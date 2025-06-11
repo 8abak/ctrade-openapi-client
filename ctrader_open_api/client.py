@@ -11,7 +11,7 @@ class Client(ClientService):
         self._runningReactor = reactor
         self.numberOfMessagesToSendPerSecond = numberOfMessagesToSendPerSecond
         endpoint = clientFromString(self._runningReactor, f"ssl:{host}:{port}")
-        factory = Factory.forProtocol(protocol, client=self)
+        factory = Factory(client=self)
         super().__init__(endpoint, factory, retryPolicy=retryPolicy, clock=clock, prepareConnection=prepareConnection)
         self._events = dict()
         self._responseDeferreds = dict()
