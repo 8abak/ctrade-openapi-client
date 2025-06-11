@@ -14,26 +14,33 @@ clientSecret = creds["clientSecret"]
 accountId = creds["accountId"]
 connectionType = creds.get("connectionType", "Live").lower()
 
-client = Client()
-client.setup(clientId=clientId, clientSecret=clientSecret, environment=connectionType)
+host = "live.ctraderapi.com" if connectionType == "live" else "demo.ctraderapi.com"
+port = 5035
+protocol = "protobuf"
 
-def on_ready():
-    print("✅ Connected to cTrader. Sending account auth request...")
-    msg = Factory.build_payload(ProtoOAAccountAuthReq, accountId=accountId)
-    client.send(msg)
+# Create client
+client = Client(host=host, port=port, protocol=protocol)
+
+# Set callbacks
+def on_connected(_):
+    print("✅ Connected to cTrader.")
+    authMsg = Factory.build_payload(ProtoOAAccountAuthReq, accountId=accountId)
+    client.send(authMsg).addCallback(on_auth_response).addErrback(on_error)
 
 def on_auth_response(message):
-    print("🎉 Authentication Success!")
+    print("🎉 Authenticated successfully!")
     print(message)
     reactor.stop()
 
-def on_error(e):
-    print("❌ Error occurred:", e)
+def on_error(error):
+    print("❌ Error during connection or authentication:")
+    print(error)
     reactor.stop()
 
-client.on("connected", on_ready)
-client.on("ProtoOAAccountAuthRes", on_auth_response)
-client.on("error", on_error)
+client.setConnectedCallback(on_connected)
+client.setDisconnectedCallback(lambda _, reason: print(f"🔌 Disconnected: {reason}"))
+client.setMessageReceivedCallback(lambda _, msg: print(f"📩 Message: {msg.payloadType}"))
 
-client.connect()
+# Start the client service and reactor
+client.startService()
 reactor.run()
