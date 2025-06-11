@@ -46,17 +46,17 @@ def connected(_):
 
 def onMessage(clientRef, message):
     from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOASpotEvent
+
     if message.payloadType == ProtoOASpotEvent().payloadType:
         try:
             spot = Protobuf.extract(message)
-            if hasattr(spot, "quote"):
+            if hasattr(spot, "quote") and len(spot.quote) > 0:
                 for quote in spot.quote:
                     print(f"💰 Spot Update - symbolId {quote.symbolId}: bid={quote.bid}, ask={quote.ask}")
             else:
-                print("⚠️ Spot message received, but no quotes inside.")
+                print(f"⚠️ Spot message received, but no quotes inside:\n{spot}")
         except Exception as e:
             print(f"❌ Failed to parse spot event: {e}")
-
 
 
 def disconnected(_, reason):
