@@ -44,6 +44,14 @@ def connected(_):
     deferred.addCallback(lambda _: subscribeToSpot(creds["symbolId"]))
     deferred.addErrback(onError)
 
+def onMessage(clientRef, message):
+    from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOASpotEvent
+    if message.payloadType == ProtoOASpotEvent().payloadType:
+        spot = Protobuf.extract(message)
+        for quote in spot.quote:
+            print(f"💰 Spot Update - symbolId {quote.symbolId}: bid={quote.bid}, ask={quote.ask}")
+
+
 def disconnected(_, reason):
     print(f"\n🔌 Disconnected: {reason}")
 
@@ -77,7 +85,7 @@ def unsubscribeFromSpot(symbolId):
 
 client.setConnectedCallback(connected)
 client.setDisconnectedCallback(disconnected)
-client.setMessageReceivedCallback(lambda _, m: None)  # Silence all extra messages
+client.setMessageReceivedCallback(onMessage)
 
 client.startService()
 reactor.run()
