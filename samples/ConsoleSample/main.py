@@ -41,6 +41,7 @@ def connected(_):
 
     deferred.addCallback(afterAppAuth)
     deferred.addCallback(lambda _: print(f"\n🔐 Account {accountId} authorized.\n"))
+    deferred.addCallback(lambda _: subscribeToSpot(creds["symbolId"]))
     deferred.addErrback(onError)
 
 def disconnected(_, reason):
