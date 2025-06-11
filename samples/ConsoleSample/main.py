@@ -50,13 +50,10 @@ def onMessage(clientRef, message):
     if message.payloadType == ProtoOASpotEvent().payloadType:
         try:
             spot = Protobuf.extract(message)
-            if hasattr(spot, "quote") and len(spot.quote) > 0:
-                for quote in spot.quote:
-                    print(f"💰 Spot Update - symbolId {quote.symbolId}: bid={quote.bid}, ask={quote.ask}")
-            else:
-                print(f"⚠️ Spot message received, but no quotes inside:\n{spot}")
+            print(f"💰 Spot Update - symbolId {spot.symbolId}: bid={spot.bid / 100000.0}, ask={spot.ask / 100000.0} @ {spot.timestamp}")
         except Exception as e:
             print(f"❌ Failed to parse spot event: {e}")
+
 
 
 def disconnected(_, reason):
