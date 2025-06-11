@@ -5,6 +5,8 @@ import os
 from twisted.internet import reactor
 from ctrader_open_api import Client, Protobuf, TcpProtocol, EndPoints
 from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOAApplicationAuthReq, ProtoOAAccountAuthReq
+from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOASubscribeSpotsReq, ProtoOAUnsubscribeSpotsReq, ProtoOAQuoteType, ProtoOASpotEvent
+
 
 # Load credentials
 with open(os.path.expanduser("~/cTrade/creds.json"), "r") as f:
@@ -48,6 +50,29 @@ def onError(err):
     print("❌ Error during connection or authentication:")
     print(err)
     reactor.stop()
+    
+def subscribeToSpot(symbolId, timeoutInSeconds=15):
+    print(f"📡 Subscribing to spot data for symbolId {symbolId} for {timeoutInSeconds} seconds...")
+
+    req = ProtoOASubscribeSpotsReq()
+    req.ctidTraderAccountId = accountId
+    req.symbolId.append(symbolId)
+    req.subscribeToSpotTimestamp = True
+
+    client.send(req)
+
+    # Schedule unsubscribe
+    reactor.callLater(timeoutInSeconds, unsubscribeFromSpot, symbolId)
+
+def unsubscribeFromSpot(symbolId):
+    print(f"🛑 Unsubscribing from spot data for symbolId {symbolId}...")
+    req = ProtoOAUnsubscribeSpotsReq()
+    req.ctidTraderAccountId = accountId
+    req.symbolId.append(symbolId)
+    client.send(req)
+
+
+
 
 client.setConnectedCallback(connected)
 client.setDisconnectedCallback(disconnected)
