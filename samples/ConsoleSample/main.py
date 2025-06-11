@@ -14,7 +14,8 @@ clientSecret = creds["clientSecret"]
 accountId = creds["accountId"]
 connectionType = creds.get("connectionType", "Live").lower()
 
-client = Client(clientId=clientId, clientSecret=clientSecret, environment=connectionType)
+client = Client()
+client.setup(clientId=clientId, clientSecret=clientSecret, environment=connectionType)
 
 def on_ready():
     print("✅ Connected to cTrader. Sending account auth request...")
