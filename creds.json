@@ -1,0 +1,11 @@
+{
+  "clientId": "12367_TW3qWwxsCpLIBjiuU6QQBkzqkfqd6j9cgYiCNikEGFtNlbwMum",
+  "clientSecret": "8Uh3BVz5QzjsLKmaL0iuyfQ4ANaGiS3hlPulL4eyPk31P5b8t2",
+  "accessToken": "hpdoxSFOB4YsctHLwiE0Ymi_3yg_CviZkd_BEjpJOv8",
+  "refreshToken": "w1CzBCvabq_3UaOfmACe7zoURE_uxwYnnGO7iMpR3Ps",
+  "tokenType": "Bearer",
+  "connectionType": "Live",
+  "redirection": "https://datavis.au/callback",
+  "accountId": 41216916,
+  "symbolId": 41
+}
