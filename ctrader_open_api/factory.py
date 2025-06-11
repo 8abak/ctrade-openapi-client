@@ -13,3 +13,13 @@ class Factory(ClientFactory):
         self.client._disconnected(reason)
     def received(self, message):
         self.client._received(message)
+
+    @staticmethod
+    def build_payload(message_cls, **params):
+        """Create and populate a protobuf message instance."""
+        msg = message_cls()
+        if 'accountId' in params and hasattr(msg, 'ctidTraderAccountId'):
+            setattr(msg, 'ctidTraderAccountId', params.pop('accountId'))
+        for field, value in params.items():
+            setattr(msg, field, value)
+        return msg

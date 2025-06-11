@@ -3,6 +3,7 @@ import os
 from twisted.internet import reactor
 from ctrader_open_api.client import Client
 from ctrader_open_api.factory import Factory
+from ctrader_open_api import TcpProtocol
 from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOAAccountAuthReq
 
 # Load credentials
@@ -12,11 +13,12 @@ with open(os.path.expanduser("~/cTrade/creds.json"), "r") as f:
 clientId = creds["clientId"]
 clientSecret = creds["clientSecret"]
 accountId = creds["accountId"]
+accessToken = creds.get("accessToken")
 connectionType = creds.get("connectionType", "Live").lower()
 
 host = "live.ctraderapi.com" if connectionType == "live" else "demo.ctraderapi.com"
 port = 5035
-protocol = "protobuf"
+protocol = TcpProtocol
 
 # Create client
 client = Client(host=host, port=port, protocol=protocol)
@@ -24,7 +26,11 @@ client = Client(host=host, port=port, protocol=protocol)
 # Set callbacks
 def on_connected(_):
     print("✅ Connected to cTrader.")
-    authMsg = Factory.build_payload(ProtoOAAccountAuthReq, accountId=accountId)
+    authMsg = Factory.build_payload(
+        ProtoOAAccountAuthReq,
+        accountId=accountId,
+        accessToken=accessToken,
+    )
     client.send(authMsg).addCallback(on_auth_response).addErrback(on_error)
 
 def on_auth_response(message):
