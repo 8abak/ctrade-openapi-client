@@ -13,6 +13,7 @@ with open(os.path.expanduser("~/cTrade/creds.json"), "r") as f:
 clientId = creds["clientId"]
 clientSecret = creds["clientSecret"]
 accountId = creds["accountId"]
+accessToken = creds.get("accessToken")
 connectionType = creds.get("connectionType", "Live").lower()
 
 host = "live.ctraderapi.com" if connectionType == "live" else "demo.ctraderapi.com"
@@ -25,7 +26,11 @@ client = Client(host=host, port=port, protocol=protocol)
 # Set callbacks
 def on_connected(_):
     print("✅ Connected to cTrader.")
-    authMsg = Factory.build_payload(ProtoOAAccountAuthReq, accountId=accountId)
+    authMsg = Factory.build_payload(
+        ProtoOAAccountAuthReq,
+        accountId=accountId,
+        accessToken=accessToken,
+    )
     client.send(authMsg).addCallback(on_auth_response).addErrback(on_error)
 
 def on_auth_response(message):
