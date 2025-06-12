@@ -8,7 +8,7 @@ csvFile = "ticks.csv"
 
 # Set page layout
 st.set_page_config(layout="wide")
-st.title("📈 Live Tick Data Stream for XAUUSD")
+st.title("📈 Live Tick Data Stream for GOLD")
 st.caption("Streaming from ticks.csv and updating in real time.")
 
 # Auto-refresh every 1000 ms (1 second)
