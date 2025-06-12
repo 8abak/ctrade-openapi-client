@@ -32,6 +32,8 @@ pyOpenSSL = "24.1.0"
 protobuf = "3.20.1"
 requests = "2.32.3"
 inputimeout = "1.0.4"
+streamlit = "^1.34.0"
+streamlit-autorefresh = "^0.1.0"
 
 [tool.black]
 line-length=100
