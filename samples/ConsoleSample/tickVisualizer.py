@@ -12,7 +12,6 @@ st.title("📈 Live Tick Data Stream for GOLD")
 st.caption("Streaming from ticks.csv and updating in real time.")
 
 # Auto-refresh every 1000 ms (1 second)
-st.experimental_data_editor
 st.experimental_rerun
 st_autorefresh = st.experimental_rerun if hasattr(st, 'experimental_rerun') else None
 if hasattr(st, 'experimental_rerun'):
