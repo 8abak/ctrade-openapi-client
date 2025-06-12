@@ -3,11 +3,17 @@
 import json
 import os
 import csv
+import signal
 from datetime import datetime
 from twisted.internet import reactor
 from ctrader_open_api import Client, Protobuf, TcpProtocol, EndPoints
-from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOAApplicationAuthReq, ProtoOAAccountAuthReq, ProtoOASubscribeSpotsReq
-import signal
+from ctrader_open_api.messages.OpenApiMessages_pb2 import (
+    ProtoOAApplicationAuthReq,
+    ProtoOAAccountAuthReq,
+    ProtoOASubscribeSpotsReq,
+    ProtoOAUnsubscribeSpotsReq,
+    ProtoOASpotEvent
+)
 
 # Load credentials
 with open(os.path.expanduser("~/cTrade/creds.json"), "r") as f:
@@ -25,29 +31,34 @@ port = EndPoints.PROTOBUF_PORT
 
 client = Client(host=host, port=port, protocol=TcpProtocol)
 
-csv_file = "ticks.csv"
-lastTimestamp = None
+csvFile = "ticks.csv"
+seenTimestamps = set()
 
 # Prepare CSV
-if not os.path.exists(csv_file):
-    with open(csv_file, mode="w", newline="") as f:
+if os.path.exists(csvFile):
+    with open(csvFile, "r") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            seenTimestamps.add(row["timestamp"])
+else:
+    with open(csvFile, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["timestamp", "datetime", "symbolId", "bid", "ask"])
 
-def write_tick(timestamp, symbolId, bid, ask):
-    global lastTimestamp
-    if timestamp == lastTimestamp:
+def writeTick(timestamp, symbolId, bid, ask):
+    if str(timestamp) in seenTimestamps:
+        print(f"⏩ Duplicate tick skipped: {timestamp}")
         return
-    lastTimestamp = timestamp
-    with open(csv_file, mode="a", newline="") as f:
+
+    seenTimestamps.add(str(timestamp))
+    dt = datetime.fromtimestamp(timestamp / 1000.0).strftime("%Y-%m-%d %H:%M:%S.%f")
+    with open(csvFile, "a", newline="") as f:
         writer = csv.writer(f)
-        dt = datetime.fromtimestamp(timestamp / 1000.0).strftime("%Y-%m-%d %H:%M:%S.%f")
         writer.writerow([timestamp, dt, symbolId, bid / 100000.0, ask / 100000.0])
-        print(f"💾 Saved tick: {symbolId} @ {dt} | bid={bid / 100000.0}, ask={ask / 100000.0}")
+    print(f"📂 Tick saved: symbolId={symbolId}, bid={bid / 100000.0}, ask={ask / 100000.0} @ {dt}")
 
 def connected(_):
     print("✅ Connected. Subscribing to spot data...")
-    # Step 1: Authenticate app
     authMsg = ProtoOAApplicationAuthReq()
     authMsg.clientId = clientId
     authMsg.clientSecret = clientSecret
@@ -55,7 +66,6 @@ def connected(_):
 
     def afterAppAuth(_):
         print("🎉 API Application authorized")
-        # Step 2: Authenticate account
         accountAuth = ProtoOAAccountAuthReq()
         accountAuth.ctidTraderAccountId = accountId
         accountAuth.accessToken = accessToken
@@ -77,26 +87,24 @@ def subscribeToSpot():
     client.send(req)
 
 def disconnected(_, reason):
-    print(f"
-🔌 Disconnected: {reason}")
+    print(f"🔌 Disconnected: {reason}")
     reactor.stop()
 
 def onMessage(_, message):
-    from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOASpotEvent
     if message.payloadType == ProtoOASpotEvent().payloadType:
         spot = Protobuf.extract(message)
-        write_tick(spot.timestamp, spot.symbolId, getattr(spot, "bid", 0), getattr(spot, "ask", 0))
+        writeTick(spot.timestamp, spot.symbolId, getattr(spot, "bid", 0), getattr(spot, "ask", 0))
 
 def onError(err):
     print("❌ Error during connection or authentication:")
     print(err)
     reactor.stop()
 
-def handle_sigint(signum, frame):
-    print("\n🛑 Gracefully shutting down...")
+def handleSigint(signum, frame):
+    print("\n🚩 Gracefully shutting down...")
     reactor.stop()
 
-signal.signal(signal.SIGINT, handle_sigint)
+signal.signal(signal.SIGINT, handleSigint)
 
 client.setConnectedCallback(connected)
 client.setDisconnectedCallback(disconnected)
