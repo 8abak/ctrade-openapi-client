@@ -18,6 +18,7 @@ st_autorefresh(interval=1000, limit=None, key="tick_autorefresh")
 # Load data
 if os.path.exists(csvFile):
     df = pd.read_csv(csvFile)
+    # Use the modern Streamlit data editor API
     st.data_editor(df.tail(30), use_container_width=True)
 else:
     st.warning("No data yet. Please wait for tick data to be generated.")
