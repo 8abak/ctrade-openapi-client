@@ -16,7 +16,7 @@ st.caption("Streaming XAUUSD data directly from database")
 conn = psycopg2.connect(
     dbname="trading",
     user="babak",
-    password="BB@bb3304",
+    password="BB@bb33044",
     host="localhost",
     port=5432
 )
