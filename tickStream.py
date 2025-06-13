@@ -5,12 +5,15 @@ import pandas as pd
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
+# ✅ Set page config FIRST
+st.set_page_config(layout="wide")
+
 # Auto-refresh every 1 second
 st_autorefresh(interval=1000, limit=None, key="db_autorefresh")
 
-st.set_page_config(layout="wide")
 st.title("📡 Live Tick Stream from PostgreSQL")
 st.caption("Streaming XAUUSD data directly from database")
+
 
 # Connect to PostgreSQL
 conn = psycopg2.connect(
