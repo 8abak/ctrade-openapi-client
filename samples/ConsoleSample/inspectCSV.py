@@ -1,4 +1,4 @@
-import panda as pd
+import pandas as pd
 df = pd.read_csv("tiks.csv")
 
 print ("Fist 5 rows: ")
