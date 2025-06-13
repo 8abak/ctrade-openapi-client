@@ -6,7 +6,8 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 # ✅ Set page config FIRST
-st.set_page_config(layout="wide")
+st.set_page_config(layout="wide", page_title="Gold Live Stream")
+
 
 # Auto-refresh every 1 second
 st_autorefresh(interval=1000, limit=None, key="db_autorefresh")
