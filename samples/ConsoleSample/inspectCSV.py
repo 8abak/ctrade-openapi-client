@@ -1,5 +1,5 @@
 import pandas as pd
-df = pd.read_csv("tiks.csv")
+df = pd.read_csv("ticks.csv")
 
 print ("Fist 5 rows: ")
 print (df.head())
