@@ -4,21 +4,17 @@ import psycopg2
 import pandas as pd
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
-import altair as alt
+import plotly.graph_objects as go
 
-# This must be the very first Streamlit command
 st.set_page_config(page_title="Gold Live Stream", layout="wide")
-
-# Auto-refresh every 1 second
-st_autorefresh(interval=1000, limit=None, key="db_autorefresh")
+st_autorefresh(interval=1000, limit=None, key="refresh")
 
 st.title("📡 Live Tick Stream from PostgreSQL")
 st.caption("Streaming XAUUSD data directly from database")
 
-# ✅ Allow user to select how many ticks to load
-numTicks = st.slider("How many recent ticks to display?", min_value=100, max_value=2000, value=100, step=100)
+numTicks = st.slider("Number of ticks to display", min_value=100, max_value=2000, value=100, step=100)
 
-# PostgreSQL connection
+# Connect to database
 conn = psycopg2.connect(
     dbname="trading",
     user="babak",
@@ -39,23 +35,20 @@ conn.close()
 
 df = df.sort_values("timestamp")
 df["timestamp"] = pd.to_datetime(df["timestamp"])
-df["timestamp"] = df["timestamp"].dt.strftime('%H:%M:%S')
 
-# Melt for Altair (so bid and ask are separate lines)
-df_melted = df.melt(id_vars="timestamp", value_vars=["bid", "ask"], var_name="type", value_name="price")
+# Create Plotly chart
+fig = go.Figure()
 
-# ✅ Interactive zoom selection
-zoom = alt.selection_interval(bind='scales', encodings=["x", "y"])
+fig.add_trace(go.Scatter(x=df["timestamp"], y=df["bid"], mode="lines", name="bid"))
+fig.add_trace(go.Scatter(x=df["timestamp"], y=df["ask"], mode="lines", name="ask"))
 
-chart = alt.Chart(df_melted).mark_line().encode(
-    x=alt.X("timestamp:T", title="Time"),
-    y=alt.Y("price:Q", title="Price"),
-    color=alt.Color("type:N", title="Type")
-).properties(
-    width=1000,
-    height=400
-).add_selection(
-    zoom
+fig.update_layout(
+    title="Live XAUUSD Tick Chart",
+    xaxis_title="Time",
+    yaxis_title="Price",
+    xaxis_rangeslider_visible=True,
+    template="plotly_white",
+    height=500
 )
 
-st.altair_chart(chart, use_container_width=True)
+st.plotly_chart(fig, use_container_width=True)
