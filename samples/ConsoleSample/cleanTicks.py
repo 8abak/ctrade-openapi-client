@@ -1,21 +1,21 @@
 import pandas as pd
 
-# Load the CSV
+# Load CSV
 df = pd.read_csv("ticks.csv")
 
-# Replace 0.0 in bid/ask with NaN temporarily
-df["bid"] = df["bid"].replace(0.0, pd.NA)
-df["ask"] = df["ask"].replace(0.0, pd.NA)
+# Convert bid/ask to numeric just in case
+df["bid"] = pd.to_numeric(df["bid"], errors="coerce")
+df["ask"] = pd.to_numeric(df["ask"], errors="coerce")
 
-# Forward-fill from previous valid value
-df["bid"] = df["bid"].fillna(method="ffill")
-df["ask"] = df["ask"].fillna(method="ffill")
+# Replace zeros with NaN to enable forward-fill
+df["bid"].replace(0.0, pd.NA, inplace=True)
+df["ask"].replace(0.0, pd.NA, inplace=True)
 
-# Optional: Fill initial NaNs (if the file starts with 0.0s)
-df["bid"] = df["bid"].fillna(method="bfill")
-df["ask"] = df["ask"].fillna(method="bfill")
+# Forward-fill and backfill
+df["bid"] = df["bid"].ffill().bfill()
+df["ask"] = df["ask"].ffill().bfill()
 
-# Save back if needed
+# Save cleaned version
 df.to_csv("ticks_cleaned.csv", index=False)
 
-print("Zeroes replaced with previous non-zero values.")
+print("✅ Zeroes replaced with previous non-zero values.")
