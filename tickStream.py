@@ -3,6 +3,7 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 from streamlit_autorefresh import st_autorefresh
+from streamlit_plotly_events import plotly_events
 
 # Streamlit UI setup (must be first)
 st.set_page_config(page_title="Gold Live Stream", layout="wide")
@@ -13,11 +14,7 @@ st.caption("Streaming XAUUSD data directly from database")
 
 # PostgreSQL connection configuration
 conn = psycopg2.connect(
-    dbname="trading",
-    user="babak",
-    password="BB@bb33044",
-    host="localhost",
-    port=5432
+    dbname="trading", user="babak", password="BB@bb33044", host="localhost", port=5432
 )
 
 # Initialize session state to manage loaded range
@@ -52,11 +49,11 @@ if df.empty:
     st.warning("No tick data found.")
 else:
     df = df.sort_values("timestamp")
-    df["timestamp"] = df["timestamp"].dt.strftime('%H:%M:%S')
+    df["timestamp"] = df["timestamp"].dt.strftime("%H:%M:%S")
 
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df["timestamp"], y=df["bid"], mode='lines', name="bid"))
-    fig.add_trace(go.Scatter(x=df["timestamp"], y=df["ask"], mode='lines', name="ask"))
+    fig.add_trace(go.Scatter(x=df["timestamp"], y=df["bid"], mode="lines", name="bid"))
+    fig.add_trace(go.Scatter(x=df["timestamp"], y=df["ask"], mode="lines", name="ask"))
 
     fig.update_layout(
         xaxis_title="Time",
@@ -66,15 +63,19 @@ else:
         uirevision="window",
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    config = {"scrollZoom": True}
+    events = plotly_events(
+        fig,
+        events=["relayout"],
+        config=config,
+        key="tick_chart",
+        override_height=600,
+    )
 
-    # Dynamic data loading logic (future)
-    # You could attach JavaScript or Streamlit events to load more on zoom/pan
-    # For now, session state can be manipulated manually:
-    if st.button("⬅️ Load More Left"):
-        st.session_state.start_index -= int(window_size * 0.1)
-        st.experimental_rerun()
-
-    if st.button("🔄 Reset View"):
-        st.session_state.start_index = -550
+    # When the user zooms out using the mouse wheel, attempt to load more data
+    if events and any("range" in e for e in events):
+        if st.session_state.start_index - window_size >= -total_rows:
+            st.session_state.start_index -= window_size
+        else:
+            st.session_state.start_index = -total_rows
         st.experimental_rerun()
