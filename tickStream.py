@@ -41,6 +41,20 @@ df = df.sort_values("timestamp")
 
 # Optional: convert timestamp to shorter strings
 df["timestamp"] = df["timestamp"].dt.strftime('%H:%M:%S')
+import altair as alt
+# Create Altair line chart
+yMin = df[["bid", "ask"]].min().min() - 0.1
+yMax = df[["bid", "ask"]].max().max() + 0.1
+
+chart = alt.Chart(df).transform_fold(
+    ['bid', 'ask'], as +['type', 'value'    ]
+).mark_line().encode(
+    x='timestamp:T',
+    y=alt.Y('value:Q',scale=alt.Scale(domain=[yMin, yMax])),
+    color='type:N',
+).properties(width=800, height=400)
+
 
 # Display line chart
-st.line_chart(df.set_index("timestamp")[["bid", "ask"]])
+st.altair_chart(chart, use_container_width=True)
+
