@@ -2,7 +2,7 @@ import pandas as pd
 df = pd.read_csv("ticks.csv")
 
 print ("Fist 5 rows: ")
-print (df.head())
+print (df.last())
 
 print("\nColumn names: ")
 print(df.columns.tolist())
