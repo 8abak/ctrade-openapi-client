@@ -16,6 +16,6 @@ df["bid"] = df["bid"].ffill().bfill()
 df["ask"] = df["ask"].ffill().bfill()
 
 # Save cleaned version
-df.to_csv("ticks_cleaned.csv", index=False)
+df.to_csv("ticks.csv", index=False)
 
 print("✅ Zeroes replaced with previous non-zero values.")
