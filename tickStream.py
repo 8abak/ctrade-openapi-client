@@ -1,7 +1,7 @@
 # tickStream.py
 
 import streamlit as st
-st.set_page_config(layout="wide")  # MUST be the first Streamlit command
+st.set_page_config(layout="wide")  # Must be first Streamlit command
 
 import psycopg2
 import pandas as pd
@@ -11,7 +11,6 @@ from streamlit_autorefresh import st_autorefresh
 # Auto-refresh every 1 second
 st_autorefresh(interval=1000, limit=None, key="db_autorefresh")
 
-# Title and caption
 st.title("📡 Live Tick Stream from PostgreSQL")
 st.caption("Streaming XAUUSD data directly from database")
 
@@ -24,7 +23,6 @@ conn = psycopg2.connect(
     port=5432
 )
 
-# Query latest 100 rows
 query = """
     SELECT timestamp, bid, ask
     FROM ticks
@@ -35,21 +33,21 @@ query = """
 df = pd.read_sql(query, conn)
 conn.close()
 
-# Sort by ascending timestamp for plotting
+# Sort and keep original datetime format
 df = df.sort_values("timestamp")
-df["timestamp"] = df["timestamp"].dt.strftime('%H:%M:%S')
 
-# Dynamically determine y-axis range
-yMin = df[["bid", "ask"]].min().min() - 0.1
-yMax = df[["bid", "ask"]].max().max() + 0.1
+# Altair needs long format
+df_melted = df.melt(id_vars=["timestamp"], value_vars=["bid", "ask"], var_name="type", value_name="price")
 
-# Altair chart for live bid/ask line chart
-chart = alt.Chart(df).transform_fold(
-    ['bid', 'ask'], as_=['type', 'value']
-).mark_line().encode(
-    x=alt.X('timestamp:T', title='Time'),
-    y=alt.Y('value:Q', title='Price', scale=alt.Scale(domain=[yMin, yMax])),
-    color='type:N'
+# Calculate y-axis bounds
+yMin = df_melted["price"].min() - 0.1
+yMax = df_melted["price"].max() + 0.1
+
+# Create Altair chart
+chart = alt.Chart(df_melted).mark_line().encode(
+    x=alt.X("timestamp:T", title="Time"),
+    y=alt.Y("price:Q", title="Price", scale=alt.Scale(domain=[yMin, yMax])),
+    color=alt.Color("type:N", title="Type")
 ).properties(
     width=1000,
     height=400
