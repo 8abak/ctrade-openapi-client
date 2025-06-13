@@ -1,20 +1,17 @@
-# tickStream.py
-
 import psycopg2
 import pandas as pd
 import streamlit as st
-from streamlit_autorefresh import st_autorefresh
 import plotly.graph_objects as go
+from streamlit_autorefresh import st_autorefresh
 
+# Streamlit UI setup (must be first)
 st.set_page_config(page_title="Gold Live Stream", layout="wide")
-st_autorefresh(interval=1000, limit=None, key="refresh")
+st_autorefresh(interval=1000, key="auto_refresh")
 
 st.title("📡 Live Tick Stream from PostgreSQL")
 st.caption("Streaming XAUUSD data directly from database")
 
-numTicks = st.slider("Number of ticks to display", min_value=100, max_value=2000, value=100, step=100)
-
-# Connect to database
+# PostgreSQL connection configuration
 conn = psycopg2.connect(
     dbname="trading",
     user="babak",
@@ -23,32 +20,61 @@ conn = psycopg2.connect(
     port=5432
 )
 
-query = """
+# Initialize session state to manage loaded range
+if "start_index" not in st.session_state:
+    st.session_state.start_index = -550  # Load 500 + 10% buffer initially
+
+# Count total rows
+with conn.cursor() as cur:
+    cur.execute("SELECT COUNT(*) FROM ticks WHERE symbol = 'XAUUSD'")
+    total_rows = cur.fetchone()[0]
+
+# Query the window with a 10% buffer
+window_size = 500
+buffer = int(window_size * 0.1)
+start = max(total_rows + st.session_state.start_index, 0)
+limit = window_size + buffer
+
+query = f"""
     SELECT timestamp, bid, ask
     FROM ticks
     WHERE symbol = 'XAUUSD'
-    ORDER BY timestamp DESC
-    LIMIT %s
+    ORDER BY id
+    OFFSET {start}
+    LIMIT {limit}
 """
-df = pd.read_sql(query, conn, params=(numTicks,))
+
+# Load and process data
+df = pd.read_sql(query, conn)
 conn.close()
 
-df = df.sort_values("timestamp")
-df["timestamp"] = pd.to_datetime(df["timestamp"])
+if df.empty:
+    st.warning("No tick data found.")
+else:
+    df = df.sort_values("timestamp")
+    df["timestamp"] = df["timestamp"].dt.strftime('%H:%M:%S')
 
-# Create Plotly chart
-fig = go.Figure()
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=df["timestamp"], y=df["bid"], mode='lines', name="bid"))
+    fig.add_trace(go.Scatter(x=df["timestamp"], y=df["ask"], mode='lines', name="ask"))
 
-fig.add_trace(go.Scatter(x=df["timestamp"], y=df["bid"], mode="lines", name="bid"))
-fig.add_trace(go.Scatter(x=df["timestamp"], y=df["ask"], mode="lines", name="ask"))
+    fig.update_layout(
+        xaxis_title="Time",
+        yaxis_title="Price",
+        xaxis_rangeslider_visible=True,
+        height=600,
+        uirevision="window",
+    )
 
-fig.update_layout(
-    title="Live XAUUSD Tick Chart",
-    xaxis_title="Time",
-    yaxis_title="Price",
-    xaxis_rangeslider_visible=True,
-    template="plotly_white",
-    height=500
-)
+    st.plotly_chart(fig, use_container_width=True)
 
-st.plotly_chart(fig, use_container_width=True)
+    # Dynamic data loading logic (future)
+    # You could attach JavaScript or Streamlit events to load more on zoom/pan
+    # For now, session state can be manipulated manually:
+    if st.button("⬅️ Load More Left"):
+        st.session_state.start_index -= int(window_size * 0.1)
+        st.experimental_rerun()
+
+    if st.button("🔄 Reset View"):
+        st.session_state.start_index = -550
+        st.experimental_rerun()
