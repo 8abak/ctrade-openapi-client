@@ -1,23 +1,19 @@
-#!/usr/bin/env python3
-
-import os
-import pandas as pd
 import streamlit as st
+import pandas as pd
 from streamlit_autorefresh import st_autorefresh
 
-csvFile = "ticks.csv"
+# Set page configuration
+st.set_page_config(page_title="Live Tick Visualizer", layout="wide")
 
-# Set page layout
-st.set_page_config(layout="wide")
-st.title("📈 Live Tick Data Stream for GOLD")
-st.caption("Streaming from ticks.csv and updating in real time.")
+# Auto-refresh every 2 seconds
+st_autorefresh(interval=2000, key="tick_autorefresh")
 
-# Auto-refresh every 1000 ms (1 second)
-st_autorefresh(interval=1000, limit=None, key="tick_autorefresh")
+st.title("Live Tick Stream")
 
-# Load data
-if os.path.exists(csvFile):
-    df = pd.read_csv(csvFile)
-    st.data_editor(df.tail(30), use_container_width=True)
-else:
-    st.warning("No data yet. Please wait for tick data to be generated.")
+# Load and display the latest tick data
+try:
+    df = pd.read_csv("ticks.csv")
+    st.write(f"Total ticks: {len(df)}")
+    st.dataframe(df.tail(10))
+except FileNotFoundError:
+    st.warning("ticks.csv not found. Waiting for data...")
