@@ -23,7 +23,7 @@ def fetchTicks(limit=5000):
         dbname="trading", user="babak", password="BB@bb33044", host="localhost", port=5432
     )
     query = f"""
-        SELECT * FROM ticks
+        SELECT * FROM public.ticks
         WHERE symbol = 'XAUUSD'
         ORDER BY timestamp DESC
         LIMIT {limit}
