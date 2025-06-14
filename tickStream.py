@@ -3,7 +3,6 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 from streamlit_autorefresh import st_autorefresh
-from streamlit_plotly_events import plotly_events
 
 # The chart uses Plotly events to detect zooming. The dependency is optional so
 # the app still works even if it's not installed.
@@ -80,25 +79,16 @@ else:
             key="tick_chart",
             config={"scrollZoom": True},
         )
-        if plotly_events:
-            events = plotly_events(
-                fig,
-                events=["relayout"],
-                key="tick_chart",
-                config={"scrollZoom": True},
-            )
-            if events and "xaxis.range[0]" in events[0]:
-                # When the visible range starts before our loaded data, double the
-                # number of rows fetched (up to the total available) and rerun the
-                # app so the plot expands accordingly.
-                range_start = pd.to_datetime(events[0]["xaxis.range[0]"])
-                earliest = df["timestamp"].iloc[0]
-                if range_start < earliest and st.session_state.rows_loaded < total_rows:
-                    st.session_state.rows_loaded = min(
-                        st.session_state.rows_loaded * 2, total_rows
-                    )
-                    st.experimental_rerun()
-            st.plotly_chart(fig, use_container_width=True, config={"scrollZoom": True})
-        else:
-            st.warning("streamlit-plotly-events not installed, zoom-based loading disabled")
-            st.plotly_chart(fig, use_container_width=True, config={"scrollZoom": True})
+        if events and "xaxis.range[0]" in events[0]:
+            # When the visible range starts before our loaded data, double the
+            # number of rows fetched (up to the total available) and rerun the
+            # app so the plot expands accordingly.
+            range_start = pd.to_datetime(events[0]["xaxis.range[0]"])
+            earliest = df["timestamp"].iloc[0]
+            if range_start < earliest and st.session_state.rows_loaded < total_rows:
+                st.session_state.rows_loaded = min(st.session_state.rows_loaded * 2, total_rows)
+                st.experimental_rerun()
+        st.plotly_chart(fig, use_container_width=True, config={"scrollZoom": True})
+    else:
+        st.warning("streamlit-plotly-events not installed, zoom-based loading disabled")
+        st.plotly_chart(fig, use_container_width=True, config={"scrollZoom": True})
