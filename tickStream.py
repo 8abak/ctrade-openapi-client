@@ -18,7 +18,7 @@ if "windowSize" not in st.session_state:
     st.session_state.windowSize = 500
 
 # ------------------ Fetch Data ------------------------
-def fetchTicks(limit=50000):
+def fetchTicks(limit=50):
     conn = psycopg2.connect(
         dbname="trading", user="babak", password="BB@bb33044", host="localhost", port=5432
     )
