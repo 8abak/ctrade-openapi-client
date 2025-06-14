@@ -11,14 +11,14 @@ st.title("📡 Live Tick Stream from PostgreSQL")
 st.caption("📉 Zoom out with your mouse to automatically load more XAUUSD data.")
 
 # Refresh every second
-st_autorefresh(interval=1000, key="tick_autorefresh")
+st_autorefresh(interval=2000, key="tick_autorefresh")
 
 # ------------------ Session State Init ----------------
 if "windowSize" not in st.session_state:
     st.session_state.windowSize = 500
 
 # ------------------ Fetch Data ------------------------
-def fetchTicks(limit=500):
+def fetchTicks(limit=1000):
     conn = psycopg2.connect(
         dbname="trading", user="babak", password="BB@bb33044", host="localhost", port=5432
     )
