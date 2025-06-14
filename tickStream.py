@@ -3,14 +3,13 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objs as go
 from streamlit_autorefresh import st_autorefresh
-from streamlit_js_eval import streamlit_js_eval
 
 # ---------------------- UI SETUP ----------------------
 st.set_page_config(layout="wide")
 st.title("📡 Live Tick Stream from PostgreSQL")
-st.caption("📉 Zoom out with your mouse to automatically load more XAUUSD data.")
+st.caption("📉 Scroll left to load more XAUUSD data automatically.")
 
-# Refresh every second
+# Refresh every 2 seconds
 st_autorefresh(interval=2000, key="tick_autorefresh")
 
 # ------------------ Session State Init ----------------
@@ -43,32 +42,7 @@ fig.update_layout(
     xaxis_title="Time",
     yaxis_title="Price",
     xaxis=dict(type="date", rangeslider_visible=True),
-    uirevision="constant"
+    uirevision="keep"
 )
 
 st.plotly_chart(fig, use_container_width=True)
-
-# ------------------ Inject JS for Zoom Detection ------------------------
-st.markdown("""
-<script>
-    document.addEventListener("DOMContentLoaded", function () {
-        const plot = document.querySelector('[id^="root"] .js-plotly-plot');
-        if (plot && !plot.zoomHooked) {
-            plot.on('plotly_relayout', function(eventData) {
-                if (eventData['xaxis.range[0]']) {
-                    window.lastZoomRange = eventData;
-                }
-            });
-            plot.zoomHooked = true;
-        }
-    });
-</script>
-""", unsafe_allow_html=True)
-
-
-# ------------------ Check for Zoom & Rerun ------------------------
-zoom_event = streamlit_js_eval(js_expressions="window.PlotlyZoomRange", key="zoomEval")
-
-if isinstance(zoom_event, dict) and "xaxis.range[0]" in zoom_event:
-    st.session_state.windowSize = int(st.session_state.windowSize * 1.2)
-    st.experimental_rerun()
