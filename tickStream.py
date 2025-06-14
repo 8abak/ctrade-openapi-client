@@ -18,7 +18,7 @@ if "windowSize" not in st.session_state:
     st.session_state.windowSize = 5000
 
 # ------------------ Fetch Data ------------------------
-def fetchTicks(limit=50):
+def fetchTicks(limit):
     conn = psycopg2.connect(
         dbname="trading", user="babak", password="BB@bb33044", host="localhost", port=5432
     )
@@ -32,7 +32,7 @@ def fetchTicks(limit=50):
     conn.close()
     return df.sort_values("timestamp")
 
-df = fetchTicks(limit=st.session_state.windowSize)
+df = fetchTicks(st.session_state.windowSize)
 
 # ------------------ Plot Chart ------------------------
 fig = go.Figure()
