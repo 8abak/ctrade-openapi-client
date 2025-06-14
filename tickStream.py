@@ -2,14 +2,14 @@ import psycopg2
 import pandas as pd
 import streamlit as st
 import plotly.graph_objs as go
+from streamlit_plotly_events import plotly_events
 from streamlit_autorefresh import st_autorefresh
 
 # ---------------------- UI SETUP ----------------------
 st.set_page_config(layout="wide")
 st.title("📡 Live Tick Stream from PostgreSQL")
-st.caption("📉 Scroll left to load more XAUUSD data automatically.")
+st.caption("📉 Scroll left or zoom out to load more XAUUSD data.")
 
-# Refresh every 2 seconds
 st_autorefresh(interval=2000, key="tick_autorefresh")
 
 # ------------------ Session State Init ----------------
@@ -45,4 +45,21 @@ fig.update_layout(
     uirevision="keep"
 )
 
-st.plotly_chart(fig, use_container_width=True)
+# Use plotly_events to detect zoom
+zoom_event = plotly_events(
+    fig,
+    click_event=False,
+    select_event=False,
+    override_height=600,
+    override_width="100%",
+    key="zoom"
+)
+
+# ------------------ Detect Zoom Scroll to Left ------------------------
+if zoom_event and isinstance(zoom_event[0], dict) and "xaxis.range[0]" in zoom_event[0]:
+    zoomStartTime = pd.to_datetime(zoom_event[0]["xaxis.range[0]"])
+    earliestTimestamp = df["timestamp"].min()
+
+    if zoomStartTime <= earliestTimestamp + pd.Timedelta(minutes=2):
+        st.session_state.windowSize = int(st.session_state.windowSize * 1.2)
+        st.experimental_rerun()
