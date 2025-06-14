@@ -82,6 +82,7 @@ else:
             if range_start < earliest and st.session_state.rows_loaded < total_rows:
                 st.session_state.rows_loaded = min(st.session_state.rows_loaded * 2, total_rows)
                 st.experimental_rerun()
+        st.plotly_chart(fig, use_container_width=True, config={"scrollZoom": True})
     else:
         st.warning("streamlit-plotly-events not installed, zoom-based loading disabled")
         st.plotly_chart(fig, use_container_width=True, config={"scrollZoom": True})
