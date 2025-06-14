@@ -7,7 +7,7 @@ from streamlit_js_eval import streamlit_js_eval
 
 # ---------------------- UI SETUP ----------------------
 st.set_page_config(layout="wide")
-st.title("📡 Live Tick Stream from PostgreSQLl")
+st.title("📡 Live Tick Stream from PostgreSQL")
 st.caption("📉 Zoom out with your mouse to automatically load more XAUUSD data.")
 
 # Refresh every second
@@ -15,7 +15,7 @@ st_autorefresh(interval=2000, key="tick_autorefresh")
 
 # ------------------ Session State Init ----------------
 if "windowSize" not in st.session_state:
-    st.session_state.windowSize = 500
+    st.session_state.windowSize = 5000
 
 # ------------------ Fetch Data ------------------------
 def fetchTicks(limit=50):
