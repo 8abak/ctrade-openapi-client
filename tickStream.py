@@ -10,6 +10,7 @@ st.set_page_config(layout="wide")
 st.title("📡 Live Tick Stream from PostgreSQL")
 st.caption("📉 Scroll left or zoom out to load more XAUUSD data.")
 
+# Refresh every 2 seconds
 st_autorefresh(interval=2000, key="tick_autorefresh")
 
 # ------------------ Session State Init ----------------
@@ -33,6 +34,11 @@ def fetchTicks(limit):
 
 df = fetchTicks(st.session_state.windowSize)
 
+# Ensure bid and ask are numeric
+df["bid"] = pd.to_numeric(df["bid"], errors="coerce")
+df["ask"] = pd.to_numeric(df["ask"], errors="coerce")
+df.dropna(subset=["bid", "ask"], inplace=True)
+
 # ------------------ Plot Chart ------------------------
 fig = go.Figure()
 fig.add_trace(go.Scatter(x=df["timestamp"], y=df["bid"], mode="lines", name="bid", line=dict(color="blue")))
@@ -42,24 +48,25 @@ fig.update_layout(
     xaxis_title="Time",
     yaxis_title="Price",
     xaxis=dict(type="date", rangeslider_visible=True),
-    uirevision="keep"
+    uirevision="zoomState"
 )
 
-# Use plotly_events to detect zoom
-zoom_event = plotly_events(
+# Plotly events: capture relayout (zoom/scroll)
+selected_events = plotly_events(
     fig,
-    click_event=False,
-    select_event=False,
+    events=["relayout"],
     override_height=600,
     override_width="100%",
-    key="zoom"
+    key="zoom",
+    override_plotly_events=True
 )
 
-# ------------------ Detect Zoom Scroll to Left ------------------------
-if zoom_event and isinstance(zoom_event[0], dict) and "xaxis.range[0]" in zoom_event[0]:
-    zoomStartTime = pd.to_datetime(zoom_event[0]["xaxis.range[0]"])
-    earliestTimestamp = df["timestamp"].min()
-
-    if zoomStartTime <= earliestTimestamp + pd.Timedelta(minutes=2):
-        st.session_state.windowSize = int(st.session_state.windowSize * 1.2)
-        st.experimental_rerun()
+# ------------------ Detect Zoom or Scroll Left ------------------------
+if selected_events and isinstance(selected_events[0], dict):
+    event = selected_events[0]
+    if "xaxis.range[0]" in event:
+        zoomStartTime = pd.to_datetime(event["xaxis.range[0]"])
+        earliestTimestamp = df["timestamp"].min()
+        if zoomStartTime <= earliestTimestamp + pd.Timedelta(minutes=2):
+            st.session_state.windowSize = int(st.session_state.windowSize * 1.2)
+            st.experimental_rerun()
