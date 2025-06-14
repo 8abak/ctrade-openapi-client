@@ -3,6 +3,7 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 from streamlit_autorefresh import st_autorefresh
+from streamlit_plotly_events import plotly_events
 
 # The chart uses Plotly events to detect zooming. The dependency is optional so
 # the app still works even if it's not installed.
@@ -73,6 +74,13 @@ else:
     )
 
     if plotly_events:
+        events = plotly_events(
+            fig,
+            events=["relayout"],
+            key="tick_chart",
+            config={"scrollZoom": True},
+        )
+        if plotly_events:
         events = plotly_events(
             fig,
             events=["relayout"],
