@@ -83,3 +83,4 @@ Please check documentation or samples for a complete example.
 
 * <a href="https://pypi.org/project/twisted/">Twisted</a>
 * <a href="https://pypi.org/project/protobuf/">Protobuf</a>
+* <a href="https://pypi.org/project/streamlit-plotly-events/">streamlit-plotly-events</a> (optional for zooming in `tickStream`)
