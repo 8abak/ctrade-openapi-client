@@ -51,17 +51,20 @@ st.plotly_chart(fig, use_container_width=True)
 # ------------------ Inject JS for Zoom Detection ------------------------
 st.markdown("""
 <script>
-document.addEventListener("DOMContentLoaded", function () {
-    const plotlyChart = document.querySelector('[id^="root"] .js-plotly-plot');
-    if (plotlyChart && !plotlyChart.zoomHooked) {
-        plotlyChart.on('plotly_relayout', function(eventData) {
-            window.PlotlyZoomRange = eventData;
-        });
-        plotlyChart.zoomHooked = true;
-    }
-});
+    document.addEventListener("DOMContentLoaded", function () {
+        const plot = document.querySelector('[id^="root"] .js-plotly-plot');
+        if (plot && !plot.zoomHooked) {
+            plot.on('plotly_relayout', function(eventData) {
+                if (eventData['xaxis.range[0]']) {
+                    window.lastZoomRange = eventData;
+                }
+            });
+            plot.zoomHooked = true;
+        }
+    });
 </script>
 """, unsafe_allow_html=True)
+
 
 # ------------------ Check for Zoom & Rerun ------------------------
 zoom_event = streamlit_js_eval(js_expressions="window.PlotlyZoomRange", key="zoomEval")
