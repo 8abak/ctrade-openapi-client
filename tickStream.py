@@ -10,7 +10,6 @@ st.set_page_config(layout="wide")
 st.title("📡 Live Tick Stream from PostgreSQL")
 st.caption("📉 Scroll left or zoom out to load more XAUUSD data.")
 
-# Refresh every 2 seconds
 st_autorefresh(interval=2000, key="tick_autorefresh")
 
 # ------------------ Session State Init ----------------
@@ -34,7 +33,7 @@ def fetchTicks(limit):
 
 df = fetchTicks(st.session_state.windowSize)
 
-# Ensure bid and ask are numeric
+# Convert bid/ask to numeric
 df["bid"] = pd.to_numeric(df["bid"], errors="coerce")
 df["ask"] = pd.to_numeric(df["ask"], errors="coerce")
 df.dropna(subset=["bid", "ask"], inplace=True)
@@ -48,20 +47,20 @@ fig.update_layout(
     xaxis_title="Time",
     yaxis_title="Price",
     xaxis=dict(type="date", rangeslider_visible=True),
-    uirevision="zoomState"
+    uirevision="keep"
 )
 
-# Plotly events: capture relayout (zoom/scroll)
 selected_events = plotly_events(
     fig,
     events=["relayout"],
+    override_plotly_events=True,
+    config={"scrollZoom": True},
     override_height=600,
     override_width="100%",
-    key="zoom",
-    override_plotly_events=True
+    key="zoom"
 )
 
-# ------------------ Detect Zoom or Scroll Left ------------------------
+# ------------------ Detect Scroll Left ------------------------
 if selected_events and isinstance(selected_events[0], dict):
     event = selected_events[0]
     if "xaxis.range[0]" in event:
