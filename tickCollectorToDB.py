@@ -4,7 +4,7 @@
 import json
 import os
 import psycopg2
-from datetime import datetime
+from datetime import datetime, timezone
 from twisted.internet import reactor
 from ctrader_open_api import Client, EndPoints
 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
@@ -43,7 +43,7 @@ def on_tick(message):
     if not isinstance(message, ProtoOASpotEvent):
         return
 
-    timestamp = datetime.utcfromtimestamp(message.timestamp / 1000.0)
+    timestamp = datetime.fromtimestamp(message.timestamp / 1000.0, tz=timezone.utc)
     bid = message.bid
     ask = message.ask
 
