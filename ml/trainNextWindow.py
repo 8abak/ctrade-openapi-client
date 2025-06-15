@@ -57,6 +57,12 @@ X_train = train[['spread', 'pd', 'momentum']]
 y_train = train['target']
 
 model = RandomForestClassifier(n_estimators=100, random_state=42)
+
+print("✅ X_train shape:", X_train.shape)
+print("✅ y_train shape:", y_train.shape)
+print("📊 Features used:", X_train.columns.tolist())
+print("🔍 Preview of X_train:\n", X_train.head())
+
 model.fit(X_train, y_train)
 
 # --- Predict on 40k–60k ---
