@@ -8,7 +8,7 @@ import os
 
 # Load full tick dataset (up to whatever number is available)
 df = pd.read_csv("ml/data/ticks20k_80k.csv")
-df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+df['timestamp'] = pd.to_datetime(df['timestamp'], format='mixed', utc=True)
 
 # Label the entire dataset once
 labeled_df = label_targets(df.copy())
