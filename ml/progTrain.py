@@ -7,7 +7,7 @@ from featureEngineering import engineer_features
 import os
 
 # Load full tick dataset (up to whatever number is available)
-df = pd.read_csv("ml/data/ticks20k_80k.csv")
+df = pd.read_csv("ml/data/ticks_clean.csv")
 df['timestamp'] = pd.to_datetime(df['timestamp'], format='mixed', utc=True)
 
 # Label the entire dataset once
