@@ -39,7 +39,8 @@ def fetchTicks(limit=1000, before=None):
         '''
         cur.execute(query, ('XAUUSD', limit))
     rows = cur.fetchall()
-    df = pd.DataFrame(rows, columns=['symbol', 'timestamp', 'bid', 'ask'])
+    df = pd.DataFrame(rows, columns=['id', 'symbol', 'timestamp', 'bid', 'ask', 'volume'])
+    df = df[['timestamp', 'bid', 'ask']]  # trim for chart
     conn.close()
     return df.sort_values('timestamp')
 
