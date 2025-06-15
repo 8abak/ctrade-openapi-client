@@ -30,7 +30,8 @@ for start in range(0, len(labeled_df) - 20000 + 1, 10000):
     train_feat = engineer_features(train_df.copy())
     test_feat = engineer_features(test_df.copy())
 
-    drop_cols = ['timestamp', 'datetime', 'bid', 'ask', 'mid', 'target', 'session_date']
+    drop_cols = ['timestamp', 'datetime', 'bid', 'ask', 'mid', 'target', 'session_date', 'or_start_time']
+
     X_train = train_feat.drop(columns=drop_cols, errors='ignore')
     y_train = train_feat['target']
     X_test = test_feat.drop(columns=drop_cols, errors='ignore')
