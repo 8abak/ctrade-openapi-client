@@ -2,8 +2,8 @@ import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score
-from ml.labelTargets_v2 import label_targets
-from ml.featureEngineering import engineer_features
+from labelTargets_v2 import label_targets
+from featureEngineering import engineer_features
 import os
 
 # Load full tick dataset (up to whatever number is available)
