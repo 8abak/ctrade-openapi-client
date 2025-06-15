@@ -8,7 +8,7 @@ import joblib
 df = pd.read_csv("ml/data/ticks20k_80k.csv")
 
 # --- Convert timestamps properly ---
-df['timestamp'] = pd.to_datetime(df['timestamp'])
+df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
 
 # --- Helper: compute mid price ---
 df['mid'] = (df['bid'] + df['ask']) / 2
