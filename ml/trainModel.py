@@ -13,7 +13,7 @@ df = pd.read_csv("ml/data/features.csv")
 # Step 2: Define features and target
 # -------------------------------
 # Drop columns we should not include in the ML model
-drop_cols = ['timestamp', 'bid', 'ask', 'mid', 'target']
+drop_cols = ['timestamp', 'bid', 'ask', 'mid', 'target', 'session_date', 'session_hour']
 feature_cols = [col for col in df.columns if col not in drop_cols]
 X = df[feature_cols]
 y = df['target']
