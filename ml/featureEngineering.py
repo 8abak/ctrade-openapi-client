@@ -4,8 +4,7 @@ import numpy as np
 
 # Load labeled ticks
 df = pd.read_csv("ml/data/labeledTicks.csv")
-df['timestamp'] = pd.to_datetime(df['timestamp'])
-
+df['timestamp'] = pd.to_datetime(df['timestamp'], format='mixed')
 # Price-based features
 df['spread'] = df['ask'] - df['bid']
 df['delta'] = df['mid'].diff()
