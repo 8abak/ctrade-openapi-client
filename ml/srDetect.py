@@ -32,18 +32,18 @@ for i in range(0, len(df) - windowSize - confirmWindow, windowSize):
     minTime = df.loc[minBidIdx]['timestamp']
 
     if lastSupport is None or abs(minBid - lastSupport) > minZoneGap:
-        lastSupport = minBid
+        lastSupport = float(minBid)
         cur.execute("""
             INSERT INTO sr_zones (type, price, start_time, end_time)
             VALUES (%s, %s, %s, %s) RETURNING id
-        """, ('support', minBid, window.iloc[0]['timestamp'], window.iloc[-1]['timestamp']))
+        """, ('support', float(minBid), window.iloc[0]['timestamp'], window.iloc[-1]['timestamp']))
         supportId = cur.fetchone()[0]
         conn.commit()
 
         # Check for encounter
         future = df.iloc[i+windowSize:i+windowSize+confirmWindow]
         for j in range(len(future)):
-            price = future.iloc[j]['bid']
+            price = float(future.iloc[j]['bid'])
             if abs(price - minBid) <= encounterRange:
                 futureSlice = future.iloc[j:j+10]
                 rebound = futureSlice['bid'].max() > minBid + encounterRange
@@ -70,18 +70,18 @@ for i in range(0, len(df) - windowSize - confirmWindow, windowSize):
     maxTime = df.loc[maxAskIdx]['timestamp']
 
     if lastResistance is None or abs(maxAsk - lastResistance) > minZoneGap:
-        lastResistance = maxAsk
+        lastResistance = float(maxAsk)
         cur.execute("""
             INSERT INTO sr_zones (type, price, start_time, end_time)
             VALUES (%s, %s, %s, %s) RETURNING id
-        """, ('resistance', maxAsk, window.iloc[0]['timestamp'], window.iloc[-1]['timestamp']))
+        """, ('resistance', float(maxAsk), window.iloc[0]['timestamp'], window.iloc[-1]['timestamp']))
         resistanceId = cur.fetchone()[0]
         conn.commit()
 
         # Check for encounter
         future = df.iloc[i+windowSize:i+windowSize+confirmWindow]
         for j in range(len(future)):
-            price = future.iloc[j]['ask']
+            price = float(future.iloc[j]['ask'])
             if abs(price - maxAsk) <= encounterRange:
                 futureSlice = future.iloc[j:j+10]
                 rejection = futureSlice['ask'].min() < maxAsk - encounterRange
