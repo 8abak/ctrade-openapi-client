@@ -12,7 +12,7 @@ conn = psycopg2.connect(
 )
 
 # Or use SQLAlchemy for easier update
-engine = create_engine("postgresql+psycopg2://babak:BB@bb33044@localhost:5432/trading")
+engine = create_engine("postgresql+psycopg2://babak:BB%40bb33044@localhost:5432/trading")
 
 # === LOAD DATA ===
 df = pd.read_sql("SELECT * FROM pivotIdentification ORDER BY timestamp ASC", conn)
