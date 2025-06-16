@@ -27,7 +27,7 @@ for i in range(0, len(df) - windowSize - confirmWindow, windowSize):
     window = df.iloc[i:i+windowSize]
 
     # Detect support zone from min bid
-    minBid = window['bid'].min()
+    minBid = float(window['bid'].min())
     minBidIdx = window['bid'].idxmin()
     minTime = df.loc[minBidIdx]['timestamp']
 
@@ -59,13 +59,13 @@ for i in range(0, len(df) - windowSize - confirmWindow, windowSize):
                     outcome,
                     confirmWindow,
                     price,
-                    futureSlice['bid'].iloc[-1]
+                    float(futureSlice['bid'].iloc[-1])
                 ))
                 conn.commit()
                 break
 
     # Detect resistance zone from max ask
-    maxAsk = window['ask'].max()
+    maxAsk = float(window['ask'].max())
     maxAskIdx = window['ask'].idxmax()
     maxTime = df.loc[maxAskIdx]['timestamp']
 
@@ -97,7 +97,7 @@ for i in range(0, len(df) - windowSize - confirmWindow, windowSize):
                     outcome,
                     confirmWindow,
                     price,
-                    futureSlice['ask'].iloc[-1]
+                    float(futureSlice['ask'].iloc[-1])
                 ))
                 conn.commit()
                 break
