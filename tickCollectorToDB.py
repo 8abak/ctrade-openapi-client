@@ -100,5 +100,5 @@ client.on_application_auth_response = on_app_auth_response
 client.on_account_auth_response = on_account_auth_response
 
 # Start the connection
-client.connect()
+client.startService()
 reactor.run()
