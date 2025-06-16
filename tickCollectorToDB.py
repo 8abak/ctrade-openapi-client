@@ -2,16 +2,16 @@
 
 import json
 import os
-import psycopg2
 import signal
-from datetime import datetime, timezone
+import psycopg2
+from datetime import datetime
 from twisted.internet import reactor
-from ctrader_open_api import Client, EndPoints
-from ctrader_open_api.tcpProtocol import TcpProtocol
+from ctrader_open_api import Client, Protobuf, TcpProtocol, EndPoints
 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOAApplicationAuthReq,
     ProtoOAAccountAuthReq,
     ProtoOASubscribeSpotsReq,
+    ProtoOAUnsubscribeSpotsReq,
     ProtoOASpotEvent
 )
 
@@ -29,33 +29,23 @@ connectionType = creds.get("connectionType", "live").lower()
 host = EndPoints.PROTOBUF_LIVE_HOST if connectionType == "live" else EndPoints.PROTOBUF_DEMO_HOST
 port = EndPoints.PROTOBUF_PORT
 
-# Database connection
+# Setup PostgreSQL connection
 conn = psycopg2.connect(dbname="trading", user="babak", password="BB@bb33044", host="localhost", port=5432)
 cur = conn.cursor()
 
-# Tick memory
-lastValidBid = None
-lastValidAsk = None
+client = Client(host=host, port=port, protocol=TcpProtocol)
 
-def on_tick(message):
-    global lastValidBid, lastValidAsk
+seenTimestamps = set()
 
-    if not isinstance(message, ProtoOASpotEvent):
+def writeTick(timestamp, symbolId, bid, ask):
+    if str(timestamp) in seenTimestamps:
+        print(f"⏩ Duplicate tick skipped: {timestamp}")
         return
 
-    timestamp = datetime.fromtimestamp(message.timestamp / 1000.0, tz=timezone.utc)
-    bid = message.bid
-    ask = message.ask
-
-    if bid == 0.0 and lastValidBid is not None:
-        bid = lastValidBid
-    elif bid != 0.0:
-        lastValidBid = bid
-
-    if ask == 0.0 and lastValidAsk is not None:
-        ask = lastValidAsk
-    elif ask != 0.0:
-        lastValidAsk = ask
+    seenTimestamps.add(str(timestamp))
+    dt = datetime.fromtimestamp(timestamp / 1000.0)
+    bidFloat = bid / 100000.0
+    askFloat = ask / 100000.0
 
     try:
         cur.execute(
@@ -64,44 +54,72 @@ def on_tick(message):
             VALUES (%s, %s, %s, %s)
             ON CONFLICT (symbol, timestamp) DO NOTHING;
             """,
-            ("XAUUSD", timestamp, bid, ask)
+            ("XAUUSD", dt, bidFloat, askFloat)
         )
         conn.commit()
+        print(f"🧠 DB tick saved: {dt}  bid={bidFloat} ask={askFloat}")
     except Exception as e:
-        print(f"DB error: {e}")
+        print(f"❌ DB error: {e}")
         conn.rollback()
 
-# Setup protocol + client
-protocol = TcpProtocol()
-client = Client(host, port, protocol)
+def connected(_):
+    print("✅ Connected. Subscribing to spot data...")
+    authMsg = ProtoOAApplicationAuthReq()
+    authMsg.clientId = clientId
+    authMsg.clientSecret = clientSecret
+    deferred = client.send(authMsg)
 
-# Callback setup
-def on_connect():
-    print("Connected to server.")
-    client.send(ProtoOAApplicationAuthReq(clientId=clientId, clientSecret=clientSecret))
+    def afterAppAuth(_):
+        print("🎉 API Application authorized")
+        accountAuth = ProtoOAAccountAuthReq()
+        accountAuth.ctidTraderAccountId = accountId
+        accountAuth.accessToken = accessToken
+        return client.send(accountAuth)
 
-def on_message(_, message):
-    if isinstance(message, ProtoOASpotEvent):
-        on_tick(message)
-    elif message.payloadType == 2105:  # Application Auth Response
-        client.send(ProtoOAAccountAuthReq(accessToken=accessToken, ctidTraderAccountId=accountId))
-    elif message.payloadType == 2107:  # Account Auth Response
-        client.send(ProtoOASubscribeSpotsReq(ctidTraderAccountId=accountId, symbolId=symbolId))
+    def afterAccountAuth(_):
+        print(f"🔐 Account {accountId} authorized. Starting tick logging.")
+        subscribeToSpot()
 
-client.setConnectedCallback(lambda _: on_connect())
-client.setDisconnectedCallback(lambda *_: print("Disconnected."))
-client.setMessageReceivedCallback(on_message)
+    deferred.addCallback(afterAppAuth)
+    deferred.addCallback(afterAccountAuth)
+    deferred.addErrback(onError)
 
-# Graceful shutdown
-def shutdown(*args):
-    print("Shutting down...")
-    client.stopService()
+def subscribeToSpot():
+    req = ProtoOASubscribeSpotsReq()
+    req.ctidTraderAccountId = accountId
+    req.symbolId.append(symbolId)
+    req.subscribeToSpotTimestamp = True
+    client.send(req)
+
+def disconnected(_, reason):
+    print(f"🔌 Disconnected: {reason}")
     cur.close()
     conn.close()
     reactor.stop()
 
-signal.signal(signal.SIGINT, shutdown)
+def onMessage(_, message):
+    if message.payloadType == ProtoOASpotEvent().payloadType:
+        spot = Protobuf.extract(message)
+        writeTick(spot.timestamp, spot.symbolId, getattr(spot, "bid", 0), getattr(spot, "ask", 0))
 
-# Start
+def onError(err):
+    print("❌ Error during connection or authentication:")
+    print(err)
+    cur.close()
+    conn.close()
+    reactor.stop()
+
+def handleSigint(signum, frame):
+    print("\n🚩 Gracefully shutting down...")
+    cur.close()
+    conn.close()
+    reactor.stop()
+
+signal.signal(signal.SIGINT, handleSigint)
+
+client.setConnectedCallback(connected)
+client.setDisconnectedCallback(disconnected)
+client.setMessageReceivedCallback(onMessage)
+
 client.startService()
 reactor.run()
