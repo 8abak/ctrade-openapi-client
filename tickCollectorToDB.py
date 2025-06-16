@@ -68,7 +68,7 @@ def writeTick(timestamp, symbolId, bid, ask):
     try:
         cur.execute(
             """
-            INSERT INTO ticks (symbol, timestamp, bid, ask)
+            INSERT INTO ticks (symbol, timestamp, bid, ask, mid)
             VALUES (%s, %s, %s, %s, %s)
             ON CONFLICT (symbol, timestamp) DO NOTHING;
             """,
