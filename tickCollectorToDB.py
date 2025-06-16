@@ -62,18 +62,21 @@ def writeTick(timestamp, symbolId, bid, ask):
     dt = datetime.fromtimestamp(timestamp / 1000.0)
     bidFloat = bid / 100000.0
     askFloat = ask / 100000.0
+    mid = round((bidFloat + askFloat) / 2, 2)
+    
+    )
 
     try:
         cur.execute(
             """
             INSERT INTO ticks (symbol, timestamp, bid, ask)
-            VALUES (%s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s)
             ON CONFLICT (symbol, timestamp) DO NOTHING;
             """,
-            ("XAUUSD", dt, bidFloat, askFloat)
+            ("XAUUSD", dt, bidFloat, askFloat, mid)
         )
         conn.commit()
-        print(f"🧠 DB tick saved: {dt}  bid={bidFloat} ask={askFloat}")
+        print(f"🧠 DB tick saved: {dt}  bid={bidFloat} ask={askFloat} mid={mid}")
     except Exception as e:
         print(f"❌ DB error: {e}")
         conn.rollback()
