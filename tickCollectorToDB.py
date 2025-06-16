@@ -113,7 +113,7 @@ def handleSigint(signum, frame):
     print("\n🚩 Gracefully shutting down...")
     cur.close()
     conn.close()
-    reactor.stop()
+    #reactor.stop()
 
 signal.signal(signal.SIGINT, handleSigint)
 
