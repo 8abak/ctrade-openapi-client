@@ -37,10 +37,26 @@ client = Client(host=host, port=port, protocol=TcpProtocol)
 
 seenTimestamps = set()
 
+# Track last good values
+lastValidBid = None
+lastValidAsk = None
+
 def writeTick(timestamp, symbolId, bid, ask):
+    global lastValidBid, lastValidAsk
+
     if str(timestamp) in seenTimestamps:
-        print(f"⏩ Duplicate tick skipped: {timestamp}")
         return
+
+    # Forward-fill
+    if bid == 0.0 and lastValidBid is not None:
+        bid = lastValidBid
+    elif bid != 0.0:
+        lastValidBid = bid
+
+    if ask == 0.0 and lastValidAsk is not None:
+        ask = lastValidAsk
+    elif ask != 0.0:
+        lastValidAsk = ask
 
     seenTimestamps.add(str(timestamp))
     dt = datetime.fromtimestamp(timestamp / 1000.0)
@@ -61,6 +77,8 @@ def writeTick(timestamp, symbolId, bid, ask):
     except Exception as e:
         print(f"❌ DB error: {e}")
         conn.rollback()
+
+
 
 def connected(_):
     print("✅ Connected. Subscribing to spot data...")
