@@ -58,14 +58,25 @@ fig.add_trace(go.Scatter(
     name='Mid Price', line=dict(color='black')
 ))
 
-# Draw support/resistance zones
-for _, row in zones.iterrows():
-    color = 'green' if row['type'] == 'support' else 'red'
+# Draw support/resistance zones with dynamic end (until first break)
+for _, zone in zones.iterrows():
+    color = 'green' if zone['type'] == 'support' else 'red'
+
+    # Try to find the first "broken" event for this zone
+    broken_events = events[(events['zone_id'] == zone['id']) & (events['outcome'] == 'broken')]
+    if not broken_events.empty:
+        endTime = broken_events['timestamp'].min()
+    else:
+        endTime = maxTime  # fallback to full range if not broken yet
+
     fig.add_trace(go.Scatter(
-        x=[minTime, maxTime], y=[row['price'], row['price']],
-        mode='lines', name=f"{row['type'].capitalize()} @ {row['price']:.2f}",
+        x=[zone['start_time'], endTime],
+        y=[zone['price'], zone['price']],
+        mode='lines',
+        name=f"{zone['type'].capitalize()} @ {zone['price']:.2f}",
         line=dict(color=color, dash='dot')
     ))
+
 
 # Add event flags
 color_map = {'reacted': 'blue', 'broken': 'orange', 'unclear': 'gray'}
