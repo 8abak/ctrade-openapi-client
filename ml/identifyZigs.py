@@ -1,6 +1,6 @@
 import pandas as pd
 import psycopg2
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 
 # === DB CONNECTION ===
 conn = psycopg2.connect(
@@ -70,13 +70,13 @@ df_to_update = df[['id', 'pivot_type', 'zigzag_direction']].dropna(subset=['pivo
 with engine.begin() as connection:
     for _, row in df_to_update.iterrows():
         connection.execute(
-            f"""
+            text("""
             UPDATE pivotIdentification
-            SET pivot_type = %s,
-                zigzag_direction = %s
-            WHERE id = %s
-            """,
-            (row['pivot_type'], row['zigzag_direction'], int(row['id']))
+            SET pivot_type = :pivot,
+                zigzag_direction = :zigzag
+            WHERE id = :id
+            """),
+            {"pivot": row['pivot_type'], "zigzag": row['zigzag_direction'], "id": int(row['id'])}
         )
 
 print("✅ Zigzag labeling complete.")
