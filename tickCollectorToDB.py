@@ -13,6 +13,10 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOASubscribeSpotsReq,
     ProtoOASpotEvent
 )
+from ctrader_open_api.tcpProtocol import TcpProtocol
+protocol = TcpProtocol()
+
+
 
 # Load credentials
 with open(os.path.expanduser("~/cTrade/creds.json"), "r") as f:
@@ -74,7 +78,7 @@ def on_tick(message):
         conn.rollback()
 
 # Client setup
-client = Client(host, port)
+client = Client(host, port, protocol)
 
 def on_connect():
     print("Connected to server.")
