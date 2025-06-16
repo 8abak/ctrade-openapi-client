@@ -64,7 +64,6 @@ def writeTick(timestamp, symbolId, bid, ask):
     askFloat = ask / 100000.0
     mid = round((bidFloat + askFloat) / 2, 2)
     
-    )
 
     try:
         cur.execute(
