@@ -3,16 +3,15 @@ import streamlit as st
 import plotly.graph_objects as go
 from sqlalchemy import create_engine
 
-# Streamlit setup
-st.set_page_config(layout="wide")
-st.title("📊 Support/Resistance MOB Viewer")
-
-# Database connection via SQLAlchemy
-db_uri = "postgresql+psycopg2://babak:babak33044@localhost:5432/trading"  # ← or use %40 if needed
+# DB setup
+db_uri = "postgresql+psycopg2://babak:babak33044@localhost:5432/trading"
 engine = create_engine(db_uri)
 
-# User inputs
-st.sidebar.header("Display Options")
+# Streamlit config
+st.set_page_config(layout="wide")
+st.title("📍 Pivot Viewer")
+
+# Sidebar inputs
 startTick = st.sidebar.number_input("Start Tick Index", min_value=0, value=0, step=100)
 endTick = st.sidebar.number_input("End Tick Index", min_value=startTick + 1, value=startTick + 1000, step=100)
 
@@ -25,26 +24,19 @@ queryTicks = f"""
 """
 df = pd.read_sql(queryTicks, engine)
 df['timestamp'] = pd.to_datetime(df['timestamp'])
+df['mid'] = (df['bid'] + df['ask']) / 2
 
-# Load support/resistance zones
+# Load pivots
 minTime = df['timestamp'].min()
 maxTime = df['timestamp'].max()
 
-zones = pd.read_sql("""
-    SELECT * FROM sr_zones
-    WHERE start_time <= %s AND end_time >= %s
-""", engine, params=(maxTime, minTime))
-
-# Load events
-events = pd.read_sql("""
-    SELECT e.*, z.type AS zone_type, z.price AS zone_price
-    FROM sr_mob_events e
-    JOIN sr_zones z ON e.zone_id = z.id
-    WHERE e.timestamp BETWEEN %s AND %s
+pivots = pd.read_sql("""
+    SELECT * FROM pivots
+    WHERE timestamp BETWEEN %s AND %s
 """, engine, params=(minTime, maxTime))
-events['timestamp'] = pd.to_datetime(events['timestamp'])
+pivots['timestamp'] = pd.to_datetime(pivots['timestamp'])
 
-# Plot setup
+# Plot chart
 fig = go.Figure()
 
 # Mid price
@@ -53,42 +45,27 @@ fig.add_trace(go.Scatter(
     name='Mid Price', line=dict(color='black')
 ))
 
-# Zones with start and break-end logic
-for _, zone in zones.iterrows():
-    color = 'green' if zone['type'] == 'support' else 'red'
-    broken_events = events[(events['zone_id'] == zone['id']) & (events['outcome'] == 'broken')]
-    endTime = broken_events['timestamp'].min() if not broken_events.empty else maxTime
-
+# Pivots
+for _, p in pivots.iterrows():
+    marker = 'triangle-up' if p['pivot_type'] == 'high' else 'triangle-down'
+    color = 'blue' if p['pivot_type'] == 'high' else 'orange'
     fig.add_trace(go.Scatter(
-        x=[zone['start_time'], endTime],
-        y=[zone['price'], zone['price']],
-        mode='lines',
-        name=f"{zone['type'].capitalize()} @ {zone['price']:.2f}",
-        line=dict(color=color, dash='dot')
+        x=[p['timestamp']], y=[p['price']],
+        mode='markers+text',
+        marker=dict(symbol=marker, color=color, size=12),
+        text=[p['pivot_type']],
+        textposition='top center',
+        name=f"{p['pivot_type']} @ {p['price']:.2f}"
     ))
 
-# Event markers
-color_map = {'reacted': 'blue', 'broken': 'orange', 'unclear': 'gray'}
-for _, row in events.iterrows():
-    fig.add_trace(go.Scatter(
-        x=[row['timestamp']], y=[row['price_at_touch']],
-        mode='markers+text', name=row['outcome'],
-        marker=dict(size=10, color=color_map.get(row['outcome'], 'black'), symbol='x'),
-        text=[row['outcome']], textposition='top center'
-    ))
-
-fig.update_layout(height=600, title="Tick Stream with S/R Zones and MOB Events")
+fig.update_layout(height=600, title="Structured Pivots Only")
 st.plotly_chart(fig, use_container_width=True)
 
-# Optional tables
-st.sidebar.markdown("---")
+# Table (optional)
 if st.sidebar.checkbox("Show Ticks Table"):
     st.dataframe(df)
 
-if st.sidebar.checkbox("Show S/R Zones Table"):
-    st.dataframe(zones)
-
-if st.sidebar.checkbox("Show MOB Events Table"):
-    st.dataframe(events)
+if st.sidebar.checkbox("Show Pivots Table"):
+    st.dataframe(pivots)
 
 engine.dispose()
