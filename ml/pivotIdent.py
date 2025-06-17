@@ -21,15 +21,14 @@ pivots = []
 i = 1
 
 while i < len(df) - 1:
-    # Look for candidate highs and lows based on mid
     prevMid = df['mid'].iloc[i - 1]
     currMid = df['mid'].iloc[i]
     nextMid = df['mid'].iloc[i + 1]
 
     if currMid > prevMid and currMid > nextMid:
-        pivots.append({'type': 'high', 'i': i, 'timestamp': df['timestamp'].iloc[i], 'price': round(currMid, 2)})
+        pivots.append({'type': 'high', 'i': i, 'timestamp': df['timestamp'].iloc[i], 'price': float(round(currMid, 2))})
     elif currMid < prevMid and currMid < nextMid:
-        pivots.append({'type': 'low', 'i': i, 'timestamp': df['timestamp'].iloc[i], 'price': round(currMid, 2)})
+        pivots.append({'type': 'low', 'i': i, 'timestamp': df['timestamp'].iloc[i], 'price': float(round(currMid, 2))})
     i += 1
 
 # Structural enforcement
@@ -39,14 +38,22 @@ for j in range(1, len(pivots)):
     curr = pivots[j]
 
     if prev['type'] == curr['type']:
-        # If same type in a row (e.g., high → high), fill the in-between with the opposite pivot
         subset = df.iloc[prev['i']:curr['i']]
+
         if curr['type'] == 'high':
             idx = subset['mid'].idxmin()
-            finalPivots.append({'type': 'low', 'timestamp': df['timestamp'].loc[idx], 'price': round(df['mid'].loc[idx], 2)})
+            finalPivots.append({
+                'type': 'low',
+                'timestamp': df['timestamp'].loc[idx],
+                'price': float(round(df['mid'].loc[idx], 2))
+            })
         else:
             idx = subset['mid'].idxmax()
-            finalPivots.append({'type': 'high', 'timestamp': df['timestamp'].loc[idx], 'price': round(df['mid'].loc[idx], 2)})
+            finalPivots.append({
+                'type': 'high',
+                'timestamp': df['timestamp'].loc[idx],
+                'price': float(round(df['mid'].loc[idx], 2))
+            })
 
     finalPivots.append(curr)
 
@@ -58,7 +65,4 @@ for p in finalPivots:
         VALUES (%s, %s, %s)
     """, (p['timestamp'], p['price'], p['type']))
 conn.commit()
-cur.close()
-conn.close()
-
-print(f"✅ Inserted {len(finalPivots)} structured pivots.")
+cur.c
