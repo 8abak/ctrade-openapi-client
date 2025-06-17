@@ -1,20 +1,15 @@
-import psycopg2
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
+from sqlalchemy import create_engine
 
-# Page config
+# Streamlit setup
 st.set_page_config(layout="wide")
 st.title("📊 Support/Resistance MOB Viewer")
 
-# Connect to PostgreSQL
-conn = psycopg2.connect(
-    dbname="trading",
-    user="babak",
-    password="BB@bb33044",
-    host="localhost",
-    port=5432
-)
+# Database connection via SQLAlchemy
+db_uri = "postgresql+psycopg2://babak:babak33044@localhost:5432/trading"  # ← or use %40 if needed
+engine = create_engine(db_uri)
 
 # User inputs
 st.sidebar.header("Display Options")
@@ -28,46 +23,41 @@ queryTicks = f"""
     OFFSET {startTick}
     LIMIT {endTick - startTick}
 """
-df = pd.read_sql(queryTicks, conn)
+df = pd.read_sql(queryTicks, engine)
 df['timestamp'] = pd.to_datetime(df['timestamp'])
 
-# Load support/resistance zones within time window
+# Load support/resistance zones
 minTime = df['timestamp'].min()
 maxTime = df['timestamp'].max()
 
 zones = pd.read_sql("""
     SELECT * FROM sr_zones
     WHERE start_time <= %s AND end_time >= %s
-""", conn, params=(maxTime, minTime))
+""", engine, params=(maxTime, minTime))
 
-# Load events within time window
+# Load events
 events = pd.read_sql("""
     SELECT e.*, z.type AS zone_type, z.price AS zone_price
     FROM sr_mob_events e
     JOIN sr_zones z ON e.zone_id = z.id
     WHERE e.timestamp BETWEEN %s AND %s
-""", conn, params=(minTime, maxTime))
+""", engine, params=(minTime, maxTime))
 events['timestamp'] = pd.to_datetime(events['timestamp'])
 
-# Plot
+# Plot setup
 fig = go.Figure()
 
-# Tick price line
+# Mid price
 fig.add_trace(go.Scatter(
     x=df['timestamp'], y=df['mid'], mode='lines',
     name='Mid Price', line=dict(color='black')
 ))
 
-# Draw support/resistance zones with dynamic end (until first break)
+# Zones with start and break-end logic
 for _, zone in zones.iterrows():
     color = 'green' if zone['type'] == 'support' else 'red'
-
-    # Try to find the first "broken" event for this zone
     broken_events = events[(events['zone_id'] == zone['id']) & (events['outcome'] == 'broken')]
-    if not broken_events.empty:
-        endTime = broken_events['timestamp'].min()
-    else:
-        endTime = maxTime  # fallback to full range if not broken yet
+    endTime = broken_events['timestamp'].min() if not broken_events.empty else maxTime
 
     fig.add_trace(go.Scatter(
         x=[zone['start_time'], endTime],
@@ -77,8 +67,7 @@ for _, zone in zones.iterrows():
         line=dict(color=color, dash='dot')
     ))
 
-
-# Add event flags
+# Event markers
 color_map = {'reacted': 'blue', 'broken': 'orange', 'unclear': 'gray'}
 for _, row in events.iterrows():
     fig.add_trace(go.Scatter(
@@ -89,10 +78,9 @@ for _, row in events.iterrows():
     ))
 
 fig.update_layout(height=600, title="Tick Stream with S/R Zones and MOB Events")
-
 st.plotly_chart(fig, use_container_width=True)
 
-# Optional: Show tables
+# Optional tables
 st.sidebar.markdown("---")
 if st.sidebar.checkbox("Show Ticks Table"):
     st.dataframe(df)
@@ -103,4 +91,4 @@ if st.sidebar.checkbox("Show S/R Zones Table"):
 if st.sidebar.checkbox("Show MOB Events Table"):
     st.dataframe(events)
 
-conn.close()
+engine.dispose()
