@@ -65,4 +65,7 @@ for p in finalPivots:
         VALUES (%s, %s, %s)
     """, (p['timestamp'], p['price'], p['type']))
 conn.commit()
-cur.c
+cur.close()
+conn.close()
+
+print(f"✅ Inserted {len(finalPivots)} structured pivots.")
