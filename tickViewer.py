@@ -1,13 +1,14 @@
-# --- ✅ 1. Imports ---
 import streamlit as st
+
+# ✅ ABSOLUTELY FIRST Streamlit command
+st.set_page_config(layout="wide")
+
+# ✅ Now safe to import everything else
 import pandas as pd
 import plotly.graph_objects as go
 from sqlalchemy import create_engine
 
-# --- ✅ 2. Must be first Streamlit command ---
-st.set_page_config(layout="wide")
-
-# --- ✅ 3. Now safe to inject CSS ---
+# ✅ CSS to remove top padding and Streamlit header
 st.markdown("""
     <style>
         .block-container {
@@ -18,8 +19,6 @@ st.markdown("""
         }
     </style>
 """, unsafe_allow_html=True)
-
-# Continue with rest of app...
 
 # DB setup
 db_uri = "postgresql+psycopg2://babak:babak33044@localhost:5432/trading"
