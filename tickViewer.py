@@ -25,7 +25,6 @@ db_uri = "postgresql+psycopg2://babak:babak33044@localhost:5432/trading"
 engine = create_engine(db_uri)
 
 # Streamlit config
-st.set_page_config(layout="wide")
 st.markdown("<h1 style='margin-bottom: 0;'>📍 Pivot Viewer</h1>", unsafe_allow_html=True)
 
 # Get total tick count
