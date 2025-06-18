@@ -30,7 +30,7 @@ host = EndPoints.PROTOBUF_LIVE_HOST if connectionType == "live" else EndPoints.P
 port = EndPoints.PROTOBUF_PORT
 
 # Setup PostgreSQL connection
-conn = psycopg2.connect(dbname="trading", user="babak", password="BB@bb33044", host="localhost", port=5432)
+conn = psycopg2.connect(dbname="trading", user="babak", password="babak33044", host="localhost", port=5432)
 cur = conn.cursor()
 
 client = Client(host=host, port=port, protocol=TcpProtocol)
