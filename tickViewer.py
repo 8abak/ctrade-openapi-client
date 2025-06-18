@@ -1,11 +1,12 @@
-
-
-import pandas as pd
 import streamlit as st
+import pandas as pd
 import plotly.graph_objects as go
 from sqlalchemy import create_engine
 
-# Hide Streamlit default header and padding
+# ✅ Set layout as first Streamlit command
+st.set_page_config(layout="wide")
+
+# ✅ Then hide Streamlit header and spacing
 st.markdown("""
     <style>
         .block-container {
@@ -16,7 +17,6 @@ st.markdown("""
         }
     </style>
 """, unsafe_allow_html=True)
-
 
 
 # DB setup
