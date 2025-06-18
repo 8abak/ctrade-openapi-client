@@ -1,3 +1,10 @@
+
+
+import pandas as pd
+import streamlit as st
+import plotly.graph_objects as go
+from sqlalchemy import create_engine
+
 # Hide Streamlit default header and padding
 st.markdown("""
     <style>
@@ -11,10 +18,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-import pandas as pd
-import streamlit as st
-import plotly.graph_objects as go
-from sqlalchemy import create_engine
 
 # DB setup
 db_uri = "postgresql+psycopg2://babak:babak33044@localhost:5432/trading"
