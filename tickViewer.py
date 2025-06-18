@@ -1,23 +1,25 @@
+# --- ✅ 1. Imports ---
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from sqlalchemy import create_engine
 
-# ✅ Set layout as first Streamlit command
+# --- ✅ 2. Must be first Streamlit command ---
 st.set_page_config(layout="wide")
 
-# ✅ Then hide Streamlit header and spacing
+# --- ✅ 3. Now safe to inject CSS ---
 st.markdown("""
     <style>
         .block-container {
             padding-top: 0rem;
         }
-        header, .st-emotion-cache-z5fcl4 { 
+        header, .st-emotion-cache-z5fcl4 {
             display: none;
         }
     </style>
 """, unsafe_allow_html=True)
 
+# Continue with rest of app...
 
 # DB setup
 db_uri = "postgresql+psycopg2://babak:babak33044@localhost:5432/trading"
