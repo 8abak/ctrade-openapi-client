@@ -1,3 +1,16 @@
+# Hide Streamlit default header and padding
+st.markdown("""
+    <style>
+        .block-container {
+            padding-top: 0rem;
+        }
+        header, .st-emotion-cache-z5fcl4 { 
+            display: none;
+        }
+    </style>
+""", unsafe_allow_html=True)
+
+
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
