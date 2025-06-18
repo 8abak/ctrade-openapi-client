@@ -9,18 +9,42 @@ engine = create_engine(db_uri)
 
 # Streamlit config
 st.set_page_config(layout="wide")
-st.title("📍 Pivot Viewer")
+st.markdown("<h1 style='margin-bottom: 0;'>📍 Pivot Viewer</h1>", unsafe_allow_html=True)
 
-# Slider on top instead of sidebar inputs
-maxIndex = 100000  # adjust based on your total tick count
-tickRange = st.slider("Select Tick Range", 0, maxIndex, (0, 1000), step=100)
-startTick, endTick = tickRange
+# Get total tick count
+totalTicks = pd.read_sql("SELECT COUNT(*) FROM ticks", engine).iloc[0, 0]
+defaultStart = max(0, totalTicks - 10000)
+defaultEnd = totalTicks
 
-# Sidebar checkboxes
-st.sidebar.subheader("Pivot Display Options")
-showPivotChart = st.sidebar.checkbox("Show Pivots in Chart", value=True)
-showPivotTable = st.sidebar.checkbox("Show Pivots Table", value=False)
-showTickTable = st.sidebar.checkbox("Show Ticks Table", value=False)
+# Session state for slider
+if "tickRange" not in st.session_state:
+    st.session_state.tickRange = (defaultStart, defaultEnd)
+
+# Horizontal slider + Jump to Latest button
+col1, col2 = st.columns([4, 1])
+with col1:
+    tickRange = st.slider("Tick Index Range", 0, totalTicks, st.session_state.tickRange, step=100, key="tickSlider")
+with col2:
+    if st.button("🔄 Jump to Latest"):
+        st.session_state.tickRange = (max(0, totalTicks - 10000), totalTicks)
+        st.experimental_rerun()
+
+startTick, endTick = st.session_state.tickRange
+
+# Sidebar checkbox layout
+st.sidebar.subheader("🧩 Display Options")
+
+# Tick display options
+st.sidebar.markdown("**Tick**")
+tickCols = st.sidebar.columns(2)
+showTickChart = tickCols[0].checkbox("Chart", value=True, key="tickChart")
+showTickTable = tickCols[1].checkbox("Table", value=False, key="tickTable")
+
+# Pivot display options
+st.sidebar.markdown("**Pivot**")
+pivotCols = st.sidebar.columns(2)
+showPivotChart = pivotCols[0].checkbox("Chart", value=True, key="pivotChart")
+showPivotTable = pivotCols[1].checkbox("Table", value=False, key="pivotTable")
 
 # Load ticks
 queryTicks = f"""
@@ -46,13 +70,15 @@ pivots['timestamp'] = pd.to_datetime(pivots['timestamp'])
 # Plot chart
 fig = go.Figure()
 
-# Mid price
-fig.add_trace(go.Scatter(
-    x=df['timestamp'], y=df['mid'], mode='lines',
-    name='Mid Price', line=dict(color='black')
-))
+# Mid price (optional)
+if showTickChart:
+    dfMidThin = df.iloc[::5]
+    fig.add_trace(go.Scatter(
+        x=dfMidThin['timestamp'], y=dfMidThin['mid'], mode='lines',
+        name='Mid Price', line=dict(color='black', width=1)
+    ))
 
-# Pivots (conditionally show)
+# Pivots
 if showPivotChart:
     for _, p in pivots.iterrows():
         marker = 'triangle-up' if p['pivot_type'] == 'high' else 'triangle-down'
@@ -68,18 +94,18 @@ if showPivotChart:
 
 fig.update_layout(
     height=600,
-    title="Structured Pivots Only",
-    margin=dict(l=20, r=0, t=40, b=20)
+    margin=dict(l=20, r=0, t=0, b=20),
+    showlegend=False
 )
 st.plotly_chart(fig, use_container_width=True)
 
 # Tables
 if showTickTable:
-    st.subheader("Ticks Table")
+    st.subheader("Tick Table")
     st.dataframe(df)
 
 if showPivotTable:
-    st.subheader("Pivots Table")
+    st.subheader("Pivot Table")
     st.dataframe(pivots)
 
 engine.dispose()
