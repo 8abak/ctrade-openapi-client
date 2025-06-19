@@ -32,8 +32,8 @@ totalTicks = pd.read_sql("SELECT COUNT(*) FROM ticks", engine).iloc[0, 0]
 defaultStart = max(0, totalTicks - 10000)
 defaultEnd = totalTicks
 
-# Session state for slider
-if "tickRange" not in st.session_state:
+# Only set default once when app first runs
+if "tickRange" not in st.session_state or not st.session_state.get("tickSliderMoved", False):
     st.session_state.tickRange = (defaultStart, defaultEnd)
 
 # Horizontal slider + Jump to Latest button
