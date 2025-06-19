@@ -38,14 +38,73 @@ if "tickRange" not in st.session_state or not st.session_state.get("tickSliderMo
 
 # Horizontal slider + Jump to Latest button
 col1, col2 = st.columns([4, 1])
+
 with col1:
-    tickRange = st.slider("Tick Index Range", 0, totalTicks, st.session_state.tickRange, step=100, key="tickSlider")
+    tickRange = st.slider(
+        "Tick Range",
+        0, totalTicks,
+        st.session_state.tickRange,
+        step=1000,
+        key="tickSlider"
+    )
+
+    # ✅ Detect user interaction
+    if tickRange != st.session_state.tickRange:
+        st.session_state.tickRange = tickRange
+        st.session_state.tickSliderMoved = True
+
 with col2:
     if st.button("🔄"):
         st.session_state.tickRange = (max(0, totalTicks - 10000), totalTicks)
+        st.session_state.tickSliderMoved = False  # reset zoom state
         st.rerun()
 
+
 startTick, endTick = st.session_state.tickRange
+
+with st.container():
+    cols = st.columns([1, 1, 1, 1, 1])
+    
+    if cols[0].button("⏪ -100"):
+        start, end = st.session_state.tickRange
+        shift = 100
+        newStart = max(0, start - shift)
+        newEnd = max(newStart + 1, end - shift)
+        st.session_state.tickRange = (newStart, newEnd)
+        st.rerun()
+
+    if cols[1].button("🔍 Zoom In"):
+        start, end = st.session_state.tickRange
+        center = (start + end) // 2
+        window = max(100, (end - start) // 2)
+        newStart = max(0, center - window // 2)
+        newEnd = min(totalTicks, newStart + window)
+        st.session_state.tickRange = (newStart, newEnd)
+        st.rerun()
+
+    if cols[2].button("🔍 Zoom Out"):
+        start, end = st.session_state.tickRange
+        center = (start + end) // 2
+        window = min(totalTicks, (end - start) * 2)
+        newStart = max(0, center - window // 2)
+        newEnd = min(totalTicks, newStart + window)
+        st.session_state.tickRange = (newStart, newEnd)
+        st.rerun()
+
+    if cols[3].button("+100 ⏩"):
+        start, end = st.session_state.tickRange
+        shift = 100
+        newEnd = min(totalTicks, end + shift)
+        newStart = max(0, newEnd - (end - start))
+        st.session_state.tickRange = (newStart, newEnd)
+        st.rerun()
+
+    if cols[4].button("🔄"):
+        st.session_state.tickRange = (max(0, totalTicks - 10000), totalTicks)
+        st.session_state.tickSliderMoved = False
+        st.rerun()
+
+
 
 # Sidebar checkbox layout
 st.sidebar.subheader("🧩 Display Options")
