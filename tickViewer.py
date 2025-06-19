@@ -41,9 +41,9 @@ col1, col2 = st.columns([4, 1])
 with col1:
     tickRange = st.slider("Tick Index Range", 0, totalTicks, st.session_state.tickRange, step=100, key="tickSlider")
 with col2:
-    if st.button("🔄 Jump to Latest"):
+    if st.button("🔄"):
         st.session_state.tickRange = (max(0, totalTicks - 10000), totalTicks)
-        st.experimental_rerun()
+        st.rerun()
 
 startTick, endTick = st.session_state.tickRange
 
