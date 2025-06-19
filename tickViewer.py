@@ -1,127 +1,108 @@
 import streamlit as st
 
-# ✅ ABSOLUTELY FIRST Streamlit command
+# ✅ Must be first Streamlit command
 st.set_page_config(layout="wide")
 
-# ✅ Now safe to import everything else
 import pandas as pd
 import plotly.graph_objects as go
 from sqlalchemy import create_engine
 
-# ✅ CSS to remove top padding and Streamlit header
+# ✅ Hide header and spacing
 st.markdown("""
     <style>
-        .block-container {
-            padding-top: 0rem;
-        }
-        header, .st-emotion-cache-z5fcl4 {
-            display: none;
+        .block-container { padding-top: 0rem; }
+        header, .st-emotion-cache-z5fcl4 { display: none; }
+        button[kind="secondary"] {
+            padding: 0.25rem 0.5rem;
+            font-size: 0.75rem;
         }
     </style>
 """, unsafe_allow_html=True)
 
-# DB setup
+# --- Database ---
 db_uri = "postgresql+psycopg2://babak:babak33044@localhost:5432/trading"
 engine = create_engine(db_uri)
 
-# Streamlit config
-st.markdown("<h1 style='margin-bottom: 0;'>📍 Pivot Viewer</h1>", unsafe_allow_html=True)
-
-# Get total tick count
+# --- Get tick count ---
 totalTicks = pd.read_sql("SELECT COUNT(*) FROM ticks", engine).iloc[0, 0]
 defaultStart = max(0, totalTicks - 10000)
 defaultEnd = totalTicks
 
-# Only set default once when app first runs
-if "tickRange" not in st.session_state or not st.session_state.get("tickSliderMoved", False):
+# --- Init session state ---
+if "tickRange" not in st.session_state:
     st.session_state.tickRange = (defaultStart, defaultEnd)
+if "tickSliderMoved" not in st.session_state:
+    st.session_state.tickSliderMoved = False
 
-# Horizontal slider + Jump to Latest button
-col1, col2 = st.columns([4, 1])
+# --- Zoom & Shift Buttons ---
+st.markdown("#### Navigation")
 
-with col1:
-    tickRange = st.slider(
-        "Tick Range",
-        0, totalTicks,
-        st.session_state.tickRange,
-        step=1000,
-        key="tickSlider"
-    )
-
-    # ✅ Detect user interaction
-    if tickRange != st.session_state.tickRange:
-        st.session_state.tickRange = tickRange
-        st.session_state.tickSliderMoved = True
-
-with col2:
-    if st.button("🔄"):
-        st.session_state.tickRange = (max(0, totalTicks - 10000), totalTicks)
-        st.session_state.tickSliderMoved = False  # reset zoom state
+navCols = st.columns([1, 1, 1, 1, 1])
+with navCols[0]:
+    if st.button("⏪ -100"):
+        s, e = st.session_state.tickRange
+        s = max(0, s - 100)
+        e = max(s + 1, e - 100)
+        st.session_state.tickRange = (s, e)
         st.rerun()
-
-
-startTick, endTick = st.session_state.tickRange
-
-with st.container():
-    cols = st.columns([1, 1, 1, 1, 1])
-    
-    if cols[0].button("⏪ -100"):
-        start, end = st.session_state.tickRange
-        shift = 100
-        newStart = max(0, start - shift)
-        newEnd = max(newStart + 1, end - shift)
-        st.session_state.tickRange = (newStart, newEnd)
+with navCols[1]:
+    if st.button("🔍 In"):
+        s, e = st.session_state.tickRange
+        c = (s + e) // 2
+        w = max(100, (e - s) // 2)
+        s = max(0, c - w // 2)
+        e = min(totalTicks, s + w)
+        st.session_state.tickRange = (s, e)
         st.rerun()
-
-    if cols[1].button("🔍 Zoom In"):
-        start, end = st.session_state.tickRange
-        center = (start + end) // 2
-        window = max(100, (end - start) // 2)
-        newStart = max(0, center - window // 2)
-        newEnd = min(totalTicks, newStart + window)
-        st.session_state.tickRange = (newStart, newEnd)
+with navCols[2]:
+    if st.button("🔍 Out"):
+        s, e = st.session_state.tickRange
+        c = (s + e) // 2
+        w = min(totalTicks, (e - s) * 2)
+        s = max(0, c - w // 2)
+        e = min(totalTicks, s + w)
+        st.session_state.tickRange = (s, e)
         st.rerun()
-
-    if cols[2].button("🔍 Zoom Out"):
-        start, end = st.session_state.tickRange
-        center = (start + end) // 2
-        window = min(totalTicks, (end - start) * 2)
-        newStart = max(0, center - window // 2)
-        newEnd = min(totalTicks, newStart + window)
-        st.session_state.tickRange = (newStart, newEnd)
+with navCols[3]:
+    if st.button("+100 ⏩"):
+        s, e = st.session_state.tickRange
+        e = min(totalTicks, e + 100)
+        s = max(0, e - (e - s))
+        st.session_state.tickRange = (s, e)
         st.rerun()
-
-    if cols[3].button("+100 ⏩"):
-        start, end = st.session_state.tickRange
-        shift = 100
-        newEnd = min(totalTicks, end + shift)
-        newStart = max(0, newEnd - (end - start))
-        st.session_state.tickRange = (newStart, newEnd)
-        st.rerun()
-
-    if cols[4].button("🔄"):
+with navCols[4]:
+    if st.button("🔄 Reset"):
         st.session_state.tickRange = (max(0, totalTicks - 10000), totalTicks)
         st.session_state.tickSliderMoved = False
         st.rerun()
 
+# --- Slider ---
+tickRange = st.slider(
+    "Tick Range",
+    0, totalTicks,
+    st.session_state.tickRange,
+    step=1000,
+    key="tickSlider"
+)
+if tickRange != st.session_state.tickRange:
+    st.session_state.tickRange = tickRange
+    st.session_state.tickSliderMoved = True
 
+startTick, endTick = st.session_state.tickRange
 
-# Sidebar checkbox layout
+# --- Sidebar Options ---
 st.sidebar.subheader("🧩 Display Options")
-
-# Tick display options
 st.sidebar.markdown("**Tick**")
 tickCols = st.sidebar.columns(2)
 showTickChart = tickCols[0].checkbox("Chart", value=True, key="tickChart")
 showTickTable = tickCols[1].checkbox("Table", value=False, key="tickTable")
 
-# Pivot display options
 st.sidebar.markdown("**Pivot**")
 pivotCols = st.sidebar.columns(2)
 showPivotChart = pivotCols[0].checkbox("Chart", value=True, key="pivotChart")
 showPivotTable = pivotCols[1].checkbox("Table", value=False, key="pivotTable")
 
-# Load ticks
+# --- Load Ticks ---
 queryTicks = f"""
     SELECT * FROM ticks
     ORDER BY timestamp
@@ -132,28 +113,25 @@ df = pd.read_sql(queryTicks, engine)
 df['timestamp'] = pd.to_datetime(df['timestamp'])
 df['mid'] = (df['bid'] + df['ask']) / 2
 
-# Load pivots
+# --- Load Pivots ---
 minTime = df['timestamp'].min()
 maxTime = df['timestamp'].max()
-
 pivots = pd.read_sql("""
     SELECT * FROM pivots
     WHERE timestamp BETWEEN %s AND %s
 """, engine, params=(minTime, maxTime))
 pivots['timestamp'] = pd.to_datetime(pivots['timestamp'])
 
-# Plot chart
+# --- Chart ---
 fig = go.Figure()
 
-# Mid price (optional)
 if showTickChart:
     dfMidThin = df.iloc[::5]
     fig.add_trace(go.Scatter(
-        x=dfMidThin['timestamp'], y=dfMidThin['mid'], mode='lines',
-        name='Mid Price', line=dict(color='black', width=1)
+        x=dfMidThin['timestamp'], y=dfMidThin['mid'],
+        mode='lines', name='Mid Price', line=dict(color='black', width=1)
     ))
 
-# Pivots
 if showPivotChart:
     for _, p in pivots.iterrows():
         marker = 'triangle-up' if p['pivot_type'] == 'high' else 'triangle-down'
@@ -174,7 +152,7 @@ fig.update_layout(
 )
 st.plotly_chart(fig, use_container_width=True)
 
-# Tables
+# --- Tables ---
 if showTickTable:
     st.subheader("Tick Table")
     st.dataframe(df)
