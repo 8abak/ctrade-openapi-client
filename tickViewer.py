@@ -78,7 +78,7 @@ with navCols[4]:
 
 # --- Slider ---
 tickRange = st.slider(
-    "Tick Range..",
+    "Tick Range...",
     0, totalTicks,
     st.session_state.tickRange,
     step=1000,
