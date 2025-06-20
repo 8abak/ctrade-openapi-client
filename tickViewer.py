@@ -105,7 +105,7 @@ showPivotTable = pivotCols[1].checkbox("Table", value=False, key="pivotTable")
 # --- Load Ticks ---
 queryTicks = f"""
     SELECT * FROM ticks
-    ORDER BY timestamp
+    ORDER BY timestamp ASC
     OFFSET {startTick}
     LIMIT {endTick - startTick}
 """
