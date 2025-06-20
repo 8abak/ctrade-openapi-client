@@ -12,3 +12,4 @@ st.markdown("""
     - Renko Chart
     - More tools coming soon!
 """)
+ 
