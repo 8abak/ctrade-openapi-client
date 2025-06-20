@@ -17,7 +17,7 @@ df["mid"] = (df["bid"] + df["ask"]) / 2
 
 # ✅ Renko calculation
 brickSize = st.sidebar.slider("Brick Size ($)", min_value=0.1, max_value=5.0, value=1.0, step=0.1)
-
+ 
 renko = []
 lastBrick = None
 
