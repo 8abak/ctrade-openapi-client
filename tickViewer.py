@@ -25,7 +25,7 @@ engine = create_engine(db_uri)
 
 # --- Get tick count ---
 totalTicks = pd.read_sql("SELECT COUNT(*) FROM ticks", engine).iloc[0, 0]
-defaultStart = max(0, totalTicks - 10000)
+defaultStart = max(0, totalTicks - 1000)
 defaultEnd = totalTicks
 
 # --- Init session state ---
@@ -72,7 +72,7 @@ with navCols[3]:
         st.rerun()
 with navCols[4]:
     if st.button("🔄 Reset"):
-        st.session_state.tickRange = (max(0, totalTicks - 10000), totalTicks)
+        st.session_state.tickRange = (max(0, totalTicks - 1000), totalTicks)
         st.session_state.tickSliderMoved = False
         st.rerun()
 
