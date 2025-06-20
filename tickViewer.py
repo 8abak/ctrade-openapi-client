@@ -99,7 +99,7 @@ showTickTable = tickCols[1].checkbox("Table", value=False, key="tickTable")
 
 st.sidebar.markdown("**Pivot**")
 pivotCols = st.sidebar.columns(2)
-showPivotChart = pivotCols[0].checkbox("Chart", value=True, key="pivotChart")
+showPivotChart = pivotCols[0].checkbox("Chart", value=False, key="pivotChart")
 showPivotTable = pivotCols[1].checkbox("Table", value=False, key="pivotTable")
 
 # --- Load Ticks ---
