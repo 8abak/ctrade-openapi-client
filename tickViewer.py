@@ -94,13 +94,13 @@ startTick, endTick = st.session_state.tickRange
 st.sidebar.subheader("🧩 Display Options")
 st.sidebar.markdown("**Tick**")
 tickCols = st.sidebar.columns(2)
-showTickChart = tickCols[0].checkbox("Chart", value=True, key="tickChart")
-showTickTable = tickCols[1].checkbox("Table", value=False, key="tickTable")
+showTickChart = tickCols[0].checkbox("C", value=True, key="tickChart")
+showTickTable = tickCols[1].checkbox("T", value=False, key="tickTable")
 
 st.sidebar.markdown("**Pivot**")
 pivotCols = st.sidebar.columns(2)
-showPivotChart = pivotCols[0].checkbox("Chart", value=False, key="pivotChart")
-showPivotTable = pivotCols[1].checkbox("Table", value=False, key="pivotTable")
+showPivotChart = pivotCols[0].checkbox("C", value=False, key="pivotChart")
+showPivotTable = pivotCols[1].checkbox("T", value=False, key="pivotTable")
 
 # --- Load Ticks ---
 queryTicks = f"""
