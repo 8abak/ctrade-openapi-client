@@ -28,7 +28,7 @@ if selectedTable:
 
 
 #SQL Console
-st.markdown("#### SQL Console")
+st.sidebar.markdown("#### 💻 SQL Console")
 
 sqlCode = st.text_area("Enter your SQL query", height=150)
 if st.button("Execute SQL"):
