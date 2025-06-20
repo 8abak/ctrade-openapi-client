@@ -30,8 +30,8 @@ if selectedTable:
 #SQL Console
 st.sidebar.markdown("#### 💻 SQL Console")
 
-sqlCode = st.text_area("Enter your SQL query", height=150)
-if st.button("Execute SQL"):
+sqlCode = st.sidebar.text_area("Enter your SQL query", height=150)
+if st.sidebar.button("Execute SQL"):
     try:
         result = pd.read_sql(text(sqlCode), engine)
         st.success("Query executed successfully!")
