@@ -10,7 +10,30 @@ st.title("📉 Renko Chart Viewer")
 engine = create_engine("postgresql+psycopg2://babak:babak33044@localhost:5432/trading")
 
 # ✅ Load last 10,000 ticks
-df = pd.read_sql("SELECT * FROM ticks WHERE symbol = 'XAUUSD' ORDER BY timestamp DESC LIMIT 10000", engine)
+from datetime import datetime, timedelta
+
+# Get time window (in minutes) from user
+windowMinutes = st.sidebar.slider("History Window (minutes)", min_value=5, max_value=240, value=30)
+
+# Define time range
+endTime = datetime.utcnow()
+startTime = endTime - timedelta(minutes=windowMinutes)
+
+# Query only within that window
+query = f"""
+    SELECT * FROM ticks
+    WHERE symbol = 'XAUUSD'
+    AND timestamp BETWEEN '{startTime}' AND '{endTime}'
+    ORDER BY timestamp
+    LIMIT 20000
+"""
+
+df = pd.read_sql(query, engine)
+# Check if DataFrame is empty
+if df.empty:
+    st.warning("No tick data available in this time range.")
+    st.stop()
+
 df = df.sort_values("timestamp")
 df["timestamp"] = pd.to_datetime(df["timestamp"])
 df["mid"] = (df["bid"] + df["ask"]) / 2
@@ -18,6 +41,9 @@ df["mid"] = (df["bid"] + df["ask"]) / 2
 # ✅ Renko calculation
 brickSize = st.sidebar.slider("Brick Size ($)", min_value=0.1, max_value=5.0, value=1.0, step=0.1)
  
+st.caption(f"Showing data from **{startTime.strftime('%H:%M:%S')}** to **{endTime.strftime('%H:%M:%S')}** UTC")
+
+
 renko = []
 lastBrick = None
 
