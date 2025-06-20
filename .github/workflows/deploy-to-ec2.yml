@@ -1,0 +1,33 @@
+name: 🚀 Deploy to EC2
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    name: Deploy to EC2
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: ⬇️ Checkout Repo
+        uses: actions/checkout@v3
+
+      - name: 🔐 Set up SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.EC2_SSH_KEY }}
+
+      - name: 🚀 Deploy to EC2 via SSH
+        run: |
+          ssh -o StrictHostKeyChecking=no ec2-user@${{ secrets.EC2_HOST }} << 'EOF'
+          cd ~/cTrade
+          git pull origin main
+          source venv/bin/activate
+          # Restart whatever service or script you want, e.g.:
+          # tmux send-keys -t tickStream 'python tickCollectorToDB.py' C-m
+          # or
+          # systemctl restart tick-service
+          echo "✅ Deployment complete"
+          EOF
