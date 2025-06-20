@@ -23,7 +23,7 @@ selectedTable = st.sidebar.selectbox("Select a table", tableNames)
 
 if selectedTable:
     st.subheader(f"Preview:  `{selectedTable}`")
-    df = pd.read_sql(f"SELECT * FROM {selectedTable} LIMIT 10", engine)
+    df = pd.read_sql(f"SELECT * FROM {selectedTable} ORDER BY timestamp DESC LIMIT 10", engine)
     st.dataframe(df)
 
 
@@ -31,12 +31,22 @@ if selectedTable:
 st.sidebar.markdown("#### 💻 SQL Console")
 
 sqlCode = st.sidebar.text_area("Enter your SQL query", height=150)
-if st.sidebar.button("Execute SQL"):
+
+#Button: execute and store in session state
+if st.sidebar.button("Store SQL"):
     try:
         result = pd.read_sql(text(sqlCode), engine)
-        st.success("Query executed successfully!")
-        st.dataframe(result)
+        st.session_state["lastQueryResult"] = result
+        st.success("Query stored successfully!")
     except Exception as e:
         st.error(f"Error: {e}")
+        st.session_state["lastQueryResult"] = None
 
-engine.dispose()  # Close the database connection when done
+
+#If we have results in sesstion, display them
+if "lastQueryResult" in st.session_state and st.session_state["lastQueryResult"] is not None:
+    st.subheader("Last Query Result")
+    st.dataframe(st.session_state["lastQueryResult"])
+
+
+engine.dispose() 
