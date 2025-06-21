@@ -56,7 +56,7 @@ def simulate_bricks(midSeries, timeSeries, brickSize):
 
     return pd.DataFrame(bricks)
 
-# Evaluate each brick size
+# Analyze each brick size
 records = []
 for size in brickSizes:
     brickDf = simulate_bricks(df["mid"], df["timestamp"], size)
@@ -65,15 +65,16 @@ for size in brickSizes:
     if total == 0:
         continue
 
-    # Run analysis
-    zigzags = 0
+    # Trackers
     spikes = 0
+    zigzags = 0
+    pivots = 0
     maxSpikeRun = 0
     maxZigzagRun = 0
 
     lastDir = None
     currentSpike = 0
-    currentZigzag = 0
+    currentZigzag = 1
 
     for d in brickDf["direction"]:
         if lastDir is None:
@@ -81,11 +82,12 @@ for size in brickSizes:
             currentZigzag = 1
         elif d == lastDir:
             currentSpike += 1
-            maxZigzagRun = max(maxZigzagRun, currentZigzag)
-            if currentZigzag >= 2:
+            if currentZigzag >= 3:
                 zigzags += 1
+                maxZigzagRun = max(maxZigzagRun, currentZigzag)
             currentZigzag = 1
         else:
+            pivots += 1  # simple flip
             currentZigzag += 1
             if currentSpike >= 2:
                 spikes += 1
@@ -94,9 +96,9 @@ for size in brickSizes:
         lastDir = d
 
     # Final sequence
-    maxZigzagRun = max(maxZigzagRun, currentZigzag)
-    if currentZigzag >= 2:
+    if currentZigzag >= 3:
         zigzags += 1
+        maxZigzagRun = max(maxZigzagRun, currentZigzag)
     if currentSpike >= 2:
         spikes += 1
         maxSpikeRun = max(maxSpikeRun, currentSpike)
@@ -104,6 +106,7 @@ for size in brickSizes:
     records.append({
         "brickSize": size,
         "brickCount": total,
+        "pivotCount": pivots,
         "zigzagCount": zigzags,
         "spikeCount": spikes,
         "spikeRatio": round(spikes / total, 4),
@@ -112,7 +115,7 @@ for size in brickSizes:
         "maxZigzagLength": maxZigzagRun
     })
 
-# Show results
+# Output sorted by brick size
 resultDf = pd.DataFrame(records)
 print("\nRenko Brick Size Evaluation:")
 print(resultDf.sort_values("brickSize").to_string(index=False))
