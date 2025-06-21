@@ -19,10 +19,10 @@ df["timeDiff"] = df["timestamp"].diff().dt.total_seconds()
 df["delta"] = df["mid"].diff().abs()
 df = df[df["timeDiff"] <= 1].copy()
 
-# Candidate brick sizes (above spread)
+# Candidate brick sizes
 brickSizes = [0.25, 0.3, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0]
 
-# Function to simulate Renko bricks
+# Renko brick builder
 def simulate_bricks(midSeries, timeSeries, brickSize):
     bricks = []
     lastBrick = None
@@ -56,7 +56,7 @@ def simulate_bricks(midSeries, timeSeries, brickSize):
 
     return pd.DataFrame(bricks)
 
-# Analyze each brick size
+# Evaluate each brick size
 records = []
 for size in brickSizes:
     brickDf = simulate_bricks(df["mid"], df["timestamp"], size)
@@ -65,38 +65,41 @@ for size in brickSizes:
     if total == 0:
         continue
 
+    # Run analysis
     zigzags = 0
     spikes = 0
     maxSpikeRun = 0
     maxZigzagRun = 0
+
     lastDir = None
-    currentRun = 0
-    lastWasZig = False
+    currentSpike = 0
+    currentZigzag = 0
 
     for d in brickDf["direction"]:
         if lastDir is None:
-            currentRun = 1
+            currentSpike = 1
+            currentZigzag = 1
         elif d == lastDir:
-            if lastWasZig:
-                maxZigzagRun = max(maxZigzagRun, currentRun)
+            currentSpike += 1
+            maxZigzagRun = max(maxZigzagRun, currentZigzag)
+            if currentZigzag >= 2:
                 zigzags += 1
-                lastWasZig = False
-            currentRun += 1
+            currentZigzag = 1
         else:
-            if currentRun >= 2:
+            currentZigzag += 1
+            if currentSpike >= 2:
                 spikes += 1
-                maxSpikeRun = max(maxSpikeRun, currentRun)
-            currentRun = 2
-            lastWasZig = True
+                maxSpikeRun = max(maxSpikeRun, currentSpike)
+            currentSpike = 1
         lastDir = d
 
     # Final sequence
-    if lastWasZig:
-        maxZigzagRun = max(maxZigzagRun, currentRun)
+    maxZigzagRun = max(maxZigzagRun, currentZigzag)
+    if currentZigzag >= 2:
         zigzags += 1
-    else:
-        maxSpikeRun = max(maxSpikeRun, currentRun)
+    if currentSpike >= 2:
         spikes += 1
+        maxSpikeRun = max(maxSpikeRun, currentSpike)
 
     records.append({
         "brickSize": size,
@@ -109,7 +112,7 @@ for size in brickSizes:
         "maxZigzagLength": maxZigzagRun
     })
 
-# Output results
+# Show results
 resultDf = pd.DataFrame(records)
 print("\nRenko Brick Size Evaluation:")
 print(resultDf.sort_values("spikeRatio", ascending=False).to_string(index=False))
