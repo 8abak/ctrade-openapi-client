@@ -24,22 +24,25 @@ selectedTable = st.sidebar.selectbox("Select a table", tableNames)
 # ✅ Preview selected table
 if selectedTable:
     st.subheader(f"Preview: `{selectedTable}` (latest 10 rows)")
-    df = pd.read_sql(f"SELECT * FROM {selectedTable} ORDER BY timestamp DESC LIMIT 10", engine)
-    st.dataframe(df)
+    try:
+        df = pd.read_sql(f"SELECT * FROM {selectedTable} ORDER BY timestamp DESC LIMIT 10", engine)
+        st.dataframe(df)
+    except Exception as e:
+        st.warning(f"Preview failed: {e}")
 
 # ✅ Sidebar SQL console
 st.sidebar.markdown("#### 💻 SQL Console")
 sqlCode = st.sidebar.text_area("Enter your SQL query", height=150)
 
-# ✅ Initialize query trigger flag
+# ✅ Initialize session state flags
 if "runQuery" not in st.session_state:
     st.session_state.runQuery = False
 
-# ✅ Trigger query on button click
+# ✅ Trigger query execution
 if st.sidebar.button("Run SQL"):
     st.session_state.runQuery = True
 
-# ✅ Execute query and store result
+# ✅ Execute and cache result
 if st.session_state.runQuery:
     try:
         result = pd.read_sql(text(sqlCode), engine)
@@ -50,11 +53,9 @@ if st.session_state.runQuery:
     except Exception as e:
         st.error(f"Error: {e}")
         st.session_state["lastQueryResult"] = None
-
-    # Reset the query trigger
     st.session_state.runQuery = False
 
-# ✅ Paginated result display
+# ✅ Display results with pagination and download
 if "lastQueryResult" in st.session_state and st.session_state["lastQueryResult"] is not None:
     result = st.session_state["lastQueryResult"]
     totalPages = st.session_state.get("totalPages", 1)
@@ -74,6 +75,15 @@ if "lastQueryResult" in st.session_state and st.session_state["lastQueryResult"]
     with col3:
         if st.button("Next ➡️") and currentPage < totalPages:
             st.session_state["currentPage"] += 1
+
+    # ✅ Full CSV download
+    csv = result.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        label="📥 Download full CSV",
+        data=csv,
+        file_name="query_result.csv",
+        mime="text/csv"
+    )
 
 # ✅ Cleanup
 engine.dispose()
