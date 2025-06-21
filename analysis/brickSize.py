@@ -8,7 +8,7 @@ engine = create_engine("postgresql+psycopg2://babak:babak33044@localhost:5432/tr
 
 # Load a large chunk of ticks
 query = """
-    SELECT timestamp, mid
+    SELECT timestamp, bid, ask, mid
     FROM ticks
     WHERE symbol = 'XAUUSD'
     ORDER BY timestamp ASC
