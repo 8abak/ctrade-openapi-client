@@ -133,17 +133,26 @@ cur = conn.cursor()
 
 for row in results:
     cur.execute("""
-        INSERT INTO brickan (
-            brickSize, fromTime, toTime, brickCount,
-            pivotCount, zigzagCount, spikeCount,
-            spikeRatio, zigzagRatio, maxSpikeLength, maxZigzagLength
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (brickSize) DO NOTHING
-    """, (
-        row["brickSize"], row["fromTime"], row["toTime"], row["brickCount"],
-        row["pivotCount"], row["zigzagCount"], row["spikeCount"],
-        row["spikeRatio"], row["zigzagRatio"], row["maxSpikeLength"], row["maxZigzagLength"]
+    INSERT INTO brickan (
+        brickSize, fromTime, toTime, brickCount,
+        pivotCount, zigzagCount, spikeCount,
+        spikeRatio, zigzagRatio, maxSpikeLength, maxZigzagLength
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (brickSize) DO NOTHING
+""", (
+    float(row["brickSize"]),
+    row["fromTime"],
+    row["toTime"],
+    int(row["brickCount"]),
+    int(row["pivotCount"]),
+    int(row["zigzagCount"]),
+    int(row["spikeCount"]),
+    float(row["spikeRatio"]),
+    float(row["zigzagRatio"]),
+    int(row["maxSpikeLength"]),
+    int(row["maxZigzagLength"])
     ))
+
 
 conn.commit()
 cur.close()
