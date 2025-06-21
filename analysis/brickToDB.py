@@ -118,5 +118,34 @@ for brickSize in np.round(np.arange(0.4, 6.1, 0.1), 2):
 
 # Save to DB
 result_df = pd.DataFrame(results)
-result_df.to_sql("brickanalytics", engine, if_exists="append", index=False, method="multi")
-print("✅ Data saved to 'brickanalytics' table.")
+# Save each row to the brickan table
+import psycopg2
+
+conn = psycopg2.connect(
+    dbname="trading",
+    user="babak",
+    password="babak33044",
+    host="localhost",
+    port=5432
+)
+cur = conn.cursor()
+
+for row in results:
+    cur.execute("""
+        INSERT INTO brickan (
+            brickSize, fromTime, toTime, brickCount,
+            pivotCount, zigzagCount, spikeCount,
+            spikeRatio, zigzagRatio, maxSpikeLength, maxZigzagLength
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (brickSize) DO NOTHING
+    """, (
+        row["brickSize"], row["startTime"], row["endTime"], row["brickCount"],
+        row["pivotCount"], row["zigzagCount"], row["spikeCount"],
+        row["spikeRatio"], row["zigzagRatio"], row["maxSpikeLength"], row["maxZigzagLength"]
+    ))
+
+conn.commit()
+cur.close()
+conn.close()
+
+print("✅ All records inserted into 'brickan'.")
