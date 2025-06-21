@@ -17,6 +17,12 @@ query = """
 df = pd.read_sql(query, engine)
 df["timestamp"] = pd.to_datetime(df["timestamp"])
 
+#calculate spread for better understanding of price movement
+df["spread"] = df["ask"] - df["bid"]
+spreadStats = df["spread"].describe()
+print("Descriptive statistics of spread:")
+print(spreadStats)
+
 # Step 1: Calculate tick-to-tick change
 df["delta"] = df["mid"].diff().abs()
 
