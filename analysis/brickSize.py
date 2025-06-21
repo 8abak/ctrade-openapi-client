@@ -23,16 +23,25 @@ spreadStats = df["spread"].describe()
 print("Descriptive statistics of spread:")
 print(spreadStats)
 
-# Step 1: Calculate tick-to-tick change
-df["delta"] = df["mid"].diff().abs()
+#Sort by timestamp to ensure order
+df = df.sort_values("timestamp")
+
+#Compute time difference between ticks
+df["timeDiff"] = df["timestamp"].diff().dt.total_seconds()
+
+#Only keep rows where the time gap between ticks is short (e.g., less than 10 seconds)
+filtered= df[df["timeDiff"] <= 10].copy()
+
+#Compute price movement
+filtered["delta"] = filtered["mid"].diff().abs()
 
 # Step 2: Show distribution stats
 print("Descriptive statistics of tick-to-tick movement:")
-print(df["delta"].describe())
+print(filtered["delta"].describe())
 
 # Step 3: Plot histogram
 plt.figure(figsize=(10, 5))
-sns.histplot(df["delta"].dropna(), bins=100, kde=True)
+sns.histplot(filtered["delta"].dropna(), bins=100, kde=True)
 plt.title("Tick-to-Tick Price Change (XAUUSD)")
 plt.xlabel("Absolute ΔPrice")
 plt.ylabel("Frequency")
