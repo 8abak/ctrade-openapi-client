@@ -1,30 +1,47 @@
 import pandas as pd
 import numpy as np
+import psycopg2
 from sqlalchemy import create_engine
 
 # Database connection
 engine = create_engine("postgresql+psycopg2://babak:babak33044@localhost:5432/trading")
 
-# Load first 100k ticks
-query = """
+# Step 1: Get the latest toTime from brickan
+with engine.connect() as conn:
+    result = conn.execute("SELECT MAX(toTime) FROM brickan")
+    latest_time = result.scalar()
+
+if latest_time is None:
+    latest_time = "1970-01-01T00:00:00"  # Start from beginning if table is empty
+
+# Step 2: Load next 100,000 ticks after latest_time
+query = f"""
     SELECT timestamp, bid, ask, mid
     FROM ticks
     WHERE symbol = 'XAUUSD'
+    AND timestamp > '{latest_time}'
     ORDER BY timestamp ASC
     LIMIT 100000
 """
 df = pd.read_sql(query, engine)
 df["timestamp"] = pd.to_datetime(df["timestamp"])
 
-# Calculate spread and filter by time difference
+if df.empty:
+    print("✅ No new ticks to process.")
+    exit()
+
+# Step 3: Filter data
+startTime = df["timestamp"].min()
+endTime = df["timestamp"].max()
 df["spread"] = df["ask"] - df["bid"]
 df = df.sort_values("timestamp")
 df["timeDiff"] = df["timestamp"].diff().dt.total_seconds()
 filtered = df[df["timeDiff"] <= 1].copy()
 filtered["delta"] = filtered["mid"].diff().abs()
 filtered = filtered.dropna()
+mid_prices = filtered["mid"].values
 
-# Renko logic
+# Step 4: Brick builder
 def build_renko(mid_prices, brick_size):
     bricks = []
     last = None
@@ -40,17 +57,17 @@ def build_renko(mid_prices, brick_size):
             bricks.append(last)
     return bricks
 
-# Analyze renko bricks
+# Step 5: Analyzer
 def analyze_bricks(brick_prices):
     directions = np.sign(np.diff(brick_prices))
     if len(directions) == 0:
         return 0, 0, 0, 0, 0, 0, 0
 
-    spikeCount = 0
-    zigzagCount = 0
     pivotCount = 0
-    maxSpike = 0
-    maxZigzag = 0
+    zigzagCount = 0
+    spike_lengths = []
+    zigzag_lengths = []
+
     cur = 1
     while cur < len(directions):
         if directions[cur] != directions[cur - 1]:
@@ -59,10 +76,9 @@ def analyze_bricks(brick_prices):
                 zigzagCount += 1
         cur += 1
 
+    # Spike
     current_dir = directions[0]
     current_len = 1
-    spike_lengths = []
-    zigzag_lengths = []
     for d in directions[1:]:
         if d == current_dir:
             current_len += 1
@@ -72,6 +88,7 @@ def analyze_bricks(brick_prices):
             current_dir = d
     spike_lengths.append(current_len)
 
+    # Zigzag
     zigzag_streak = 1
     for i in range(1, len(directions)):
         if directions[i] != directions[i - 1]:
@@ -93,69 +110,27 @@ def analyze_bricks(brick_prices):
         max(zigzag_lengths) if zigzag_lengths else 0
     )
 
-# Run analysis for multiple brick sizes
-results = []
-startTime = filtered["timestamp"].min()
-endTime = filtered["timestamp"].max()
-mid_prices = filtered["mid"].values
+# Step 6: Run over brick sizes and insert
+conn = psycopg2.connect(dbname="trading", user="babak", password="babak33044", host="localhost", port=5432)
+cur = conn.cursor()
 
 for brickSize in np.round(np.arange(0.4, 6.1, 0.1), 2):
     bricks = build_renko(mid_prices, brickSize)
     pivot, zigzag, spike, spikeR, zigzagR, maxS, maxZ = analyze_bricks(bricks)
-    results.append({
-        "brickSize": brickSize,
-        "brickCount": len(bricks),
-        "pivotCount": pivot,
-        "zigzagCount": zigzag,
-        "spikeCount": spike,
-        "spikeRatio": spikeR,
-        "zigzagRatio": zigzagR,
-        "maxSpikeLength": maxS,
-        "maxZigzagLength": maxZ,
-        "timestamp": startTime,
-        "toTime": endTime
-    })
 
-
-# Save to DB
-result_df = pd.DataFrame(results)
-# Save each row to the brickan table
-import psycopg2
-
-conn = psycopg2.connect(
-    dbname="trading",
-    user="babak",
-    password="babak33044",
-    host="localhost",
-    port=5432
-)
-cur = conn.cursor()
-
-for row in results:
     cur.execute("""
-    INSERT INTO brickan (
-        brickSize, timestamp, toTime, brickCount,
-        pivotCount, zigzagCount, spikeCount,
-        spikeRatio, zigzagRatio, maxSpikeLength, maxZigzagLength
-    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-    ON CONFLICT (brickSize) DO NOTHING
-""", (
-    float(row["brickSize"]),
-    row["timestamp"],
-    row["toTime"],
-    int(row["brickCount"]),
-    int(row["pivotCount"]),
-    int(row["zigzagCount"]),
-    int(row["spikeCount"]),
-    float(row["spikeRatio"]),
-    float(row["zigzagRatio"]),
-    int(row["maxSpikeLength"]),
-    int(row["maxZigzagLength"])
+        INSERT INTO brickan (
+            brickSize, fromTime, toTime, brickCount,
+            pivotCount, zigzagCount, spikeCount,
+            spikeRatio, zigzagRatio, maxSpikeLength, maxZigzagLength
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """, (
+        float(brickSize), startTime, endTime, len(bricks),
+        pivot, zigzag, spike,
+        spikeR, zigzagR, maxS, maxZ
     ))
-
 
 conn.commit()
 cur.close()
 conn.close()
-
-print("✅ All records inserted into 'brickan'.")
+print(f"✅ Brick analysis stored from {startTime} to {endTime} in 'brickan'.")
