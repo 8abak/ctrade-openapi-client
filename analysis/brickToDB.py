@@ -112,9 +112,10 @@ for brickSize in np.round(np.arange(0.4, 6.1, 0.1), 2):
         "zigzagRatio": zigzagR,
         "maxSpikeLength": maxS,
         "maxZigzagLength": maxZ,
-        "startTime": startTime,
-        "endTime": endTime
+        "fromTime": startTime,
+        "toTime": endTime
     })
+
 
 # Save to DB
 result_df = pd.DataFrame(results)
