@@ -6,7 +6,7 @@ from sqlalchemy import create_engine
 # Connect to PostgreSQL
 engine = create_engine("postgresql+psycopg2://babak:babak33044@localhost:5432/trading")
 
-# Load a large chunk of ticks
+# Load 100,000 ticks (ordered by timestamp)
 query = """
     SELECT timestamp, bid, ask, mid
     FROM ticks
@@ -17,32 +17,29 @@ query = """
 df = pd.read_sql(query, engine)
 df["timestamp"] = pd.to_datetime(df["timestamp"])
 
-#calculate spread for better understanding of price movement
+# Calculate spread
 df["spread"] = df["ask"] - df["bid"]
-spreadStats = df["spread"].describe()
 print("Descriptive statistics of spread:")
-print(spreadStats)
+print(df["spread"].describe())
 
-#Sort by timestamp to ensure order
+# Sort and compute time between ticks
 df = df.sort_values("timestamp")
-
-#Compute time difference between ticks
 df["timeDiff"] = df["timestamp"].diff().dt.total_seconds()
 
-#Only keep rows where the time gap between ticks is short (e.g., less than 10 seconds)
-filtered= df[df["timeDiff"] <= 10].copy()
+# Compute mid-price delta
+df["delta"] = df["mid"].diff().abs()
 
-#Compute price movement
-filtered["delta"] = filtered["mid"].diff().abs()
+# Filter out tick pairs with timeDiff > 1s (dead periods)
+filtered = df[df["timeDiff"] <= 1].copy()
 
-# Step 2: Show distribution stats
-print("Descriptive statistics of tick-to-tick movement:")
+# Show clean delta stats
+print("\nDescriptive statistics of filtered tick-to-tick movement:")
 print(filtered["delta"].describe())
 
-# Step 3: Plot histogram
+# Plot clean delta histogram
 plt.figure(figsize=(10, 5))
 sns.histplot(filtered["delta"].dropna(), bins=100, kde=True)
-plt.title("Tick-to-Tick Price Change (XAUUSD)")
+plt.title("Cleaned Tick-to-Tick Price Change (XAUUSD)")
 plt.xlabel("Absolute ΔPrice")
 plt.ylabel("Frequency")
 plt.grid(True)
