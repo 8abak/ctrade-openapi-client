@@ -112,7 +112,7 @@ for brickSize in np.round(np.arange(0.4, 6.1, 0.1), 2):
         "zigzagRatio": zigzagR,
         "maxSpikeLength": maxS,
         "maxZigzagLength": maxZ,
-        "fromTime": startTime,
+        "timestamp": startTime,
         "toTime": endTime
     })
 
@@ -134,14 +134,14 @@ cur = conn.cursor()
 for row in results:
     cur.execute("""
     INSERT INTO brickan (
-        brickSize, fromTime, toTime, brickCount,
+        brickSize, timestamp, toTime, brickCount,
         pivotCount, zigzagCount, spikeCount,
         spikeRatio, zigzagRatio, maxSpikeLength, maxZigzagLength
     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT (brickSize) DO NOTHING
 """, (
     float(row["brickSize"]),
-    row["fromTime"],
+    row["timestamp"],
     row["toTime"],
     int(row["brickCount"]),
     int(row["pivotCount"]),
