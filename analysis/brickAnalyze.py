@@ -106,3 +106,13 @@ for size in brickSizes:
 resultDf = pd.DataFrame(records)
 print("\nRenko Brick Size Evaluation:")
 print(resultDf.sort_values("spikeRatio", ascending=False).to_string(index=False))
+
+
+# Report the time of the first and 100,000th tick
+first_time = df["timestamp"].iloc[0]
+last_time = df["timestamp"].iloc[-1]
+duration = last_time - first_time
+
+print(f"\nFirst tick time:  {first_time}")
+print(f"Last tick time:   {last_time}")
+print(f"Time span:        {duration} (HH:MM:SS)")
