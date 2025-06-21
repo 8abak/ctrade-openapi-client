@@ -140,7 +140,7 @@ for row in results:
         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (brickSize) DO NOTHING
     """, (
-        row["brickSize"], row["startTime"], row["endTime"], row["brickCount"],
+        row["brickSize"], row["fromTime"], row["toTime"], row["brickCount"],
         row["pivotCount"], row["zigzagCount"], row["spikeCount"],
         row["spikeRatio"], row["zigzagRatio"], row["maxSpikeLength"], row["maxZigzagLength"]
     ))
