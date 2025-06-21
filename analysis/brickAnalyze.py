@@ -115,4 +115,4 @@ for size in brickSizes:
 # Show results
 resultDf = pd.DataFrame(records)
 print("\nRenko Brick Size Evaluation:")
-print(resultDf.sort_values("spikeRatio", ascending=False).to_string(index=False))
+print(resultDf.sort_values("brickSize").to_string(index=False))
