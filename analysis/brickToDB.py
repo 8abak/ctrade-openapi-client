@@ -120,7 +120,7 @@ for brickSize in np.round(np.arange(0.4, 6.1, 0.1), 2):
 
     cur.execute("""
         INSERT INTO brickan (
-            brickSize, fromTime, toTime, brickCount,
+            brickSize, timestamp, toTime, brickCount,
             pivotCount, zigzagCount, spikeCount,
             spikeRatio, zigzagRatio, maxSpikeLength, maxZigzagLength
         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
