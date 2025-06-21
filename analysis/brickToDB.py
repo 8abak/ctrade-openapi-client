@@ -118,5 +118,5 @@ for brickSize in np.round(np.arange(0.4, 6.1, 0.1), 2):
 
 # Save to DB
 result_df = pd.DataFrame(results)
-result_df.to_sql("brickanalytics", engine, if_exists="replace", index=False)
+result_df.to_sql("brickanalytics", engine, if_exists="append", index=False, method="multi")
 print("✅ Data saved to 'brickanalytics' table.")
