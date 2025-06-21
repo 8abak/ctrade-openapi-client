@@ -1,11 +1,10 @@
 import pandas as pd
 from sqlalchemy import create_engine
-from datetime import datetime
 
 # Connect to PostgreSQL
 engine = create_engine("postgresql+psycopg2://babak:babak33044@localhost:5432/trading")
 
-# Load 100,000 cleaned ticks
+# Load and clean tick data
 query = """
     SELECT timestamp, bid, ask, mid
     FROM ticks
@@ -18,19 +17,16 @@ df["timestamp"] = pd.to_datetime(df["timestamp"])
 df = df.sort_values("timestamp")
 df["timeDiff"] = df["timestamp"].diff().dt.total_seconds()
 df["delta"] = df["mid"].diff().abs()
-
-# Filter out dead-time jumps
 df = df[df["timeDiff"] <= 1].copy()
 
-# Define candidate brick sizes (only > spread)
+# Candidate brick sizes (above spread)
 brickSizes = [0.25, 0.3, 0.5, 1.0, 1.5, 2.0]
 
+# Function to simulate Renko bricks
 def simulate_bricks(midSeries, timeSeries, brickSize):
     bricks = []
-    directions = []
     lastBrick = None
     startTime = None
-    results = []
 
     for i in range(len(midSeries)):
         price = midSeries.iloc[i]
@@ -47,18 +43,16 @@ def simulate_bricks(midSeries, timeSeries, brickSize):
         if steps != 0:
             for _ in range(abs(steps)):
                 direction = "up" if steps > 0 else "down"
-                endTime = time
                 bricks.append({
                     "start": startTime,
-                    "end": endTime,
-                    "durationSec": (endTime - startTime).total_seconds(),
+                    "end": time,
+                    "durationSec": (time - startTime).total_seconds(),
                     "startPrice": lastBrick,
                     "endPrice": lastBrick + brickSize * (1 if steps > 0 else -1),
                     "direction": direction
                 })
                 lastBrick += brickSize * (1 if steps > 0 else -1)
-                directions.append(direction)
-                startTime = endTime
+                startTime = time
 
     return pd.DataFrame(bricks)
 
@@ -66,53 +60,56 @@ def simulate_bricks(midSeries, timeSeries, brickSize):
 records = []
 for size in brickSizes:
     brickDf = simulate_bricks(df["mid"], df["timestamp"], size)
-
     total = len(brickDf)
+
+    if total == 0:
+        continue
+
     zigzags = 0
-    trends = 0
-    maxRun = 0
+    spikes = 0
+    maxSpikeRun = 0
+    maxZigzagRun = 0
     lastDir = None
     currentRun = 0
+    lastWasZig = False
 
     for d in brickDf["direction"]:
-        if d == lastDir:
+        if lastDir is None:
+            currentRun = 1
+        elif d == lastDir:
+            if lastWasZig:
+                maxZigzagRun = max(maxZigzagRun, currentRun)
+                zigzags += 1
+                lastWasZig = False
             currentRun += 1
         else:
-            if currentRun in [2, 3, 4]:
-                zigzags += 1
-            elif currentRun >= 5:
-                trends += 1
-                maxRun = max(maxRun, currentRun)
-            currentRun = 1
+            if currentRun >= 2:
+                spikes += 1
+                maxSpikeRun = max(maxSpikeRun, currentRun)
+            currentRun = 2
+            lastWasZig = True
         lastDir = d
 
-    # Final run
-    if currentRun in [2, 3, 4]:
+    # Final sequence
+    if lastWasZig:
+        maxZigzagRun = max(maxZigzagRun, currentRun)
         zigzags += 1
-    elif currentRun >= 5:
-        trends += 1
-        maxRun = max(maxRun, currentRun)
+    else:
+        maxSpikeRun = max(maxSpikeRun, currentRun)
+        spikes += 1
 
     records.append({
         "brickSize": size,
         "brickCount": total,
         "zigzagCount": zigzags,
-        "spikeCount": trends,
-        "spikeRatio": round(trends / total, 4) if total else 0,
-        "zigzagRatio": round(zigzags / total, 4) if total else 0,
-        "maxSpikeLength": maxRun
+        "spikeCount": spikes,
+        "spikeRatio": round(spikes / total, 4),
+        "zigzagRatio": round(zigzags / total, 4),
+        "maxSpikeLength": maxSpikeRun,
+        "maxZigzagLength": maxZigzagRun
     })
 
+# Output results
 resultDf = pd.DataFrame(records)
 print("\nRenko Brick Size Evaluation:")
 print(resultDf.sort_values("spikeRatio", ascending=False).to_string(index=False))
-
-
-# Report the time of the first and 100,000th tick
-first_time = df["timestamp"].iloc[0]
-last_time = df["timestamp"].iloc[-1]
-duration = last_time - first_time
-
-print(f"\nFirst tick time:  {first_time}")
-print(f"Last tick time:   {last_time}")
-print(f"Time span:        {duration} (HH:MM:SS)")
