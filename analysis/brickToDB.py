@@ -1,14 +1,14 @@
 import pandas as pd
 import numpy as np
 import psycopg2
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 
 # Database connection
 engine = create_engine("postgresql+psycopg2://babak:babak33044@localhost:5432/trading")
 
 # Step 1: Get the latest toTime from brickan
 with engine.connect() as conn:
-    result = conn.execute("SELECT MAX(toTime) FROM brickan")
+    result = conn.execute(text("SELECT MAX(toTime) FROM brickan"))
     latest_time = result.scalar()
 
 if latest_time is None:
