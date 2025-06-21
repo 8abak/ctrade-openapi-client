@@ -18,7 +18,7 @@ with engine.connect() as conn:
     tableNames = [table[0] for table in tables]
 
 # ✅ Sidebar table selector
-st.sidebar.header("📊 Tables")
+st.sidebar.header("📊 Tables.")
 selectedTable = st.sidebar.selectbox("Select a table", tableNames)
 
 # ✅ Preview selected table
