@@ -23,7 +23,8 @@ selectedTable = st.sidebar.selectbox("Select a table", tableNames)
 
 # ✅ Preview selected table
 if selectedTable:
-    st.subheader(f"Preview: `{selectedTable}` (latest 10 rows)")
+    totalNumRows = pd.read_sql(f"SELECT COUNT(*) FROM {selectedTable}", engine).iloc[0, 0]
+    st.subheader(f"Preview: `{selectedTable}` (latest 10 rows) - Total Rows: {totalNumRows}")
     try:
         df = pd.read_sql(f"SELECT * FROM {selectedTable} ORDER BY timestamp DESC LIMIT 10", engine)
         st.dataframe(df)
