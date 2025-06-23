@@ -60,14 +60,16 @@ if "lastQueryResult" in st.session_state and st.session_state["lastQueryResult"]
     result = st.session_state["lastQueryResult"]
     totalPages = st.session_state.get("totalPages", 1)
     currentPage = st.session_state.get("currentPage", 1)
+    totalRows = len(result)
 
-    st.subheader(f"Page {currentPage} of {totalPages}")
+    st.subheader(f"Page {currentPage} of {totalPages} Showing {totalRows} rows")
 
     start = (currentPage - 1) * 50
     end = start + 50
+        # ✅ Display current page
     st.dataframe(result.iloc[start:end])
 
-    # Navigation buttons
+    # ✅ Pagination controls
     col1, col2, col3 = st.columns(3)
     with col1:
         if st.button("⬅️ Previous") and currentPage > 1:
@@ -76,14 +78,11 @@ if "lastQueryResult" in st.session_state and st.session_state["lastQueryResult"]
         if st.button("Next ➡️") and currentPage < totalPages:
             st.session_state["currentPage"] += 1
 
-    # ✅ Full CSV download
-    csv = result.to_csv(index=False).encode("utf-8")
+    # ✅ Download full result (not just the page)
+    csv_all = st.session_state["lastQueryResult"].to_csv(index=False).encode("utf-8")
     st.download_button(
         label="📥 Download full CSV",
-        data=csv,
+        data=csv_all,
         file_name="query_result.csv",
         mime="text/csv"
     )
-
-# ✅ Cleanup
-engine.dispose()
