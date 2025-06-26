@@ -57,7 +57,7 @@
     chart.setOption(option);
 
     async function loadInitialData() {
-      const res = await fetch("http://localhost:8000/ticks?offset=0&limit=2000");
+      const res = await fetch("/api/ticks?offset=0&limit=2000");
       const ticks = await res.json();
       data = ticks.map(t => [t.timestamp, t.mid]);
       lastTimestamp = ticks[ticks.length - 1]?.timestamp;
