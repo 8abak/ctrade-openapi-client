@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Live Tick Chart</title>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5"></script>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      font-family: sans-serif;
+      background: #111;
+      color: white;
+    }
+    #main {
+      height: 100vh;
+      width: 100%;
+    }
+  </style>
+</head>
+<body>
+  <div id="main"></div>
+
+  <script>
+    const chart = echarts.init(document.getElementById('main'), null, { renderer: 'canvas' });
+    let data = [], lastTimestamp = null;
+
+    const option = {
+      backgroundColor: '#111',
+      tooltip: {
+        trigger: 'axis',
+        formatter: (params) => {
+          const p = params[0];
+          return `${p.value[0]}<br/>Mid: ${p.value[1]}`;
+        }
+      },
+      xAxis: {
+        type: 'category',
+        data: [],
+        axisLabel: { color: '#ccc' }
+      },
+      yAxis: {
+        type: 'value',
+        scale: true,
+        axisLabel: { color: '#ccc' }
+      },
+      series: [{
+        name: 'Mid Price',
+        type: 'line',
+        showSymbol: false,
+        data: [],
+        lineStyle: { color: '#3fa9f5' }
+      }]
+    };
+
+    chart.setOption(option);
+
+    async function loadInitialData() {
+      const res = await fetch("http://localhost:8000/ticks?offset=0&limit=2000");
+      const ticks = await res.json();
+      data = ticks.map(t => [t.timestamp, t.mid]);
+      lastTimestamp = ticks[ticks.length - 1]?.timestamp;
+      chart.setOption({
+        xAxis: { data: data.map(d => d[0]) },
+        series: [{ data }]
+      });
+    }
+
+    async function pollNewData() {
+      if (!lastTimestamp) return;
+      const res = await fetch(`http://localhost:8000/ticks/latest?after=${encodeURIComponent(lastTimestamp)}`);
+      const newTicks = await res.json();
+      if (newTicks.length > 0) {
+        newTicks.forEach(t => {
+          data.push([t.timestamp, t.mid]);
+        });
+        lastTimestamp = newTicks[newTicks.length - 1].timestamp;
+        // Update chart
+        chart.setOption({
+          xAxis: { data: data.map(d => d[0]) },
+          series: [{ data }]
+        });
+      }
+    }
+
+    loadInitialData();
+    setInterval(pollNewData, 3000);
+  </script>
+</body>
+</html>
