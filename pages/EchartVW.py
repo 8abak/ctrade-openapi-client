@@ -5,7 +5,7 @@ from sqlalchemy import create_engine
 import pytz
 
 # --- Page config ---
-st.set_page_config(layout="wide")
+st.set_page_config(layout="wide", page_title="Tick Chart Viewer", initial_sidebar_state="expanded")
 
 # --- Constants ---
 CHUNK_SIZE = 2000
@@ -21,18 +21,6 @@ total_ticks = pd.read_sql("SELECT COUNT(*) FROM ticks", engine).iloc[0, 0]
 # --- Session state for scrolling ---
 if "offset" not in st.session_state:
     st.session_state.offset = max(0, total_ticks - CHUNK_SIZE)
-
-# --- Navigation controls ---
-st.markdown("#### Navigate Tick History")
-nav = st.columns([1, 1, 1])
-with nav[0]:
-    if st.button("⬅️ Back 2000"):
-        st.session_state.offset = max(0, st.session_state.offset - CHUNK_SIZE)
-with nav[1]:
-    if st.button("➡️ Forward 2000"):
-        st.session_state.offset = min(max(0, total_ticks - CHUNK_SIZE), st.session_state.offset + CHUNK_SIZE)
-with nav[2]:
-    st.write(f"Showing ticks {st.session_state.offset:,} to {min(total_ticks, st.session_state.offset + CHUNK_SIZE):,}")
 
 # --- Load tick chunk ---
 offset = st.session_state.offset
@@ -93,16 +81,19 @@ depth_series = [
 
 # --- Chart Options ---
 echart_options = {
+    "darkMode": True,
     "tooltip": {
         "trigger": "axis",
-        "formatter": "function(params) { return `${params[0].axisValue}<br/>Price: ${params[0].data[1].toFixed(2)}`; }"
+        "formatter": {
+            "function": "function(params) { const val = params[0].data[1].toFixed(2); const ts = params[0].data[0]; return `${ts}<br/>Price: ${val}`; }"
+        }
     },
     "dataZoom": [
         {"type": "inside", "xAxisIndex": [0, 1]},
         {"type": "slider", "xAxisIndex": [0, 1], "bottom": 10, "height": 40}
     ],
     "grid": [
-        {"left": "5%", "right": "5%", "height": "60%"},
+        {"left": "5%", "right": "5%", "top": "0%", "height": "65%"},
         {"left": "5%", "right": "5%", "top": "75%", "height": "20%"}
     ],
     "xAxis": [
@@ -129,4 +120,4 @@ echart_options = {
 }
 
 # --- Render Chart ---
-st_echarts(options=echart_options, height="700px")
+st_echarts(options=echart_options, height="100vh", width="100%")
