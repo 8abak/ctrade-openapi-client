@@ -22,9 +22,13 @@ df = pd.read_sql(query, engine)
 df = df.sort_values(by="timestamp").reset_index(drop=True)
 df["mid"] = ((df["bid"] + df["ask"]) / 2).round(2)
 
-# Convert timestamps to Sydney timezone
+# Convert timestamps to Sydney timezone if not already tz-aware
 sydney = pytz.timezone("Australia/Sydney")
-df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.tz_localize("UTC").dt.tz_convert(sydney).dt.strftime("%Y-%m-%d %H:%M:%S")
+timestamp_col = pd.to_datetime(df["timestamp"])
+if timestamp_col.dt.tz is None:
+    timestamp_col = timestamp_col.dt.tz_localize("UTC")
+timestamp_col = timestamp_col.dt.tz_convert(sydney).dt.strftime("%Y-%m-%d %H:%M:%S")
+df["timestamp"] = timestamp_col
 
 tick_data = df[["timestamp", "mid"]].copy()
 tick_data["tick_index"] = tick_data.index
