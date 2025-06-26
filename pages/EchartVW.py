@@ -84,17 +84,15 @@ echart_options = {
     "darkMode": True,
     "tooltip": {
         "trigger": "axis",
-        "formatter": {
-            "function": "function(params) { const val = params[0].value[1].toFixed(2); const ts = params[0].value[0]; return ts + '<br/>Price: ' + val; }"
-        }
+        "formatter": "function(params) { const val = params[0].value[1].toFixed(2); const ts = params[0].value[0]; return ts + '<br/>Price: ' + val; }"
     },
     "dataZoom": [
         {"type": "inside", "xAxisIndex": [0, 1]},
         {"type": "slider", "xAxisIndex": [0, 1], "bottom": 10, "height": 40}
     ],
     "grid": [
-        {"left": "5%", "right": "5%", "top": "5%", "height": "65%"},
-        {"left": "5%", "right": "5%", "top": "75%", "height": "20%"}
+        {"left": "5%", "right": "5%", "top": 20, "height": "60%"},
+        {"left": "5%", "right": "5%", "top": "70%", "height": "20%"}
     ],
     "xAxis": [
         {"type": "category", "gridIndex": 0, "name": "Timestamp", "data": tick_data['timestamp'].tolist()},
@@ -120,4 +118,4 @@ echart_options = {
 }
 
 # --- Render Chart ---
-st_echarts(options=echart_options, height="100vh", width="100%")
+st_echarts(options=echart_options, height="700px", width="100%")
