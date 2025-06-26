@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from streamlit_echarts import st_echarts
 from sqlalchemy import create_engine
+import pytz
 
 # --- Page config ---
 st.set_page_config(layout="wide")
@@ -20,6 +21,11 @@ query = """
 df = pd.read_sql(query, engine)
 df = df.sort_values(by="timestamp").reset_index(drop=True)
 df["mid"] = ((df["bid"] + df["ask"]) / 2).round(2)
+
+# Convert timestamps to Sydney timezone
+sydney = pytz.timezone("Australia/Sydney")
+df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.tz_localize("UTC").dt.tz_convert(sydney).dt.strftime("%Y-%m-%d %H:%M:%S")
+
 tick_data = df[["timestamp", "mid"]].copy()
 tick_data["tick_index"] = tick_data.index
 
@@ -71,7 +77,7 @@ echart_options = {
                     const idx = params[0].dataIndex;
                     const val = params[0].value[1].toFixed(2);
                     const ts = tickTimestamps[idx];
-                    return `Tick ${idx}<br/>Price: ${val}<br/>${ts}`;
+                    return `Tick ${idx}<br/>${ts}<br/>Price: ${val}`;
                 }
             """
         }
