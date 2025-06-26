@@ -38,8 +38,26 @@
       xAxis: {
         type: 'category',
         data: [],
-        axisLabel: { color: '#ccc' }
-      },
+        axisLabel: {
+            color: '#ccc',
+            formatter: function (value) {
+            const date = new Date(value);
+            const sydneyOffset = 10 * 60;
+            date.setMinutes(date.getMinutes() + sydneyOffset);
+
+            const hours = String(date.getHours()).padStart(2, '0');
+            const minutes = String(date.getMinutes()).padStart(2, '0');
+            const seconds = date.getSeconds();
+
+            if (seconds === 0) {
+                const day = date.toLocaleDateString('en-AU', { month: 'short', day: 'numeric' });
+                return `${hours}:${minutes}\n${day}`;
+            }
+
+            return '';
+            }
+        }
+        },
       yAxis: {
         type: 'value',
         scale: true,
