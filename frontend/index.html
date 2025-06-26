@@ -69,7 +69,7 @@
 
     async function pollNewData() {
       if (!lastTimestamp) return;
-      const res = await fetch(`http://localhost:8000/ticks/latest?after=${encodeURIComponent(lastTimestamp)}`);
+      const res = await fetch(`/api/ticks/latest?after=${encodeURIComponent(lastTimestamp)}`);
       const newTicks = await res.json();
       if (newTicks.length > 0) {
         newTicks.forEach(t => {
