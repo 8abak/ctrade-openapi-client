@@ -84,16 +84,14 @@ echart_options = {
     "darkMode": True,
     "tooltip": {
         "trigger": "axis",
-        "formatter": {
-            "function": "function(params) { const val = params[0].data[1].toFixed(2); const ts = params[0].data[0]; return `${ts}<br/>Price: ${val}`; }"
-        }
+        "formatter": "function(params) { const val = params[0].data[1].toFixed(2); const ts = params[0].data[0]; return `${ts}<br/>Price: ${val}`; }"
     },
     "dataZoom": [
         {"type": "inside", "xAxisIndex": [0, 1]},
         {"type": "slider", "xAxisIndex": [0, 1], "bottom": 10, "height": 40}
     ],
     "grid": [
-        {"left": "5%", "right": "5%", "top": "0%", "height": "65%"},
+        {"left": "5%", "right": "5%", "top": "5%", "height": "65%"},
         {"left": "5%", "right": "5%", "top": "75%", "height": "20%"}
     ],
     "xAxis": [
