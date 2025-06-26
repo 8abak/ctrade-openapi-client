@@ -4,7 +4,6 @@ from streamlit_echarts import st_echarts
 
 # --- Page config ---
 st.set_page_config(layout="wide")
-st.title("eTickView — ECharts Tick Viewer with Market Depth")
 
 # --- Simulated Data ---
 num_ticks = 2000
@@ -48,7 +47,7 @@ depth_series = [
     for _, row in depth_df.iterrows()
 ]
 
-# --- Chart Options - --
+# --- Chart Options ---
 echart_options = {
     "tooltip": {"trigger": "axis"},
     "dataZoom": [
