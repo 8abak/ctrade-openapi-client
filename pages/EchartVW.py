@@ -7,15 +7,41 @@ import pytz
 # --- Page config ---
 st.set_page_config(layout="wide")
 
+# --- Constants ---
+CHUNK_SIZE = 2000
+VISIBLE_WINDOW = 1800
+
 # --- Database connection ---
 db_uri = "postgresql+psycopg2://babak:babak33044@localhost:5432/trading"
 engine = create_engine(db_uri)
 
-# --- Load real tick data ---
-query = """
+# --- Get total tick count ---
+total_ticks = pd.read_sql("SELECT COUNT(*) FROM ticks", engine).iloc[0, 0]
+
+# --- Session state for scrolling ---
+if "offset" not in st.session_state:
+    st.session_state.offset = max(0, total_ticks - CHUNK_SIZE)
+
+# --- Navigation controls ---
+st.markdown("#### Navigate Tick History")
+nav = st.columns([1, 1, 1])
+with nav[0]:
+    if st.button("⬅️ Back 2000"):
+        st.session_state.offset = max(0, st.session_state.offset - CHUNK_SIZE)
+with nav[1]:
+    if st.button("➡️ Forward 2000"):
+        st.session_state.offset = min(max(0, total_ticks - CHUNK_SIZE), st.session_state.offset + CHUNK_SIZE)
+with nav[2]:
+    st.write(f"Showing ticks {st.session_state.offset:,} to {min(total_ticks, st.session_state.offset + CHUNK_SIZE):,}")
+
+# --- Load tick chunk ---
+offset = st.session_state.offset
+query = f"""
     SELECT timestamp, bid, ask
     FROM ticks
     ORDER BY timestamp ASC
+    OFFSET {offset}
+    LIMIT {CHUNK_SIZE}
 """
 df = pd.read_sql(query, engine)
 df["mid"] = ((df["bid"] + df["ask"]) / 2).round(2)
@@ -27,6 +53,8 @@ if df["timestamp"].dt.tz is None:
     df["timestamp"] = df["timestamp"].dt.tz_localize("UTC")
 df["timestamp"] = df["timestamp"].dt.tz_convert(sydney).dt.strftime("%Y-%m-%d %H:%M:%S")
 
+# --- Limit to visible portion ---
+df = df.tail(VISIBLE_WINDOW).reset_index(drop=True)
 tick_data = df[["timestamp", "mid"]].copy()
 
 # Simulated market depth (Level 2) data
@@ -46,7 +74,7 @@ depth_df = pd.concat([ask_depth, bid_depth], ignore_index=True)
 # --- Prepare Tick Series ---
 tick_series = [[row['timestamp'], row['mid']] for _, row in tick_data.iterrows()]
 
-# --- Prepare Depth Bars (plotted at the end of chart range) ---
+# --- Prepare Depth Bars ---
 depth_series = [
     {
         "name": f"{row['side'].capitalize()} @{row['price']}",
