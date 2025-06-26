@@ -65,14 +65,16 @@ depth_series = [
 echart_options = {
     "tooltip": {
         "trigger": "axis",
-        "formatter": """
-            function (params) {
-                const idx = params[0].dataIndex;
-                const val = params[0].value[1].toFixed(2);
-                const ts = params[0].axisValue;
-                return `Tick ${idx}<br/>Price: ${val}<br/>${params[0].name}`;
-            }
-        """
+        "formatter": {
+            "function": """
+                function (params) {
+                    const idx = params[0].dataIndex;
+                    const val = params[0].value[1].toFixed(2);
+                    const ts = tickTimestamps[idx];
+                    return `Tick ${idx}<br/>Price: ${val}<br/>${ts}`;
+                }
+            """
+        }
     },
     "dataZoom": [
         {"type": "inside"},
@@ -104,6 +106,10 @@ echart_options = {
         }
     ] + depth_series
 }
+
+# --- Inject JS timestamps array ---
+tick_timestamps_js = "const tickTimestamps = [" + ",".join([f'\"{ts}\"' for ts in tick_data['timestamp']]) + "];"
+st.components.v1.html(f"<script>{tick_timestamps_js}</script>", height=0)
 
 # --- Render Chart ---
 st_echarts(options=echart_options, height="700px")
