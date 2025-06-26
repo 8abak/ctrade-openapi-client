@@ -84,7 +84,9 @@ echart_options = {
     "darkMode": True,
     "tooltip": {
         "trigger": "axis",
-        "formatter": "function(params) { const val = params[0].data[1].toFixed(2); const ts = params[0].data[0]; return `${ts}<br/>Price: ${val}`; }"
+        "formatter": {
+            "function": "function(params) { const val = params[0].value[1].toFixed(2); const ts = params[0].value[0]; return ts + '<br/>Price: ' + val; }"
+        }
     },
     "dataZoom": [
         {"type": "inside", "xAxisIndex": [0, 1]},
