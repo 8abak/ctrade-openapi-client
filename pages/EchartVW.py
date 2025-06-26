@@ -6,12 +6,25 @@ from streamlit_echarts import st_echarts
 st.set_page_config(layout="wide")
 
 # --- Simulated Data ---
-num_ticks = 2000
-mid_prices = pd.Series([2350 + (i * 0.01) + (0.5 - i % 10) * 0.1 for i in range(num_ticks)])
-tick_data = pd.DataFrame({
-    "tick_index": list(range(num_ticks)),
-    "mid": mid_prices.round(2)
-})
+from sqlalchemy import create_engine
+
+# --- Database connection ---
+db_uri = "postgresql+psycopg2://babak:babak33044@localhost:5432/trading"
+engine = create_engine(db_uri)
+
+# --- Load real tick data ---
+query = """
+    SELECT timestamp, bid, ask
+    FROM ticks
+    ORDER BY timestamp DESC
+    LIMIT 2000
+"""
+df = pd.read_sql(query, engine)
+df = df.sort_values(by="timestamp").reset_index(drop=True)
+df["mid"] = (df["bid"] + df["ask"]) / 2
+tick_data = df[["mid"]].copy()
+tick_data["tick_index"] = tick_data.index
+
 
 # Simulated market depth (Level 2) data
 last_price = tick_data['mid'].iloc[-1]
