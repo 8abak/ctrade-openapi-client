@@ -48,7 +48,7 @@ depth_series = [
     for _, row in depth_df.iterrows()
 ]
 
-# --- Chart Options ---
+# --- Chart Options - --
 echart_options = {
     "tooltip": {"trigger": "axis"},
     "dataZoom": [
