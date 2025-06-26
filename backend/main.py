@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from typing import List
 from sqlalchemy import create_engine, text
 import os
+from datetime import datetime
 
 # Initialize FastAPI
 app = FastAPI()
@@ -25,7 +26,7 @@ engine = create_engine(db_url)
 
 # Tick model
 class Tick(BaseModel):
-    timestamp: str
+    timestamp: datetime
     bid: float
     ask: float
     mid: float
