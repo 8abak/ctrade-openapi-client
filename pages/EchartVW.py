@@ -15,23 +15,19 @@ engine = create_engine(db_uri)
 query = """
     SELECT timestamp, bid, ask
     FROM ticks
-    ORDER BY timestamp DESC
-    LIMIT 2000
+    ORDER BY timestamp ASC
 """
 df = pd.read_sql(query, engine)
-df = df.sort_values(by="timestamp").reset_index(drop=True)
 df["mid"] = ((df["bid"] + df["ask"]) / 2).round(2)
 
-# Convert timestamps to Sydney timezone if not already tz-aware
+# Convert timestamps to Sydney timezone
 sydney = pytz.timezone("Australia/Sydney")
-timestamp_col = pd.to_datetime(df["timestamp"])
-if timestamp_col.dt.tz is None:
-    timestamp_col = timestamp_col.dt.tz_localize("UTC")
-timestamp_col = timestamp_col.dt.tz_convert(sydney).dt.strftime("%H:%M:%S")
-df["timestamp"] = timestamp_col
+df["timestamp"] = pd.to_datetime(df["timestamp"])
+if df["timestamp"].dt.tz is None:
+    df["timestamp"] = df["timestamp"].dt.tz_localize("UTC")
+df["timestamp"] = df["timestamp"].dt.tz_convert(sydney).dt.strftime("%Y-%m-%d %H:%M:%S")
 
 tick_data = df[["timestamp", "mid"]].copy()
-tick_data["tick_index"] = tick_data.index
 
 # Simulated market depth (Level 2) data
 last_price = tick_data['mid'].iloc[-1]
@@ -48,11 +44,7 @@ bid_depth = pd.DataFrame({
 depth_df = pd.concat([ask_depth, bid_depth], ignore_index=True)
 
 # --- Prepare Tick Series ---
-tick_series = [[i, row['mid']] for i, row in tick_data.iterrows()]
-tooltips = [
-    f"{row['mid']:.2f}<br/>{row['timestamp']}"
-    for _, row in tick_data.iterrows()
-]
+tick_series = [[row['timestamp'], row['mid']] for _, row in tick_data.iterrows()]
 
 # --- Prepare Depth Bars (plotted at the end of chart range) ---
 depth_series = [
@@ -75,16 +67,7 @@ depth_series = [
 echart_options = {
     "tooltip": {
         "trigger": "axis",
-        "formatter": {
-            "function": """
-                function (params) {
-                    const idx = params[0].dataIndex;
-                    const val = params[0].value[1].toFixed(2);
-                    const ts = tickTimestamps[idx];
-                    return `${ts}<br/>Price: ${val}`;
-                }
-            """
-        }
+        "formatter": "function(params) { return `${params[0].axisValue}<br/>Price: ${params[0].data[1].toFixed(2)}`; }"
     },
     "dataZoom": [
         {"type": "inside"},
@@ -95,7 +78,7 @@ echart_options = {
         {"left": "5%", "right": "5%", "top": "75%", "height": "20%"}
     ],
     "xAxis": [
-        {"type": "value", "gridIndex": 0, "name": "Tick"},
+        {"type": "category", "gridIndex": 0, "name": "Timestamp", "data": tick_data['timestamp'].tolist()},
         {"type": "category", "gridIndex": 1, "data": [str(p) for p in depth_df['price']]}
     ],
     "yAxis": [
@@ -116,10 +99,6 @@ echart_options = {
         }
     ] + depth_series
 }
-
-# --- Inject JS timestamps array ---
-tick_timestamps_js = "const tickTimestamps = [" + ",".join([f'\"{ts}\"' for ts in tick_data['timestamp']]) + "];"
-st.components.v1.html(f"<script>{tick_timestamps_js}</script>", height=0)
 
 # --- Render Chart ---
 st_echarts(options=echart_options, height="700px")
