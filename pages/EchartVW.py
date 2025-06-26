@@ -1,12 +1,10 @@
 import streamlit as st
 import pandas as pd
 from streamlit_echarts import st_echarts
+from sqlalchemy import create_engine
 
 # --- Page config ---
 st.set_page_config(layout="wide")
-
-# --- Simulated Data ---
-from sqlalchemy import create_engine
 
 # --- Database connection ---
 db_uri = "postgresql+psycopg2://babak:babak33044@localhost:5432/trading"
@@ -21,10 +19,9 @@ query = """
 """
 df = pd.read_sql(query, engine)
 df = df.sort_values(by="timestamp").reset_index(drop=True)
-df["mid"] = (df["bid"] + df["ask"]) / 2
-tick_data = df[["mid"]].copy()
+df["mid"] = ((df["bid"] + df["ask"]) / 2).round(2)
+tick_data = df[["timestamp", "mid"]].copy()
 tick_data["tick_index"] = tick_data.index
-
 
 # Simulated market depth (Level 2) data
 last_price = tick_data['mid'].iloc[-1]
@@ -41,7 +38,11 @@ bid_depth = pd.DataFrame({
 depth_df = pd.concat([ask_depth, bid_depth], ignore_index=True)
 
 # --- Prepare Tick Series ---
-tick_series = [[i, p] for i, p in enumerate(tick_data['mid'])]
+tick_series = [[i, row['mid']] for i, row in tick_data.iterrows()]
+tooltips = [
+    f"{row['mid']:.2f}<br/>{row['timestamp']}"
+    for _, row in tick_data.iterrows()
+]
 
 # --- Prepare Depth Bars (plotted at the end of chart range) ---
 depth_series = [
@@ -62,7 +63,17 @@ depth_series = [
 
 # --- Chart Options ---
 echart_options = {
-    "tooltip": {"trigger": "axis"},
+    "tooltip": {
+        "trigger": "axis",
+        "formatter": """
+            function (params) {
+                const idx = params[0].dataIndex;
+                const val = params[0].value[1].toFixed(2);
+                const ts = params[0].axisValue;
+                return `Tick ${idx}<br/>Price: ${val}<br/>${params[0].name}`;
+            }
+        """
+    },
     "dataZoom": [
         {"type": "inside"},
         {"type": "slider"}
