@@ -3,26 +3,27 @@
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List
 from sqlalchemy import create_engine, text
 import os
-import datetime
 
+# Initialize FastAPI
 app = FastAPI()
 
-# Allow frontend from anywhere for now (we'll lock it later to datavis.au)
+# Allow cross-origin requests (frontend calling this backend)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # You can restrict this to "https://www.datavis.au" later
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# PostgreSQL DB config
+# Database connection
 db_url = os.getenv("DATABASE_URL", "postgresql+psycopg2://babak:babak33044@localhost:5432/trading")
 engine = create_engine(db_url)
 
 
+# Tick model
 class Tick(BaseModel):
     timestamp: str
     bid: float
@@ -30,11 +31,12 @@ class Tick(BaseModel):
     mid: float
 
 
+# Get chunk of historical ticks (for scrolling/initial view)
 @app.get("/ticks", response_model=List[Tick])
 def get_ticks(offset: int = 0, limit: int = 2000):
     with engine.connect() as conn:
         query = text("""
-            SELECT timestamp, bid, ask, ROUND((bid + ask)/2, 2) AS mid
+            SELECT timestamp, bid, ask, mid
             FROM ticks
             ORDER BY timestamp ASC
             OFFSET :offset LIMIT :limit
@@ -44,11 +46,12 @@ def get_ticks(offset: int = 0, limit: int = 2000):
     return ticks
 
 
+# Get new ticks after a timestamp (for live appending)
 @app.get("/ticks/latest", response_model=List[Tick])
 def get_latest_ticks(after: str = Query(..., description="UTC timestamp in ISO format")):
     with engine.connect() as conn:
         query = text("""
-            SELECT timestamp, bid, ask, ROUND((bid + ask)/2, 2) AS mid
+            SELECT timestamp, bid, ask, mid
             FROM ticks
             WHERE timestamp > :after
             ORDER BY timestamp ASC
@@ -61,4 +64,4 @@ def get_latest_ticks(after: str = Query(..., description="UTC timestamp in ISO f
 
 @app.get("/")
 def home():
-    return {"message": "Tick API is live. Use /ticks or /ticks/latest."}
+    return {"message": "Tick API is live. Try /ticks or /ticks/latest."}
