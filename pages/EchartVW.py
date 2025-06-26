@@ -27,7 +27,7 @@ sydney = pytz.timezone("Australia/Sydney")
 timestamp_col = pd.to_datetime(df["timestamp"])
 if timestamp_col.dt.tz is None:
     timestamp_col = timestamp_col.dt.tz_localize("UTC")
-timestamp_col = timestamp_col.dt.tz_convert(sydney).dt.strftime("%Y-%m-%d %H:%M:%S")
+timestamp_col = timestamp_col.dt.tz_convert(sydney).dt.strftime("%H:%M:%S")
 df["timestamp"] = timestamp_col
 
 tick_data = df[["timestamp", "mid"]].copy()
@@ -81,7 +81,7 @@ echart_options = {
                     const idx = params[0].dataIndex;
                     const val = params[0].value[1].toFixed(2);
                     const ts = tickTimestamps[idx];
-                    return `Tick ${idx}<br/>${ts}<br/>Price: ${val}`;
+                    return `${ts}<br/>Price: ${val}`;
                 }
             """
         }
