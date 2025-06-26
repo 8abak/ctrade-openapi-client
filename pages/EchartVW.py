@@ -70,8 +70,8 @@ echart_options = {
         "formatter": "function(params) { return `${params[0].axisValue}<br/>Price: ${params[0].data[1].toFixed(2)}`; }"
     },
     "dataZoom": [
-        {"type": "inside"},
-        {"type": "slider"}
+        {"type": "inside", "xAxisIndex": [0, 1]},
+        {"type": "slider", "xAxisIndex": [0, 1], "bottom": 10, "height": 40}
     ],
     "grid": [
         {"left": "5%", "right": "5%", "height": "60%"},
