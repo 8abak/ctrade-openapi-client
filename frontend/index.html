@@ -41,7 +41,25 @@
       trigger: 'axis',
       formatter: (params) => {
         const p = params[0];
-        return `${p.value[0]}<br/>Mid: ${p.value[1]}`;
+        const date = new Date(p.value[0]);
+        const sydneyOffsetMinutes = 10 * 60;
+
+        date.setMinutes(date.getMinutes() + sydneyOffsetMinutes);
+
+        const timeStr = date.toLocaleTimeString('en-AU', {
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          hour12: true
+        }). toLowerCase();
+
+        const dateStr = date.toLocaleDateString('en-au');
+
+        return `
+          <div style="color: #3fa9f5; font-weight: bold;">${timeStr}</div>
+          <div style="color: #ccc;">${dateStr}</div>
+          <div style="color: #3fa9f5;">Mid Price: ${p.value[1].toFixed(2)}</div>
+        `;
       }
     },
     xAxis: {
