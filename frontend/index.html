@@ -22,88 +22,108 @@
 <body>
   <div id="main"></div>
 
-  <script>
-    const chart = echarts.init(document.getElementById('main'), null, { renderer: 'canvas' });
-    let data = [], lastTimestamp = null;
+<script>
+  const chart = echarts.init(document.getElementById('main'), null, { renderer: 'canvas' });
+  let data = [], lastTimestamp = null;
 
-    const option = {
-      backgroundColor: '#111',
-      tooltip: {
-        trigger: 'axis',
-        formatter: (params) => {
-          const p = params[0];
-          return `${p.value[0]}<br/>Mid: ${p.value[1]}`;
+  const option = {
+    backgroundColor: '#111',
+    tooltip: {
+      trigger: 'axis',
+      formatter: (params) => {
+        const p = params[0];
+        return `${p.value[0]}<br/>Mid: ${p.value[1]}`;
+      }
+    },
+    xAxis: {
+      type: 'category',
+      data: [],
+      axisLabel: {
+        color: '#ccc',
+        formatter: function (value) {
+          const date = new Date(value);
+          const sydneyOffset = 10 * 60;
+          date.setMinutes(date.getMinutes() + sydneyOffset);
+
+          const hours = String(date.getHours()).padStart(2, '0');
+          const minutes = String(date.getMinutes()).padStart(2, '0');
+          const seconds = date.getSeconds();
+
+          if (seconds === 0) {
+            const day = date.toLocaleDateString('en-AU', { month: 'short', day: 'numeric' });
+            return `${hours}:${minutes}\n${day}`;
+          }
+
+          return '';
         }
+      }
+    },
+    yAxis: {
+      type: 'value',
+      scale: true,
+      axisLabel: { color: '#ccc' }
+    },
+    dataZoom: [
+      {
+        type: 'inside',
+        start: 100 * (200 / 2200),
+        end: 100
       },
-      xAxis: {
-        type: 'category',
-        data: [],
-        axisLabel: {
-            color: '#ccc',
-            formatter: function (value) {
-            const date = new Date(value);
-            const sydneyOffset = 10 * 60;
-            date.setMinutes(date.getMinutes() + sydneyOffset);
-
-            const hours = String(date.getHours()).padStart(2, '0');
-            const minutes = String(date.getMinutes()).padStart(2, '0');
-            const seconds = date.getSeconds();
-
-            if (seconds === 0) {
-                const day = date.toLocaleDateString('en-AU', { month: 'short', day: 'numeric' });
-                return `${hours}:${minutes}\n${day}`;
-            }
-
-            return '';
-            }
+      {
+        type: 'slider',
+        start: 100 * (200 / 2200),
+        end: 100,
+        bottom: 0,
+        height: 40,
+        handleStyle: {
+          color: '#3fa9f5'
         }
-        },
-      yAxis: {
-        type: 'value',
-        scale: true,
-        axisLabel: { color: '#ccc' }
-      },
-      series: [{
-        name: 'Mid Price',
-        type: 'line',
-        showSymbol: false,
-        data: [],
-        lineStyle: { color: '#3fa9f5' }
-      }]
-    };
+      }
+    ],
+    series: [{
+      name: 'Mid Price',
+      type: 'line',
+      showSymbol: false,
+      data: [],
+      lineStyle: { color: '#3fa9f5' }
+    }]
+  };
 
-    chart.setOption(option);
+  chart.setOption(option);
 
-    async function loadInitialData() {
-      const res = await fetch("/api/ticks?offset=0&limit=2000");
-      const ticks = await res.json();
-      data = ticks.map(t => [t.timestamp, t.mid]);
-      lastTimestamp = ticks[ticks.length - 1]?.timestamp;
+  async function loadInitialData() {
+    const res = await fetch("/api/ticks?offset=-2200&limit=2200");
+    const ticks = await res.json();
+    data = ticks.map(t => [t.timestamp, t.mid]);
+    lastTimestamp = ticks[ticks.length - 1]?.timestamp;
+    chart.setOption({
+      xAxis: { ...option.xAxis, data: data.map(d => d[0]) },
+      series: [{ data }]
+    });
+  }
+
+  async function pollNewData() {
+    if (!lastTimestamp) return;
+    const res = await fetch(`/api/ticks/latest?after=${encodeURIComponent(lastTimestamp)}`);
+    const newTicks = await res.json();
+    if (newTicks.length > 0) {
+      newTicks.forEach(t => {
+        data.push([t.timestamp, t.mid]);
+      });
+
+      // Keep max 2200 points
+      data = data.slice(-2200);
+      lastTimestamp = newTicks[newTicks.length - 1].timestamp;
+
       chart.setOption({
         xAxis: { ...option.xAxis, data: data.map(d => d[0]) },
         series: [{ data }]
       });
     }
+  }
 
-    async function pollNewData() {
-      if (!lastTimestamp) return;
-      const res = await fetch(`/api/ticks/latest?after=${encodeURIComponent(lastTimestamp)}`);
-      const newTicks = await res.json();
-      if (newTicks.length > 0) {
-        newTicks.forEach(t => {
-          data.push([t.timestamp, t.mid]);
-        });
-        lastTimestamp = newTicks[newTicks.length - 1].timestamp;
-        // Update chart
-        chart.setOption({
-          xAxis: { ...option.xAxis, data: data.map(d => d[0]) },
-          series: [{ data }]
-        });
-      }
-    }
-
-    loadInitialData();
-    setInterval(pollNewData, 3000);
-  </script>
+  loadInitialData();
+  setInterval(pollNewData, 3000);
+</script>
 </body>
 </html>
