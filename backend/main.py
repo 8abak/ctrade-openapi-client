@@ -7,6 +7,7 @@ from typing import List
 from sqlalchemy import create_engine, text
 import os
 from datetime import datetime
+from fastapi.responses import JSONResponse
 
 # Initialize FastAPI
 app = FastAPI()
@@ -90,3 +91,30 @@ def home():
 def get_version():
     return {"version": "2025.06.28.02"}  # Manually update as needed
 
+@app.get("/sqlvw/tables")
+def get_all_table_names():
+    with engine.connect() as conn:
+        query = text("""
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema='public'
+              AND table_type='BASE TABLE'
+        """)
+        result = conn.execute(query)
+        tables = [row[0] for row in result]
+    return tables
+
+
+@app.get("/sqlvw/query")
+def run_sql_query(query: str = Query(...)):
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(text(query))
+            # If it's a SELECT, return the rows
+            if result.returns_rows:
+                rows = [dict(row._mapping) for row in result]
+                return rows
+            else:
+                return {"message": "Query executed successfully."}
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})

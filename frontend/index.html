@@ -17,23 +17,61 @@
       height: 100%;
       width: 100%;
     }
+    #sqlView {
+      padding: 1em;
+      display: none;
+    }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin-top: 1em;
+      color: white;
+    }
+    th, td {
+      border: 1px solid #444;
+      padding: 6px 10px;
+      font-size: 14px;
+    }
+    th {
+      background-color: #222;
+    }
+    input, select {
+      padding: 6px;
+      margin-right: 10px;
+      font-size: 14px;
+    }
   </style>
 </head>
 <body>
-  <div style="display: flex; height: 100vh; overflow: hidden;">
-    <div id="sidebar" style="width: 200px; background: #1a1a1a; color: white; display: flex; flex-direction: column; justify-content: space-between;">
-      <div style="padding: 1em;">
-        <h3 style="margin-top: 0;">Menu</h3>
-        <!-- Future menu items go here -->
-      </div>
-      <div id="version" style="padding: 1em; font-size: 0.8em; color: #888;">Version: ...</div>
+<div style="display: flex; height: 100vh; overflow: hidden;">
+  <div id="sidebar" style="width: 200px; background: #1a1a1a; color: white; display: flex; flex-direction: column; justify-content: space-between;">
+    <div style="padding: 1em;">
+      <h3 style="margin-top: 0;">Menu</h3>
+      <div><a href="#" onclick="showView('tick')">Tick View</a></div>
+      <div><a href="#" onclick="showView('sql')">SQL View</a></div>
     </div>
-    <div id="main" style="flex: 1;"></div>
+    <div id="version" style="padding: 1em; font-size: 0.8em; color: #888;">Version: ...</div>
   </div>
 
+  <div id="tickView" style="flex: 1; display: block;">
+    <div id="main"></div>
+  </div>
+
+  <div id="sqlView" style="flex: 1;">
+    <div style="padding: 1em;">
+      <label>Table:
+        <select id="tableSelect"></select>
+      </label>
+      <input id="queryInput" type="text" placeholder="Write your SQL or leave blank..." style="width: 50%;" />
+      <button onclick="runQuery()">Run</button>
+      <div id="sqlResult"></div>
+    </div>
+  </div>
+</div>
+
 <script>
+  let data = [], lastTimestamp = null, isLoadingOld = false;
   const chart = echarts.init(document.getElementById('main'), null, { renderer: 'canvas' });
-  let data = [], lastTimestamp = null, offset = 0, isLoadingOld = false;
 
   const option = {
     backgroundColor: '#111',
@@ -42,24 +80,10 @@
       formatter: (params) => {
         const p = params[0];
         const date = new Date(p.value[0]);
-        const sydneyOffsetMinutes = 10 * 60;
-
-        date.setMinutes(date.getMinutes() + sydneyOffsetMinutes);
-
-        const timeStr = date.toLocaleTimeString('en-AU', {
-          hour: '2-digit',
-          minute: '2-digit',
-          second: '2-digit',
-          hour12: true
-        }). toLowerCase();
-
-        const dateStr = date.toLocaleDateString('en-au');
-
-        return `
-          <div style="color: #3fa9f5; font-weight: bold;">${timeStr}</div>
-          <div style="color: #ccc;">${dateStr}</div>
-          <div style="color: #3fa9f5;">Mid: ${p.value[1].toFixed(2)}</div>
-        `;
+        date.setMinutes(date.getMinutes() + 600);
+        const timeStr = date.toLocaleTimeString('en-AU', { hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true }).toLowerCase();
+        const dateStr = date.toLocaleDateString('en-AU');
+        return `${timeStr}\n${dateStr}<br/>Mid: ${p.value[1].toFixed(2)}`;
       }
     },
     xAxis: {
@@ -69,19 +93,8 @@
         color: '#ccc',
         formatter: function (value) {
           const date = new Date(value);
-          const sydneyOffset = 10 * 60;
-          date.setMinutes(date.getMinutes() + sydneyOffset);
-
-          const hours = String(date.getHours()).padStart(2, '0');
-          const minutes = String(date.getMinutes()).padStart(2, '0');
-          const seconds = date.getSeconds();
-
-          if (seconds === 0) {
-            const day = date.toLocaleDateString('en-AU', { month: 'short', day: 'numeric' });
-            return `${hours}:${minutes}\n${day}`;
-          }
-
-          return '';
+          date.setMinutes(date.getMinutes() + 600);
+          return `${date.getHours()}:${String(date.getMinutes()).padStart(2, '0')}\n${date.toLocaleDateString('en-AU', { month: 'short', day: 'numeric' })}`;
         }
       }
     },
@@ -91,21 +104,8 @@
       axisLabel: { color: '#ccc' }
     },
     dataZoom: [
-      {
-        type: 'inside',
-        start: 100 * (200 / 2200),
-        end: 100
-      },
-      {
-        type: 'slider',
-        start: 100 * (200 / 2200),
-        end: 100,
-        bottom: 0,
-        height: 40,
-        handleStyle: {
-          color: '#3fa9f5'
-        }
-      }
+      { type: 'inside', start: 90, end: 100 },
+      { type: 'slider', start: 90, end: 100, bottom: 0, height: 40, handleStyle: { color: '#3fa9f5' } }
     ],
     series: [{
       name: 'Mid Price',
@@ -124,7 +124,7 @@
     data = ticks.map(t => [t.timestamp, t.mid]);
     lastTimestamp = ticks[ticks.length - 1]?.timestamp;
     chart.setOption({
-      xAxis: { ...option.xAxis, data: data.map(d => d[0]) },
+      xAxis: { data: data.map(d => d[0]) },
       series: [{ data }]
     });
   }
@@ -137,50 +137,12 @@
       newTicks.forEach(t => {
         data.push([t.timestamp, t.mid]);
       });
-
       data = data.slice(-2200);
       lastTimestamp = newTicks[newTicks.length - 1].timestamp;
-
       chart.setOption({
-        xAxis: { ...option.xAxis, data: data.map(d => d[0]) },
+        xAxis: { data: data.map(d => d[0]) },
         series: [{ data }]
       });
-    }
-  }
-
-  async function loadOlderTicksIfNeeded(event) {
-    const startPercent = event.batch?.[0]?.start ?? event.start;
-
-    if (startPercent < 5 && !isLoadingOld && offset < 100000) {
-      isLoadingOld = true;
-
-      const res = await fetch(`/ticks?offset=${offset + 2200}&limit=1000`);
-      const oldTicks = await res.json();
-
-      if (oldTicks.length > 0) {
-        const oldData = oldTicks.map(t => [t.timestamp, t.mid]);
-        data = oldData.concat(data);
-        offset += oldTicks.length;
-
-        chart.setOption({
-          xAxis: { data: data.map(d => d[0]) },
-          series: [{ data }],
-          dataZoom: [
-            {
-              type: 'inside',
-              start: 100 * (200 / data.length),
-              end: 100
-            },
-            {
-              type: 'slider',
-              start: 100 * (200 / data.length),
-              end: 100
-            }
-          ]
-        });
-      }
-
-      isLoadingOld = false;
     }
   }
 
@@ -194,10 +156,52 @@
     }
   }
 
+  function showView(name) {
+    document.getElementById('tickView').style.display = name === 'tick' ? 'block' : 'none';
+    document.getElementById('sqlView').style.display = name === 'sql' ? 'block' : 'none';
+  }
+
+  async function loadTableNames() {
+    const res = await fetch('/sqlvw/tables');
+    const tables = await res.json();
+    const select = document.getElementById('tableSelect');
+    select.innerHTML = tables.map(t => `<option value="${t}">${t}</option>`).join('');
+  }
+
+  async function runQuery() {
+    const table = document.getElementById('tableSelect').value;
+    const raw = document.getElementById('queryInput').value.trim();
+    const query = raw || `SELECT * FROM ${table} ORDER BY id DESC LIMIT 20`;
+    const res = await fetch(`/sqlvw/query?query=${encodeURIComponent(query)}`);
+    const container = document.getElementById('sqlResult');
+
+    try {
+      const json = await res.json();
+
+      if (Array.isArray(json)) {
+        // Display table
+        if (json.length === 0) return container.innerHTML = "<p>No results.</p>";
+
+        const headers = Object.keys(json[0]);
+        let html = "<table><thead><tr>" + headers.map(h => `<th>${h}</th>`).join('') + "</tr></thead><tbody>";
+        for (const row of json) {
+          html += "<tr>" + headers.map(h => `<td>${row[h]}</td>`).join('') + "</tr>";
+        }
+        html += "</tbody></table>";
+        container.innerHTML = html;
+      } else {
+        // Text result
+        container.innerHTML = `<pre>${JSON.stringify(json, null, 2)}</pre>`;
+      }
+    } catch (e) {
+      container.innerHTML = `<pre style="color:red">Error: ${e.message}</pre>`;
+    }
+  }
+
   loadInitialData();
   loadVersion();
+  loadTableNames();
   setInterval(pollNewData, 3000);
-  chart.on('dataZoom', loadOlderTicksIfNeeded);
 </script>
 </body>
 </html>
