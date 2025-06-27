@@ -87,9 +87,6 @@ def home():
     return {"message": "Tick API is live. Try /ticks or /ticks/latest."}
 
 
-@app.get("/version")
-def get_version():
-    return {"version": "2025.06.28.02"}  # Manually update as needed
 
 @app.get("/sqlvw/tables")
 def get_all_table_names():
@@ -118,3 +115,8 @@ def run_sql_query(query: str = Query(...)):
                 return {"message": "Query executed successfully."}
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
+
+
+@app.get("/version")
+def get_version():
+    return {"version": "2025.06.28.03"}  # Manually update as needed
