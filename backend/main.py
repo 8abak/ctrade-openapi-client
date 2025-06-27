@@ -88,5 +88,5 @@ def home():
 
 @app.get("/version")
 def get_version():
-    return {"version": "2025.06.28.01"}  # Manually update as needed
+    return {"version": "2025.06.28.02"}  # Manually update as needed
 
