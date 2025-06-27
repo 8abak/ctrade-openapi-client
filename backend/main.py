@@ -62,6 +62,24 @@ def get_latest_ticks(after: str = Query(..., description="UTC timestamp in ISO f
         ticks = [dict(row._mapping) for row in result]
     return ticks
 
+# Get the latest N ticks in chronological order
+@app.get("/ticks/recent", response_model=List[Tick])
+def get_recent_ticks(limit: int = Query(2200, le=5000)):
+    with engine.connect() as conn:
+        query = text("""
+            SELECT timestamp, bid, ask, mid
+            FROM (
+                SELECT *
+                FROM ticks
+                ORDER BY timestamp DESC
+                LIMIT :limit
+            ) sub
+            ORDER BY timestamp ASC
+        """)
+        result = conn.execute(query, {"limit": limit})
+        ticks = [dict(row._mapping) for row in result]
+    return ticks
+
 
 @app.get("/")
 def home():
