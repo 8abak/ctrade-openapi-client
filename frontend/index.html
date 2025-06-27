@@ -14,17 +14,26 @@
       color: white;
     }
     #main {
-      height: 100vh;
+      height: 100%;
       width: 100%;
     }
   </style>
 </head>
 <body>
-  <div id="main"></div>
+  <div style="display: flex; height: 100vh; overflow: hidden;">
+    <div id="sidebar" style="width: 200px; background: #1a1a1a; color: white; display: flex; flex-direction: column; justify-content: space-between;">
+      <div style="padding: 1em;">
+        <h3 style="margin-top: 0;">Menu</h3>
+        <!-- Future menu items go here -->
+      </div>
+      <div id="version" style="padding: 1em; font-size: 0.8em; color: #888;">Version: ...</div>
+    </div>
+    <div id="main" style="flex: 1;"></div>
+  </div>
 
 <script>
   const chart = echarts.init(document.getElementById('main'), null, { renderer: 'canvas' });
-  let data = [], lastTimestamp = null;
+  let data = [], lastTimestamp = null, offset = 0, isLoadingOld = false;
 
   const option = {
     backgroundColor: '#111',
@@ -104,14 +113,13 @@
 
   async function pollNewData() {
     if (!lastTimestamp) return;
-    const res = await fetch(`/api/ticks/latest?after=${encodeURIComponent(lastTimestamp)}`);
+    const res = await fetch(`/ticks/latest?after=${encodeURIComponent(lastTimestamp)}`);
     const newTicks = await res.json();
     if (newTicks.length > 0) {
       newTicks.forEach(t => {
         data.push([t.timestamp, t.mid]);
       });
 
-      // Keep max 2200 points
       data = data.slice(-2200);
       lastTimestamp = newTicks[newTicks.length - 1].timestamp;
 
@@ -122,8 +130,56 @@
     }
   }
 
+  async function loadOlderTicksIfNeeded(event) {
+    const startPercent = event.batch?.[0]?.start ?? event.start;
+
+    if (startPercent < 5 && !isLoadingOld && offset < 100000) {
+      isLoadingOld = true;
+
+      const res = await fetch(`/ticks?offset=${offset + 2200}&limit=1000`);
+      const oldTicks = await res.json();
+
+      if (oldTicks.length > 0) {
+        const oldData = oldTicks.map(t => [t.timestamp, t.mid]);
+        data = oldData.concat(data);
+        offset += oldTicks.length;
+
+        chart.setOption({
+          xAxis: { data: data.map(d => d[0]) },
+          series: [{ data }],
+          dataZoom: [
+            {
+              type: 'inside',
+              start: 100 * (200 / data.length),
+              end: 100
+            },
+            {
+              type: 'slider',
+              start: 100 * (200 / data.length),
+              end: 100
+            }
+          ]
+        });
+      }
+
+      isLoadingOld = false;
+    }
+  }
+
+  async function loadVersion() {
+    try {
+      const res = await fetch('/version');
+      const json = await res.json();
+      document.getElementById('version').textContent = `Version: ${json.version}`;
+    } catch (e) {
+      document.getElementById('version').textContent = `Version: unknown`;
+    }
+  }
+
   loadInitialData();
+  loadVersion();
   setInterval(pollNewData, 3000);
+  chart.on('dataZoom', loadOlderTicksIfNeeded);
 </script>
 </body>
 </html>

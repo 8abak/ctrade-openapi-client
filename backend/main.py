@@ -84,3 +84,9 @@ def get_recent_ticks(limit: int = Query(2200, le=5000)):
 @app.get("/")
 def home():
     return {"message": "Tick API is live. Try /ticks or /ticks/latest."}
+
+
+@app.get("/version")
+def get_version():
+    return {"version": "2025.06.28.01"}  # Manually update as needed
+
