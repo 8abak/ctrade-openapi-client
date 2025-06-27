@@ -80,7 +80,7 @@
       data = ticks.map(t => [t.timestamp, t.mid]);
       lastTimestamp = ticks[ticks.length - 1]?.timestamp;
       chart.setOption({
-        xAxis: { data: data.map(d => d[0]) },
+        xAxis: { ...option.xAxis, data: data.map(d => d[0]) },
         series: [{ data }]
       });
     }
@@ -96,7 +96,7 @@
         lastTimestamp = newTicks[newTicks.length - 1].timestamp;
         // Update chart
         chart.setOption({
-          xAxis: { data: data.map(d => d[0]) },
+          xAxis: { ...option.xAxis, data: data.map(d => d[0]) },
           series: [{ data }]
         });
       }
