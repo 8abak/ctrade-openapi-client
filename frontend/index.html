@@ -138,7 +138,7 @@
   async function loadInitialData() {
     const res = await fetch("/ticks/recent?limit=2200");
     const ticks = await res.json();
-    data = ticks.map(t => [t.timestamp, t.mid], t.id);
+    data = ticks.map(t => [t.timestamp, t.mid, t.id]);
     lastTimestamp = ticks[ticks.length - 1]?.timestamp;
     chart.setOption({
       xAxis: { data: data.map(d => d[0]) },
