@@ -73,10 +73,12 @@
       <div id="sqlConsole" style="margin-top: 1em; display: none;">
         <strong>SQL Console</strong><br>
         <select id="tableSelect"></select>
-        <input id="queryInput" type="text" placeholder="Write your SQL or leave blank..." />
+        <textarea id="queryInput" placeholder="Write query here..." rows="5" style="width: 100%; resize: vertical;"></textarea>
         <button onclick="runQuery()">Run</button>
-        <div id="sqlResult"></div>
       </div>
+
+      
+
     </div>
     <div id="version" style="padding: 1em; font-size: 0.8em; color: #888;">Version: 2025.06.28.05.017</div>
   </div>
@@ -85,7 +87,12 @@
     <div id="main"></div>
   </div>
 
-  <div id="sqlView" style="display: none;"></div>
+  <div id="sqlView" style="display: none;">
+    <div id="sqlResult" style="padding: 1em; overflow: auto; height: 100%;">
+    </div>
+  </div>
+
+
 </div>
 
 <script>
