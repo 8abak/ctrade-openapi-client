@@ -121,7 +121,7 @@ def get_all_table_names():
 @app.get("/sqlvw/query")
 def run_sql_query(query: str = Query(...)):
     try:
-        with engine.connect() as conn:
+        with engine.begin() as conn:
             result = conn.execute(text(query))
             # If it's a SELECT, return the rows
             if result.returns_rows:
@@ -150,4 +150,4 @@ def get_label_tables():
 # Get the current version of the API
 @app.get("/version")
 def get_version():
-    return {"version": "2025.06.28.06.002"}  # Manually update as needed
+    return {"version": "2025.06.28.06.003"}  # Manually update as needed
