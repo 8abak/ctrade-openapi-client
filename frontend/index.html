@@ -1,4 +1,3 @@
-<!-- index.html (2025.06.28.05.014) fully working version -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -63,9 +62,9 @@
   <div id="sidebar" style="width: 260px; background: #1a1a1a; color: white; display: flex; flex-direction: column; justify-content: space-between;">
     <div style="padding: 1em;">
       <h3 style="margin-top: 0;">Menu</h3>
-      <div><a href="#" onclick="showView('tick')">Tick View</a></div>
-      <div><a href="#" onclick="showView('sql')">SQL View</a></div>
- 
+      <div><a href="javascript:void(0)" onclick="showView('tick')">Tick View</a></div>
+      <div><a href="javascript:void(0)" onclick="showView('sql')">SQL View</a></div>
+
       <div id="labelSection" style="margin-top: 1em;">
         <strong>Labels</strong><br>
         <div id="labelToggles"></div>
@@ -79,7 +78,7 @@
         <div id="sqlResult"></div>
       </div>
     </div>
-    <div id="version" style="padding: 1em; font-size: 0.8em; color: #888;">Version: ...</div>
+    <div id="version" style="padding: 1em; font-size: 0.8em; color: #888;">Version: 2025.06.28.05.017</div>
   </div>
 
   <div id="tickView" style="flex: 1; display: block;">
@@ -88,6 +87,17 @@
 
   <div id="sqlView" style="display: none;"></div>
 </div>
+
+<script>
+function showView(name) {
+  const isTick = name === 'tick';
+  document.getElementById('tickView').style.display = isTick ? 'block' : 'none';
+  document.getElementById('sqlView').style.display = isTick ? 'none' : 'block';
+  document.getElementById('labelSection').style.display = isTick ? 'block' : 'none';
+  document.getElementById('sqlConsole').style.display = isTick ? 'none' : 'block';
+}
+</script>
+
 <script>
 let data = [], lastTimestamp = null, isLoadingOld = false;
 const labelLayers = {};
@@ -132,14 +142,6 @@ const option = {
 };
 
 chart.setOption(option);
-
-function showView(name) {
-  const isTick = name === 'tick';
-  document.getElementById('tickView').style.display = istick ? 'block' : 'none';
-  document.getElementById('sqlView').style.display = isTick ? 'none' : 'block';
-  document.getElementById('labelSection').style.display = isTick ? 'block' : 'none';
-  document.getElementById('sqlConsole').style.display = isTick ? 'none' : 'block';
-}
 
 chart.on('dataZoom', async function (event) {
   const startPercent = event.batch?.[0]?.start ?? event.start;
@@ -231,8 +233,6 @@ async function loadVersion() {
     document.getElementById('version').textContent = `Version: ${json.version}`;
   } catch { document.getElementById('version').textContent = 'Version: unknown'; }
 }
-
-
 
 async function loadTableNames() {
   const res = await fetch('/sqlvw/tables');
