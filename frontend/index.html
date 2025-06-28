@@ -94,13 +94,14 @@
         const dateStr = date.toLocaleDateString('en-AU');
 
         return `
-          <div style="color: #fff;">
+          <div style="color: #fff; background-color: #222; padding: 8px; border-radius: 4px;">
             <strong>${timeStr}</strong><br>
             <span style="color: #ccc;">${dateStr}</span><br>
-            Mid: <strong>${p.value[1].toFixed(2)}</strong>
-            ID: <span style="color: #aaa;">${p.value[2]}</span>
+            <span>Mid: <strong style="color: #3fa9f5;">${p.value[1].toFixed(2)}</strong></span><br>
+            <span>ID: <span style="color:#aaa;">${p.value[2]}</span></span>
           </div>
         `;
+
       }
     },
     xAxis: {
