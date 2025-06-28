@@ -27,6 +27,7 @@ engine = create_engine(db_url)
 
 # Tick model
 class Tick(BaseModel):
+    id: int
     timestamp: datetime
     bid: float
     ask: float
@@ -38,7 +39,7 @@ class Tick(BaseModel):
 def get_ticks(offset: int = 0, limit: int = 2000):
     with engine.connect() as conn:
         query = text("""
-            SELECT timestamp, bid, ask, mid
+            SELECT id, timestamp, bid, ask, mid
             FROM ticks
             ORDER BY timestamp ASC
             OFFSET :offset LIMIT :limit
@@ -81,13 +82,13 @@ def get_recent_ticks(limit: int = Query(2200, le=5000)):
         ticks = [dict(row._mapping) for row in result]
     return ticks
 
-
+# Home route to check if API is live
 @app.get("/")
 def home():
     return {"message": "Tick API is live. Try /ticks or /ticks/latest."}
 
 
-
+# get all table names in the database
 @app.get("/sqlvw/tables")
 def get_all_table_names():
     with engine.connect() as conn:
@@ -101,7 +102,7 @@ def get_all_table_names():
         tables = [row[0] for row in result]
     return tables
 
-
+# Run a SQL query against the database
 @app.get("/sqlvw/query")
 def run_sql_query(query: str = Query(...)):
     try:
@@ -116,7 +117,7 @@ def run_sql_query(query: str = Query(...)):
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
 
-
+# Get the current version of the API
 @app.get("/version")
 def get_version():
-    return {"version": "2025.06.28.03"}  # Manually update as needed
+    return {"version": "2025.06.28.04"}  # Manually update as needed

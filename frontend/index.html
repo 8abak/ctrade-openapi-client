@@ -80,10 +80,27 @@
       formatter: (params) => {
         const p = params[0];
         const date = new Date(p.value[0]);
-        date.setMinutes(date.getMinutes() + 600);
-        const timeStr = date.toLocaleTimeString('en-AU', { hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true }).toLowerCase();
+        const sydneyOffsetMinutes = 10*60;
+
+        date.setMinutes(date.getMinutes() + sydneyOffsetMinutes);
+
+        const timeStr = date.toLocaleTimeString('en-au',{
+          hour: 'numeric',
+          minute: '2-digit',
+          second: '2-digit',
+          hour12: true
+        }).toLowerCase();
+
         const dateStr = date.toLocaleDateString('en-AU');
-        return `${timeStr}\n${dateStr}<br/>Mid: ${p.value[1].toFixed(2)}`;
+
+        return `
+          <div style="color: #fff;">
+            <strong>${timeStr}</strong><br>
+            <span style="color: #ccc;">${dateStr}</span><br>
+            Mid: <strong>${p.value[1].toFixed(2)}</strong>
+            ID: <span style="color: #aaa;">${id}</span>
+          </div>
+        `;
       }
     },
     xAxis: {
