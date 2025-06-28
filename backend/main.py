@@ -94,7 +94,7 @@ def get_ticks_before(tick_id: int, limit: int = 2000):
         query = text("""
             SELECT id, timestamp, bid, ask, mid
             FROM ticks
-            WHERE id < :tick_id
+            WHERE id < :tickid
             ORDER BY timestamp DESC
             LIMIT :limit
         """)
