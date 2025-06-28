@@ -1,4 +1,4 @@
-<!-- index.html (2025.06.28.05.011) with full SQL console and tick chart label toggle system -->
+<!-- index.html (2025.06.28.05.014) fully working version -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -18,10 +18,6 @@
       height: 100%;
       width: 100%;
     }
-    #sqlView {
-      padding: 1em;
-      display: none;
-    }
     table {
       border-collapse: collapse;
       width: 100%;
@@ -38,21 +34,49 @@
     }
     input, select {
       padding: 6px;
-      margin-right: 10px;
+      margin-top: 6px;
+      width: 90%;
       font-size: 14px;
+      background: #222;
+      color: white;
+      border: 1px solid #555;
+    }
+    button {
+      margin-top: 6px;
+      padding: 6px 12px;
+      font-size: 14px;
+      background: #3fa9f5;
+      color: white;
+      border: none;
+      cursor: pointer;
+    }
+    #sqlResult {
+      font-size: 13px;
+      padding: 6px;
+      overflow: auto;
+      max-height: 200px;
     }
   </style>
 </head>
 <body>
 <div style="display: flex; height: 100vh; overflow: hidden;">
-  <div id="sidebar" style="width: 220px; background: #1a1a1a; color: white; display: flex; flex-direction: column; justify-content: space-between;">
+  <div id="sidebar" style="width: 260px; background: #1a1a1a; color: white; display: flex; flex-direction: column; justify-content: space-between;">
     <div style="padding: 1em;">
       <h3 style="margin-top: 0;">Menu</h3>
       <div><a href="#" onclick="showView('tick')">Tick View</a></div>
       <div><a href="#" onclick="showView('sql')">SQL View</a></div>
+
       <div style="margin-top: 1em;">
         <strong>Labels</strong><br>
         <div id="labelToggles"></div>
+      </div>
+
+      <div style="margin-top: 1em;">
+        <strong>SQL Console</strong><br>
+        <select id="tableSelect"></select>
+        <input id="queryInput" type="text" placeholder="Write your SQL or leave blank..." />
+        <button onclick="runQuery()">Run</button>
+        <div id="sqlResult"></div>
       </div>
     </div>
     <div id="version" style="padding: 1em; font-size: 0.8em; color: #888;">Version: ...</div>
@@ -62,18 +86,8 @@
     <div id="main"></div>
   </div>
 
-  <div id="sqlView" style="flex: 1;">
-    <div style="padding: 1em;">
-      <label>Table:
-        <select id="tableSelect"></select>
-      </label>
-      <input id="queryInput" type="text" placeholder="Write your SQL or leave blank..." style="width: 50%;" />
-      <button onclick="runQuery()">Run</button>
-      <div id="sqlResult"></div>
-    </div>
-  </div>
+  <div id="sqlView" style="display: none;"></div>
 </div>
-
 <script>
 let data = [], lastTimestamp = null, isLoadingOld = false;
 const labelLayers = {};
@@ -113,10 +127,7 @@ const option = {
     { type: 'inside', start: 90, end: 100 },
     { type: 'slider', start: 90, end: 100, bottom: 0, height: 40, handleStyle: { color: '#3fa9f5' } }
   ],
-  series: [{
-    name: 'Mid Price', type: 'line', showSymbol: false,
-    data: [], lineStyle: { color: '#3fa9f5', width: 1.2 }
-  }],
+  series: [{ name: 'Mid Price', type: 'line', showSymbol: false, data: [], lineStyle: { color: '#3fa9f5', width: 1.2 } }],
   markLine: { data: [] }
 };
 
