@@ -139,6 +139,53 @@
 
   chart.setOption(option);
 
+chart.on('dataZoom', async function (event){
+  const startPercent = event.batch?.[0]?.start ?? event.start;
+  const visibleLeftCount = Math.floor((startPercent / 100) * data.length);
+
+  if(visibleLeftCount < 400 && !isLoadingOld) {
+    isLoadingOld = true;
+
+    const firstID = data[0]?.[2];
+    if (!firstID) {
+      isLoadingOld = false;
+      return;
+    }
+
+
+    const res = await fetch(`/ticks/before/${firstID}?limit=2000`);
+    const olderTicks = await res.json();
+
+    if (olderTicks.length > 0) {
+      const olderData = olderTicks.map(t => [t.timestamp, t.mid, t.id]);
+      data = olderData.concat(data);
+
+      chart.setOption({
+        xAxis: { data: data.map(d => d[0]) },
+        series: [{ data }],
+        dataZoom:[
+          {
+            type: 'inside',
+            start: 100 -(220 / data.length * 100),
+            end: 100
+          },
+          {
+            type: 'slider',
+            start: 100 -(220 / data.length * 100),
+            end: 100,
+            bottom: 0,
+            height: 40,
+            handleStyle: { color: '#3fa9f5' }
+          }
+        ]
+      });
+    }
+    isLoadingOld = false;
+  }
+});
+
+
+
   async function loadInitialData() {
     const res = await fetch("/ticks/recent?limit=2200");
     const ticks = await res.json();
