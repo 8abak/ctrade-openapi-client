@@ -226,10 +226,10 @@ async function loadVersion() {
 
 function showView(name) {
   const isTick = name === 'tick';
-  document.getElementById('tickView').style.display = name === 'tick' ? 'block' : 'none';
-  document.getElementById('sqlView').style.display = name === 'sql' ? 'none' : 'block';
-  document.getElementByID('labelSection').style.display = name === 'tick' ? 'block' : 'none';
-  document.getElementById('sqlConsole').style.display = name === 'sql' ? 'none' : 'block';
+  document.getElementById('tickView').style.display = istick ? 'block' : 'none';
+  document.getElementById('sqlView').style.display = isTick ? 'none' : 'block';
+  document.getElementById('labelSection').style.display = isTick ? 'block' : 'none';
+  document.getElementById('sqlConsole').style.display = isTick ? 'none' : 'block';
 }
 
 async function loadTableNames() {
