@@ -69,9 +69,9 @@ def get_latest_ticks(after: str = Query(..., description="UTC timestamp in ISO f
 def get_recent_ticks(limit: int = Query(2200, le=5000)):
     with engine.connect() as conn:
         query = text("""
-            SELECT timestamp, bid, ask, mid
+            SELECT id, timestamp, bid, ask, mid
             FROM (
-                SELECT *
+                SELECT id, timestamp, bid, ask, mid
                 FROM ticks
                 ORDER BY timestamp DESC
                 LIMIT :limit
@@ -120,4 +120,4 @@ def run_sql_query(query: str = Query(...)):
 # Get the current version of the API
 @app.get("/version")
 def get_version():
-    return {"version": "2025.06.28.05.001"}  # Manually update as needed
+    return {"version": "2025.06.28.05.002"}  # Manually update as needed
