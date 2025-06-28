@@ -133,6 +133,14 @@ const option = {
 
 chart.setOption(option);
 
+function showView(name) {
+  const isTick = name === 'tick';
+  document.getElementById('tickView').style.display = istick ? 'block' : 'none';
+  document.getElementById('sqlView').style.display = isTick ? 'none' : 'block';
+  document.getElementById('labelSection').style.display = isTick ? 'block' : 'none';
+  document.getElementById('sqlConsole').style.display = isTick ? 'none' : 'block';
+}
+
 chart.on('dataZoom', async function (event) {
   const startPercent = event.batch?.[0]?.start ?? event.start;
   const visibleLeftCount = Math.floor((startPercent / 100) * data.length);
@@ -224,13 +232,7 @@ async function loadVersion() {
   } catch { document.getElementById('version').textContent = 'Version: unknown'; }
 }
 
-function showView(name) {
-  const isTick = name === 'tick';
-  document.getElementById('tickView').style.display = istick ? 'block' : 'none';
-  document.getElementById('sqlView').style.display = isTick ? 'none' : 'block';
-  document.getElementById('labelSection').style.display = isTick ? 'block' : 'none';
-  document.getElementById('sqlConsole').style.display = isTick ? 'none' : 'block';
-}
+
 
 async function loadTableNames() {
   const res = await fetch('/sqlvw/tables');
