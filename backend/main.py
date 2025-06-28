@@ -139,7 +139,7 @@ def get_label_tables():
         query = text("""
             SELECT table_name
             FROM information_schema.columns
-            WHERE column_name ILIKE 'tick_id'
+            WHERE column_name ILIKE 'tickid'
               AND table_schema = 'public'
         """)
         result = conn.execute(query)
@@ -150,4 +150,4 @@ def get_label_tables():
 # Get the current version of the API
 @app.get("/version")
 def get_version():
-    return {"version": "2025.06.28.05.019"}  # Manually update as needed
+    return {"version": "2025.06.28.06.001"}  # Manually update as needed
