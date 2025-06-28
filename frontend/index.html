@@ -78,6 +78,10 @@
       <div id="labelSection" style="margin-top: 1em;">
         <strong>Labels</strong><br>
         <div id="labelToggles"></div>
+        <div style="margin-top: 12px;">
+          <input id="tickLoadAmount" type="number" value="2000" min="100" max="5000" style="width: 100px; margin-bottom: 4px;" />
+          <button onclick="mannualLoadMoreLeft()">Load more left</button>
+        </div>";
       </div>
 
       <div id="sqlConsole" style="margin-top: 1em; display: none;">
@@ -223,11 +227,42 @@ async function loadLabelToggles() {
   tables.forEach(name => {
     const id = `label-${name}`;
     container.insertAdjacentHTML('beforeend', `
-      <label style="display:block;font-size:13px;margin-bottom:4px;">
+      <label style="display:flex;align-items: center;font-size:13px;margin-bottom:4px;gap: 6px;">
         <input type="checkbox" id="${id}" onchange="toggleLabel('${name}', this.checked)">
-        ${name}
+        <span>${name}</span>
       </label>`);
   });
+}
+
+async function mannualLoadMoreLeft(){
+  const count = parseInt(document.getElementById('tickLoadAmount').value) || '0';
+  if (!count || isNan(count)) return;
+
+  const currentView = chart.getModel().getComponent('dataZoom').getRange();
+  const idStart = data.find(d => d[0] === currentView.startValue)?.[2];
+  const idEnd = data.find(d => d[0] === currentView.endValue)?.[2];
+
+
+  const res = await fetch(`/ticks/before/${idStart}?limit=${count}`);
+  const older = await res.json();
+
+  if(older.length > 0) {
+    const prepend = older.map(t => [t.timestamp, t.mid, t.id]);
+    data = prepend.concat(data);
+    lastTimestamp = older[older.length - 1].timestamp;
+
+    const newStart = data.findIndex(d => d[2] === idStart);
+    const newEnd = data.findIndex(d => d[2] === idEnd);
+    const s = (newStart / data.length) * 100;
+    const e = (newEnd / data.length) * 100;
+
+    chart.setOption({
+      xAxis: { data: data.map(d => d[0]) }, 
+      series: [{ data }], 
+      dataZoom: [{ start: s, end: e }, { start: s, end: e }] 
+    });
+    updateLabelView();
+  }
 }
 
 async function pollNewData() {
