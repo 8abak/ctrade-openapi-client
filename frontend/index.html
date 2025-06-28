@@ -187,7 +187,7 @@ async function toggleLabel(name, checked) {
     const res = await fetch(`/labels/${name}`);
     const rows = await res.json();
     const marks = rows.map(r => {
-      const match = data.find(d => d[2] === r.tick_id);
+      const match = data.find(d => d[2] === r.tickid);
       return match ? { xAxis: match[0], label: { formatter: name }, lineStyle: { type: 'dashed', color: '#ffa500' } } : null;
     }).filter(Boolean);
     labelLayers[name] = marks;

@@ -88,8 +88,8 @@ def home():
     return {"message": "Tick API is live. Try /ticks or /ticks/latest."}
 
 # get thicks before by ID
-@app.get("/ticks/before/{tick_id}", response_model=List[Tick])
-def get_ticks_before(tick_id: int, limit: int = 2000):
+@app.get("/ticks/before/{tickid}", response_model=List[Tick])
+def get_ticks_before(tickid: int, limit: int = 2000):
     with engine.connect() as conn:
         query = text("""
             SELECT id, timestamp, bid, ask, mid
@@ -98,7 +98,7 @@ def get_ticks_before(tick_id: int, limit: int = 2000):
             ORDER BY timestamp DESC
             LIMIT :limit
         """)
-        result = conn.execute(query, {"tick_id": tick_id, "limit": limit})
+        result = conn.execute(query, {"tickid": tickid, "limit": limit})
         ticks = [dict(row._mapping) for row in result]
     return list(reversed(ticks))  # Reverse to return in chronological order
 
@@ -150,4 +150,4 @@ def get_label_tables():
 # Get the current version of the API
 @app.get("/version")
 def get_version():
-    return {"version": "2025.06.28.06.003"}  # Manually update as needed
+    return {"version": "2025.06.28.06.004"}  # Manually update as needed
