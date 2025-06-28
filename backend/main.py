@@ -132,7 +132,22 @@ def run_sql_query(query: str = Query(...)):
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
 
+# Get available tables based on labels.
+@app.get("/labels/available")
+def get_label_tables():
+    with engine.connect() as conn:
+        query = text("""
+            SELECT table_name
+            FROM information_schema.columns
+            WHERE column_name ILIKE 'tick_id'
+              AND table_schema = 'public'
+        """)
+        result = conn.execute(query)
+        tables = sorted({row[0] for row in result})
+    return tables
+
+
 # Get the current version of the API
 @app.get("/version")
 def get_version():
-    return {"version": "2025.06.28.05.007"}  # Manually update as needed
+    return {"version": "2025.06.28.05.008"}  # Manually update as needed
