@@ -74,7 +74,7 @@
         <strong>SQL Console</strong><br>
         <select id="tableSelect"></select>
         <textarea id="queryInput" placeholder="Write query here..." rows="5" style="width: 100%; resize: vertical;"></textarea>
-        <button onclick="runQuery()">Run</button>SELECT * FROM bricks_1 ORDER BY timestamp DESC LIMIT 20
+        <button onclick="runQuery()">Run</button>
       </div>
 
       
@@ -251,7 +251,7 @@ async function loadTableNames() {
 async function runQuery() {
   const table = document.getElementById('tableSelect').value;
   const raw = document.getElementById('queryInput').value.trim();
-  const query = raw || `SELECT * FROM ${table} ORDER BY id DESC LIMIT 20`;
+  const query = raw || `SELECT * FROM ${table} ORDER BY timestamp DESC LIMIT 20`;
   const container = document.getElementById('sqlResult');
   container.innerHTML = `<pre style="color: #999;">Running query...</pre>`;
   try {
