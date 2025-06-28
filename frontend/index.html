@@ -139,54 +139,64 @@
 
   chart.setOption(option);
 
-chart.on('dataZoom', async function (event){
+chart.on('dataZoom', async function (event) {
   const startPercent = event.batch?.[0]?.start ?? event.start;
   const visibleLeftCount = Math.floor((startPercent / 100) * data.length);
 
-  if(visibleLeftCount < 400 && !isLoadingOld) {
+  if (visibleLeftCount < 400 && !isLoadingOld) {
     isLoadingOld = true;
 
-    const firstID = data[0]?.[2];
-    if (!firstID) {
+    // Track visible window in IDs
+    const zoom = chart.getOption().dataZoom?.[0];
+    const startIndex = Math.floor((zoom?.start / 100) * data.length);
+    const endIndex = Math.floor((zoom?.end / 100) * data.length);
+    const idStart = data[startIndex]?.[2];
+    const idEnd = data[endIndex]?.[2];
+
+    const firstId = data[0]?.[2];
+    if (!firstId) {
       isLoadingOld = false;
       return;
     }
 
-
-    const res = await fetch(`/ticks/before/${firstID}?limit=2000`);
+    const res = await fetch(`/ticks/before/${firstId}?limit=2000`);
     const olderTicks = await res.json();
 
     if (olderTicks.length > 0) {
       const olderData = olderTicks.map(t => [t.timestamp, t.mid, t.id]);
       data = olderData.concat(data);
 
-      // Preserve current zoom state
-      const currentZoom = chart.getOption().dataZoom?.[0];
-      const currentStart = currentZoom?.start ?? 0;
-      const currentEnd = currentZoom?.end ?? 100;
+      // Find new indexes of the same tick IDs after prepending
+      const newStartIndex = data.findIndex(d => d[2] === idStart);
+      const newEndIndex = data.findIndex(d => d[2] === idEnd);
+
+      const newStartPercent = (newStartIndex / data.length) * 100;
+      const newEndPercent = (newEndIndex / data.length) * 100;
 
       chart.setOption({
-        xAxis: {data:data.map(d => d[0])},
+        xAxis: { data: data.map(d => d[0]) },
         series: [{ data }],
-        dataZoom: [{
-          type: 'inside',
-          start: currentStart,
-          end: currentEnd
-        },
-        {
-          type: 'slider',
-          start: currentStart,
-          end: currentEnd,
-          bottom: 0,
-          height: 40,
-          handleStyle: { color: '#3fa9f5' }
-        }]
-      })
+        dataZoom: [
+          {
+            type: 'inside',
+            start: newStartPercent,
+            end: newEndPercent
+          },
+          {
+            type: 'slider',
+            start: newStartPercent,
+            end: newEndPercent,
+            bottom: 0,
+            height: 40,
+            handleStyle: { color: '#3fa9f5' }
+          }
+        ]
+      });
     }
+
     isLoadingOld = false;
   }
 });
-
 
 
   async function loadInitialData() {
