@@ -98,7 +98,7 @@
             <strong>${timeStr}</strong><br>
             <span style="color: #ccc;">${dateStr}</span><br>
             Mid: <strong>${p.value[1].toFixed(2)}</strong>
-            ID: <span style="color: #aaa;">${id}</span>
+            ID: <span style="color: #aaa;">${p.value[2]}</span>
           </div>
         `;
       }
@@ -138,7 +138,7 @@
   async function loadInitialData() {
     const res = await fetch("/ticks/recent?limit=2200");
     const ticks = await res.json();
-    data = ticks.map(t => [t.timestamp, t.mid]);
+    data = ticks.map(t => [t.timestamp, t.mid], t.id);
     lastTimestamp = ticks[ticks.length - 1]?.timestamp;
     chart.setOption({
       xAxis: { data: data.map(d => d[0]) },
@@ -152,7 +152,7 @@
     const newTicks = await res.json();
     if (newTicks.length > 0) {
       newTicks.forEach(t => {
-        data.push([t.timestamp, t.mid]);
+        data.push([t.timestamp, t.mid, t.id]);
       });
       data = data.slice(-2200);
       lastTimestamp = newTicks[newTicks.length - 1].timestamp;
