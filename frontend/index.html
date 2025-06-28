@@ -65,13 +65,13 @@
       <h3 style="margin-top: 0;">Menu</h3>
       <div><a href="#" onclick="showView('tick')">Tick View</a></div>
       <div><a href="#" onclick="showView('sql')">SQL View</a></div>
-
-      <div style="margin-top: 1em;">
+ 
+      <div id="labelSection" style="margin-top: 1em;">
         <strong>Labels</strong><br>
         <div id="labelToggles"></div>
       </div>
 
-      <div style="margin-top: 1em;">
+      <div id="sqlConsole" style="margin-top: 1em; display: none;">
         <strong>SQL Console</strong><br>
         <select id="tableSelect"></select>
         <input id="queryInput" type="text" placeholder="Write your SQL or leave blank..." />
@@ -227,6 +227,8 @@ async function loadVersion() {
 function showView(name) {
   document.getElementById('tickView').style.display = name === 'tick' ? 'block' : 'none';
   document.getElementById('sqlView').style.display = name === 'sql' ? 'block' : 'none';
+  document.getElementByID('labelSection').style.display = name === 'tick' ? 'block' : 'none';
+  document.getElementById('sqlConsole').style.display = name === 'sql' ? 'block' : 'none';
 }
 
 async function loadTableNames() {
