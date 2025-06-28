@@ -135,4 +135,4 @@ def run_sql_query(query: str = Query(...)):
 # Get the current version of the API
 @app.get("/version")
 def get_version():
-    return {"version": "2025.06.28.05.005"}  # Manually update as needed
+    return {"version": "2025.06.28.05.006"}  # Manually update as needed
