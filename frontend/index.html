@@ -206,7 +206,7 @@ async function loadInitialData() {
 }
 
 async function loadLabelToggles() {
-  const res = await fetch('/labels/available');
+  const res = await fetch('/api/labels/available');
   const tables = await res.json();
   const container = document.getElementById('labelToggles');
   container.innerHTML = '';
