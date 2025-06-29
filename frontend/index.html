@@ -238,10 +238,11 @@ async function mannualLoadMoreLeft(){
   const count = parseInt(document.getElementById('tickLoadAmount').value) || '0';
   if (!count || isNaN(count)) return;
 
-  const currentView = chart.getModel().getComponent('dataZoom').getRange();
-  const idStart = data.find(d => d[0] === currentView.startValue)?.[2];
-  const idEnd = data.find(d => d[0] === currentView.endValue)?.[2];
-
+  const zoom = chart.getOption().dataZoom?.[0];
+  const startIndex = Math.floor((zoom?.start / 100) * data.length);
+  const endIndex = Math.floor((zoom?.end / 100) * data.length);
+  const idStart = data[startIndex]?.[2];
+  const idEnd = data[endIndex]?.[2];
 
   const res = await fetch(`/ticks/before/${idStart}?limit=${count}`);
   const older = await res.json();
