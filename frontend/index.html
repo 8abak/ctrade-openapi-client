@@ -236,7 +236,7 @@ async function loadLabelToggles() {
 
 async function mannualLoadMoreLeft(){
   const count = parseInt(document.getElementById('tickLoadAmount').value) || '0';
-  if (!count || isNan(count)) return;
+  if (!count || isNaN(count)) return;
 
   const currentView = chart.getModel().getComponent('dataZoom').getRange();
   const idStart = data.find(d => d[0] === currentView.startValue)?.[2];
