@@ -175,7 +175,24 @@ series: [{
   showSymbol: false,
   data: [],
   lineStyle: { color: '#3fa9f5', width: 1.2 }
-}]
+}],
+dataZoom: [
+  {
+    type: 'inside',
+    start: 90,
+    end: 100
+  },
+  {
+    type: 'slider',
+    start: 90,
+    end: 100,
+    bottom: 0,
+    height: 40,
+    handleStyle: {
+      color: '#3fa9f5'
+    }
+  }
+],
 
 };
 
