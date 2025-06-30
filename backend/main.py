@@ -54,7 +54,7 @@ def get_ticks(offset: int = 0, limit: int = 2000):
 def get_latest_ticks(after: str = Query(..., description="UTC timestamp in ISO format")):
     with engine.connect() as conn:
         query = text("""
-            SELECT timestamp, bid, ask, mid
+            SELECT id, timestamp, bid, ask, mid  -- <-- FIXED: add id
             FROM ticks
             WHERE timestamp > :after
             ORDER BY timestamp ASC
@@ -63,6 +63,7 @@ def get_latest_ticks(after: str = Query(..., description="UTC timestamp in ISO f
         result = conn.execute(query, {"after": after})
         ticks = [dict(row._mapping) for row in result]
     return ticks
+
 
 # Get the latest N ticks in chronological order
 @app.get("/ticks/recent", response_model=List[Tick])
@@ -150,4 +151,4 @@ def get_label_tables():
 # Get the current version of the API
 @app.get("/version")
 def get_version():
-    return {"version": "2025.06.28.06.013"}  # Manually update as needed
+    return {"version": "2025.07.01.01.001"}  # Manually update as needed
