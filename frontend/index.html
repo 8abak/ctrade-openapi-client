@@ -153,13 +153,22 @@ const option = {
       }
     }
   },
-  yAxis: { type: 'value', scale: true, axisLabel: { color: '#ccc' } },
-  dataZoom: [
-    { type: 'inside', start: 90, end: 100 },
-    { type: 'slider', start: 90, end: 100, bottom: 0, height: 40, handleStyle: { color: '#3fa9f5' } }
-  ],
-  series: [{ name: 'Mid Price', type: 'line', showSymbol: false, data: [], lineStyle: { color: '#3fa9f5', width: 1.2 } }],
-  markLine: { data: [] }
+  yAxis: {
+    type: 'value',
+    scale: true,
+    min: function (value) {
+      return Math.floor(value.min); // always round down
+    },
+    max: function (value) {
+      return Math.ceil(value.max); // always round up
+    },
+    interval: 1, // fixed step of 1.0 for clean price levels
+    axisLabel: {
+      color: '#ccc',
+      formatter: val => val.toFixed(0) // show as whole numbers only
+    }
+},
+
 };
 
 chart.setOption(option);
