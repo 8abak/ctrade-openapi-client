@@ -156,24 +156,42 @@ async function mannualLoadMoreLeft() {
 
 async function pollNewData() {
   if (!lastTimestamp) return;
-  const res = await fetch(`/ticks/latest?after=${encodeURIComponent(lastTimestamp)}`);
-  const newTicks = await res.json();
-  if (newTicks.length > 0) {
-    const range = chart.getModel().getComponent('dataZoom').getRange();
-    const atRightEdge = range.endValue === data[data.length - 1]?.[0];
-    newTicks.forEach(t => data.push([t.timestamp, t.mid, t.id]));
-    data = data.slice(-3000);
-    lastTimestamp = newTicks[newTicks.length - 1].timestamp;
-    chart.setOption({
-      xAxis: { data: data.map(d => d[0]) },
-      series: [{ data }],
-      dataZoom: atRightEdge ? [
-        { startValue: data[data.length - 200]?.[0], endValue: data[data.length - 1]?.[0] },
-        { startValue: data[data.length - 200]?.[0], endValue: data[data.length - 1]?.[0] }
-      ] : undefined
-    });
+
+  try {
+    const res = await fetch(`/ticks/latest?after=${encodeURIComponent(lastTimestamp)}`);
+    const newTicks = await res.json();
+
+    if (newTicks.length > 0) {
+      const range = chart.getModel().getComponent('dataZoom').getRange();
+      const currentRightMost = data[data.length - 1]?.[0];
+      const atRightEdge = range.endValue === currentRightMost;
+
+      newTicks.forEach(t => data.push([t.timestamp, t.mid, t.id]));
+      data = data.slice(-3000);
+      lastTimestamp = newTicks[newTicks.length - 1].timestamp;
+
+      const newRightMost = data[data.length - 1]?.[0];
+      const newLeft = data[data.length - 200]?.[0];
+
+      chart.setOption({
+        xAxis: { data: data.map(d => d[0]) },
+        series: [{ data }],
+        dataZoom: atRightEdge
+          ? [
+              { startValue: newLeft, endValue: newRightMost },
+              { startValue: newLeft, endValue: newRightMost }
+            ]
+          : [
+              { startValue: range.startValue, endValue: range.endValue },
+              { startValue: range.startValue, endValue: range.endValue }
+            ]
+      });
+    }
+  } catch (err) {
+    console.error("Error fetching live ticks:", err);
   }
 }
+
 
 async function loadInitialData() {
   const res = await fetch("/ticks/recent?limit=2200");
