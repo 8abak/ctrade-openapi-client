@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
+  <meta charset="UTF-8" />
   <title>Live Tick Chart</title>
   <script src="https://cdn.jsdelivr.net/npm/echarts@5"></script>
   <style>
@@ -13,141 +13,364 @@
       background: #111;
       color: white;
     }
+    #tickView, #sqlView {
+      flex: 1;
+      height: 100%;
+    }
+    #tickView {
+      display: block;
+    }
+    #sqlView {
+      display: none;
+    }
     #main {
       height: 100%;
       width: 100%;
     }
-    #sidebar {
-      width: 260px;
-      background: #1a1a1a;
-      padding: 1em;
-      box-sizing: border-box;
-      display: flex;
-      flex-direction: column;
-      justify-content: space-between;
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin-top: 1em;
+      color: white;
     }
-    button, input, select, textarea {
+    th, td {
+      border: 1px solid #444;
+      padding: 6px 10px;
       font-size: 14px;
+    }
+    th {
+      background-color: #222;
+    }
+    input, select {
       padding: 6px;
       margin-top: 6px;
-      width: 100%;
+      width: 90%;
+      font-size: 14px;
       background: #222;
       color: white;
       border: 1px solid #555;
     }
     button {
-      background-color: #3fa9f5;
+      margin-top: 6px;
+      padding: 6px 12px;
+      font-size: 14px;
+      background: #3fa9f5;
+      color: white;
       border: none;
       cursor: pointer;
     }
-    #sqlConsole {
-      display: none;
+    #sqlResult {
+      font-size: 13px;
+      padding: 6px;
+      overflow: auto;
+      max-height: 200px;
     }
   </style>
 </head>
 <body>
-<div style="display: flex; height: 100vh;">
-  <div id="sidebar">
-    <div>
-      <h3>Live Tick Chart</h3>
-      <label>Load More Left:</label>
-      <input type="number" id="tickLoadAmount" value="2000" min="100" max="10000">
-      <button onclick="loadMoreLeft()">Load more left</button>
-      <button onclick="toggleSQL()">Toggle SQL View</button>
-      <div id="sqlConsole">
-        <select id="tableSelect"></select>
-        <textarea id="queryInput" rows="4" placeholder="SELECT * FROM ticks LIMIT 20"></textarea>
-        <button onclick="runQuery()">Run Query</button>
-      </div>
-    </div>
-    <div id="version">Version: loading...</div>
-  </div>
-  <div style="flex: 1; display: flex; flex-direction: column;">
-    <div id="main" style="flex: 1;"></div>
-    <div id="sqlResult" style="max-height: 200px; overflow-y: auto; padding: 1em; font-size: 13px;"></div>
-  </div>
-</div>
-<script>
-const chart = echarts.init(document.getElementById('main'));
-let data = [], lastTimestamp = null;
+<div style="display: flex; height: 100vh; overflow: hidden;">
+  <div id="sidebar" style="width: 260px; background: #1a1a1a; color: white; display: flex; flex-direction: column; justify-content: space-between;">
+    <div style="padding: 1em;">
+      <h3 style="margin-top: 0;">Menu</h3>
+      <div><a href="javascript:void(0)" onclick="showView('tick')">Tick View</a></div>
+      <div><a href="javascript:void(0)" onclick="showView('sql')">SQL View</a></div>
 
-chart.setOption({
+      <div id="labelSection" style="margin-top: 1em;">
+        <strong>Labels</strong><br>
+        <div id="labelToggles"></div>
+        <div style="margin-top: 12px;">
+          <input id="tickLoadAmount" type="number" value="2000" min="100" max="5000" style="width: 100px; margin-bottom: 4px;" />
+          <button onclick="mannualLoadMoreLeft()">Load more left</button>
+        </div>";
+      </div>
+
+      <div id="sqlConsole" style="margin-top: 1em; display: none;">
+        <strong>SQL Console</strong><br>
+        <select id="tableSelect"></select>
+        <textarea id="queryInput" placeholder="Write query here..." rows="5" style="width: 100%; resize: vertical;"></textarea>
+        <button onclick="runQuery()">Run</button>
+      </div>
+
+      
+
+    </div>
+    <div id="version" style="padding: 1em; font-size: 0.8em; color: #888;">Version: 2025.06.28.05.017</div>
+  </div>
+
+  <div id="tickView">
+    <div id="main"></div>
+  </div>
+
+  <div id="sqlView">
+    <div id="sqlResult" style="padding: 1em; overflow: auto; height: 100%;">
+    </div>
+  </div>
+
+
+</div>
+
+<script>
+function showView(name) {
+  const isTick = name === 'tick';
+  document.getElementById('tickView').style.display = isTick ? 'block' : 'none';
+  document.getElementById('sqlView').style.display = isTick ? 'none' : 'block';
+  document.getElementById('labelSection').style.display = isTick ? 'block' : 'none';
+  document.getElementById('sqlConsole').style.display = isTick ? 'none' : 'block';
+}
+</script>
+
+<script>
+let data = [], lastTimestamp = null, isLoadingOld = false;
+const labelLayers = {};
+const chart = echarts.init(document.getElementById('main'));
+
+const option = {
   backgroundColor: '#111',
   tooltip: {
     trigger: 'axis',
-    formatter: p => `ID: ${p[0].value[2]}<br>Mid: ${p[0].value[1]}`
+    backgroundColor: '#222',
+    borderColor: '#555',
+    borderWidth: 1,
+    textStyle: { color: '#fff', fontSize: 13 },
+    formatter: (params) => {
+      const p = params[0];
+      const date = new Date(p.value[0]);
+      date.setMinutes(date.getMinutes() + 600);
+      const timeStr = date.toLocaleTimeString('en-au', { hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true }).toLowerCase();
+      const dateStr = date.toLocaleDateString('en-AU');
+      return `<div style="padding: 8px;"><strong>${timeStr}</strong><br><span style="color: #ccc;">${dateStr}</span><br>Mid: <strong style="color: #3fa9f5;">${p.value[1].toFixed(2)}</strong><br>ID: <span style="color:#aaa;">${p.value[2]}</span></div>`;
+    }
   },
-  xAxis: { type: 'category', data: [], axisLabel: { color: '#ccc' } },
-  yAxis: { type: 'value', scale: true, axisLabel: { color: '#ccc' } },
-  dataZoom: [
-    { type: 'inside' },
-    { type: 'slider', bottom: 0, height: 40, handleStyle: { color: '#3fa9f5' } }
-  ],
-  series: [{ type: 'line', data: [], showSymbol: false }]
+  xAxis: {
+    type: 'category',
+    data: [],
+    axisLabel: {
+      color: '#ccc',
+      formatter: val => {
+        const d = new Date(val);
+        d.setMinutes(d.getMinutes() + 600);
+        return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}` + `\n${d.toLocaleDateString('en-AU', { month: 'short', day: 'numeric' })}`;
+      }
+    }
+  },
+  yAxis: {
+    type: 'value',
+    scale: true,
+    min: function (value) {
+      return Math.floor(value.min); // always round down
+    },
+    max: function (value) {
+      return Math.ceil(value.max); // always round up
+    },
+    interval: 1, // fixed step of 1.0 for clean price levels
+    axisLabel: {
+      color: '#ccc',
+      formatter: val => val.toFixed(0) // show as whole numbers only
+    }
+  
+},
+series: [{
+  name: 'Mid Price',
+  type: 'line',
+  showSymbol: false,
+  data: [],
+  lineStyle: { color: '#3fa9f5', width: 1.2 }
+}],
+dataZoom: [
+  {
+    type: 'inside',
+    start: 90,
+    end: 100
+  },
+  {
+    type: 'slider',
+    start: 90,
+    end: 100,
+    bottom: 0,
+    height: 40,
+    handleStyle: {
+      color: '#3fa9f5'
+    }
+  }
+],
+
+};
+
+chart.setOption(option);
+
+chart.on('dataZoom', async function (event) {
+  const startPercent = event.batch?.[0]?.start ?? event.start;
+  const visibleLeftCount = Math.floor((startPercent / 100) * data.length);
+  if (visibleLeftCount < 400 && !isLoadingOld) {
+    isLoadingOld = true;
+    const zoom = chart.getOption().dataZoom?.[0];
+    const startIndex = Math.floor((zoom?.start / 100) * data.length);
+    const endIndex = Math.floor((zoom?.end / 100) * data.length);
+    const idStart = data[startIndex]?.[2];
+    const idEnd = data[endIndex]?.[2];
+    const firstId = data[0]?.[2];
+    const res = await fetch(`/ticks/before/${firstId}?limit=2000`);
+    const older = await res.json();
+    if (older.length > 0) {
+      const prepend = older.map(t => [t.timestamp, t.mid, t.id]);
+      data = prepend.concat(data);
+      const newStart = data.findIndex(d => d[2] === idStart);
+      const newEnd = data.findIndex(d => d[2] === idEnd);
+      const s = (newStart / data.length) * 100;
+      const e = (newEnd / data.length) * 100;
+      chart.setOption({ xAxis: { data: data.map(d => d[0]) }, series: [{ data }], dataZoom: [{ start: s, end: e }, { start: s, end: e }] });
+      updateLabelView();
+    }
+    isLoadingOld = false;
+  }
 });
 
-function updateChart(autoScroll = false) {
-  const end = data[data.length - 1]?.[0];
-  const start = data[data.length - 200]?.[0];
-  const zoom = autoScroll ? [start, end] : chart.getOption().dataZoom.map(z => [z.startValue, z.endValue]);
+function updateLabelView() {
+  const markLines = Object.values(labelLayers).flat();
+  const markAreas = [];
+
+  if (labelLayers['supres']) {
+    const srZones = labelLayers['supres'];
+    const currentLastId = data[data.length - 1]?.[2];
+
+    for (const zone of srZones) {
+      const startTick = data.find(d => d[2] === zone.tickid_start);
+      let endTick = zone.tickid_end
+        ? data.find(d => d[2] === zone.tickid_end)
+        : data[data.length - 1];
+
+      if (startTick && endTick) {
+        markAreas.push([
+          { xAxis: startTick[0], yAxis: zone.price_low },
+          { xAxis: endTick[0], yAxis: zone.price_high }
+        ]);
+      }
+    }
+  }
+
   chart.setOption({
-    xAxis: { data: data.map(d => d[0]) },
-    series: [{ data }],
-    dataZoom: [
-      { startValue: zoom[0][0], endValue: zoom[0][1] },
-      { startValue: zoom[1][0], endValue: zoom[1][1] }
-    ]
+    markLine: { symbol: ['none', 'none'], label: { show: true }, data: markLines },
+    series: [{
+      name: 'Mid Price',
+      type: 'line',
+      showSymbol: false,
+      data: data,  // 🔑 Reuse existing tick data
+      lineStyle: { color: '#3fa9f5', width: 1.2 },
+      markArea: {
+        silent: true,
+        data: markAreas,
+        itemStyle: {
+          color: 'rgba(255, 255, 0, 0.15)', // default, overridden per zone
+        }
+      }
+    }]
   });
 }
 
+
+
+async function toggleLabel(name, checked) {
+  if (checked) {
+    if (name === 'supres') {
+      const res = await fetch(`/labels/supres`);
+      labelLayers[name] = res;
+    } else {
+      const res = await fetch(`/labels/${name}`);
+      const marks = res.map(r => {
+        const match = data.find(d => d[2] === r.tickid);
+        return match ? { xAxis: match[0], label: { formatter: name }, lineStyle: { type: 'dashed', color: '#ffa500' } } : null;
+      }).filter(Boolean);
+      labelLayers[name] = marks;
+    }
+  } else {
+    delete labelLayers[name];
+  }
+  updateLabelView();
+}
+
+
 async function loadInitialData() {
-  const res = await fetch('/ticks/recent?limit=2200');
+  const res = await fetch("/ticks/recent?limit=2200");
   const ticks = await res.json();
   data = ticks.map(t => [t.timestamp, t.mid, t.id]);
   lastTimestamp = ticks[ticks.length - 1]?.timestamp;
-  updateChart(true);
-  loadTableList();
+  chart.setOption({ xAxis: { data: data.map(d => d[0]) }, series: [{ data }] });
 }
+
+async function loadLabelToggles() {
+  const res = await fetch('/api/labels/available');
+  const tables = await res.json();
+  const container = document.getElementById('labelToggles');
+  container.innerHTML = '';
+  tables.forEach(name => {
+    const id = `label-${name}`;
+    container.insertAdjacentHTML('beforeend', `
+      <label style="display:flex;align-items: center;font-size:13px;margin-bottom:4px;gap: 6px;">
+        <input type="checkbox" id="${id}" onchange="toggleLabel('${name}', this.checked)">
+        <span>${name}</span>
+      </label>`);
+  });
+}
+
+async function mannualLoadMoreLeft(){
+  const count = parseInt(document.getElementById('tickLoadAmount').value) || 0;
+  if (!count || isNaN(count)) return;
+
+  const zoom = chart.getModel().getComponent('dataZoom');
+  const range = zoom.getRange();  // actual xAxis values, not percentages
+
+  const idStart = data.find(d => d[0] === range.startValue)?.[2];
+  const idEnd = data.find(d => d[0] === range.endValue)?.[2];
+
+  const res = await fetch(`/ticks/before/${idStart}?limit=${count}`);
+  const older = await res.json();
+
+  if (older.length > 0) {
+    const prepend = older.map(t => [t.timestamp, t.mid, t.id]);
+    data = prepend.concat(data);
+    lastTimestamp = older[older.length - 1].timestamp;
+
+    chart.setOption({
+      xAxis: { data: data.map(d => d[0]) },
+      series: [{ data }],
+      dataZoom: [
+        { type: 'inside', startValue: range.startValue, endValue: range.endValue },
+        { type: 'slider', startValue: range.startValue, endValue: range.endValue }
+      ]
+    });
+
+    updateLabelView();
+  }
+}
+
+
 
 async function pollNewData() {
   if (!lastTimestamp) return;
   const res = await fetch(`/ticks/latest?after=${encodeURIComponent(lastTimestamp)}`);
   const newTicks = await res.json();
   if (newTicks.length > 0) {
-    const latest = data[data.length - 1]?.[0];
-    const zoom = chart.getOption().dataZoom?.[0];
-    const atRight = zoom?.endValue === latest;
     newTicks.forEach(t => data.push([t.timestamp, t.mid, t.id]));
-    data = data.slice(-3000);
+    data = data.slice(-2200);
     lastTimestamp = newTicks[newTicks.length - 1].timestamp;
-    updateChart(atRight);
+    chart.setOption({ xAxis: { data: data.map(d => d[0]) }, series: [{ data }] });
+    updateLabelView();
   }
 }
 
-async function loadMoreLeft() {
-  const count = parseInt(document.getElementById('tickLoadAmount').value);
-  const zoom = chart.getOption().dataZoom?.[0];
-  const first = data.find(d => d[0] === zoom.startValue);
-  if (!first) return;
-  const res = await fetch(`/ticks/before/${first[2]}?limit=${count}`);
-  const older = await res.json();
-  if (older.length > 0) {
-    const prepend = older.map(t => [t.timestamp, t.mid, t.id]);
-    data = prepend.concat(data);
-    updateChart(false);
-  }
+async function loadVersion() {
+  try {
+    const res = await fetch('/version');
+    const json = await res.json();
+    document.getElementById('version').textContent = `Version: ${json.version}`;
+  } catch { document.getElementById('version').textContent = 'Version: unknown'; }
 }
 
-function toggleSQL() {
-  const sql = document.getElementById('sqlConsole');
-  sql.style.display = sql.style.display === 'none' ? 'block' : 'none';
-}
-
-async function loadTableList() {
+async function loadTableNames() {
   const res = await fetch('/sqlvw/tables');
   const tables = await res.json();
-  const sel = document.getElementById('tableSelect');
-  sel.innerHTML = tables.map(t => `<option value="${t}">${t}</option>`).join('');
+  const select = document.getElementById('tableSelect');
+  select.innerHTML = tables.map(t => `<option value="${t}">${t}</option>`).join('');
 }
 
 async function runQuery() {
@@ -179,18 +402,10 @@ async function runQuery() {
   }
 }
 
-async function loadVersion() {
-  try {
-    const res = await fetch('/version');
-    const json = await res.json();
-    document.getElementById('version').textContent = `Version: ${json.version}`;
-  } catch {
-    document.getElementById('version').textContent = 'Version: failed';
-  }
-}
-
 loadInitialData();
 loadVersion();
+loadTableNames();
+loadLabelToggles();
 setInterval(pollNewData, 3000);
 </script>
 </body>

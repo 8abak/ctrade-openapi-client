@@ -144,20 +144,6 @@ def get_supres_zones():
         """))
         return [dict(row._mapping) for row in result]
 
-#Get historical data for ticks.
-@app.get("/ticks/navigationExtend", response_model=List[Tick])
-def extendNavigationPanel(beforeId: int, limit: int = 10000):
-    with engine.connect() as conn:
-        query = text("""
-                     SELECT id, timestamp, bid, ask, mid
-                     from ticks
-                     where id < beforeId
-                     oreder by id desc
-                     limit :limit
-                     """)
-        result = conn.execute(query, {"beforeId": beforeId, "limit": limit})
-        ticks = [dict(row._mapping) for row in result]
-        return list(reversed(ticks))  # Reverse to return in chronological order
 
 # Get available tables based on labels.
 @app.get("/labels/available")
@@ -177,4 +163,4 @@ def get_label_tables():
 # Get the current version of the API
 @app.get("/version")
 def get_version():
-    return {"version": "2025.07.02.1.06"}  # Manually update as needed
+    return {"version": "2025.07.02.1.001"}  # Manually update as needed
