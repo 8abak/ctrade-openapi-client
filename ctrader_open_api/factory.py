@@ -10,7 +10,12 @@ class Factory(ClientFactory):
         self.numberOfMessagesToSendPerSecond = self.client.numberOfMessagesToSendPerSecond
 
     def buildProtocol(self, addr):
-        return TcpProtocol(self)  # ✅ Ensures Twisted gets a valid protocol
+        print("✅ buildProtocol CALLED — returning TcpProtocol")
+        from ctrader_open_api.tcpProtocol import TcpProtocol
+        proto = TcpProtocol(self)
+        print("✅ TcpProtocol instance created:", proto)
+        return proto
+
 
     def connected(self, protocol):
         self.client._connected(protocol)

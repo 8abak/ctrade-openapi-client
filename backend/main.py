@@ -133,6 +133,18 @@ def run_sql_query(query: str = Query(...)):
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
 
+# to serve Support and Resisance zones
+@app.get("/labels/supres")
+def get_supres_zones():
+    with engine.connect() as conn:
+        result = conn.execute(text("""
+            SELECT level_type, price_low, price_high, tickid_start, tickid_end
+            FROM supRes
+            WHERE confirmed = TRUE
+        """))
+        return [dict(row._mapping) for row in result]
+
+
 # Get available tables based on labels.
 @app.get("/labels/available")
 def get_label_tables():
@@ -151,4 +163,4 @@ def get_label_tables():
 # Get the current version of the API
 @app.get("/version")
 def get_version():
-    return {"version": "2025.07.01.02.009"}  # Manually update as needed
+    return {"version": "2025.07.01.03.001(supRes)"}  # Manually update as needed

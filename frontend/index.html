@@ -226,24 +226,69 @@ chart.on('dataZoom', async function (event) {
 });
 
 function updateLabelView() {
-  const all = Object.values(labelLayers).flat();
-  chart.setOption({ markLine: { symbol: ['none', 'none'], label: { show: true }, data: all } });
+  const markLines = Object.values(labelLayers).flat();
+
+  const markAreas = [];
+
+  if (labelLayers['supres']) {
+    const srZones = labelLayers['supres'];
+    const currentLastId = data[data.length - 1]?.[2];
+
+    for (const zone of srZones) {
+      const startTick = data.find(d => d[2] === zone.tickid_start);
+      let endTick = zone.tickid_end
+        ? data.find(d => d[2] === zone.tickid_end)
+        : data[data.length - 1];
+
+      if (startTick && endTick) {
+        markAreas.push({
+          itemStyle: {
+            color: zone.level_type === 'support' ? 'rgba(255,165,0,0.2)' : 'rgba(255,255,0,0.2)',
+          },
+          label: { show: true, position: 'inside', formatter: zone.level_type },
+          xAxis: [startTick[0], endTick[0]],
+          yAxis: [zone.price_low, zone.price_high]
+        });
+      }
+    }
+  }
+
+  chart.setOption({
+    markLine: { symbol: ['none', 'none'], label: { show: true }, data: markLines },
+    series: [{
+      ...option.series[0],
+      markArea: {
+        silent: true,
+        data: markAreas.map(a => [[
+          { xAxis: a.xAxis[0], yAxis: a.yAxis[0] },
+          { xAxis: a.xAxis[1], yAxis: a.yAxis[1] }
+        ]]),
+        itemStyle: { opacity: 0.2 }
+      }
+    }]
+  });
 }
+
 
 async function toggleLabel(name, checked) {
   if (checked) {
-    const res = await fetch(`/labels/${name}`);
-    const rows = await res.json();
-    const marks = rows.map(r => {
-      const match = data.find(d => d[2] === r.tickid);
-      return match ? { xAxis: match[0], label: { formatter: name }, lineStyle: { type: 'dashed', color: '#ffa500' } } : null;
-    }).filter(Boolean);
-    labelLayers[name] = marks;
+    if (name === 'supres') {
+      const res = await fetch(`/labels/supres`);
+      labelLayers[name] = res;
+    } else {
+      const res = await fetch(`/labels/${name}`);
+      const marks = res.map(r => {
+        const match = data.find(d => d[2] === r.tickid);
+        return match ? { xAxis: match[0], label: { formatter: name }, lineStyle: { type: 'dashed', color: '#ffa500' } } : null;
+      }).filter(Boolean);
+      labelLayers[name] = marks;
+    }
   } else {
     delete labelLayers[name];
   }
   updateLabelView();
 }
+
 
 async function loadInitialData() {
   const res = await fetch("/ticks/recent?limit=2200");
