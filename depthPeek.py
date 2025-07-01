@@ -2,8 +2,8 @@ import asyncio
 from datetime import datetime
 from ctrader_open_api.client import Client
 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
-    ProtoOASubscribeDepthQuotesReq,
-    ProtoOAQuoteDepthEvent
+    ProtoOADepthEvent,
+    ProtoOASubscribeDepthQuotesReq
 )
 
 # From your tickCollector
@@ -16,35 +16,31 @@ depth_snapshots = []
 
 def on_depth(event):
     timestamp = datetime.utcnow().isoformat()
-    bids = [(b.price, b.volume) for b in event.depthQuote.bid]
-    asks = [(a.price, a.volume) for a in event.depthQuote.ask]
-    snapshot = {
-        "timestamp": timestamp,
-        "symbolId": event.symbolId,
-        "bids": bids,
-        "asks": asks
-    }
-    print(f"📊 Depth Snapshot @ {timestamp} — Bids: {len(bids)}, Asks: {len(asks)}")
-    print("  Top 3 Bids:")
-    for b in bids[:3]:
-        print(f"    Price: {b[0]:.5f} | Volume: {b[1]:.2f}")
-    print("  Top 3 Asks:")
-    for a in asks[:3]:
-        print(f"    Price: {a[0]:.5f} | Volume: {a[1]:.2f}")
+    print(f"📊 Depth Snapshot @ {timestamp}")
+    for q in event.newQuotes:
+        print(f"  Price: {q.price / 100000:.5f}, Volume: {q.volume / 100:.2f}")
     print("-" * 40)
 
+    snapshot = {
+        "timestamp": timestamp,
+        "quotes": [(q.price / 100000, q.volume / 100) for q in event.newQuotes]
+    }
     depth_snapshots.append(snapshot)
+
     if len(depth_snapshots) >= 30:
         asyncio.get_event_loop().stop()
 
 async def run_depth_peek():
     client = Client(client_id=CLIENT_ID, client_secret=CLIENT_SECRET)
     await client.connect()
-    client.on(ProtoOAQuoteDepthEvent, on_depth)
+
+    client.on(ProtoOADepthEvent, on_depth)
+
     await client.send(ProtoOASubscribeDepthQuotesReq(
         ctidTraderAccountId=ACCOUNT_ID,
         symbolId=SYMBOL_ID
     ))
+
     print("📡 Subscribed to depth stream. Waiting for 30 events...")
     await asyncio.get_event_loop().create_future()
 
