@@ -312,41 +312,37 @@ async function loadLabelToggles() {
   });
 }
 
-async function mannualLoadMoreLeft() {
+async function mannualLoadMoreLeft(){
   const count = parseInt(document.getElementById('tickLoadAmount').value) || 0;
   if (!count || isNaN(count)) return;
 
-  const firstId = data[0]?.[2]; // always get oldest loaded tick ID
-  if (!firstId) return;
+  const zoom = chart.getModel().getComponent('dataZoom');
+  const range = zoom.getRange();  // actual xAxis values, not percentages
 
-  const res = await fetch(`/ticks/before/${firstId}?limit=${count}`);
+  const idStart = data.find(d => d[0] === range.startValue)?.[2];
+  const idEnd = data.find(d => d[0] === range.endValue)?.[2];
+
+  const res = await fetch(`/ticks/before/${idStart}?limit=${count}`);
   const older = await res.json();
 
   if (older.length > 0) {
     const prepend = older.map(t => [t.timestamp, t.mid, t.id]);
-    data = prepend.concat(data); // prepend to beginning of data
-
-    // preserve current viewport range using old IDs
-    const zoom = chart.getOption().dataZoom?.[0];
-    const startIndex = Math.floor((zoom?.start / 100) * data.length);
-    const endIndex = Math.floor((zoom?.end / 100) * data.length);
-    const idStart = data[startIndex]?.[2];
-    const idEnd = data[endIndex]?.[2];
-
-    const newStart = data.findIndex(d => d[2] === idStart);
-    const newEnd = data.findIndex(d => d[2] === idEnd);
-    const s = (newStart / data.length) * 100;
-    const e = (newEnd / data.length) * 100;
+    data = prepend.concat(data);
+    lastTimestamp = older[older.length - 1].timestamp;
 
     chart.setOption({
       xAxis: { data: data.map(d => d[0]) },
       series: [{ data }],
-      dataZoom: [{ start: s, end: e }, { start: s, end: e }]
+      dataZoom: [
+        { type: 'inside', startValue: range.startValue, endValue: range.endValue },
+        { type: 'slider', startValue: range.startValue, endValue: range.endValue }
+      ]
     });
 
     updateLabelView();
   }
 }
+
 
 
 async function pollNewData() {
