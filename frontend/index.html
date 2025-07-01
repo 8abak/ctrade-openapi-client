@@ -162,35 +162,37 @@ async function pollNewData() {
     const newTicks = await res.json();
 
     if (newTicks.length > 0) {
-      const range = chart.getModel().getComponent('dataZoom').getRange();
+      // Fallback in case zoom info is missing
+      const zoom = chart.getOption().dataZoom?.[0];
+      const startValue = zoom?.startValue ?? data[data.length - 200]?.[0];
+      const endValue = zoom?.endValue ?? data[data.length - 1]?.[0];
       const currentRightMost = data[data.length - 1]?.[0];
-      const atRightEdge = range.endValue === currentRightMost;
+      const atRightEdge = endValue === currentRightMost;
 
       newTicks.forEach(t => data.push([t.timestamp, t.mid, t.id]));
       data = data.slice(-3000);
       lastTimestamp = newTicks[newTicks.length - 1].timestamp;
 
-      const newRightMost = data[data.length - 1]?.[0];
-      const newLeft = data[data.length - 200]?.[0];
-
       chart.setOption({
         xAxis: { data: data.map(d => d[0]) },
         series: [{ data }],
-        dataZoom: atRightEdge
-          ? [
-              { startValue: newLeft, endValue: newRightMost },
-              { startValue: newLeft, endValue: newRightMost }
-            ]
-          : [
-              { startValue: range.startValue, endValue: range.endValue },
-              { startValue: range.startValue, endValue: range.endValue }
-            ]
+        dataZoom: [
+          {
+            startValue: atRightEdge ? data[data.length - 200]?.[0] : startValue,
+            endValue: atRightEdge ? data[data.length - 1]?.[0] : endValue
+          },
+          {
+            startValue: atRightEdge ? data[data.length - 200]?.[0] : startValue,
+            endValue: atRightEdge ? data[data.length - 1]?.[0] : endValue
+          }
+        ]
       });
     }
   } catch (err) {
     console.error("Error fetching live ticks:", err);
   }
 }
+
 
 
 async function loadInitialData() {
