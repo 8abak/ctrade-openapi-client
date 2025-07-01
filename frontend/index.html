@@ -81,12 +81,7 @@
         <div style="margin-top: 12px;">
           <input id="tickLoadAmount" type="number" value="2000" min="100" max="5000" style="width: 100px; margin-bottom: 4px;" />
           <button onclick="mannualLoadMoreLeft()">Load more left</button>
-        </div>
-        <div style="margin-top: 10px;">
-          <input type="checkbox" id="liveAppendToggle" checked />
-          <label for="liveAppendToggle" style="font-size: 13px; padding-left: 6px;">Live append chart</label>
-        </div>
-
+        </div>";
       </div>
 
       <div id="sqlConsole" style="margin-top: 1em; display: none;">
@@ -355,35 +350,13 @@ async function pollNewData() {
   const res = await fetch(`/ticks/latest?after=${encodeURIComponent(lastTimestamp)}`);
   const newTicks = await res.json();
   if (newTicks.length > 0) {
-    const mapped = newTicks.map(t => [t.timestamp, t.mid, t.id]);
-    data = data.concat(mapped).slice(-2200);
+    newTicks.forEach(t => data.push([t.timestamp, t.mid, t.id]));
+    data = data.slice(-2200);
     lastTimestamp = newTicks[newTicks.length - 1].timestamp;
-
-    const liveAppend = document.getElementById('liveAppendToggle').checked;
-    if (liveAppend) {
-      chart.setOption({
-        xAxis: { data: data.map(d => d[0]) },
-        series: [{ data }]
-      });
-      updateLabelView();
-    }
-    // ❗ If not live appending, we still update the zoom slider (navigation panel) only
-    else {
-      const zoom = chart.getOption().dataZoom?.[0];
-      if (zoom) {
-        const start = zoom.start;
-        const end = zoom.end;
-        chart.setOption({
-          xAxis: { data: data.map(d => d[0]) },
-          series: [{ data }],
-          dataZoom: [{ start, end }, { start, end }]
-        });
-      }
-    }
+    chart.setOption({ xAxis: { data: data.map(d => d[0]) }, series: [{ data }] });
+    updateLabelView();
   }
 }
-
-
 
 async function loadVersion() {
   try {
