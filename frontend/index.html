@@ -380,7 +380,7 @@ async function loadTableNames() {
 async function runQuery() {
   const table = document.getElementById('tableSelect').value;
   const raw = document.getElementById('queryInput').value.trim();
-  const query = raw || `SELECT * FROM ${table} ORDER BY timestamp DESC LIMIT 20`;
+  const query = raw || `SELECT * FROM ${table} ORDER BY id DESC LIMIT 20`;
   const container = document.getElementById('sqlResult');
   container.innerHTML = `<pre style="color: #999;">Running query...</pre>`;
   try {
