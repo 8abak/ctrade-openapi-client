@@ -26,11 +26,12 @@ with engine.begin() as conn:
     if not first_tick:
         raise Exception("No ticks found on or after 25 June")
 
-    df = pd.read_sql("""
-        SELECT id, mid FROM ticks
-        WHERE id >= :start_id
-        ORDER BY id ASC
-    """, conn, params={"start_id": first_tick[0]})
+    df = pd.read_sql(
+        text("SELECT id, mid FROM ticks WHERE id >= :start_id ORDER BY id ASC"),
+        conn,
+        params={"start_id": first_tick[0]}
+    )
+
 
 # ───────────────────────────────────────────────────────
 # FIND SWING HIGHS / LOWS
