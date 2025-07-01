@@ -23,3 +23,22 @@ class Factory(ClientFactory):
         for field, value in params.items():
             setattr(msg, field, value)
         return msg
+from ctrader_open_api.tcpProtocol import TcpProtocol
+
+class Factory(ClientFactory):
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+        self.client = kwargs['client']
+        self.numberOfMessagesToSendPerSecond = self.client.numberOfMessagesToSendPerSecond
+
+    def buildProtocol(self, addr):
+        return TcpProtocol(self)
+    
+    def connected(self, protocol):
+        self.client._connected(protocol)
+
+    def disconnected(self, reason):
+        self.client._disconnected(reason)
+
+    def received(self, message):
+        self.client._received(message)
