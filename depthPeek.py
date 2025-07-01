@@ -1,3 +1,5 @@
+import json
+import os
 import asyncio
 from datetime import datetime
 from ctrader_open_api.client import Client
@@ -6,11 +8,17 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOASubscribeDepthQuotesReq
 )
 
-# From your tickCollector
-CLIENT_ID = "12367_TW3qWwxsCpLIBjiuU6QQBkzqkfqd6j9cgYiCNikEGFtNlbwMum"
-CLIENT_SECRET = "8Uh3BVz5QzjsLKmaL0iuyfQ4ANaGiS3hlPulL4eyPk31P5b8t2"
-ACCOUNT_ID = 41216916
-SYMBOL_ID = 1  # XAUUSD
+# Load credentials
+with open(os.path.expanduser("~/cTrade/creds.json"), "r") as f:
+    creds = json.load(f)
+
+clientId = creds["clientId"]
+clientSecret = creds["clientSecret"]
+accountId = creds["accountId"]
+accessToken = creds["accessToken"]
+symbolId = creds["symbolId"]
+connectionType = creds.get("connectionType", "live").lower()
+
 
 depth_snapshots = []
 
@@ -31,14 +39,14 @@ def on_depth(event):
         asyncio.get_event_loop().stop()
 
 async def run_depth_peek():
-    client = Client(client_id=CLIENT_ID, client_secret=CLIENT_SECRET)
-    await client.connect()
+    client = Client()
+    await client.connect(client_id=clientId, client_secret=clientSecret)
 
     client.on(ProtoOADepthEvent, on_depth)
 
     await client.send(ProtoOASubscribeDepthQuotesReq(
-        ctidTraderAccountId=ACCOUNT_ID,
-        symbolId=SYMBOL_ID
+        ctidTraderAccountId=accountId,
+        symbolId=symbolId
     ))
 
     print("📡 Subscribed to depth stream. Waiting for 30 events...")
