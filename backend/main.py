@@ -8,6 +8,9 @@ from sqlalchemy import create_engine, text
 import os
 from datetime import datetime
 from fastapi.responses import JSONResponse
+from datetime import datetime, timedelta
+
+
 
 # Initialize FastAPI
 app = FastAPI()
@@ -159,6 +162,20 @@ def get_ticks_from(start: str = Query(..., description="UTC timestamp in ISO for
         ticks = [dict(row._mapping) for row in result]
     return ticks
 
+@app.get("/ticks/first-of-day", response_model=Tick)
+def get_first_tick_of_day():
+    today = datetime.utcnow().date()
+    with engine.connect() as conn:
+        query = text("""
+            SELECT id, timestamp, bid, ask, mid
+            FROM ticks
+            WHERE timestamp >= :start
+            ORDER BY timestamp ASC
+            LIMIT 1
+        """)
+        result = conn.execute(query, {"start": today.isoformat()})
+        row = result.fetchone()
+        return dict(row._mapping) if row else JSONResponse(status_code=404, content={"error": "No data today"})
 
 
 # Get available tables based on labels.
@@ -179,4 +196,4 @@ def get_label_tables():
 # Get the current version of the API
 @app.get("/version")
 def get_version():
-    return {"version": "2025.07.02.2.001"}  # Manually update as needed
+    return {"version": "2025.07.02.2.002"}  # Manually update as needed

@@ -84,7 +84,18 @@ function getTodayStartISOString() {
   return now.toISOString();
 }
 
-document.getElementById('timestampInput').value = formatDateToLocalInput(new Date());
+(async () => {
+  try {
+    const res = await fetch('/ticks/first-of-day');
+    const json = await res.json();
+    if (json.timestamp) {
+      document.getElementById('timestampInput').value = formatDateToLocalInput(new Date(json.timestamp));
+    }
+  } catch (e) {
+    console.error('No tick data found for today.');
+  }
+})();
+
 
 async function loadInitial() {
   const dt = document.getElementById('timestampInput').value;
