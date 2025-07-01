@@ -81,7 +81,12 @@
         <div style="margin-top: 12px;">
           <input id="tickLoadAmount" type="number" value="2000" min="100" max="5000" style="width: 100px; margin-bottom: 4px;" />
           <button onclick="mannualLoadMoreLeft()">Load more left</button>
-        </div>";
+        </div>
+        <label style="display:flex;align-items:center;font-size:13px;margin-top:8px;gap:6px;">
+          <input type="checkbox" id="liveAppendToggle" checked />
+          <span>Live append to chart</span>
+        </label>
+
       </div>
 
       <div id="sqlConsole" style="margin-top: 1em; display: none;">
@@ -350,13 +355,21 @@ async function pollNewData() {
   const res = await fetch(`/ticks/latest?after=${encodeURIComponent(lastTimestamp)}`);
   const newTicks = await res.json();
   if (newTicks.length > 0) {
-    newTicks.forEach(t => data.push([t.timestamp, t.mid, t.id]));
-    data = data.slice(-2200);
+    const liveAppend = document.getElementById('liveAppendToggle').checked;
+    const mapped = newTicks.map(t => [t.timestamp, t.mid, t.id]);
+    data = data.concat(mapped).slice(-2200);
     lastTimestamp = newTicks[newTicks.length - 1].timestamp;
-    chart.setOption({ xAxis: { data: data.map(d => d[0]) }, series: [{ data }] });
-    updateLabelView();
+
+    if (liveAppend) {
+      chart.setOption({
+        xAxis: { data: data.map(d => d[0]) },
+        series: [{ data }]
+      });
+      updateLabelView();
+    }
   }
 }
+
 
 async function loadVersion() {
   try {
