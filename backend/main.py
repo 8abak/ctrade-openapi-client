@@ -163,4 +163,4 @@ def get_label_tables():
 # Get the current version of the API
 @app.get("/version")
 def get_version():
-    return {"version": "2025.07.01.03.001(supRes)"}  # Manually update as needed
+    return {"version": "2025.07.01.03.002"}  # Manually update as needed

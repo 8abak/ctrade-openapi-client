@@ -227,7 +227,6 @@ chart.on('dataZoom', async function (event) {
 
 function updateLabelView() {
   const markLines = Object.values(labelLayers).flat();
-
   const markAreas = [];
 
   if (labelLayers['supres']) {
@@ -241,14 +240,10 @@ function updateLabelView() {
         : data[data.length - 1];
 
       if (startTick && endTick) {
-        markAreas.push({
-          itemStyle: {
-            color: zone.level_type === 'support' ? 'rgba(255,165,0,0.2)' : 'rgba(255,255,0,0.2)',
-          },
-          label: { show: true, position: 'inside', formatter: zone.level_type },
-          xAxis: [startTick[0], endTick[0]],
-          yAxis: [zone.price_low, zone.price_high]
-        });
+        markAreas.push([
+          { xAxis: startTick[0], yAxis: zone.price_low },
+          { xAxis: endTick[0], yAxis: zone.price_high }
+        ]);
       }
     }
   }
@@ -256,18 +251,22 @@ function updateLabelView() {
   chart.setOption({
     markLine: { symbol: ['none', 'none'], label: { show: true }, data: markLines },
     series: [{
-      ...option.series[0],
+      name: 'Mid Price',
+      type: 'line',
+      showSymbol: false,
+      data: data,  // 🔑 Reuse existing tick data
+      lineStyle: { color: '#3fa9f5', width: 1.2 },
       markArea: {
         silent: true,
-        data: markAreas.map(a => [[
-          { xAxis: a.xAxis[0], yAxis: a.yAxis[0] },
-          { xAxis: a.xAxis[1], yAxis: a.yAxis[1] }
-        ]]),
-        itemStyle: { opacity: 0.2 }
+        data: markAreas,
+        itemStyle: {
+          color: 'rgba(255, 255, 0, 0.15)', // default, overridden per zone
+        }
       }
     }]
   });
 }
+
 
 
 async function toggleLabel(name, checked) {
