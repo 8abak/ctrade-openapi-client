@@ -144,6 +144,22 @@ def get_supres_zones():
         """))
         return [dict(row._mapping) for row in result]
 
+# Get ticks starting from a specific timestamp
+@app.get("/ticks/from", response_model=List[Tick])
+def get_ticks_from(start: str = Query(..., description="UTC timestamp in ISO format"), limit: int = 2000):
+    with engine.connect() as conn:
+        query = text("""
+            SELECT id, timestamp, bid, ask, mid
+            FROM ticks
+            WHERE timestamp >= :start
+            ORDER BY timestamp ASC
+            LIMIT :limit
+        """)
+        result = conn.execute(query, {"start": start})
+        ticks = [dict(row._mapping) for row in result]
+    return ticks
+
+
 
 # Get available tables based on labels.
 @app.get("/labels/available")
@@ -163,4 +179,4 @@ def get_label_tables():
 # Get the current version of the API
 @app.get("/version")
 def get_version():
-    return {"version": "2025.07.02.1.001"}  # Manually update as needed
+    return {"version": "2025.07.02.2.001"}  # Manually update as needed

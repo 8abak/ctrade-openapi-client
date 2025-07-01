@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Historical Tick View</title>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5"></script>
+  <style>
+    body {
+      margin: 0;
+      font-family: sans-serif;
+      background: #111;
+      color: white;
+    }
+    #toolbar {
+      padding: 1em;
+      background: #1a1a1a;
+    }
+    #toolbar input, #toolbar button {
+      margin-right: 10px;
+      padding: 6px 10px;
+      font-size: 14px;
+      background: #222;
+      color: white;
+      border: 1px solid #444;
+    }
+    #chart {
+      height: calc(100vh - 60px);
+      width: 100%;
+    }
+  </style>
+</head>
+<body>
+<div id="toolbar">
+  <label for="timestampInput">Start Timestamp:</label>
+  <input type="datetime-local" id="timestampInput">
+  <button onclick="loadInitial()">Load</button>
+</div>
+<div id="chart"></div>
+
+<script>
+let chart = echarts.init(document.getElementById('chart'));
+let data = [], lastTimestamp = null, offset = 0, baseTimestamp;
+
+const option = {
+  backgroundColor: '#111',
+  tooltip: {
+    trigger: 'axis',
+    formatter: p => {
+      const t = new Date(p[0].value[0]);
+      return `${t.toLocaleString()}<br/>Mid: ${p[0].value[1]}`;
+    }
+  },
+  xAxis: {
+    type: 'category',
+    data: []
+  },
+  yAxis: {
+    type: 'value',
+    scale: true,
+    axisLabel: { color: '#ccc' }
+  },
+  series: [{
+    name: 'Mid',
+    type: 'line',
+    data: [],
+    showSymbol: false,
+    lineStyle: { color: '#3fa9f5' }
+  }],
+  dataZoom: [
+    { type: 'inside' },
+    { type: 'slider', bottom: 0, height: 40, handleStyle: { color: '#3fa9f5' } }
+  ]
+};
+
+chart.setOption(option);
+
+function formatDateToLocalInput(date) {
+  return date.toISOString().slice(0, 16);
+}
+
+function getTodayStartISOString() {
+  const now = new Date();
+  now.setHours(0, 0, 0, 0);
+  return now.toISOString();
+}
+
+document.getElementById('timestampInput').value = formatDateToLocalInput(new Date());
+
+async function loadInitial() {
+  const dt = document.getElementById('timestampInput').value;
+  baseTimestamp = new Date(dt).toISOString();
+  offset = 0;
+
+  const res = await fetch(`/ticks/from?start=${encodeURIComponent(baseTimestamp)}&limit=5000`);
+  const ticks = await res.json();
+  if (ticks.length === 0) return;
+
+  data = ticks.map(t => [t.timestamp, t.mid, t.id]);
+  lastTimestamp = data[data.length - 1][0];
+
+  const first2000 = data.slice(0, 2000);
+  chart.setOption({
+    xAxis: { data: first2000.map(d => d[0]) },
+    series: [{ data: first2000 }],
+    dataZoom: [
+      { type: 'inside', start: 0, end: (2000 / data.length) * 100 },
+      { type: 'slider', start: 0, end: (2000 / data.length) * 100 }
+    ]
+  });
+
+  setTimeout(loadMore, 3000);
+}
+
+async function loadMore() {
+  const currentZoom = chart.getOption().dataZoom?.[0];
+  const startValue = currentZoom?.startValue;
+  const endValue = currentZoom?.endValue;
+
+  const res = await fetch(`/ticks/from?start=${encodeURIComponent(lastTimestamp)}&limit=3000`);
+  const newTicks = await res.json();
+  if (newTicks.length === 0) return;
+
+  const mapped = newTicks.map(t => [t.timestamp, t.mid, t.id]);
+  data = data.concat(mapped);
+  lastTimestamp = mapped[mapped.length - 1][0];
+
+  chart.setOption({
+    xAxis: { data: data.map(d => d[0]) },
+    series: [{ data }],
+    dataZoom: [
+      { type: 'inside', startValue, endValue },
+      { type: 'slider', startValue, endValue }
+    ]
+  });
+
+  setTimeout(loadMore, 3000); // keep extending until exhausted
+}
+</script>
+</body>
+</html>
