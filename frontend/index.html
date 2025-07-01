@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
+  <meta charset="UTF-8">
   <title>Live Tick Chart</title>
   <script src="https://cdn.jsdelivr.net/npm/echarts@5"></script>
   <style>
@@ -13,204 +13,132 @@
       background: #111;
       color: white;
     }
-    #tickView, #sqlView {
-      flex: 1;
-      height: 100%;
-    }
-    #tickView {
-      display: block;
-    }
-    #sqlView {
-      display: none;
-    }
     #main {
       height: 100%;
       width: 100%;
     }
-    table {
-      border-collapse: collapse;
-      width: 100%;
-      margin-top: 1em;
-      color: white;
+    #sidebar {
+      width: 260px;
+      background: #1a1a1a;
+      padding: 1em;
+      box-sizing: border-box;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
     }
-    th, td {
-      border: 1px solid #444;
-      padding: 6px 10px;
+    button, input {
       font-size: 14px;
-    }
-    th {
-      background-color: #222;
-    }
-    input, select {
       padding: 6px;
       margin-top: 6px;
-      width: 90%;
-      font-size: 14px;
+      width: 100%;
       background: #222;
       color: white;
       border: 1px solid #555;
     }
     button {
-      margin-top: 6px;
-      padding: 6px 12px;
-      font-size: 14px;
-      background: #3fa9f5;
-      color: white;
+      background-color: #3fa9f5;
       border: none;
       cursor: pointer;
-    }
-    #sqlResult {
-      font-size: 13px;
-      padding: 6px;
-      overflow: auto;
-      max-height: 200px;
     }
   </style>
 </head>
 <body>
-<div style="display: flex; height: 100vh; overflow: hidden;">
-  <div id="sidebar" style="width: 260px; background: #1a1a1a; color: white; display: flex; flex-direction: column; justify-content: space-between;">
-    <div style="padding: 1em;">
-      <h3 style="margin-top: 0;">Menu</h3>
-      <div><a href="javascript:void(0)" onclick="showView('tick')">Tick View</a></div>
-      <div><a href="javascript:void(0)" onclick="showView('sql')">SQL View</a></div>
-      <div id="labelSection" style="margin-top: 1em;">
-        <strong>Labels</strong><br>
-        <div id="labelToggles"></div>
-        <div style="margin-top: 12px;">
-          <input id="tickLoadAmount" type="number" value="2000" min="100" max="5000" style="width: 100px; margin-bottom: 4px;" />
-          <button onclick="mannualLoadMoreLeft()">Load more left</button>
-        </div>
-      </div>
-      <div id="sqlConsole" style="margin-top: 1em; display: none;">
-        <strong>SQL Console</strong><br>
-        <select id="tableSelect"></select>
-        <textarea id="queryInput" placeholder="Write query here..." rows="5" style="width: 100%; resize: vertical;"></textarea>
-        <button onclick="runQuery()">Run</button>
-      </div>
+<div style="display: flex; height: 100vh;">
+  <div id="sidebar">
+    <div>
+      <h3>Live Tick Chart</h3>
+      <label>Load More Left:</label>
+      <input type="number" id="tickLoadAmount" value="2000" min="100" max="10000">
+      <button onclick="loadMoreLeft()">Load more left</button>
     </div>
-    <div id="version" style="padding: 1em; font-size: 0.8em; color: #888;">Version: loading...</div>
+    <div id="version">Version: loading...</div>
   </div>
-  <div id="tickView">
+  <div style="flex: 1;">
     <div id="main"></div>
-  </div>
-  <div id="sqlView">
-    <div id="sqlResult" style="padding: 1em; overflow: auto; height: 100%;"></div>
   </div>
 </div>
 <script>
-function showView(name) {
-  const isTick = name === 'tick';
-  document.getElementById('tickView').style.display = isTick ? 'block' : 'none';
-  document.getElementById('sqlView').style.display = isTick ? 'none' : 'block';
-  document.getElementById('labelSection').style.display = isTick ? 'block' : 'none';
-  document.getElementById('sqlConsole').style.display = isTick ? 'none' : 'block';
-}
-
-let data = [], lastTimestamp = null;
 const chart = echarts.init(document.getElementById('main'));
-const option = {
+let data = [], lastTimestamp = null;
+
+chart.setOption({
   backgroundColor: '#111',
   tooltip: {
     trigger: 'axis',
     formatter: p => `ID: ${p[0].value[2]}<br>Mid: ${p[0].value[1]}`
   },
-  xAxis: {
-    type: 'category',
-    data: [],
-    axisLabel: { color: '#ccc' }
-  },
-  yAxis: {
-    type: 'value',
-    scale: true,
-    axisLabel: { color: '#ccc' }
-  },
+  xAxis: { type: 'category', data: [], axisLabel: { color: '#ccc' } },
+  yAxis: { type: 'value', scale: true, axisLabel: { color: '#ccc' } },
   dataZoom: [
     { type: 'inside' },
     { type: 'slider', bottom: 0, height: 40, handleStyle: { color: '#3fa9f5' } }
   ],
   series: [{ type: 'line', data: [], showSymbol: false }]
-};
-chart.setOption(option);
-
-async function mannualLoadMoreLeft() {
-  const count = parseInt(document.getElementById('tickLoadAmount').value) || 2000;
-  const range = chart.getModel().getComponent('dataZoom').getRange();
-  const idStart = data.find(d => d[0] === range.startValue)?.[2];
-  const idEnd = data.find(d => d[0] === range.endValue)?.[2];
-  const res = await fetch(`/ticks/before/${idStart}?limit=${count}`);
-  const older = await res.json();
-  if (older.length > 0) {
-    const prepend = older.map(t => [t.timestamp, t.mid, t.id]);
-    data = prepend.concat(data);
-    chart.setOption({
-      xAxis: { data: data.map(d => d[0]) },
-      series: [{ data }],
-      dataZoom: [
-        { startValue: range.startValue, endValue: range.endValue },
-        { startValue: range.startValue, endValue: range.endValue }
-      ]
-    });
-  }
-}
-
-async function pollNewData() {
-  if (!lastTimestamp) return;
-
-  try {
-    const res = await fetch(`/ticks/latest?after=${encodeURIComponent(lastTimestamp)}`);
-    const newTicks = await res.json();
-
-    if (newTicks.length > 0) {
-      // Fallback in case zoom info is missing
-      const zoom = chart.getOption().dataZoom?.[0];
-      const startValue = zoom?.startValue ?? data[data.length - 200]?.[0];
-      const endValue = zoom?.endValue ?? data[data.length - 1]?.[0];
-      const currentRightMost = data[data.length - 1]?.[0];
-      const atRightEdge = endValue === currentRightMost;
-
-      newTicks.forEach(t => data.push([t.timestamp, t.mid, t.id]));
-      data = data.slice(-3000);
-      lastTimestamp = newTicks[newTicks.length - 1].timestamp;
-
-      chart.setOption({
-        xAxis: { data: data.map(d => d[0]) },
-        series: [{ data }],
-        dataZoom: [
-          {
-            startValue: atRightEdge ? data[data.length - 200]?.[0] : startValue,
-            endValue: atRightEdge ? data[data.length - 1]?.[0] : endValue
-          },
-          {
-            startValue: atRightEdge ? data[data.length - 200]?.[0] : startValue,
-            endValue: atRightEdge ? data[data.length - 1]?.[0] : endValue
-          }
-        ]
-      });
-    }
-  } catch (err) {
-    console.error("Error fetching live ticks:", err);
-  }
-}
-
-
+});
 
 async function loadInitialData() {
-  const res = await fetch("/ticks/recent?limit=2200");
+  const res = await fetch('/ticks/recent?limit=2200');
   const ticks = await res.json();
   data = ticks.map(t => [t.timestamp, t.mid, t.id]);
-  lastTimestamp = data[data.length - 1]?.[0]; // ← match what /latest uses!
+  lastTimestamp = ticks[ticks.length - 1]?.timestamp;
+  updateChart(true);
+}
+
+function updateChart(autoScroll = false) {
+  const end = data[data.length - 1]?.[0];
+  const start = data[data.length - 200]?.[0];
+  const zoom = autoScroll ? [start, end] : chart.getOption().dataZoom.map(z => [z.startValue, z.endValue]);
   chart.setOption({
     xAxis: { data: data.map(d => d[0]) },
     series: [{ data }],
     dataZoom: [
-      { startValue: data[data.length - 200]?.[0], endValue: data[data.length - 1]?.[0] },
-      { startValue: data[data.length - 200]?.[0], endValue: data[data.length - 1]?.[0] }
+      { startValue: zoom[0][0], endValue: zoom[0][1] },
+      { startValue: zoom[1][0], endValue: zoom[1][1] }
     ]
   });
 }
 
+async function pollNewData() {
+  if (!lastTimestamp) return;
+  const res = await fetch(`/ticks/latest?after=${encodeURIComponent(lastTimestamp)}`);
+  const newTicks = await res.json();
+  if (newTicks.length > 0) {
+    const latest = data[data.length - 1]?.[0];
+    const zoom = chart.getOption().dataZoom?.[0];
+    const atRight = zoom?.endValue === latest;
+    newTicks.forEach(t => data.push([t.timestamp, t.mid, t.id]));
+    data = data.slice(-3000);
+    lastTimestamp = newTicks[newTicks.length - 1].timestamp;
+    updateChart(atRight);
+  }
+}
+
+async function loadMoreLeft() {
+  const count = parseInt(document.getElementById('tickLoadAmount').value);
+  const zoom = chart.getOption().dataZoom?.[0];
+  const first = data.find(d => d[0] === zoom.startValue);
+  if (!first) return;
+  const res = await fetch(`/ticks/before/${first[2]}?limit=${count}`);
+  const older = await res.json();
+  if (older.length > 0) {
+    const prepend = older.map(t => [t.timestamp, t.mid, t.id]);
+    data = prepend.concat(data);
+    updateChart(false);
+  }
+}
+
+async function loadVersion() {
+  try {
+    const res = await fetch('/version');
+    const json = await res.json();
+    document.getElementById('version').textContent = `Version: ${json.version}`;
+  } catch {
+    document.getElementById('version').textContent = 'Version: failed';
+  }
+}
+
 loadInitialData();
+loadVersion();
 setInterval(pollNewData, 3000);
 </script>
 </body>
