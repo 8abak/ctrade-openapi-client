@@ -106,6 +106,22 @@ def get_ticks_before(tickid: int, limit: int = 2000):
         ticks = [dict(row._mapping) for row in result]
     return list(reversed(ticks))  # Reverse to return in chronological order
 
+# get ticks after id for htick loading data
+@app.get("/ticks/after/{tickid}", response_model=List[Tick])
+def get_ticks_after(tickid: int, limit: int = 2000):
+    with engine.connect() as conn:
+        query = text("""
+            SELECT id, timestamp, bid, ask, mid
+            FROM ticks
+            WHERE id > :tickid
+            ORDER BY id ASC
+            LIMIT :limit
+        """)
+        result = conn.execute(query, {"tickid": tickid, "limit": limit})
+        ticks = [dict(row._mapping) for row in result]
+    return ticks
+
+
 
 # get all table names in the database
 @app.get("/sqlvw/tables")
@@ -204,4 +220,4 @@ def get_label_tables():
 # Get the current version of the API
 @app.get("/version")
 def get_version():
-    return {"version": "2025.07.02.2.012"}  # Manually update as needed
+    return {"version": "2025.07.02.2.013"}  # Manually update as needed

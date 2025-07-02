@@ -109,7 +109,7 @@ async function loadInitial() {
   }
 
   const startId = idData[0].id;
-  const tickRes = await fetch(`/sqlvw/query?query=${encodeURIComponent(`SELECT id, timestamp, bid, ask, mid FROM ticks WHERE id >= ${startId} ORDER BY id ASC LIMIT 5000`)}`);
+  const tickRes = await fetch(`/ticks/after/${startId}?limit=5000`);
   const tickData = await tickRes.json();
 
   if (!Array.isArray(tickData) || tickData.length === 0) {
