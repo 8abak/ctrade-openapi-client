@@ -97,7 +97,7 @@ chart.setOption({
   },
   xAxis: {
     type: 'category',
-    data: [],
+    data: xIds.map(id => id.toString()),
     axisLabel: {
       color: '#ccc',
       formatter: val => val
@@ -135,9 +135,9 @@ function refreshChart() {
   const showAsk = document.getElementById('chkAsk').checked;
 
   const xIds = allTicks.map(t => t.id);
-  const bidSeries = showBid ? allTicks.map(t => [t.id, t.bid, t.id]) : [];
-  const midSeries = showMid ? allTicks.map(t => [t.id, t.mid, t.id]) : [];
-  const askSeries = showAsk ? allTicks.map(t => [t.id, t.ask, t.id]) : [];
+  const bidSeries = showBid ? allTicks.map(t => [t.id.toString(), t.bid, t.id]) : [];
+  const midSeries = showMid ? allTicks.map(t => [t.id.toString(), t.mid, t.id]) : [];
+  const askSeries = showAsk ? allTicks.map(t => [t.id.toString(), t.ask, t.id]) : [];
 
   chart.setOption({
     xAxis: { data: xIds },
