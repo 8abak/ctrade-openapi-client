@@ -120,29 +120,37 @@ chart.setOption({
 });
 
 function refreshChart() {
-  const zoom = chart.getModel().getComponent('dataZoom');
-  const range = zoom?.getRange() ?? {};
-  const startVal = range.startValue;
-  const endVal = range.endValue;
+  if (!allTicks.length || !chart) return;
 
-  const startTick = allTicks.find(t => t.id == startVal);
-  const endTick = allTicks.find(t => t.id == endVal);
-  const newStartId = startTick?.id || allTicks[0]?.id;
-  const newEndId = endTick?.id || allTicks[allTicks.length - 1]?.id;
-
-
+  let startVal = null, endVal = null;
+  try {
+    const zoomModel = chart.getModel().getComponent('dataZoom');
+    const range = zoomModel?.getRange?.();
+    startVal = range?.startValue;
+    endVal = range?.endValue;
+  } catch (e) {
+    console.warn("Zoom info unavailable yet:", e.message);
+  }
 
   const showBid = document.getElementById('chkBid').checked;
   const showMid = document.getElementById('chkMid').checked;
   const showAsk = document.getElementById('chkAsk').checked;
 
   const xIds = allTicks.map(t => t.id.toString());
+
   const bidSeries = showBid ? allTicks.map(t => [t.id.toString(), t.bid, t.id]) : [];
   const midSeries = showMid ? allTicks.map(t => [t.id.toString(), t.mid, t.id]) : [];
   const askSeries = showAsk ? allTicks.map(t => [t.id.toString(), t.ask, t.id]) : [];
 
+  const newStartId = startVal?.toString() || xIds[0];
+  const newEndId = endVal?.toString() || xIds[xIds.length - 1];
+
   chart.setOption({
-    xAxis: { data: xIds },
+    xAxis: {
+      type: 'category',
+      data: xIds,
+      axisLabel: { color: '#ccc' }
+    },
     series: [
       { data: bidSeries },
       { data: midSeries },
@@ -154,6 +162,7 @@ function refreshChart() {
     ]
   });
 }
+
 
 async function loadInitial() {
   const dt = document.getElementById('timestampInput').value;
