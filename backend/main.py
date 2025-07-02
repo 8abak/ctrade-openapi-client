@@ -165,19 +165,24 @@ def get_ticks_from(start: str = Query(..., description="UTC timestamp in ISO for
 # Get the first ticks of the current day
 @app.get("/ticks/first-of-day", response_model=Tick)
 def get_first_tick_of_day():
-    today = datetime.utcnow().date()
-    with engine.connect() as conn:
-        query = text("""
-            SELECT id, timestamp, bid, ask, mid
-            FROM ticks
-            WHERE timestamp >= :start::timestamptz
-            ORDER BY timestamp ASC
-            LIMIT 1
-        """)
+    try:
+        today = datetime.utcnow().date()
+        with engine.connect() as conn:
+            query = text("""
+                SELECT id, timestamp, bid, ask, mid
+                FROM ticks
+                WHERE timestamp >= :start::timestamptz
+                ORDER BY timestamp ASC
+                LIMIT 1
+            """)
+            result = conn.execute(query, {"start": str(today)})
+            row = result.fetchone()
+            if not row:
+                return JSONResponse(status_code=404, content={"error": "No data today"})
+            return dict(row._mapping)
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
-        result = conn.execute(query, {"start": today.isoformat()})
-        row = result.fetchone()
-        return dict(row._mapping) if row else JSONResponse(status_code=404, content={"error": "No data today"})
 
 
 # Get available tables based on labels.
@@ -198,4 +203,4 @@ def get_label_tables():
 # Get the current version of the API
 @app.get("/version")
 def get_version():
-    return {"version": "2025.07.02.2.006"}  # Manually update as needed
+    return {"version": "2025.07.02.2.007"}  # Manually update as needed
