@@ -10,13 +10,24 @@
       font-family: sans-serif;
       background: #111;
       color: white;
+      display: flex;
+      height: 100vh;
+      overflow: hidden;
+    }
+    #sidebar {
+      width: 260px;
+      background: #1a1a1a;
+      color: white;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
     }
     #toolbar {
       padding: 1em;
-      background: #1a1a1a;
     }
-    #toolbar input, #toolbar button {
-      margin-right: 10px;
+    #toolbar input, #toolbar button, #toolbar select {
+      margin-bottom: 10px;
+      width: 100%;
       padding: 6px 10px;
       font-size: 14px;
       background: #222;
@@ -24,17 +35,30 @@
       border: 1px solid #444;
     }
     #chart {
-      height: calc(100vh - 60px);
-      width: 100%;
+      flex: 1;
+    }
+    #version {
+      padding: 1em;
+      font-size: 0.8em;
+      color: #888;
     }
   </style>
 </head>
 <body>
-<div id="toolbar">
-  <label for="timestampInput">Start Timestamp:</label>
-  <input type="datetime-local" id="timestampInput">
-  <button onclick="loadInitial()">Load</button>
-  <div id="version" style="padding: 1em; font-size: 0.8em; color: #888;">Version: frontend</div>
+<div id="sidebar">
+  <div id="toolbar">
+    <label for="timestampInput">Start Timestamp:</label>
+    <input type="datetime-local" id="timestampInput">
+    <button onclick="loadInitial()">Load</button>
+
+    <label for="priceType">Show Price:</label>
+    <select id="priceType">
+      <option value="mid">Mid</option>
+      <option value="bid">Bid</option>
+      <option value="ask">Ask</option>
+    </select>
+  </div>
+  <div id="version">Version: frontend</div>
 </div>
 <div id="chart"></div>
 
@@ -55,7 +79,7 @@ chart.setOption({
       const date = new Date(p.value[0]);
       const timeStr = date.toLocaleTimeString('en-au', { hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true }).toLowerCase();
       const dateStr = date.toLocaleDateString('en-AU');
-      return `<div style="padding: 8px;"><strong>${timeStr}</strong><br><span style="color: #ccc;">${dateStr}</span><br>Mid: <strong style="color: #3fa9f5;">${p.value[1].toFixed(2)}</strong><br>ID: <span style="color:#aaa;">${p.value[2]}</span></div>`;
+      return `<div style="padding: 8px;"><strong>${timeStr}</strong><br><span style="color: #ccc;">${dateStr}</span><br>${priceType.toUpperCase()}: <strong style="color: #3fa9f5;">${p.value[1].toFixed(2)}</strong><br>ID: <span style="color:#aaa;">${p.value[2]}</span></div>`;
     }
   },
   xAxis: {
@@ -75,7 +99,7 @@ chart.setOption({
     axisLabel: { color: '#ccc' }
   },
   series: [{
-    name: 'Mid Price',
+    name: 'Price',
     type: 'line',
     showSymbol: false,
     data: [],
@@ -97,7 +121,7 @@ function formatDateToLocalInput(date) {
     const json = await res.json();
     if (json.timestamp) {
       document.getElementById('timestampInput').value = formatDateToLocalInput(new Date(json.timestamp));
-      loadInitial(); // auto-trigger after setting default timestamp
+      loadInitial();
     }
   } catch (e) {
     console.error('No tick data found for today.');
@@ -109,7 +133,14 @@ async function loadVersion() {
     const res = await fetch('/version');
     const json = await res.json();
     document.getElementById('version').textContent = `Version: ${json.version}`;
-  } catch { document.getElementById('version').textContent = 'Version: unknown'; }
+  } catch {
+    document.getElementById('version').textContent = 'Version: unknown';
+  }
+}
+
+function getSelectedPrice(tick) {
+  const type = document.getElementById('priceType').value;
+  return type === 'ask' ? tick.ask : (type === 'bid' ? tick.bid : tick.mid);
 }
 
 async function loadInitial() {
@@ -125,16 +156,16 @@ async function loadInitial() {
 
   const startId = idData[0].id;
   lastTickId = startId;
+  data = []; // clear data each time Load is clicked
   await loadNextBlock();
 }
 
 async function loadNextBlock() {
   const tickRes = await fetch(`/ticks/after/${lastTickId}?limit=3000`);
   const tickData = await tickRes.json();
-
   if (!Array.isArray(tickData) || tickData.length === 0) return;
 
-  const newData = tickData.map(t => [t.timestamp, t.mid, t.id]);
+  const newData = tickData.map(t => [t.timestamp, getSelectedPrice(t), t.id]);
   lastTickId = newData[newData.length - 1][2];
   data = data.concat(newData);
 
@@ -143,11 +174,8 @@ async function loadNextBlock() {
     series: [{ data }]
   });
 
-  setTimeout(loadNextBlock, 3000); // continue loading
+  setTimeout(loadNextBlock, 3000);
 }
-
-loadVersion();
-
 </script>
 </body>
 </html>
