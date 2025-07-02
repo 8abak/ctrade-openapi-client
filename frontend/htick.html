@@ -55,11 +55,20 @@
     <button onclick="loadInitial()">Load</button>
 
     <div style="margin-top: 1em;">
-      <strong>Show Prices:</strong><br>
-      <label><input type="checkbox" id="chkBid" onchange="refreshChart()"> Bid</label><br>
-      <label><input type="checkbox" id="chkMid" onchange="refreshChart()" checked> Mid</label><br>
-      <label><input type="checkbox" id="chkAsk" onchange="refreshChart()"> Ask</label>
+      <strong>Show Prices:</strong>
+      <div style="display: flex; flex-wrap: wrap; gap: 10px; margin-top: 6px;">
+        <label style="display: flex; align-items: center; gap: 4px;">
+          <input type="checkbox" id="chkBid" onchange="refreshChart()"> Bid
+        </label>
+        <label style="display: flex; align-items: center; gap: 4px;">
+          <input type="checkbox" id="chkMid" onchange="refreshChart()" checked> Mid
+        </label>
+        <label style="display: flex; align-items: center; gap: 4px;">
+          <input type="checkbox" id="chkAsk" onchange="refreshChart()"> Ask
+        </label>
+      </div>
     </div>
+
   </div>
   <div id="version">Version: frontend</div>
 </div>
@@ -150,10 +159,20 @@ function refreshChart() {
   if (showAsk) series.push({ data: allTicks.map(t => [t.timestamp, t.ask, t.id]) });
   else series.push({ data: [] });
 
-  chart.setOption({
-    xAxis: { data: allTicks.map(t => t.timestamp) },
-    series: series
-  });
+  const option = chart.getOption();
+const currentZoom = option.dataZoom?.[0];
+const start = currentZoom?.start ?? 0;
+const end = currentZoom?.end ?? 100;
+
+chart.setOption({
+  xAxis: { data: allTicks.map(t => t.timestamp) },
+  series: series,
+  dataZoom: [
+    { type: 'inside', start, end },
+    { type: 'slider', start, end, bottom: 0, height: 40, handleStyle: { color: '#3fa9f5' } }
+  ]
+});
+
 }
 
 async function loadInitial() {
