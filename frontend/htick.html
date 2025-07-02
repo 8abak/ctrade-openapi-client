@@ -39,21 +39,29 @@
 
 <script>
 let chart = echarts.init(document.getElementById('chart'));
-let data = [], lastTimestamp = null, offset = 0, baseTimestamp;
+let data = [];
 
-const option = {
+chart.setOption({
   backgroundColor: '#111',
   tooltip: {
     trigger: 'axis',
     formatter: p => {
-      const t = new Date(p[0].value[0]);
-      return `${t.toLocaleString()}<br/>Mid: ${p[0].value[1]}`;
-    }
+      const d = p[0].value;
+      const date = new Date(d[0]);
+      return `${date.toLocaleString()}<br>Mid: ${d[1]}<br>ID: ${d[2]}`;
+    },
+    textStyle: { color: '#fff' }
   },
   xAxis: {
     type: 'category',
     data: [],
-    axisLabel: { color: '#ccc' }
+    axisLabel: {
+      color: '#ccc',
+      formatter: val => {
+        const d = new Date(val);
+        return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
+      }
+    }
   },
   yAxis: {
     type: 'value',
@@ -61,19 +69,17 @@ const option = {
     axisLabel: { color: '#ccc' }
   },
   series: [{
-    name: 'Mid',
+    name: 'Mid Price',
     type: 'line',
-    data: [],
     showSymbol: false,
-    lineStyle: { color: '#3fa9f5' }
+    data: [],
+    lineStyle: { color: '#3fa9f5', width: 1.2 }
   }],
   dataZoom: [
-    { type: 'inside' },
-    { type: 'slider', bottom: 0, height: 40, handleStyle: { color: '#3fa9f5' } }
+    { type: 'inside', start: 0, end: 100 },
+    { type: 'slider', start: 0, end: 100, bottom: 0, height: 40, handleStyle: { color: '#3fa9f5' } }
   ]
-};
-
-chart.setOption(option);
+});
 
 function formatDateToLocalInput(date) {
   return date.toISOString().slice(0, 16);
@@ -93,59 +99,34 @@ function formatDateToLocalInput(date) {
 
 async function loadInitial() {
   const dt = document.getElementById('timestampInput').value;
-  baseTimestamp = new Date(dt).toISOString();
-  offset = 0;
+  const iso = new Date(dt).toISOString();
 
-  const res = await fetch(`/ticks/from?start=${encodeURIComponent(baseTimestamp)}&limit=5000`);
-  const ticks = await res.json();
-  console.log('Loaded ticks:', ticks);
-  if (ticks.length === 0) {
-    alert('No ticks found at this timestamp');
+  const idRes = await fetch(`/sqlvw/query?query=${encodeURIComponent(`SELECT id FROM ticks WHERE timestamp >= '${iso}' ORDER BY timestamp ASC LIMIT 1`)}`);
+  const idData = await idRes.json();
+  if (!Array.isArray(idData) || idData.length === 0) {
+    alert("No tick found for that timestamp.");
     return;
   }
 
-  data = ticks.map(t => [t.timestamp, t.mid, t.id]);
-  lastTimestamp = data[data.length - 1][0];
+  const startId = idData[0].id;
+  const tickRes = await fetch(`/sqlvw/query?query=${encodeURIComponent(`SELECT id, timestamp, bid, ask, mid FROM ticks WHERE id >= ${startId} ORDER BY id ASC LIMIT 5000`)}`);
+  const tickData = await tickRes.json();
 
+  if (!Array.isArray(tickData) || tickData.length === 0) {
+    alert("No ticks found after that ID.");
+    return;
+  }
+
+  data = tickData.map(t => [t.timestamp, t.mid, t.id]);
   const first2000 = data.slice(0, 2000);
-  console.log('First 2000 preview:', first2000.slice(0, 5));
-  console.log('Series format sample:', first2000.map(d => [d[0], d[1]]).slice(0, 5));
-
   chart.setOption({
     xAxis: { data: first2000.map(d => d[0]) },
-    series: [{ data: first2000.map(d => [d[0], d[1]]) }],
+    series: [{ data: first2000 }],
     dataZoom: [
-      { type: 'inside', start: 0, end: (2000 / data.length) * 100 },
-      { type: 'slider', start: 0, end: (2000 / data.length) * 100 }
+      { type: 'inside', start: 0, end: 100 },
+      { type: 'slider', start: 0, end: 100 }
     ]
   });
-
-  setTimeout(loadMore, 3000);
-}
-
-async function loadMore() {
-  const currentZoom = chart.getOption().dataZoom?.[0];
-  const startValue = currentZoom?.startValue;
-  const endValue = currentZoom?.endValue;
-
-  const res = await fetch(`/ticks/from?start=${encodeURIComponent(lastTimestamp)}&limit=3000`);
-  const newTicks = await res.json();
-  if (newTicks.length === 0) return;
-
-  const mapped = newTicks.map(t => [t.timestamp, t.mid, t.id]);
-  data = data.concat(mapped);
-  lastTimestamp = mapped[mapped.length - 1][0];
-
-  chart.setOption({
-    xAxis: { data: data.map(d => d[0]) },
-    series: [{ data: data.map(d => [d[0], d[1]]) }],
-    dataZoom: [
-      { type: 'inside', startValue, endValue },
-      { type: 'slider', startValue, endValue }
-    ]
-  });
-
-  setTimeout(loadMore, 3000);
 }
 </script>
 </body>
