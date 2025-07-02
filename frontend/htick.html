@@ -40,18 +40,23 @@
 
 <script>
 let chart = echarts.init(document.getElementById('chart'));
-let data = [];
+let data = [], lastTickId = null;
 
 chart.setOption({
   backgroundColor: '#111',
   tooltip: {
     trigger: 'axis',
-    formatter: p => {
-      const d = p[0].value;
-      const date = new Date(d[0]);
-      return `${date.toLocaleString()}<br>Mid: ${d[1]}<br>ID: ${d[2]}`;
-    },
-    textStyle: { color: '#fff' }
+    backgroundColor: '#222',
+    borderColor: '#555',
+    borderWidth: 1,
+    textStyle: { color: '#fff', fontSize: 13 },
+    formatter: (params) => {
+      const p = params[0];
+      const date = new Date(p.value[0]);
+      const timeStr = date.toLocaleTimeString('en-au', { hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true }).toLowerCase();
+      const dateStr = date.toLocaleDateString('en-AU');
+      return `<div style="padding: 8px;"><strong>${timeStr}</strong><br><span style="color: #ccc;">${dateStr}</span><br>Mid: <strong style="color: #3fa9f5;">${p.value[1].toFixed(2)}</strong><br>ID: <span style="color:#aaa;">${p.value[2]}</span></div>`;
+    }
   },
   xAxis: {
     type: 'category',
@@ -92,6 +97,7 @@ function formatDateToLocalInput(date) {
     const json = await res.json();
     if (json.timestamp) {
       document.getElementById('timestampInput').value = formatDateToLocalInput(new Date(json.timestamp));
+      loadInitial(); // auto-trigger after setting default timestamp
     }
   } catch (e) {
     console.error('No tick data found for today.');
@@ -118,24 +124,26 @@ async function loadInitial() {
   }
 
   const startId = idData[0].id;
-  const tickRes = await fetch(`/ticks/after/${startId}?limit=5000`);
+  lastTickId = startId;
+  await loadNextBlock();
+}
+
+async function loadNextBlock() {
+  const tickRes = await fetch(`/ticks/after/${lastTickId}?limit=3000`);
   const tickData = await tickRes.json();
 
-  if (!Array.isArray(tickData) || tickData.length === 0) {
-    alert("No ticks found after that ID.");
-    return;
-  }
+  if (!Array.isArray(tickData) || tickData.length === 0) return;
 
-  data = tickData.map(t => [t.timestamp, t.mid, t.id]);
-  const first2000 = data.slice(0, 2000);
+  const newData = tickData.map(t => [t.timestamp, t.mid, t.id]);
+  lastTickId = newData[newData.length - 1][2];
+  data = data.concat(newData);
+
   chart.setOption({
-    xAxis: { data: first2000.map(d => d[0]) },
-    series: [{ data: first2000 }],
-    dataZoom: [
-      { type: 'inside', start: 0, end: 100 },
-      { type: 'slider', start: 0, end: 100 }
-    ]
+    xAxis: { data: data.map(d => d[0]) },
+    series: [{ data }]
   });
+
+  setTimeout(loadNextBlock, 3000); // continue loading
 }
 </script>
 </body>
