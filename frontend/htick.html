@@ -78,12 +78,6 @@ function formatDateToLocalInput(date) {
   return date.toISOString().slice(0, 16);
 }
 
-function getTodayStartISOString() {
-  const now = new Date();
-  now.setHours(0, 0, 0, 0);
-  return now.toISOString();
-}
-
 (async () => {
   try {
     const res = await fetch('/ticks/first-of-day');
@@ -95,7 +89,6 @@ function getTodayStartISOString() {
     console.error('No tick data found for today.');
   }
 })();
-
 
 async function loadInitial() {
   const dt = document.getElementById('timestampInput').value;
@@ -144,7 +137,7 @@ async function loadMore() {
     ]
   });
 
-  setTimeout(loadMore, 3000); // keep extending until exhausted
+  setTimeout(loadMore, 3000);
 }
 </script>
 </body>
