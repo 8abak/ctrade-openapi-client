@@ -145,44 +145,38 @@ function getSelectedSeries(tick) {
 }
 
 function refreshChart() {
-  // Store tickId range before refresh
   const option = chart.getOption();
-  const zoom = option.dataZoom?.[0];
-  const startPercent = zoom?.start ?? 0;
-  const endPercent = zoom?.end ?? 100;
+  const zoomModel = chart.getModel().getComponent('dataZoom');
+  const range = zoomModel?.getRange() ?? {};
+  const startVal = range.startValue;
+  const endVal = range.endValue;
 
-  const total = allTicks.length;
-  const startIndex = Math.floor((startPercent / 100) * total);
-  const endIndex = Math.floor((endPercent / 100) * total);
-
-  const startTickId = allTicks[startIndex]?.id;
-  const endTickId = allTicks[endIndex]?.id;
+  const startTickId = allTicks.find(t => t.timestamp === startVal)?.id;
+  const endTickId = allTicks.find(t => t.timestamp === endVal)?.id;
 
   const showBid = document.getElementById('chkBid').checked;
   const showMid = document.getElementById('chkMid').checked;
   const showAsk = document.getElementById('chkAsk').checked;
 
+  const timestamps = allTicks.map(t => t.timestamp);
   const bidSeries = showBid ? allTicks.map(t => [t.timestamp, t.bid, t.id]) : [];
   const midSeries = showMid ? allTicks.map(t => [t.timestamp, t.mid, t.id]) : [];
   const askSeries = showAsk ? allTicks.map(t => [t.timestamp, t.ask, t.id]) : [];
 
-  // Find new index range after update
-  const newStartIdx = allTicks.findIndex(t => t.id === startTickId);
-  const newEndIdx = allTicks.findIndex(t => t.id === endTickId);
-  const newTotal = allTicks.length;
-  const newStart = newStartIdx >= 0 ? (newStartIdx / newTotal) * 100 : 0;
-  const newEnd = newEndIdx >= 0 ? (newEndIdx / newTotal) * 100 : 100;
+  // Restore by timestamp instead of percent
+  const newStartTs = allTicks.find(t => t.id === startTickId)?.timestamp || timestamps[0];
+  const newEndTs = allTicks.find(t => t.id === endTickId)?.timestamp || timestamps[timestamps.length - 1];
 
   chart.setOption({
-    xAxis: { data: allTicks.map(t => t.timestamp) },
+    xAxis: { data: timestamps },
     series: [
       { data: bidSeries },
       { data: midSeries },
       { data: askSeries }
     ],
     dataZoom: [
-      { type: 'inside', start: newStart, end: newEnd },
-      { type: 'slider', start: newStart, end: newEnd, bottom: 0, height: 40, handleStyle: { color: '#3fa9f5' } }
+      { type: 'inside', startValue: newStartTs, endValue: newEndTs },
+      { type: 'slider', startValue: newStartTs, endValue: newEndTs, bottom: 0, height: 40, handleStyle: { color: '#3fa9f5' } }
     ]
   });
 }
