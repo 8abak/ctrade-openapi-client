@@ -184,11 +184,13 @@ def get_first_tick_of_day():
 def get_label_tables():
     with engine.connect() as conn:
         query = text("""
-            SELECT table_name
-            FROM information_schema.columns
-            WHERE column_name ILIKE 'tickid'
-              AND table_schema = 'public'
+            SELECT id, timestamp, bid, ask, mid
+            FROM ticks
+            WHERE timestamp >= :start::timestamptz
+            ORDER BY timestamp ASC
+            LIMIT 1
         """)
+
         result = conn.execute(query)
         tables = sorted({row[0] for row in result})
     return tables
@@ -197,4 +199,4 @@ def get_label_tables():
 # Get the current version of the API
 @app.get("/version")
 def get_version():
-    return {"version": "2025.07.02.2.004"}  # Manually update as needed
+    return {"version": "2025.07.02.2.005"}  # Manually update as needed
