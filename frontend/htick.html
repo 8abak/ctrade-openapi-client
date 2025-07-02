@@ -52,7 +52,8 @@ const option = {
   },
   xAxis: {
     type: 'category',
-    data: []
+    data: [],
+    axisLabel: { color: '#ccc' }
   },
   yAxis: {
     type: 'value',
@@ -98,7 +99,6 @@ async function loadInitial() {
   const res = await fetch(`/ticks/from?start=${encodeURIComponent(baseTimestamp)}&limit=5000`);
   const ticks = await res.json();
   console.log('Loaded ticks:', ticks);
-
   if (ticks.length === 0) {
     alert('No ticks found at this timestamp');
     return;
@@ -112,15 +112,13 @@ async function loadInitial() {
     xAxis: { data: first2000.map(d => d[0]) },
     series: [{ data: first2000.map(d => [d[0], d[1]]) }],
     dataZoom: [
-        { type: 'inside', start: 0, end: (2000 / data.length) * 100 },
-        { type: 'slider', start: 0, end: (2000 / data.length) * 100 }
+      { type: 'inside', start: 0, end: (2000 / data.length) * 100 },
+      { type: 'slider', start: 0, end: (2000 / data.length) * 100 }
     ]
   });
 
-
   setTimeout(loadMore, 3000);
 }
-
 
 async function loadMore() {
   const currentZoom = chart.getOption().dataZoom?.[0];
@@ -136,11 +134,11 @@ async function loadMore() {
   lastTimestamp = mapped[mapped.length - 1][0];
 
   chart.setOption({
-    xAxis: { data: first2000.map(d => d[0]) },
-    series: [{ data: first2000.map(d => [d[0], d[1]]) }],
+    xAxis: { data: data.map(d => d[0]) },
+    series: [{ data: data.map(d => [d[0], d[1]]) }],
     dataZoom: [
-        { type: 'inside', start: 0, end: (2000 / data.length) * 100 },
-        { type: 'slider', start: 0, end: (2000 / data.length) * 100 }
+      { type: 'inside', startValue, endValue },
+      { type: 'slider', startValue, endValue }
     ]
   });
 
