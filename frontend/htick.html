@@ -108,6 +108,9 @@ async function loadInitial() {
   lastTimestamp = data[data.length - 1][0];
 
   const first2000 = data.slice(0, 2000);
+  console.log('First 2000 preview:', first2000.slice(0, 5));
+  console.log('Series format sample:', first2000.map(d => [d[0], d[1]]).slice(0, 5));
+
   chart.setOption({
     xAxis: { data: first2000.map(d => d[0]) },
     series: [{ data: first2000.map(d => [d[0], d[1]]) }],
