@@ -171,7 +171,7 @@ def get_first_tick_of_day():
             query = text("""
                 SELECT id, timestamp, bid, ask, mid
                 FROM ticks
-                WHERE timestamp >= :start::timestamptz
+                WHERE timestamp >= CAST(:start AS timestamptz)
                 ORDER BY timestamp ASC
                 LIMIT 1
             """)
@@ -182,6 +182,7 @@ def get_first_tick_of_day():
             return dict(row._mapping)
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
+
 
 
 
@@ -203,4 +204,4 @@ def get_label_tables():
 # Get the current version of the API
 @app.get("/version")
 def get_version():
-    return {"version": "2025.07.02.2.007"}  # Manually update as needed
+    return {"version": "2025.07.02.2.008"}  # Manually update as needed
