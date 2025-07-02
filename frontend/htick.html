@@ -158,17 +158,17 @@ function refreshChart() {
   const showMid = document.getElementById('chkMid').checked;
   const showAsk = document.getElementById('chkAsk').checked;
 
-  const timestamps = allTicks.map(t => t.timestamp);
-  const bidSeries = showBid ? allTicks.map(t => [t.timestamp, t.bid, t.id]) : [];
-  const midSeries = showMid ? allTicks.map(t => [t.timestamp, t.mid, t.id]) : [];
-  const askSeries = showAsk ? allTicks.map(t => [t.timestamp, t.ask, t.id]) : [];
+  const xIds = allTicks.map(t => t.id);
+  const bidSeries = showBid ? allTicks.map(t => [t.id, t.bid, t.id]) : [];
+  const midSeries = showMid ? allTicks.map(t => [t.id, t.mid, t.id]) : [];
+  const askSeries = showAsk ? allTicks.map(t => [t.id, t.ask, t.id]) : [];
 
   // Restore by timestamp instead of percent
   const newStartTs = allTicks.find(t => t.id === startTickId)?.timestamp || timestamps[0];
   const newEndTs = allTicks.find(t => t.id === endTickId)?.timestamp || timestamps[timestamps.length - 1];
 
   chart.setOption({
-    xAxis: { data: timestamps },
+    xAxis: { data: xIds },
     series: [
       { data: bidSeries },
       { data: midSeries },
