@@ -170,10 +170,11 @@ def get_first_tick_of_day():
         query = text("""
             SELECT id, timestamp, bid, ask, mid
             FROM ticks
-            WHERE timestamp >= :start
+            WHERE timestamp >= :start::timestamptz
             ORDER BY timestamp ASC
             LIMIT 1
         """)
+
         result = conn.execute(query, {"start": today.isoformat()})
         row = result.fetchone()
         return dict(row._mapping) if row else JSONResponse(status_code=404, content={"error": "No data today"})
@@ -184,13 +185,11 @@ def get_first_tick_of_day():
 def get_label_tables():
     with engine.connect() as conn:
         query = text("""
-            SELECT id, timestamp, bid, ask, mid
-            FROM ticks
-            WHERE timestamp >= :start::timestamptz
-            ORDER BY timestamp ASC
-            LIMIT 1
+            SELECT table_name
+            FROM information_schema.columns
+            WHERE column_name ILIKE 'tickid'
+              AND table_schema = 'public'
         """)
-
         result = conn.execute(query)
         tables = sorted({row[0] for row in result})
     return tables
@@ -199,4 +198,4 @@ def get_label_tables():
 # Get the current version of the API
 @app.get("/version")
 def get_version():
-    return {"version": "2025.07.02.2.005"}  # Manually update as needed
+    return {"version": "2025.07.02.2.006"}  # Manually update as needed
