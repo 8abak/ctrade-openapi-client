@@ -51,7 +51,7 @@
 <div id="sidebar">
   <div id="toolbar">
     <label for="timestampInput">Start Timestamp:</label>
-    <input type="datetime-local" id="timestampInput">
+    <input type="datetime-local" id="timestampInput" value="2025-07-02T00:00">
     <button onclick="loadInitial()">Load</button>
 
     <div style="margin-top: 1em;">
@@ -68,7 +68,6 @@
         </label>
       </div>
     </div>
-
   </div>
   <div id="version">Version: frontend</div>
 </div>
@@ -76,7 +75,7 @@
 
 <script>
 let chart = echarts.init(document.getElementById('chart'));
-let data = [], lastTickId = null, allTicks = [];
+let allTicks = [], lastTickId = null;
 
 chart.setOption({
   backgroundColor: '#111',
@@ -88,7 +87,9 @@ chart.setOption({
     textStyle: { color: '#fff', fontSize: 13 },
     formatter: (params) => {
       const p = params[0];
-      const date = new Date(p.value[0]);
+      const tick = allTicks.find(t => t.id === p.value[0]);
+      if (!tick) return '';
+      const date = new Date(tick.timestamp);
       const timeStr = date.toLocaleTimeString('en-au', { hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true }).toLowerCase();
       const dateStr = date.toLocaleDateString('en-AU');
       return `<div style="padding: 8px;"><strong>${timeStr}</strong><br><span style="color: #ccc;">${dateStr}</span><br>Value: <strong style="color: #3fa9f5;">${p.value[1].toFixed(2)}</strong><br>ID: <span style="color:#aaa;">${p.value[2]}</span></div>`;
@@ -99,10 +100,7 @@ chart.setOption({
     data: [],
     axisLabel: {
       color: '#ccc',
-      formatter: val => {
-        const d = new Date(val);
-        return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
-      }
+      formatter: val => val
     }
   },
   yAxis: {
@@ -121,38 +119,16 @@ chart.setOption({
   ]
 });
 
-function formatDateToLocalInput(date) {
-  return date.toISOString().slice(0, 16);
-}
-
-async function loadVersion() {
-  try {
-    const res = await fetch('/version');
-    const json = await res.json();
-    document.getElementById('version').textContent = `Version: ${json.version}`;
-  } catch {
-    document.getElementById('version').textContent = 'Version: unknown';
-  }
-}
-loadVersion();
-
-function getSelectedSeries(tick) {
-  return {
-    bid: [tick.timestamp, tick.bid, tick.id],
-    mid: [tick.timestamp, tick.mid, tick.id],
-    ask: [tick.timestamp, tick.ask, tick.id]
-  };
-}
-
 function refreshChart() {
-  const option = chart.getOption();
-  const zoomModel = chart.getModel().getComponent('dataZoom');
-  const range = zoomModel?.getRange() ?? {};
+  const zoom = chart.getModel().getComponent('dataZoom');
+  const range = zoom?.getRange() ?? {};
   const startVal = range.startValue;
   const endVal = range.endValue;
 
-  const startTickId = allTicks.find(t => t.timestamp === startVal)?.id;
-  const endTickId = allTicks.find(t => t.timestamp === endVal)?.id;
+  const startTick = allTicks.find(t => t.id == startVal);
+  const endTick = allTicks.find(t => t.id == endVal);
+  const newStartId = startTick?.id || allTicks[0]?.id;
+  const newEndId = endTick?.id || allTicks[allTicks.length - 1]?.id;
 
   const showBid = document.getElementById('chkBid').checked;
   const showMid = document.getElementById('chkMid').checked;
@@ -163,10 +139,6 @@ function refreshChart() {
   const midSeries = showMid ? allTicks.map(t => [t.id, t.mid, t.id]) : [];
   const askSeries = showAsk ? allTicks.map(t => [t.id, t.ask, t.id]) : [];
 
-  // Restore by timestamp instead of percent
-  const newStartTs = allTicks.find(t => t.id === startTickId)?.timestamp || timestamps[0];
-  const newEndTs = allTicks.find(t => t.id === endTickId)?.timestamp || timestamps[timestamps.length - 1];
-
   chart.setOption({
     xAxis: { data: xIds },
     series: [
@@ -175,12 +147,11 @@ function refreshChart() {
       { data: askSeries }
     ],
     dataZoom: [
-      { type: 'inside', startValue: newStartTs, endValue: newEndTs },
-      { type: 'slider', startValue: newStartTs, endValue: newEndTs, bottom: 0, height: 40, handleStyle: { color: '#3fa9f5' } }
+      { type: 'inside', startValue: newStartId, endValue: newEndId },
+      { type: 'slider', startValue: newStartId, endValue: newEndId, bottom: 0, height: 40, handleStyle: { color: '#3fa9f5' } }
     ]
   });
 }
-
 
 async function loadInitial() {
   const dt = document.getElementById('timestampInput').value;
@@ -194,23 +165,31 @@ async function loadInitial() {
     return;
   }
 
-  const startId = idData[0].id;
-  lastTickId = startId;
+  lastTickId = idData[0].id;
   allTicks = [];
   await loadNextBlock();
 }
 
 async function loadNextBlock() {
-  const tickRes = await fetch(`/ticks/after/${lastTickId}?limit=3000`);
-  const tickData = await tickRes.json();
-  if (!Array.isArray(tickData) || tickData.length === 0) return;
-
-  allTicks = allTicks.concat(tickData);
-  lastTickId = tickData[tickData.length - 1].id;
+  const res = await fetch(`/ticks/after/${lastTickId}?limit=3000`);
+  const ticks = await res.json();
+  if (!Array.isArray(ticks) || ticks.length === 0) return;
+  allTicks = allTicks.concat(ticks);
+  lastTickId = ticks[ticks.length - 1].id;
   refreshChart();
-
   setTimeout(loadNextBlock, 3000);
 }
+
+async function loadVersion() {
+  try {
+    const res = await fetch('/version');
+    const json = await res.json();
+    document.getElementById('version').textContent = `Version: ${json.version}`;
+  } catch {
+    document.getElementById('version').textContent = 'Version: unknown';
+  }
+}
+loadVersion();
 </script>
 </body>
 </html>
