@@ -97,7 +97,12 @@ async function loadInitial() {
 
   const res = await fetch(`/ticks/from?start=${encodeURIComponent(baseTimestamp)}&limit=5000`);
   const ticks = await res.json();
-  if (ticks.length === 0) return;
+  console.log('Loaded ticks:', ticks);
+
+  if (ticks.length === 0) {
+    alert('No ticks found at this timestamp');
+    return;
+  }
 
   data = ticks.map(t => [t.timestamp, t.mid, t.id]);
   lastTimestamp = data[data.length - 1][0];
@@ -114,6 +119,7 @@ async function loadInitial() {
 
   setTimeout(loadMore, 3000);
 }
+
 
 async function loadMore() {
   const currentZoom = chart.getOption().dataZoom?.[0];

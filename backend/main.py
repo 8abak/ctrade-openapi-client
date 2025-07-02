@@ -162,6 +162,7 @@ def get_ticks_from(start: str = Query(..., description="UTC timestamp in ISO for
         ticks = [dict(row._mapping) for row in result]
     return ticks
 
+# Get the first ticks of the current day
 @app.get("/ticks/first-of-day", response_model=Tick)
 def get_first_tick_of_day():
     today = datetime.utcnow().date()
@@ -196,4 +197,4 @@ def get_label_tables():
 # Get the current version of the API
 @app.get("/version")
 def get_version():
-    return {"version": "2025.07.02.2.003"}  # Manually update as needed
+    return {"version": "2025.07.02.2.004"}  # Manually update as needed
