@@ -130,11 +130,13 @@ function refreshChart() {
   const newStartId = startTick?.id || allTicks[0]?.id;
   const newEndId = endTick?.id || allTicks[allTicks.length - 1]?.id;
 
+
+
   const showBid = document.getElementById('chkBid').checked;
   const showMid = document.getElementById('chkMid').checked;
   const showAsk = document.getElementById('chkAsk').checked;
 
-  const xIds = allTicks.map(t => t.id);
+  const xIds = allTicks.map(t => t.id.toString());
   const bidSeries = showBid ? allTicks.map(t => [t.id.toString(), t.bid, t.id]) : [];
   const midSeries = showMid ? allTicks.map(t => [t.id.toString(), t.mid, t.id]) : [];
   const askSeries = showAsk ? allTicks.map(t => [t.id.toString(), t.ask, t.id]) : [];
