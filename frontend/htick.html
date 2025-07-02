@@ -34,6 +34,7 @@
   <label for="timestampInput">Start Timestamp:</label>
   <input type="datetime-local" id="timestampInput">
   <button onclick="loadInitial()">Load</button>
+  <div id="version" style="padding: 1em; font-size: 0.8em; color: #888;">Version: frontend</div>
 </div>
 <div id="chart"></div>
 
@@ -96,6 +97,14 @@ function formatDateToLocalInput(date) {
     console.error('No tick data found for today.');
   }
 })();
+
+async function loadVersion() {
+  try {
+    const res = await fetch('/version');
+    const json = await res.json();
+    document.getElementById('version').textContent = `Version: ${json.version}`;
+  } catch { document.getElementById('version').textContent = 'Version: unknown'; }
+}
 
 async function loadInitial() {
   const dt = document.getElementById('timestampInput').value;
