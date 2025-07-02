@@ -25,7 +25,7 @@
     #toolbar {
       padding: 1em;
     }
-    #toolbar input, #toolbar button, #toolbar select {
+    #toolbar input, #toolbar button {
       margin-bottom: 10px;
       width: 100%;
       padding: 6px 10px;
@@ -33,6 +33,9 @@
       background: #222;
       color: white;
       border: 1px solid #444;
+    }
+    #toolbar label {
+      font-size: 14px;
     }
     #chart {
       flex: 1;
@@ -51,12 +54,12 @@
     <input type="datetime-local" id="timestampInput">
     <button onclick="loadInitial()">Load</button>
 
-    <label for="priceType">Show Price:</label>
-    <select id="priceType">
-      <option value="mid">Mid</option>
-      <option value="bid">Bid</option>
-      <option value="ask">Ask</option>
-    </select>
+    <div style="margin-top: 1em;">
+      <strong>Show Prices:</strong><br>
+      <label><input type="checkbox" id="chkBid" onchange="refreshChart()"> Bid</label><br>
+      <label><input type="checkbox" id="chkMid" onchange="refreshChart()" checked> Mid</label><br>
+      <label><input type="checkbox" id="chkAsk" onchange="refreshChart()"> Ask</label>
+    </div>
   </div>
   <div id="version">Version: frontend</div>
 </div>
@@ -64,7 +67,7 @@
 
 <script>
 let chart = echarts.init(document.getElementById('chart'));
-let data = [], lastTickId = null;
+let data = [], lastTickId = null, allTicks = [];
 
 chart.setOption({
   backgroundColor: '#111',
@@ -79,7 +82,7 @@ chart.setOption({
       const date = new Date(p.value[0]);
       const timeStr = date.toLocaleTimeString('en-au', { hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true }).toLowerCase();
       const dateStr = date.toLocaleDateString('en-AU');
-      return `<div style="padding: 8px;"><strong>${timeStr}</strong><br><span style="color: #ccc;">${dateStr}</span><br>${document.getElementById('priceType').value.toUpperCase()}: <strong style="color: #3fa9f5;">${p.value[1].toFixed(2)}</strong><br>ID: <span style="color:#aaa;">${p.value[2]}</span></div>`;
+      return `<div style="padding: 8px;"><strong>${timeStr}</strong><br><span style="color: #ccc;">${dateStr}</span><br>Value: <strong style="color: #3fa9f5;">${p.value[1].toFixed(2)}</strong><br>ID: <span style="color:#aaa;">${p.value[2]}</span></div>`;
     }
   },
   xAxis: {
@@ -98,13 +101,11 @@ chart.setOption({
     scale: true,
     axisLabel: { color: '#ccc' }
   },
-  series: [{
-    name: 'Price',
-    type: 'line',
-    showSymbol: false,
-    data: [],
-    lineStyle: { color: '#3fa9f5', width: 1.2 }
-  }],
+  series: [
+    { name: 'Bid', type: 'line', showSymbol: false, data: [], lineStyle: { color: '#f55', width: 1 } },
+    { name: 'Mid', type: 'line', showSymbol: false, data: [], lineStyle: { color: '#3fa9f5', width: 1.2 } },
+    { name: 'Ask', type: 'line', showSymbol: false, data: [], lineStyle: { color: '#5f5', width: 1 } }
+  ],
   dataZoom: [
     { type: 'inside', start: 0, end: 100 },
     { type: 'slider', start: 0, end: 100, bottom: 0, height: 40, handleStyle: { color: '#3fa9f5' } }
@@ -115,19 +116,6 @@ function formatDateToLocalInput(date) {
   return date.toISOString().slice(0, 16);
 }
 
-(async () => {
-  try {
-    const res = await fetch('/ticks/first-of-day');
-    const json = await res.json();
-    if (json.timestamp) {
-      document.getElementById('timestampInput').value = formatDateToLocalInput(new Date(json.timestamp));
-      loadInitial();
-    }
-  } catch (e) {
-    console.error('No tick data found for today.');
-  }
-})();
-
 async function loadVersion() {
   try {
     const res = await fetch('/version');
@@ -137,14 +125,40 @@ async function loadVersion() {
     document.getElementById('version').textContent = 'Version: unknown';
   }
 }
+loadVersion();
 
-function getSelectedPrice(tick) {
-  const type = document.getElementById('priceType').value;
-  return type === 'ask' ? tick.ask : (type === 'bid' ? tick.bid : tick.mid);
+function getSelectedSeries(tick) {
+  return {
+    bid: [tick.timestamp, tick.bid, tick.id],
+    mid: [tick.timestamp, tick.mid, tick.id],
+    ask: [tick.timestamp, tick.ask, tick.id]
+  };
+}
+
+function refreshChart() {
+  const showBid = document.getElementById('chkBid').checked;
+  const showMid = document.getElementById('chkMid').checked;
+  const showAsk = document.getElementById('chkAsk').checked;
+
+  const series = [];
+  if (showBid) series.push({ data: allTicks.map(t => [t.timestamp, t.bid, t.id]) });
+  else series.push({ data: [] });
+
+  if (showMid) series.push({ data: allTicks.map(t => [t.timestamp, t.mid, t.id]) });
+  else series.push({ data: [] });
+
+  if (showAsk) series.push({ data: allTicks.map(t => [t.timestamp, t.ask, t.id]) });
+  else series.push({ data: [] });
+
+  chart.setOption({
+    xAxis: { data: allTicks.map(t => t.timestamp) },
+    series: series
+  });
 }
 
 async function loadInitial() {
   const dt = document.getElementById('timestampInput').value;
+  if (!dt) return alert('Please select a timestamp.');
   const iso = new Date(dt).toISOString();
 
   const idRes = await fetch(`/sqlvw/query?query=${encodeURIComponent(`SELECT id FROM ticks WHERE timestamp >= '${iso}' ORDER BY timestamp ASC LIMIT 1`)}`);
@@ -156,7 +170,7 @@ async function loadInitial() {
 
   const startId = idData[0].id;
   lastTickId = startId;
-  data = []; // clear data each time Load is clicked
+  allTicks = [];
   await loadNextBlock();
 }
 
@@ -165,14 +179,9 @@ async function loadNextBlock() {
   const tickData = await tickRes.json();
   if (!Array.isArray(tickData) || tickData.length === 0) return;
 
-  const newData = tickData.map(t => [t.timestamp, getSelectedPrice(t), t.id]);
-  lastTickId = newData[newData.length - 1][2];
-  data = data.concat(newData);
-
-  chart.setOption({
-    xAxis: { data: data.map(d => d[0]) },
-    series: [{ data }]
-  });
+  allTicks = allTicks.concat(tickData);
+  lastTickId = tickData[tickData.length - 1].id;
+  refreshChart();
 
   setTimeout(loadNextBlock, 3000);
 }
