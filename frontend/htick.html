@@ -145,35 +145,48 @@ function getSelectedSeries(tick) {
 }
 
 function refreshChart() {
+  // Store tickId range before refresh
+  const option = chart.getOption();
+  const zoom = option.dataZoom?.[0];
+  const startPercent = zoom?.start ?? 0;
+  const endPercent = zoom?.end ?? 100;
+
+  const total = allTicks.length;
+  const startIndex = Math.floor((startPercent / 100) * total);
+  const endIndex = Math.floor((endPercent / 100) * total);
+
+  const startTickId = allTicks[startIndex]?.id;
+  const endTickId = allTicks[endIndex]?.id;
+
   const showBid = document.getElementById('chkBid').checked;
   const showMid = document.getElementById('chkMid').checked;
   const showAsk = document.getElementById('chkAsk').checked;
 
-  const series = [];
-  if (showBid) series.push({ data: allTicks.map(t => [t.timestamp, t.bid, t.id]) });
-  else series.push({ data: [] });
+  const bidSeries = showBid ? allTicks.map(t => [t.timestamp, t.bid, t.id]) : [];
+  const midSeries = showMid ? allTicks.map(t => [t.timestamp, t.mid, t.id]) : [];
+  const askSeries = showAsk ? allTicks.map(t => [t.timestamp, t.ask, t.id]) : [];
 
-  if (showMid) series.push({ data: allTicks.map(t => [t.timestamp, t.mid, t.id]) });
-  else series.push({ data: [] });
+  // Find new index range after update
+  const newStartIdx = allTicks.findIndex(t => t.id === startTickId);
+  const newEndIdx = allTicks.findIndex(t => t.id === endTickId);
+  const newTotal = allTicks.length;
+  const newStart = newStartIdx >= 0 ? (newStartIdx / newTotal) * 100 : 0;
+  const newEnd = newEndIdx >= 0 ? (newEndIdx / newTotal) * 100 : 100;
 
-  if (showAsk) series.push({ data: allTicks.map(t => [t.timestamp, t.ask, t.id]) });
-  else series.push({ data: [] });
-
-  const option = chart.getOption();
-const currentZoom = option.dataZoom?.[0];
-const start = currentZoom?.start ?? 0;
-const end = currentZoom?.end ?? 100;
-
-chart.setOption({
-  xAxis: { data: allTicks.map(t => t.timestamp) },
-  series: series,
-  dataZoom: [
-    { type: 'inside', start, end },
-    { type: 'slider', start, end, bottom: 0, height: 40, handleStyle: { color: '#3fa9f5' } }
-  ]
-});
-
+  chart.setOption({
+    xAxis: { data: allTicks.map(t => t.timestamp) },
+    series: [
+      { data: bidSeries },
+      { data: midSeries },
+      { data: askSeries }
+    ],
+    dataZoom: [
+      { type: 'inside', start: newStart, end: newEnd },
+      { type: 'slider', start: newStart, end: newEnd, bottom: 0, height: 40, handleStyle: { color: '#3fa9f5' } }
+    ]
+  });
 }
+
 
 async function loadInitial() {
   const dt = document.getElementById('timestampInput').value;
