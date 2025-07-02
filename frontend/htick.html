@@ -110,12 +110,13 @@ async function loadInitial() {
   const first2000 = data.slice(0, 2000);
   chart.setOption({
     xAxis: { data: first2000.map(d => d[0]) },
-    series: [{ data: first2000 }],
+    series: [{ data: first2000.map(d => [d[0], d[1]]) }],
     dataZoom: [
-      { type: 'inside', start: 0, end: (2000 / data.length) * 100 },
-      { type: 'slider', start: 0, end: (2000 / data.length) * 100 }
+        { type: 'inside', start: 0, end: (2000 / data.length) * 100 },
+        { type: 'slider', start: 0, end: (2000 / data.length) * 100 }
     ]
   });
+
 
   setTimeout(loadMore, 3000);
 }
@@ -135,11 +136,11 @@ async function loadMore() {
   lastTimestamp = mapped[mapped.length - 1][0];
 
   chart.setOption({
-    xAxis: { data: data.map(d => d[0]) },
-    series: [{ data }],
+    xAxis: { data: first2000.map(d => d[0]) },
+    series: [{ data: first2000.map(d => [d[0], d[1]]) }],
     dataZoom: [
-      { type: 'inside', startValue, endValue },
-      { type: 'slider', startValue, endValue }
+        { type: 'inside', start: 0, end: (2000 / data.length) * 100 },
+        { type: 'slider', start: 0, end: (2000 / data.length) * 100 }
     ]
   });
 
