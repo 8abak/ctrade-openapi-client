@@ -97,7 +97,7 @@ chart.setOption({
   },
   xAxis: {
     type: 'category',
-    data: xIds.map(id => id.toString()),
+    data: [],
     axisLabel: {
       color: '#ccc',
       formatter: val => val
@@ -146,21 +146,47 @@ function refreshChart() {
   const newEndId = endVal?.toString() || xIds[xIds.length - 1];
 
   chart.setOption({
+    backgroundColor: '#111',
+    tooltip: {
+      trigger: 'axis',
+      backgroundColor: '#222',
+      borderColor: '#555',
+      borderWidth: 1,
+      textStyle: { color: '#fff', fontSize: 13 },
+      formatter: (params) => {
+        const p = params[0];
+        const tick = allTicks.find(t => t.id === p.value[0]);
+        if (!tick) return '';
+        const date = new Date(tick.timestamp);
+        const timeStr = date.toLocaleTimeString('en-au', { hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true }).toLowerCase();
+        const dateStr = date.toLocaleDateString('en-AU');
+        return `<div style="padding: 8px;"><strong>${timeStr}</strong><br><span style="color: #ccc;">${dateStr}</span><br>Value: <strong style="color: #3fa9f5;">${p.value[1].toFixed(2)}</strong><br>ID: <span style="color:#aaa;">${p.value[2]}</span></div>`;
+      }
+    },
     xAxis: {
       type: 'category',
-      data: xIds,
+      data: [],
+      axisLabel: {
+        color: '#ccc',
+        formatter: val => val
+      }
+    },
+    yAxis: {
+      type: 'value',
+      scale: true,
       axisLabel: { color: '#ccc' }
     },
     series: [
-      { data: bidSeries },
-      { data: midSeries },
-      { data: askSeries }
+      { name: 'Bid', type: 'line', showSymbol: false, data: [], lineStyle: { color: '#f55', width: 1 } },
+      { name: 'Mid', type: 'line', showSymbol: false, data: [], lineStyle: { color: '#3fa9f5', width: 1.2 } },
+      { name: 'Ask', type: 'line', showSymbol: false, data: [], lineStyle: { color: '#5f5', width: 1 } }
     ],
     dataZoom: [
-      { type: 'inside', startValue: newStartId, endValue: newEndId },
-      { type: 'slider', startValue: newStartId, endValue: newEndId, bottom: 0, height: 40, handleStyle: { color: '#3fa9f5' } }
+      { type: 'inside', start: 0, end: 100 },
+      { type: 'slider', start: 0, end: 100, bottom: 0, height: 40, handleStyle: { color: '#3fa9f5' } }
     ]
   });
+
 }
 
 
