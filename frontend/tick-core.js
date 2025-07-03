@@ -63,9 +63,7 @@ function updateChartWindow() {
   const futurePad = 60 * 1000;
   const startTime = new Date(visible[0][0]).getTime();
   const endTime = new Date(visible[visible.length - 1][0]).getTime() + futurePad;
-  chart.setOption({
-    xAxis: { min: startTime, max: endTime }
-  });
+  chart.setOption({ xAxis: { min: startTime, max: endTime } });
 }
 
 function updateLabelView() {
@@ -120,13 +118,12 @@ async function pollNewData() {
     data = data.concat(newPoints).slice(-2200);
     lastTimestamp = newPoints[newPoints.length - 1][0];
 
-    const option = chart.getOption();
-    const seriesData = option.series[0].data;
-    chart.setOption({
-      series: [{ data: data }]
-    }, false); // no merge needed for single series update
+    chart.appendData({
+      seriesIndex: 0,
+      data: newPoints
+    });
 
-    const currentMax = option.xAxis[0].max;
+    const currentMax = chart.getOption().xAxis[0].max;
     const currentMaxMs = new Date(currentMax).getTime();
     const lastTickMs = new Date(lastTimestamp).getTime();
     if (lastTickMs >= currentMaxMs - 2000) {
