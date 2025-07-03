@@ -137,14 +137,23 @@ async function pollNewData() {
 async function mannualLoadMoreLeft() {
   const count = parseInt(document.getElementById('tickLoadAmount').value) || 0;
   if (!count || isNaN(count)) return;
+
   const firstId = data[0]?.[2];
+  if (!firstId) return;
+
+  const zoom = chart.getOption().xAxis?.[0];
+  const originalMin = zoom?.min;
+  const originalMax = zoom?.max;
+
   const res = await fetch(`/ticks/before/${firstId}?limit=${count}`);
   const older = await res.json();
   if (older.length > 0) {
     const prepend = older.map(t => [t.timestamp, t.mid, t.id]);
     data = prepend.concat(data);
-    lastTimestamp = data[data.length - 1][0];
-    chart.setOption({ series: [{ data }] });
+
+    chart.setOption({ series: [{ data }] }, false);
+    chart.setOption({ xAxis: { min: originalMin, max: originalMax } });
+
     updateLabelView();
   }
 }
