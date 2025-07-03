@@ -58,32 +58,15 @@ const option = {
 
 chart.setOption(option);
 
-chart.on('dataZoom', async function (event) {
-  const startPercent = event.batch?.[0]?.start ?? event.start;
-  const visibleLeftCount = Math.floor((startPercent / 100) * data.length);
-  if (visibleLeftCount < 400 && !isLoadingOld) {
-    isLoadingOld = true;
-    const zoom = chart.getOption().dataZoom?.[0];
-    const startIndex = Math.floor((zoom?.start / 100) * data.length);
-    const endIndex = Math.floor((zoom?.end / 100) * data.length);
-    const idStart = data[startIndex]?.[2];
-    const idEnd = data[endIndex]?.[2];
-    const firstId = data[0]?.[2];
-    const res = await fetch(`/ticks/before/${firstId}?limit=2000`);
-    const older = await res.json();
-    if (older.length > 0) {
-      const prepend = older.map(t => [t.timestamp, t.mid, t.id]);
-      data = prepend.concat(data);
-      const newStart = data.findIndex(d => d[2] === idStart);
-      const newEnd = data.findIndex(d => d[2] === idEnd);
-      const s = (newStart / data.length) * 100;
-      const e = (newEnd / data.length) * 100;
-      chart.setOption({ series: [{ data }], dataZoom: [{ start: s, end: e }, { start: s, end: e }] });
-      updateLabelView();
-    }
-    isLoadingOld = false;
-  }
-});
+function updateChartWindow() {
+  const visible = data.slice(-1500);
+  const futurePad = 60 * 1000;
+  const startTime = new Date(visible[0][0]).getTime();
+  const endTime = new Date(visible[visible.length - 1][0]).getTime() + futurePad;
+  chart.setOption({
+    xAxis: { min: startTime, max: endTime }
+  });
+}
 
 function updateLabelView() {
   const all = Object.values(labelLayers).flat();
@@ -110,11 +93,8 @@ async function loadInitialData() {
   const ticks = await res.json();
   data = ticks.map(t => [t.timestamp, t.mid, t.id]);
   lastTimestamp = ticks[ticks.length - 1]?.timestamp;
-  const visible = data.slice(-1500);
-  const futurePad = 60 * 1000;
-  const startTime = new Date(visible[0][0]).getTime();
-  const endTime = new Date(visible[visible.length - 1][0]).getTime() + futurePad;
-  chart.setOption({ xAxis: { min: startTime, max: endTime }, series: [{ data }] });
+  chart.setOption({ series: [{ data }] });
+  updateChartWindow();
   applyTimeSeparator(5);
 }
 
@@ -131,6 +111,32 @@ function applyTimeSeparator(minutes) {
   chart.setOption({ markLine: { symbol: ['none', 'none'], data: marks.concat(...Object.values(labelLayers)) } });
 }
 
+async function pollNewData() {
+  if (!lastTimestamp) return;
+  const res = await fetch(`/ticks/latest?after=${encodeURIComponent(lastTimestamp)}`);
+  const newTicks = await res.json();
+  if (newTicks.length > 0) {
+    const newPoints = newTicks.map(t => [t.timestamp, t.mid, t.id]);
+    data = data.concat(newPoints).slice(-2200);
+    lastTimestamp = newPoints[newPoints.length - 1][0];
+
+    const option = chart.getOption();
+    const seriesData = option.series[0].data;
+    chart.setOption({
+      series: [{ data: data }]
+    }, false); // no merge needed for single series update
+
+    const currentMax = option.xAxis[0].max;
+    const currentMaxMs = new Date(currentMax).getTime();
+    const lastTickMs = new Date(lastTimestamp).getTime();
+    if (lastTickMs >= currentMaxMs - 2000) {
+      updateChartWindow();
+    }
+
+    updateLabelView();
+  }
+}
+
 async function mannualLoadMoreLeft() {
   const count = parseInt(document.getElementById('tickLoadAmount').value) || 0;
   if (!count || isNaN(count)) return;
@@ -140,32 +146,9 @@ async function mannualLoadMoreLeft() {
   if (older.length > 0) {
     const prepend = older.map(t => [t.timestamp, t.mid, t.id]);
     data = prepend.concat(data);
-    lastTimestamp = older[older.length - 1].timestamp;
+    lastTimestamp = data[data.length - 1][0];
     chart.setOption({ series: [{ data }] });
     updateLabelView();
-  }
-}
-
-async function pollNewData() {
-  if (!lastTimestamp) return;
-  const res = await fetch(`/ticks/latest?after=${encodeURIComponent(lastTimestamp)}`);
-  const newTicks = await res.json();
-  if (newTicks.length > 0) {
-    newTicks.forEach(t => data.push([t.timestamp, t.mid, t.id]));
-    data = data.slice(-2200);
-    lastTimestamp = newTicks[newTicks.length - 1].timestamp;
-    chart.setOption({ series: [{ data }] });
-    updateLabelView();
-  }
-}
-
-async function loadVersion() {
-  try {
-    const res = await fetch('/version');
-    const json = await res.json();
-    document.getElementById('version').textContent = `Version: ${json.version}`;
-  } catch {
-    document.getElementById('version').textContent = 'Version: unknown';
   }
 }
 
@@ -182,6 +165,16 @@ async function loadLabelToggles() {
         <span>${name}</span>
       </label>`);
   });
+}
+
+async function loadVersion() {
+  try {
+    const res = await fetch('/version');
+    const json = await res.json();
+    document.getElementById('version').textContent = `Version: ${json.version}`;
+  } catch {
+    document.getElementById('version').textContent = 'Version: unknown';
+  }
 }
 
 async function loadTableNames() {
