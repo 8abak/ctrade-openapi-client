@@ -1,4 +1,4 @@
-// tick-core.js
+// tick-core.js — Clean Dot View with fallback + smooth zoom
 let data = [], lastTimestamp = null, isLoadingOld = false;
 const chart = echarts.init(document.getElementById('main'));
 
@@ -13,7 +13,7 @@ const option = {
     formatter: (params) => {
       const p = params[0];
       const date = new Date(p.value[0]);
-      date.setMinutes(date.getMinutes() + 600); // adjust UTC to Sydney
+      date.setMinutes(date.getMinutes() + 600);
       const timeStr = date.toLocaleTimeString('en-au', { hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true }).toLowerCase();
       const dateStr = date.toLocaleDateString('en-AU');
       return `<div style="padding: 8px;"><strong>${timeStr}</strong><br><span style="color: #ccc;">${dateStr}</span><br>Mid: <strong style="color: #3fa9f5;">${p.value[1].toFixed(2)}</strong><br>ID: <span style="color:#aaa;">${p.value[2]}</span></div>`;
@@ -31,13 +31,32 @@ const option = {
       }
     }
   },
-  yAxis: { type: 'value', scale: true, axisLabel: { color: '#ccc' } },
+  yAxis: {
+    type: 'value', scale: true,
+    axisLabel: { color: '#ccc' }
+  },
   dataZoom: [
-    { type: 'inside', start: 0, end: 100 },
-    { type: 'slider', start: 0, end: 100, bottom: 0, height: 40, handleStyle: { color: '#3fa9f5' } }
+    {
+      type: 'inside',
+      start: 100,
+      end: 100,
+      throttle: 10
+    },
+    {
+      type: 'slider',
+      start: 100,
+      end: 100,
+      height: 40,
+      bottom: 0,
+      handleStyle: { color: '#3fa9f5' }
+    }
   ],
-  series: [{ name: 'Mid Price', type: 'line', showSymbol: false, data: [], lineStyle: { color: '#3fa9f5', width: 1.2 } }],
-  markLine: { data: [] }
+  series: [{
+    name: 'Mid Price',
+    type: 'scatter',
+    symbolSize: 4,
+    data: []
+  }]
 };
 
 chart.setOption(option);
@@ -45,26 +64,16 @@ chart.setOption(option);
 async function loadInitialData() {
   try {
     const now = new Date();
-
-    // 🕒 Step back to Friday if today is weekend (Sydney time logic)
     const utcDay = now.getUTCDay();
-    if (utcDay === 6) { // Saturday
-      now.setUTCDate(now.getUTCDate() - 1);
-    } else if (utcDay === 0) { // Sunday
-      now.setUTCDate(now.getUTCDate() - 2);
-    }
-
-    // 🕐 Set time to start of day UTC (00:00 UTC)
+    if (utcDay === 6) now.setUTCDate(now.getUTCDate() - 1);
+    if (utcDay === 0) now.setUTCDate(now.getUTCDate() - 2);
     now.setUTCHours(0, 0, 0, 0);
     const iso = now.toISOString();
 
-    // 📡 Attempt to load from a specific timestamp
     let res = await fetch(`/ticks/after/${iso}?limit=5000`);
     let ticks = await res.json();
 
-    // 🔁 Fallback if empty
     if (!Array.isArray(ticks) || ticks.length === 0) {
-      console.warn("No data after timestamp, falling back to /ticks/recent");
       res = await fetch(`/ticks/recent?limit=2000`);
       ticks = await res.json();
     }
@@ -73,14 +82,16 @@ async function loadInitialData() {
     lastTimestamp = ticks[ticks.length - 1]?.timestamp;
     chart.setOption({
       xAxis: { data: data.map(d => d[0]) },
-      series: [{ data }]
+      series: [{ data }],
+      dataZoom: [
+        { type: 'inside', start: 80, end: 100 },
+        { type: 'slider', start: 80, end: 100, bottom: 0, height: 40 }
+      ]
     });
-    console.log(`✅ Loaded ${data.length} ticks starting from ${iso}`);
   } catch (err) {
     console.error("❌ loadInitialData() failed", err);
   }
 }
-
 
 async function pollNewData() {
   if (!lastTimestamp) return;
@@ -90,7 +101,10 @@ async function pollNewData() {
     newTicks.forEach(t => data.push([t.timestamp, t.mid, t.id]));
     data = data.slice(-5000);
     lastTimestamp = newTicks[newTicks.length - 1].timestamp;
-    chart.setOption({ xAxis: { data: data.map(d => d[0]) }, series: [{ data }] });
+    chart.setOption({
+      xAxis: { data: data.map(d => d[0]) },
+      series: [{ data }]
+    });
   }
 }
 
@@ -103,7 +117,10 @@ async function mannualLoadMoreLeft() {
   if (older.length > 0) {
     const prepend = older.map(t => [t.timestamp, t.mid, t.id]);
     data = prepend.concat(data);
-    chart.setOption({ xAxis: { data: data.map(d => d[0]) }, series: [{ data }] });
+    chart.setOption({
+      xAxis: { data: data.map(d => d[0]) },
+      series: [{ data }]
+    });
   }
 }
 
@@ -111,7 +128,7 @@ async function loadVersion() {
   try {
     const res = await fetch('/version');
     const json = await res.json();
-    document.getElementById('version').textContent = `Version: ${json.version}`;
+    document.getElementById('version').textContent = `bver: ${json.version}, fver: 2025.07.05.001`;
   } catch {
     document.getElementById('version').textContent = 'Version: unknown';
   }
