@@ -66,13 +66,15 @@ async function loadInitialData() {
     data = [[ts, t.mid, t.id]];
     lastTimestamp = t.timestamp;
 
-    const tickDate = new Date(ts);
-    const leftStart = new Date(ts);
-    leftStart.setMinutes(Math.floor(leftStart.getMinutes() / 5) * 5 - 5);
-    leftStart.setSeconds(0);
-    const rightEnd = new Date(ts);
-    rightEnd.setMinutes(Math.floor(rightEnd.getMinutes() / 5) * 5);
-    rightEnd.setSeconds(59);
+    // Calculate time bounds
+    const tickTime = new Date(ts);
+    tickTime.setSeconds(0, 0);
+
+    const rightEnd = new Date(tickTime.getTime());
+    rightEnd.setMinutes(rightEnd.getMinutes() + 1);
+
+    const leftStart = new Date(tickTime.getTime());
+    leftStart.setMinutes(leftStart.getMinutes() - 4);
 
     const start = leftStart.getTime();
     const end = rightEnd.getTime();
