@@ -1,6 +1,5 @@
 // tick-core.js
 let data = [], lastTimestamp = null, isLoadingOld = false;
-const labelLayers = {};
 const chart = echarts.init(document.getElementById('main'));
 
 const option = {
@@ -43,57 +42,25 @@ const option = {
 
 chart.setOption(option);
 
-function updateLabelView() {
-  const all = Object.values(labelLayers).flat();
-  chart.setOption({ markLine: { symbol: ['none', 'none'], label: { show: true }, data: all } });
-}
-
-async function toggleLabel(name, checked) {
-  if (checked) {
-    const res = await fetch(`/labels/${name}`);
-    const rows = await res.json();
-    const marks = rows.map(r => {
-      const match = data.find(d => d[2] === r.tickid);
-      return match ? { xAxis: match[0], label: { formatter: name }, lineStyle: { type: 'dashed', color: '#ffa500' } } : null;
-    }).filter(Boolean);
-    labelLayers[name] = marks;
-  } else {
-    delete labelLayers[name];
-  }
-  updateLabelView();
-}
-
 async function loadInitialData() {
   try {
     const now = new Date();
-
-    // Convert to Sydney timezone
-    const utcDay = now.getUTCDay();  // 0 = Sunday, 6 = Saturday
-
-    // Step back to Friday if weekend
-    if (utcDay === 6) { // Saturday
-      now.setUTCDate(now.getUTCDate() - 1);  // Friday
-    } else if (utcDay === 0) { // Sunday
-      now.setUTCDate(now.getUTCDate() - 2);  // Friday
+    const utcDay = now.getUTCDay();
+    if (utcDay === 6) {
+      now.setUTCDate(now.getUTCDate() - 1);
+    } else if (utcDay === 0) {
+      now.setUTCDate(now.getUTCDate() - 2);
     }
-
-    // Set to 8:00am Sydney time (which is UTC+10 for standard time or UTC+11 with DST)
-    now.setUTCHours(22, 0, 0, 0);  // 8am Sydney = 22:00 UTC (non-DST)
-
+    now.setUTCHours(22, 0, 0, 0);
     const res = await fetch(`/ticks/after/${now.toISOString()}?limit=5000`);
     const ticks = await res.json();
     data = ticks.map(t => [t.timestamp, t.mid, t.id]);
     lastTimestamp = ticks[ticks.length - 1]?.timestamp;
     chart.setOption({ xAxis: { data: data.map(d => d[0]) }, series: [{ data }] });
-    updateLabelView();
-
-    console.log(`✅ Loaded ${ticks.length} ticks starting from ${now.toISOString()}`);
   } catch (err) {
     console.error("❌ loadInitialData() failed", err);
   }
 }
-
-
 
 async function pollNewData() {
   if (!lastTimestamp) return;
@@ -104,38 +71,19 @@ async function pollNewData() {
     data = data.slice(-5000);
     lastTimestamp = newTicks[newTicks.length - 1].timestamp;
     chart.setOption({ xAxis: { data: data.map(d => d[0]) }, series: [{ data }] });
-    updateLabelView();
   }
-}
-
-async function loadLabelToggles() {
-  const res = await fetch('/api/labels/available');
-  const tables = await res.json();
-  const container = document.getElementById('labelToggles');
-  container.innerHTML = '';
-  tables.forEach(name => {
-    const id = `label-${name}`;
-    container.insertAdjacentHTML('beforeend', `
-      <label style="display:flex;align-items: center;font-size:13px;margin-bottom:4px;gap: 6px;">
-        <input type="checkbox" id="${id}" onchange="toggleLabel('${name}', this.checked)">
-        <span>${name}</span>
-      </label>`);
-  });
 }
 
 async function mannualLoadMoreLeft() {
   const count = parseInt(document.getElementById('tickLoadAmount').value) || 0;
   if (!count || isNaN(count)) return;
-
   const firstId = data[0]?.[2];
   const res = await fetch(`/ticks/before/${firstId}?limit=${count}`);
   const older = await res.json();
-
   if (older.length > 0) {
     const prepend = older.map(t => [t.timestamp, t.mid, t.id]);
     data = prepend.concat(data);
     chart.setOption({ xAxis: { data: data.map(d => d[0]) }, series: [{ data }] });
-    updateLabelView();
   }
 }
 
@@ -188,5 +136,4 @@ async function runQuery() {
 loadInitialData();
 loadVersion();
 loadTableNames();
-loadLabelToggles();
 setInterval(pollNewData, 3000);
