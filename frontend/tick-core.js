@@ -1,4 +1,5 @@
 // tick-core.js — Dot View, Locked Zoom Window, Dual Version
+const bver = '2025.07.05.004', fver = '2025.07.05.008';
 let data = [], lastTimestamp = null;
 const chart = echarts.init(document.getElementById('main'));
 
@@ -79,22 +80,21 @@ async function loadInitialData() {
     lastTimestamp = t.timestamp;
     data = [[tickTime, t.mid, t.id]];
 
+    const tickMinute = new Date(tickDate);
+    tickMinute.setSeconds(0, 0);
+    const chartStart = new Date(tickMinute);
+    chartStart.setMinutes(chartStart.getMinutes() - 4);
+    const chartEnd = new Date(tickMinute);
+    chartEnd.setMinutes(chartEnd.getMinutes() + 1);
+
     const dayStart = new Date(tickDate);
     dayStart.setUTCHours(0, 0, 0, 0);
     const dayEnd = new Date(tickDate);
     dayEnd.setUTCHours(23, 59, 59, 999);
 
-    const tickMinute = new Date(tickDate);
-    tickMinute.setSeconds(0, 0);
-    const chartStart = new Date(tickMinute);
-    chartStart.setMinutes(chartStart.getMinutes() - 5);
-    const chartEnd = new Date(tickMinute);
-    chartEnd.setMinutes(chartEnd.getMinutes() + 1);
-
     const price = t.mid;
-    const isInteger = price === Math.floor(price);
-    const yMin = isInteger ? price - 1 : Math.floor(price);
-    const yMax = isInteger ? price + 1 : Math.ceil(price);
+    const yMin = Math.floor(price);
+    const yMax = Number.isInteger(price) ? price + 1 : Math.ceil(price);
 
     chart.setOption({
       series: [{ data }],
