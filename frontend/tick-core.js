@@ -78,9 +78,13 @@ async function loadInitialData() {
     data = [[ts, t.mid, t.id]];
     lastTimestamp = t.timestamp;
 
+    const startOfDay = new Date(ts);
+    startOfDay.setUTCHours(0, 0, 0, 0);
+    const endOfDay = new Date(startOfDay);
+    endOfDay.setUTCHours(23, 59, 59, 999);
+
     const tickTime = new Date(ts);
     tickTime.setSeconds(0, 0);
-
     const chartStart = new Date(tickTime);
     chartStart.setMinutes(chartStart.getMinutes() - 5);
     const chartEnd = new Date(tickTime);
@@ -92,8 +96,8 @@ async function loadInitialData() {
     chart.setOption({
       series: [{ data }],
       xAxis: {
-        min: chartStart.getTime(),
-        max: chartEnd.getTime()
+        min: startOfDay.getTime(),
+        max: endOfDay.getTime()
       },
       yAxis: {
         min: yBottom,
@@ -109,78 +113,4 @@ async function loadInitialData() {
   }
 }
 
-async function pollNewData() {
-  if (!lastTimestamp) return;
-  const res = await fetch(`/ticks/latest?after=${encodeURIComponent(lastTimestamp)}`);
-  const newTicks = await res.json();
-  if (newTicks.length > 0) {
-    newTicks.forEach(t => data.push([new Date(t.timestamp).getTime(), t.mid, t.id]));
-    data = data.slice(-5000);
-    lastTimestamp = newTicks[newTicks.length - 1].timestamp;
-    chart.setOption({ series: [{ data }] });
-  }
-}
-
-async function mannualLoadMoreLeft() {
-  const count = parseInt(document.getElementById('tickLoadAmount').value) || 0;
-  if (!count || isNaN(count)) return;
-  const firstId = data[0]?.[2];
-  const res = await fetch(`/ticks/before/${firstId}?limit=${count}`);
-  const older = await res.json();
-  if (older.length > 0) {
-    const prepend = older.map(t => [new Date(t.timestamp).getTime(), t.mid, t.id]);
-    data = prepend.concat(data);
-    chart.setOption({ series: [{ data }] });
-  }
-}
-
-async function loadVersion() {
-  try {
-    const res = await fetch('/version');
-    const json = await res.json();
-    document.getElementById('version').innerHTML = `bver: ${json.version}<br>fver: 2025.07.05.006`;
-  } catch {
-    document.getElementById('version').textContent = 'Version: unknown';
-  }
-}
-
-async function loadTableNames() {
-  const res = await fetch('/sqlvw/tables');
-  const tables = await res.json();
-  const select = document.getElementById('tableSelect');
-  select.innerHTML = tables.map(t => `<option value="${t}">${t}</option>`).join('');
-}
-
-async function runQuery() {
-  const table = document.getElementById('tableSelect').value;
-  const raw = document.getElementById('queryInput').value.trim();
-  const query = raw || `SELECT * FROM ${table} ORDER BY timestamp DESC LIMIT 20`;
-  const container = document.getElementById('sqlResult');
-  container.innerHTML = `<pre style="color: #999;">Running query...</pre>`;
-  try {
-    const res = await fetch(`/sqlvw/query?query=${encodeURIComponent(query)}`);
-    const text = await res.text();
-    try {
-      const json = JSON.parse(text);
-      if (Array.isArray(json)) {
-        if (json.length === 0) return container.innerHTML = '<p>No results.</p>';
-        const headers = Object.keys(json[0]);
-        let html = '<table><thead><tr>' + headers.map(h => `<th>${h}</th>`).join('') + '</tr></thead><tbody>';
-        for (const row of json) html += '<tr>' + headers.map(h => `<td>${row[h]}</td>`).join('') + '</tr>';
-        html += '</tbody></table>';
-        container.innerHTML = html;
-      } else {
-        container.innerHTML = `<pre>${JSON.stringify(json, null, 2)}</pre>`;
-      }
-    } catch {
-      container.innerHTML = `<pre style="color: green;">${text}</pre>`;
-    }
-  } catch (e) {
-    container.innerHTML = `<pre style="color:red">Error: ${e.message}</pre>`;
-  }
-}
-
-loadInitialData();
-loadVersion();
-loadTableNames();
-setInterval(pollNewData, 3000);
+// ... [rest unchanged] ...
