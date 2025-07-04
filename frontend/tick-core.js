@@ -30,7 +30,13 @@ const option = {
       }
     },
     splitNumber: 12,
-    minInterval: 60 * 1000 * 5
+    minInterval: 60 * 1000 * 5,
+    splitLine: {
+      show: true,
+      lineStyle: {
+        color: '#333'
+      }
+    }
   },
   yAxis: {
     type: 'value',
@@ -39,6 +45,12 @@ const option = {
     axisLabel: {
       color: '#ccc',
       formatter: val => val.toFixed(1)
+    },
+    splitLine: {
+      show: true,
+      lineStyle: {
+        color: '#333'
+      }
     }
   },
   dataZoom: [
@@ -66,18 +78,13 @@ async function loadInitialData() {
     data = [[ts, t.mid, t.id]];
     lastTimestamp = t.timestamp;
 
-    // Calculate time bounds
     const tickTime = new Date(ts);
     tickTime.setSeconds(0, 0);
 
-    const rightEnd = new Date(tickTime.getTime());
-    rightEnd.setMinutes(rightEnd.getMinutes() + 1);
-
-    const leftStart = new Date(tickTime.getTime());
-    leftStart.setMinutes(leftStart.getMinutes() - 4);
-
-    const start = leftStart.getTime();
-    const end = rightEnd.getTime();
+    const chartStart = new Date(tickTime);
+    chartStart.setMinutes(chartStart.getMinutes() - 5);
+    const chartEnd = new Date(tickTime);
+    chartEnd.setMinutes(chartEnd.getMinutes() + 1);
 
     const yTop = Math.ceil(t.mid);
     const yBottom = Math.floor(t.mid);
@@ -85,16 +92,16 @@ async function loadInitialData() {
     chart.setOption({
       series: [{ data }],
       xAxis: {
-        min: start,
-        max: end
+        min: chartStart.getTime(),
+        max: chartEnd.getTime()
       },
       yAxis: {
         min: yBottom,
         max: yTop
       },
       dataZoom: [
-        { type: 'inside', startValue: start, endValue: end, realtime: false },
-        { type: 'slider', startValue: start, endValue: end, bottom: 0, height: 40, realtime: false }
+        { type: 'inside', startValue: chartStart.getTime(), endValue: chartEnd.getTime(), realtime: false },
+        { type: 'slider', startValue: chartStart.getTime(), endValue: chartEnd.getTime(), bottom: 0, height: 40, realtime: false }
       ]
     });
   } catch (err) {
