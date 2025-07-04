@@ -74,38 +74,51 @@ async function loadInitialData() {
     if (!Array.isArray(ticks) || ticks.length === 0) return;
 
     const t = ticks[0];
-    const ts = new Date(t.timestamp).getTime();
-    data = [[ts, t.mid, t.id]];
+    const tickDate = new Date(t.timestamp);
+    const tickTime = tickDate.getTime();
     lastTimestamp = t.timestamp;
+    data = [[tickTime, t.mid, t.id]];
 
-    const startOfDay = new Date(ts);
-    startOfDay.setUTCHours(0, 0, 0, 0);
-    const endOfDay = new Date(startOfDay);
-    endOfDay.setUTCHours(23, 59, 59, 999);
+    const dayStart = new Date(tickDate);
+    dayStart.setUTCHours(0, 0, 0, 0);
+    const dayEnd = new Date(tickDate);
+    dayEnd.setUTCHours(23, 59, 59, 999);
 
-    const tickTime = new Date(ts);
-    tickTime.setSeconds(0, 0);
-    const chartStart = new Date(tickTime);
+    const tickMinute = new Date(tickDate);
+    tickMinute.setSeconds(0, 0);
+    const chartStart = new Date(tickMinute);
     chartStart.setMinutes(chartStart.getMinutes() - 5);
-    const chartEnd = new Date(tickTime);
+    const chartEnd = new Date(tickMinute);
     chartEnd.setMinutes(chartEnd.getMinutes() + 1);
 
-    const yTop = Math.ceil(t.mid);
-    const yBottom = Math.floor(t.mid);
+    const yMin = Math.floor(t.mid);
+    const yMax = Math.ceil(t.mid);
 
     chart.setOption({
       series: [{ data }],
       xAxis: {
-        min: startOfDay.getTime(),
-        max: endOfDay.getTime()
+        min: dayStart.getTime(),
+        max: dayEnd.getTime()
       },
       yAxis: {
-        min: yBottom,
-        max: yTop
+        min: yMin,
+        max: yMax
       },
       dataZoom: [
-        { type: 'inside', startValue: chartStart.getTime(), endValue: chartEnd.getTime(), realtime: false },
-        { type: 'slider', startValue: chartStart.getTime(), endValue: chartEnd.getTime(), bottom: 0, height: 40, realtime: false }
+        {
+          type: 'inside',
+          startValue: chartStart.getTime(),
+          endValue: chartEnd.getTime(),
+          realtime: false
+        },
+        {
+          type: 'slider',
+          startValue: chartStart.getTime(),
+          endValue: chartEnd.getTime(),
+          bottom: 0,
+          height: 40,
+          realtime: false
+        }
       ]
     });
   } catch (err) {
