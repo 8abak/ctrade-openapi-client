@@ -66,18 +66,33 @@ async function toggleLabel(name, checked) {
 async function loadInitialData() {
   try {
     const now = new Date();
-    now.setHours(8, 0, 0, 0); // market open time
+
+    // Convert to Sydney timezone
+    const utcDay = now.getUTCDay();  // 0 = Sunday, 6 = Saturday
+
+    // Step back to Friday if weekend
+    if (utcDay === 6) { // Saturday
+      now.setUTCDate(now.getUTCDate() - 1);  // Friday
+    } else if (utcDay === 0) { // Sunday
+      now.setUTCDate(now.getUTCDate() - 2);  // Friday
+    }
+
+    // Set to 8:00am Sydney time (which is UTC+10 for standard time or UTC+11 with DST)
+    now.setUTCHours(22, 0, 0, 0);  // 8am Sydney = 22:00 UTC (non-DST)
+
     const res = await fetch(`/ticks/after/${now.toISOString()}?limit=5000`);
     const ticks = await res.json();
     data = ticks.map(t => [t.timestamp, t.mid, t.id]);
     lastTimestamp = ticks[ticks.length - 1]?.timestamp;
     chart.setOption({ xAxis: { data: data.map(d => d[0]) }, series: [{ data }] });
     updateLabelView();
-    console.log(`✅ Loaded ${ticks.length} ticks`);
+
+    console.log(`✅ Loaded ${ticks.length} ticks starting from ${now.toISOString()}`);
   } catch (err) {
     console.error("❌ loadInitialData() failed", err);
   }
 }
+
 
 
 async function pollNewData() {

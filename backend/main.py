@@ -183,4 +183,4 @@ def run_sql_query(query: str = Query(...)):
 # Version check
 @app.get("/version")
 def get_version():
-    return {"version": "2025.07.05.003"}
+    return {"version": "2025.07.05.004"}
