@@ -31,7 +31,7 @@ const option = {
       }
     },
     splitNumber: 12,
-    minInterval: 60 * 1000 * 5,
+    minInterval: 5 * 60 * 1000,
     splitLine: {
       show: true,
       lineStyle: {
@@ -93,7 +93,7 @@ async function loadInitialData() {
     dayEnd.setUTCHours(23, 59, 59, 999);
 
     const price = t.mid;
-    const yMin = Math.floor(price);
+    const yMin = Number.isInteger(price) ? price - 1 : Math.floor(price);
     const yMax = Number.isInteger(price) ? price + 1 : Math.ceil(price);
 
     chart.setOption({
