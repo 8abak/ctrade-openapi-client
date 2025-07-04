@@ -35,6 +35,7 @@ const option = {
   yAxis: {
     type: 'value',
     scale: true,
+    minInterval: 1,
     axisLabel: {
       color: '#ccc',
       formatter: val => val.toFixed(1)
@@ -65,11 +66,30 @@ async function loadInitialData() {
     data = [[ts, t.mid, t.id]];
     lastTimestamp = t.timestamp;
 
-    const start = ts - 4 * 60 * 1000;
-    const end = ts + 1 * 60 * 1000;
+    const tickDate = new Date(ts);
+    const leftStart = new Date(ts);
+    leftStart.setMinutes(Math.floor(leftStart.getMinutes() / 5) * 5 - 5);
+    leftStart.setSeconds(0);
+    const rightEnd = new Date(ts);
+    rightEnd.setMinutes(Math.floor(rightEnd.getMinutes() / 5) * 5);
+    rightEnd.setSeconds(59);
+
+    const start = leftStart.getTime();
+    const end = rightEnd.getTime();
+
+    const yTop = Math.ceil(t.mid);
+    const yBottom = Math.floor(t.mid);
 
     chart.setOption({
       series: [{ data }],
+      xAxis: {
+        min: start,
+        max: end
+      },
+      yAxis: {
+        min: yBottom,
+        max: yTop
+      },
       dataZoom: [
         { type: 'inside', startValue: start, endValue: end, realtime: false },
         { type: 'slider', startValue: start, endValue: end, bottom: 0, height: 40, realtime: false }
@@ -109,7 +129,7 @@ async function loadVersion() {
   try {
     const res = await fetch('/version');
     const json = await res.json();
-    document.getElementById('version').innerHTML = `bver: ${json.version}<br>fver: 2025.07.05.005`;
+    document.getElementById('version').innerHTML = `bver: ${json.version}<br>fver: 2025.07.05.006`;
   } catch {
     document.getElementById('version').textContent = 'Version: unknown';
   }
