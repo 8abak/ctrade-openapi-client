@@ -64,15 +64,21 @@ async function toggleLabel(name, checked) {
 }
 
 async function loadInitialData() {
-  const now = new Date();
-  now.setHours(8, 0, 0, 0); // market open time
-  const res = await fetch(`/ticks/after/${now.toISOString()}?limit=5000`);
-  const ticks = await res.json();
-  data = ticks.map(t => [t.timestamp, t.mid, t.id]);
-  lastTimestamp = ticks[ticks.length - 1]?.timestamp;
-  chart.setOption({ xAxis: { data: data.map(d => d[0]) }, series: [{ data }] });
-  updateLabelView();
+  try {
+    const now = new Date();
+    now.setHours(8, 0, 0, 0); // market open time
+    const res = await fetch(`/ticks/after/${now.toISOString()}?limit=5000`);
+    const ticks = await res.json();
+    data = ticks.map(t => [t.timestamp, t.mid, t.id]);
+    lastTimestamp = ticks[ticks.length - 1]?.timestamp;
+    chart.setOption({ xAxis: { data: data.map(d => d[0]) }, series: [{ data }] });
+    updateLabelView();
+    console.log(`✅ Loaded ${ticks.length} ticks`);
+  } catch (err) {
+    console.error("❌ loadInitialData() failed", err);
+  }
 }
+
 
 async function pollNewData() {
   if (!lastTimestamp) return;
