@@ -12,6 +12,8 @@ from fastapi.responses import JSONResponse
 # Initialize FastAPI test to see version 002
 app = FastAPI()
 
+#new test
+
 # Allow cross-origin requests (frontend calling this backend)
 app.add_middleware(
     CORSMiddleware,
@@ -181,4 +183,4 @@ def run_sql_query(query: str = Query(...)):
 # Version check
 @app.get("/version")
 def get_version():
-    return {"version": "2025.07.05.002"}
+    return {"version": "2025.07.05.003"}
