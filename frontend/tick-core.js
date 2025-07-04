@@ -1,4 +1,4 @@
-// tick-core.js — Dot View, True Zoom Lock, Dual Version
+// tick-core.js — Dot View, Locked Zoom Window, Dual Version
 let data = [], lastTimestamp = null;
 const chart = echarts.init(document.getElementById('main'));
 
@@ -73,8 +73,8 @@ async function loadInitialData() {
     chart.setOption({
       series: [{ data }],
       dataZoom: [
-        { type: 'inside', startValue: last - 60 * 60 * 1000, endValue: last, realtime: false },
-        { type: 'slider', startValue: last - 60 * 60 * 1000, endValue: last, bottom: 0, height: 40, realtime: false }
+        { type: 'inside', startValue: first, endValue: last, realtime: false },
+        { type: 'slider', startValue: first, endValue: last, bottom: 0, height: 40, realtime: false }
       ]
     });
   } catch (err) {
@@ -90,9 +90,7 @@ async function pollNewData() {
     newTicks.forEach(t => data.push([new Date(t.timestamp).getTime(), t.mid, t.id]));
     data = data.slice(-5000);
     lastTimestamp = newTicks[newTicks.length - 1].timestamp;
-    chart.setOption({
-      series: [{ data }]
-    });
+    chart.setOption({ series: [{ data }] });
   }
 }
 
@@ -105,9 +103,7 @@ async function mannualLoadMoreLeft() {
   if (older.length > 0) {
     const prepend = older.map(t => [new Date(t.timestamp).getTime(), t.mid, t.id]);
     data = prepend.concat(data);
-    chart.setOption({
-      series: [{ data }]
-    });
+    chart.setOption({ series: [{ data }] });
   }
 }
 
@@ -115,7 +111,7 @@ async function loadVersion() {
   try {
     const res = await fetch('/version');
     const json = await res.json();
-    document.getElementById('version').innerHTML = `bver: ${json.version}<br>fver: 2025.07.05.003`;
+    document.getElementById('version').innerHTML = `bver: ${json.version}<br>fver: 2025.07.05.004`;
   } catch {
     document.getElementById('version').textContent = 'Version: unknown';
   }
