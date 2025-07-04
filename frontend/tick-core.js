@@ -35,8 +35,8 @@ const option = {
     axisLabel: { color: '#ccc' }
   },
   dataZoom: [
-    { type: 'inside' },
-    { type: 'slider', height: 40, bottom: 0, handleStyle: { color: '#3fa9f5' } }
+    { type: 'inside', realtime: false },
+    { type: 'slider', height: 40, bottom: 0, handleStyle: { color: '#3fa9f5' }, realtime: false }
   ],
   series: [{
     name: 'Mid Price',
@@ -68,11 +68,13 @@ async function loadInitialData() {
     data = ticks.map(t => [new Date(t.timestamp).getTime(), t.mid, t.id]);
     lastTimestamp = ticks[ticks.length - 1]?.timestamp;
 
+    const first = data[0][0];
+    const last = data[data.length - 1][0];
     chart.setOption({
       series: [{ data }],
       dataZoom: [
-        { type: 'inside', startValue: data[0][0], endValue: data[data.length - 1][0] },
-        { type: 'slider', startValue: data[0][0], endValue: data[data.length - 1][0], bottom: 0, height: 40 }
+        { type: 'inside', startValue: last - 60 * 60 * 1000, endValue: last, realtime: false },
+        { type: 'slider', startValue: last - 60 * 60 * 1000, endValue: last, bottom: 0, height: 40, realtime: false }
       ]
     });
   } catch (err) {
@@ -113,7 +115,7 @@ async function loadVersion() {
   try {
     const res = await fetch('/version');
     const json = await res.json();
-    document.getElementById('version').innerHTML = `bver: ${json.version}<br>fver: 2025.07.05.002`;
+    document.getElementById('version').innerHTML = `bver: ${json.version}<br>fver: 2025.07.05.003`;
   } catch {
     document.getElementById('version').textContent = 'Version: unknown';
   }
