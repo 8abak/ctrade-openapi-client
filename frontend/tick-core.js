@@ -56,32 +56,23 @@ chart.setOption(option);
 
 async function loadInitialData() {
   try {
-    const now = new Date();
-    const utcDay = now.getUTCDay();
-    if (utcDay === 6) now.setUTCDate(now.getUTCDate() - 1);
-    if (utcDay === 0) now.setUTCDate(now.getUTCDate() - 2);
-    now.setUTCHours(0, 0, 0, 0);
-    const iso = now.toISOString();
+    const res = await fetch(`/ticks/recent?limit=1`);
+    const ticks = await res.json();
+    if (!Array.isArray(ticks) || ticks.length === 0) return;
 
-    let res = await fetch(`/ticks/after/${iso}?limit=5000`);
-    let ticks = await res.json();
+    const t = ticks[0];
+    const ts = new Date(t.timestamp).getTime();
+    data = [[ts, t.mid, t.id]];
+    lastTimestamp = t.timestamp;
 
-    if (!Array.isArray(ticks) || ticks.length === 0) {
-      res = await fetch(`/ticks/recent?limit=2000`);
-      ticks = await res.json();
-    }
+    const start = ts - 4 * 60 * 1000;
+    const end = ts + 1 * 60 * 1000;
 
-    data = ticks.map(t => [new Date(t.timestamp).getTime(), t.mid, t.id]);
-    lastTimestamp = ticks[ticks.length - 1]?.timestamp;
-
-    const first = data[0][0];
-    const last = data[data.length - 1][0];
-    const span = 4 * 60 * 1000; // 4 minutes
     chart.setOption({
       series: [{ data }],
       dataZoom: [
-        { type: 'inside', startValue: last - span, endValue: last, realtime: false },
-        { type: 'slider', startValue: last - span, endValue: last, bottom: 0, height: 40, realtime: false }
+        { type: 'inside', startValue: start, endValue: end, realtime: false },
+        { type: 'slider', startValue: start, endValue: end, bottom: 0, height: 40, realtime: false }
       ]
     });
   } catch (err) {
@@ -118,7 +109,7 @@ async function loadVersion() {
   try {
     const res = await fetch('/version');
     const json = await res.json();
-    document.getElementById('version').innerHTML = `bver: ${json.version}<br>fver: 2025.07.05.004`;
+    document.getElementById('version').innerHTML = `bver: ${json.version}<br>fver: 2025.07.05.005`;
   } catch {
     document.getElementById('version').textContent = 'Version: unknown';
   }
