@@ -45,22 +45,42 @@ chart.setOption(option);
 async function loadInitialData() {
   try {
     const now = new Date();
+
+    // 🕒 Step back to Friday if today is weekend (Sydney time logic)
     const utcDay = now.getUTCDay();
-    if (utcDay === 6) {
+    if (utcDay === 6) { // Saturday
       now.setUTCDate(now.getUTCDate() - 1);
-    } else if (utcDay === 0) {
+    } else if (utcDay === 0) { // Sunday
       now.setUTCDate(now.getUTCDate() - 2);
     }
-    now.setUTCHours(22, 0, 0, 0);
-    const res = await fetch(`/ticks/after/${now.toISOString()}?limit=5000`);
-    const ticks = await res.json();
+
+    // 🕐 Set time to start of day UTC (00:00 UTC)
+    now.setUTCHours(0, 0, 0, 0);
+    const iso = now.toISOString();
+
+    // 📡 Attempt to load from a specific timestamp
+    let res = await fetch(`/ticks/after/${iso}?limit=5000`);
+    let ticks = await res.json();
+
+    // 🔁 Fallback if empty
+    if (!Array.isArray(ticks) || ticks.length === 0) {
+      console.warn("No data after timestamp, falling back to /ticks/recent");
+      res = await fetch(`/ticks/recent?limit=2000`);
+      ticks = await res.json();
+    }
+
     data = ticks.map(t => [t.timestamp, t.mid, t.id]);
     lastTimestamp = ticks[ticks.length - 1]?.timestamp;
-    chart.setOption({ xAxis: { data: data.map(d => d[0]) }, series: [{ data }] });
+    chart.setOption({
+      xAxis: { data: data.map(d => d[0]) },
+      series: [{ data }]
+    });
+    console.log(`✅ Loaded ${data.length} ticks starting from ${iso}`);
   } catch (err) {
     console.error("❌ loadInitialData() failed", err);
   }
 }
+
 
 async function pollNewData() {
   if (!lastTimestamp) return;
