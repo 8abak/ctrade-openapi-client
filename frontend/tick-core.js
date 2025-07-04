@@ -88,9 +88,9 @@ async function loadInitialData() {
     chartEnd.setMinutes(chartEnd.getMinutes() + 1);
 
     const dayStart = new Date(tickDate);
-    dayStart.setUTCHours(0, 0, 0, 0);
+    dayStart.setHours(0, 0, 0, 0);
     const dayEnd = new Date(tickDate);
-    dayEnd.setUTCHours(23, 59, 59, 999);
+    dayEnd.setHours(23, 59, 59, 999);
 
     const price = t.mid;
     const yMin = Number.isInteger(price) ? price - 1 : Math.floor(price);
