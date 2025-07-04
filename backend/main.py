@@ -8,9 +8,6 @@ from sqlalchemy import create_engine, text
 import os
 from datetime import datetime
 from fastapi.responses import JSONResponse
-from datetime import datetime, timedelta
-
-
 
 # Initialize FastAPI
 app = FastAPI()
@@ -27,7 +24,6 @@ app.add_middleware(
 db_url = os.getenv("DATABASE_URL", "postgresql+psycopg2://babak:babak33044@localhost:5432/trading")
 engine = create_engine(db_url)
 
-
 # Tick model
 class Tick(BaseModel):
     id: int
@@ -36,8 +32,12 @@ class Tick(BaseModel):
     ask: float
     mid: float
 
+# Home route to check if API is live
+@app.get("/")
+def home():
+    return {"message": "Tick API is live. Try /ticks or /ticks/latest."}
 
-# Get chunk of historical ticks (for scrolling/initial view)
+# Get ticks with offset (legacy)
 @app.get("/ticks", response_model=List[Tick])
 def get_ticks(offset: int = 0, limit: int = 2000):
     with engine.connect() as conn:
@@ -48,27 +48,23 @@ def get_ticks(offset: int = 0, limit: int = 2000):
             OFFSET :offset LIMIT :limit
         """)
         result = conn.execute(query, {"offset": offset, "limit": limit})
-        ticks = [dict(row._mapping) for row in result]
-    return ticks
+        return [dict(row._mapping) for row in result]
 
-
-# Get new ticks after a timestamp (for live appending)
+# Get latest ticks after timestamp
 @app.get("/ticks/latest", response_model=List[Tick])
-def get_latest_ticks(after: str = Query(..., description="UTC timestamp in ISO format")):
+def get_latest_ticks(after: str = Query(...)):
     with engine.connect() as conn:
         query = text("""
-            SELECT id, timestamp, bid, ask, mid  -- <-- FIXED: add id
+            SELECT id, timestamp, bid, ask, mid
             FROM ticks
             WHERE timestamp > :after
             ORDER BY timestamp ASC
             LIMIT 1000
         """)
         result = conn.execute(query, {"after": after})
-        ticks = [dict(row._mapping) for row in result]
-    return ticks
+        return [dict(row._mapping) for row in result]
 
-
-# Get the latest N ticks in chronological order
+# Get recent N ticks
 @app.get("/ticks/recent", response_model=List[Tick])
 def get_recent_ticks(limit: int = Query(2200, le=5000)):
     with engine.connect() as conn:
@@ -83,15 +79,9 @@ def get_recent_ticks(limit: int = Query(2200, le=5000)):
             ORDER BY timestamp ASC
         """)
         result = conn.execute(query, {"limit": limit})
-        ticks = [dict(row._mapping) for row in result]
-    return ticks
+        return [dict(row._mapping) for row in result]
 
-# Home route to check if API is live
-@app.get("/")
-def home():
-    return {"message": "Tick API is live. Try /ticks or /ticks/latest."}
-
-# get thicks before by ID
+# Get ticks before a specific tick ID
 @app.get("/ticks/before/{tickid}", response_model=List[Tick])
 def get_ticks_before(tickid: int, limit: int = 2000):
     with engine.connect() as conn:
@@ -103,12 +93,11 @@ def get_ticks_before(tickid: int, limit: int = 2000):
             LIMIT :limit
         """)
         result = conn.execute(query, {"tickid": tickid, "limit": limit})
-        ticks = [dict(row._mapping) for row in result]
-    return list(reversed(ticks))  # Reverse to return in chronological order
+        return list(reversed([dict(row._mapping) for row in result]))
 
-# get ticks after id for htick loading data
-@app.get("/ticks/after/{tickid}", response_model=List[Tick])
-def get_ticks_after(tickid: int, limit: int = 2000):
+# Get ticks after a tick ID (used for Htick View scroll)
+@app.get("/ticks/after-id/{tickid}", response_model=List[Tick])
+def get_ticks_after_id(tickid: int, limit: int = 2000):
     with engine.connect() as conn:
         query = text("""
             SELECT id, timestamp, bid, ask, mid
@@ -118,91 +107,41 @@ def get_ticks_after(tickid: int, limit: int = 2000):
             LIMIT :limit
         """)
         result = conn.execute(query, {"tickid": tickid, "limit": limit})
-        ticks = [dict(row._mapping) for row in result]
-    return ticks
-
-
-
-# get all table names in the database
-@app.get("/sqlvw/tables")
-def get_all_table_names():
-    with engine.connect() as conn:
-        query = text("""
-            SELECT table_name
-            FROM information_schema.tables
-            WHERE table_schema='public'
-              AND table_type='BASE TABLE'
-        """)
-        result = conn.execute(query)
-        tables = [row[0] for row in result]
-    return tables
-
-# Run a SQL query against the database
-@app.get("/sqlvw/query")
-def run_sql_query(query: str = Query(...)):
-    try:
-        with engine.begin() as conn:
-            result = conn.execute(text(query))
-            # If it's a SELECT, return the rows
-            if result.returns_rows:
-                rows = [dict(row._mapping) for row in result]
-                return rows
-            else:
-                return {"message": "Query executed successfully."}
-    except Exception as e:
-        return JSONResponse(status_code=400, content={"error": str(e)})
-
-# to serve Support and Resisance zones
-@app.get("/labels/supres")
-def get_supres_zones():
-    with engine.connect() as conn:
-        result = conn.execute(text("""
-            SELECT level_type, price_low, price_high, tickid_start, tickid_end
-            FROM supRes
-            WHERE confirmed = TRUE
-        """))
         return [dict(row._mapping) for row in result]
 
-# Get ticks starting from a specific timestamp
-@app.get("/ticks/from", response_model=List[Tick])
-def get_ticks_from(start: str = Query(..., description="UTC timestamp in ISO format"), limit: int = 2000):
+# ✅ NEW: Get ticks after a timestamp (used for main chart startup)
+@app.get("/ticks/after/{timestamp}", response_model=List[Tick])
+def get_ticks_after_timestamp(timestamp: str, limit: int = 5000):
     with engine.connect() as conn:
         query = text("""
             SELECT id, timestamp, bid, ask, mid
             FROM ticks
-            WHERE timestamp >= :start
+            WHERE timestamp >= :timestamp
             ORDER BY timestamp ASC
             LIMIT :limit
         """)
-        result = conn.execute(query, {"start": start})
-        ticks = [dict(row._mapping) for row in result]
-    return ticks
+        result = conn.execute(query, {"timestamp": timestamp, "limit": limit})
+        return [dict(row._mapping) for row in result]
 
-# Get the first ticks of the current day
-@app.get("/ticks/first-of-day", response_model=Tick)
-def get_first_tick_of_day():
+# ✅ NEW: Fetch all labels from a table like /labels/upmoves
+@app.get("/labels/{name}")
+def get_labels_by_name(name: str):
     try:
-        today = datetime.utcnow().date()
         with engine.connect() as conn:
-            query = text("""
-                SELECT id, timestamp, bid, ask, mid
-                FROM ticks
-                WHERE timestamp >= CAST(:start AS timestamptz)
-                ORDER BY timestamp ASC
-                LIMIT 1
-            """)
-            result = conn.execute(query, {"start": str(today)})
-            row = result.fetchone()
-            if not row:
-                return JSONResponse(status_code=404, content={"error": "No data today"})
-            return dict(row._mapping)
+            result = conn.execute(text(f"""
+                SELECT * FROM {name}
+                ORDER BY tickid ASC
+            """))
+            return [dict(row._mapping) for row in result]
     except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        return JSONResponse(status_code=400, content={"error": str(e)})
 
+# ✅ NEW: Mirror route expected by frontend
+@app.get("/api/labels/available")
+def get_label_tables_api():
+    return get_label_tables()
 
-
-
-# Get available tables based on labels.
+# Get label-related tables that contain tickid
 @app.get("/labels/available")
 def get_label_tables():
     with engine.connect() as conn:
@@ -213,11 +152,33 @@ def get_label_tables():
               AND table_schema = 'public'
         """)
         result = conn.execute(query)
-        tables = sorted({row[0] for row in result})
-    return tables
+        return sorted({row[0] for row in result})
 
+# SQL Table Browser (for SQL View)
+@app.get("/sqlvw/tables")
+def get_all_table_names():
+    with engine.connect() as conn:
+        query = text("""
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema='public'
+              AND table_type='BASE TABLE'
+        """)
+        result = conn.execute(query)
+        return [row[0] for row in result]
 
-# Get the current version of the API
+@app.get("/sqlvw/query")
+def run_sql_query(query: str = Query(...)):
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(text(query))
+            if result.returns_rows:
+                return [dict(row._mapping) for row in result]
+            return {"message": "Query executed successfully."}
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+# Version check
 @app.get("/version")
 def get_version():
-    return {"version": "2025.07.04.005"}  # Manually update as needed
+    return {"version": "2025.07.05.001"}

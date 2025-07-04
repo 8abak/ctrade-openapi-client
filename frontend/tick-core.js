@@ -14,57 +14,34 @@ const option = {
     formatter: (params) => {
       const p = params[0];
       const date = new Date(p.value[0]);
-      date.setMinutes(date.getMinutes() + 600);
+      date.setMinutes(date.getMinutes() + 600); // adjust UTC to Sydney
       const timeStr = date.toLocaleTimeString('en-au', { hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true }).toLowerCase();
       const dateStr = date.toLocaleDateString('en-AU');
       return `<div style="padding: 8px;"><strong>${timeStr}</strong><br><span style="color: #ccc;">${dateStr}</span><br>Mid: <strong style="color: #3fa9f5;">${p.value[1].toFixed(2)}</strong><br>ID: <span style="color:#aaa;">${p.value[2]}</span></div>`;
     }
   },
   xAxis: {
-    type: 'time',
+    type: 'category',
+    data: [],
     axisLabel: {
       color: '#ccc',
       formatter: val => {
         const d = new Date(val);
+        d.setMinutes(d.getMinutes() + 600);
         return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}` + `\n${d.toLocaleDateString('en-AU', { month: 'short', day: 'numeric' })}`;
       }
-    },
-    splitLine: { show: false }
-  },
-  yAxis: {
-    type: 'value',
-    scale: true,
-    min: value => Math.floor(value.min),
-    max: value => Math.ceil(value.max),
-    interval: 1,
-    axisLabel: {
-      color: '#ccc',
-      formatter: val => val.toFixed(0)
     }
   },
-  series: [{
-    name: 'Mid Price',
-    type: 'scatter',
-    data: [],
-    symbolSize: 5,
-    itemStyle: { color: '#3fa9f5' }
-  }],
+  yAxis: { type: 'value', scale: true, axisLabel: { color: '#ccc' } },
   dataZoom: [
-    { type: 'inside', start: 90, end: 100 },
-    { type: 'slider', start: 90, end: 100, bottom: 0, height: 40, handleStyle: { color: '#3fa9f5' } }
+    { type: 'inside', start: 0, end: 100 },
+    { type: 'slider', start: 0, end: 100, bottom: 0, height: 40, handleStyle: { color: '#3fa9f5' } }
   ],
+  series: [{ name: 'Mid Price', type: 'line', showSymbol: false, data: [], lineStyle: { color: '#3fa9f5', width: 1.2 } }],
   markLine: { data: [] }
 };
 
 chart.setOption(option);
-
-function updateChartWindow() {
-  const visible = data.slice(-1500);
-  const futurePad = 60 * 1000;
-  const startTime = new Date(visible[0][0]).getTime();
-  const endTime = new Date(visible[visible.length - 1][0]).getTime() + futurePad;
-  chart.setOption({ xAxis: { min: startTime, max: endTime } });
-}
 
 function updateLabelView() {
   const all = Object.values(labelLayers).flat();
@@ -87,26 +64,14 @@ async function toggleLabel(name, checked) {
 }
 
 async function loadInitialData() {
-  const res = await fetch("/ticks/recent?limit=2200");
+  const now = new Date();
+  now.setHours(8, 0, 0, 0); // market open time
+  const res = await fetch(`/ticks/after/${now.toISOString()}?limit=5000`);
   const ticks = await res.json();
   data = ticks.map(t => [t.timestamp, t.mid, t.id]);
   lastTimestamp = ticks[ticks.length - 1]?.timestamp;
-  chart.setOption({ series: [{ data }] });
-  updateChartWindow();
-  applyTimeSeparator(5);
-}
-
-function applyTimeSeparator(minutes) {
-  const ms = minutes * 60 * 1000;
-  const marks = [];
-  if (data.length === 0) return;
-  const start = new Date(data[0][0]).getTime();
-  const end = new Date(data[data.length - 1][0]).getTime();
-  const firstGridTime = Math.ceil(start / ms) * ms;
-  for (let t = firstGridTime; t <= end + 5 * ms; t += ms) {
-    marks.push({ xAxis: t, lineStyle: { type: 'solid', color: '#333', width: 0.5 }, label: { show: false } });
-  }
-  chart.setOption({ markLine: { symbol: ['none', 'none'], data: marks.concat(...Object.values(labelLayers)) } });
+  chart.setOption({ xAxis: { data: data.map(d => d[0]) }, series: [{ data }] });
+  updateLabelView();
 }
 
 async function pollNewData() {
@@ -114,46 +79,10 @@ async function pollNewData() {
   const res = await fetch(`/ticks/latest?after=${encodeURIComponent(lastTimestamp)}`);
   const newTicks = await res.json();
   if (newTicks.length > 0) {
-    const newPoints = newTicks.map(t => [t.timestamp, t.mid, t.id]);
-    data = data.concat(newPoints).slice(-2200);
-    lastTimestamp = newPoints[newPoints.length - 1][0];
-
-    chart.appendData({
-      seriesIndex: 0,
-      data: newPoints
-    });
-
-    const currentMax = chart.getOption().xAxis[0].max;
-    const currentMaxMs = new Date(currentMax).getTime();
-    const lastTickMs = new Date(lastTimestamp).getTime();
-    if (lastTickMs >= currentMaxMs - 2000) {
-      updateChartWindow();
-    }
-
-    updateLabelView();
-  }
-}
-
-async function mannualLoadMoreLeft() {
-  const count = parseInt(document.getElementById('tickLoadAmount').value) || 0;
-  if (!count || isNaN(count)) return;
-
-  const firstId = data[0]?.[2];
-  if (!firstId) return;
-
-  const zoom = chart.getOption().xAxis?.[0];
-  const originalMin = zoom?.min;
-  const originalMax = zoom?.max;
-
-  const res = await fetch(`/ticks/before/${firstId}?limit=${count}`);
-  const older = await res.json();
-  if (older.length > 0) {
-    const prepend = older.map(t => [t.timestamp, t.mid, t.id]);
-    data = prepend.concat(data);
-
-    chart.setOption({ series: [{ data }] }, false);
-    chart.setOption({ xAxis: { min: originalMin, max: originalMax } });
-
+    newTicks.forEach(t => data.push([t.timestamp, t.mid, t.id]));
+    data = data.slice(-5000);
+    lastTimestamp = newTicks[newTicks.length - 1].timestamp;
+    chart.setOption({ xAxis: { data: data.map(d => d[0]) }, series: [{ data }] });
     updateLabelView();
   }
 }
@@ -171,6 +100,22 @@ async function loadLabelToggles() {
         <span>${name}</span>
       </label>`);
   });
+}
+
+async function mannualLoadMoreLeft() {
+  const count = parseInt(document.getElementById('tickLoadAmount').value) || 0;
+  if (!count || isNaN(count)) return;
+
+  const firstId = data[0]?.[2];
+  const res = await fetch(`/ticks/before/${firstId}?limit=${count}`);
+  const older = await res.json();
+
+  if (older.length > 0) {
+    const prepend = older.map(t => [t.timestamp, t.mid, t.id]);
+    data = prepend.concat(data);
+    chart.setOption({ xAxis: { data: data.map(d => d[0]) }, series: [{ data }] });
+    updateLabelView();
+  }
 }
 
 async function loadVersion() {
@@ -193,7 +138,7 @@ async function loadTableNames() {
 async function runQuery() {
   const table = document.getElementById('tableSelect').value;
   const raw = document.getElementById('queryInput').value.trim();
-  const query = raw || `SELECT * FROM ${table} ORDER BY id DESC LIMIT 20`;
+  const query = raw || `SELECT * FROM ${table} ORDER BY timestamp DESC LIMIT 20`;
   const container = document.getElementById('sqlResult');
   container.innerHTML = `<pre style="color: #999;">Running query...</pre>`;
   try {
@@ -221,6 +166,6 @@ async function runQuery() {
 
 loadInitialData();
 loadVersion();
-loadLabelToggles();
 loadTableNames();
+loadLabelToggles();
 setInterval(pollNewData, 3000);
