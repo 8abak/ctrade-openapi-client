@@ -1,5 +1,5 @@
-// tick-core.js — Clean Dot View with fallback + smooth zoom
-let data = [], lastTimestamp = null, isLoadingOld = false;
+// tick-core.js — Dot View, True Zoom Lock, Dual Version
+let data = [], lastTimestamp = null;
 const chart = echarts.init(document.getElementById('main'));
 
 const option = {
@@ -20,8 +20,7 @@ const option = {
     }
   },
   xAxis: {
-    type: 'category',
-    data: [],
+    type: 'time',
     axisLabel: {
       color: '#ccc',
       formatter: val => {
@@ -36,20 +35,8 @@ const option = {
     axisLabel: { color: '#ccc' }
   },
   dataZoom: [
-    {
-      type: 'inside',
-      start: 100,
-      end: 100,
-      throttle: 10
-    },
-    {
-      type: 'slider',
-      start: 100,
-      end: 100,
-      height: 40,
-      bottom: 0,
-      handleStyle: { color: '#3fa9f5' }
-    }
+    { type: 'inside' },
+    { type: 'slider', height: 40, bottom: 0, handleStyle: { color: '#3fa9f5' } }
   ],
   series: [{
     name: 'Mid Price',
@@ -78,14 +65,14 @@ async function loadInitialData() {
       ticks = await res.json();
     }
 
-    data = ticks.map(t => [t.timestamp, t.mid, t.id]);
+    data = ticks.map(t => [new Date(t.timestamp).getTime(), t.mid, t.id]);
     lastTimestamp = ticks[ticks.length - 1]?.timestamp;
+
     chart.setOption({
-      xAxis: { data: data.map(d => d[0]) },
       series: [{ data }],
       dataZoom: [
-        { type: 'inside', start: 80, end: 100 },
-        { type: 'slider', start: 80, end: 100, bottom: 0, height: 40 }
+        { type: 'inside', startValue: data[0][0], endValue: data[data.length - 1][0] },
+        { type: 'slider', startValue: data[0][0], endValue: data[data.length - 1][0], bottom: 0, height: 40 }
       ]
     });
   } catch (err) {
@@ -98,11 +85,10 @@ async function pollNewData() {
   const res = await fetch(`/ticks/latest?after=${encodeURIComponent(lastTimestamp)}`);
   const newTicks = await res.json();
   if (newTicks.length > 0) {
-    newTicks.forEach(t => data.push([t.timestamp, t.mid, t.id]));
+    newTicks.forEach(t => data.push([new Date(t.timestamp).getTime(), t.mid, t.id]));
     data = data.slice(-5000);
     lastTimestamp = newTicks[newTicks.length - 1].timestamp;
     chart.setOption({
-      xAxis: { data: data.map(d => d[0]) },
       series: [{ data }]
     });
   }
@@ -115,10 +101,9 @@ async function mannualLoadMoreLeft() {
   const res = await fetch(`/ticks/before/${firstId}?limit=${count}`);
   const older = await res.json();
   if (older.length > 0) {
-    const prepend = older.map(t => [t.timestamp, t.mid, t.id]);
+    const prepend = older.map(t => [new Date(t.timestamp).getTime(), t.mid, t.id]);
     data = prepend.concat(data);
     chart.setOption({
-      xAxis: { data: data.map(d => d[0]) },
       series: [{ data }]
     });
   }
@@ -128,7 +113,7 @@ async function loadVersion() {
   try {
     const res = await fetch('/version');
     const json = await res.json();
-    document.getElementById('version').textContent = `bver: ${json.version}, fver: 2025.07.05.001`;
+    document.getElementById('version').innerHTML = `bver: ${json.version}<br>fver: 2025.07.05.002`;
   } catch {
     document.getElementById('version').textContent = 'Version: unknown';
   }
