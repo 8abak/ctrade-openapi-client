@@ -28,11 +28,17 @@ const option = {
         d.setMinutes(d.getMinutes() + 600);
         return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}` + `\n${d.toLocaleDateString('en-AU', { month: 'short', day: 'numeric' })}`;
       }
-    }
+    },
+    splitNumber: 12,
+    minInterval: 60 * 1000 * 5
   },
   yAxis: {
-    type: 'value', scale: true,
-    axisLabel: { color: '#ccc' }
+    type: 'value',
+    scale: true,
+    axisLabel: {
+      color: '#ccc',
+      formatter: val => val.toFixed(1)
+    }
   },
   dataZoom: [
     { type: 'inside', realtime: false },
@@ -70,11 +76,12 @@ async function loadInitialData() {
 
     const first = data[0][0];
     const last = data[data.length - 1][0];
+    const span = 4 * 60 * 1000; // 4 minutes
     chart.setOption({
       series: [{ data }],
       dataZoom: [
-        { type: 'inside', startValue: first, endValue: last, realtime: false },
-        { type: 'slider', startValue: first, endValue: last, bottom: 0, height: 40, realtime: false }
+        { type: 'inside', startValue: last - span, endValue: last, realtime: false },
+        { type: 'slider', startValue: last - span, endValue: last, bottom: 0, height: 40, realtime: false }
       ]
     });
   } catch (err) {
