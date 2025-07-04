@@ -127,3 +127,6 @@ async function loadInitialData() {
     console.error("❌ loadInitialData() failed", err);
   }
 }
+
+
+loadInitialData();
