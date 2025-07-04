@@ -91,8 +91,10 @@ async function loadInitialData() {
     const chartEnd = new Date(tickMinute);
     chartEnd.setMinutes(chartEnd.getMinutes() + 1);
 
-    const yMin = Math.floor(t.mid);
-    const yMax = Math.ceil(t.mid);
+    const price = t.mid;
+    const isInteger = price === Math.floor(price);
+    const yMin = isInteger ? price - 1 : Math.floor(price);
+    const yMax = isInteger ? price + 1 : Math.ceil(price);
 
     chart.setOption({
       series: [{ data }],
@@ -125,5 +127,3 @@ async function loadInitialData() {
     console.error("❌ loadInitialData() failed", err);
   }
 }
-
-// ... [rest unchanged] ...
