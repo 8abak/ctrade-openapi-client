@@ -1,4 +1,4 @@
-const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.014';
+const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.015';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [], lastTimestamp = null;
 
@@ -138,7 +138,7 @@ function updateSeries() {
     });
   }
 
-  chart.setOption({ series: updatedSeries });
+  chart.setOption({ series: updatedSeries }, true);
 }
 
 window.addEventListener('DOMContentLoaded', () => {
