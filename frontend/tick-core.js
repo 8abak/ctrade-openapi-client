@@ -1,5 +1,5 @@
 // tick-core.js — Dot View, Locked Zoom Window, Sydney Day View
-const bver = '2025.07.05.004', fver = '2025.07.05.009';
+const bver = '2025.07.05.004', fver = '2025.07.05.010';
 let data = [], lastTimestamp = null;
 const chart = echarts.init(document.getElementById('main'));
 
@@ -106,8 +106,7 @@ async function loadInitialData() {
 
     chart.setOption({
       series: [{ data }],
-      xAxis: {
-        min: sydneyStart.getTime() - SYDNEY_OFFSET * 60000,
+      xAxis: {\        min: sydneyStart.getTime() - SYDNEY_OFFSET * 60000,
         max: sydneyEnd.getTime() - SYDNEY_OFFSET * 60000
       },
       yAxis: {
@@ -131,6 +130,15 @@ async function loadInitialData() {
         }
       ]
     });
+
+    // ✅ Load earlier ticks
+    const beforeRes = await fetch(`/ticks/before/${t.id}?limit=1000`);
+    const earlier = await beforeRes.json();
+    if (Array.isArray(earlier)) {
+      const additional = earlier.map(e => [new Date(e.timestamp).getTime(), e.mid, e.id]);
+      data.unshift(...additional);
+      chart.setOption({ series: [{ data }] });
+    }
   } catch (err) {
     console.error("❌ loadInitialData() failed", err);
   }
