@@ -79,14 +79,15 @@
       <div><a href="javascript:void(0)" onclick="showView('sql')">SQL View</a></div>
       <div><a href="htick.html" target="_blank">Htick View</a></div>
 
-      <div id="labelSection" style="margin-top: 1em;">
+      <div style="margin-top: 1em;">
         <strong>Labels</strong><br>
-        <div id="labels" style="margin-top: 6px; display: flex; gap: 16px;">
-          <label><input type="checkbox" id="askCheckbox" checked />Ask</label>
-          <label><input type="checkbox" id="midCheckbox" checked />Mid</label>
-          <label><input type="checkbox" id="bidCheckbox" checked />Bid</label>
+        <div style="display: flex; gap: 12px;" id="labels">
+          <label><input type="checkbox" id="askCheckbox" checked> Ask</label>
+          <label><input type="checkbox" id="midCheckbox" checked> Mid</label>
+          <label><input type="checkbox" id="bidCheckbox" checked> Bid</label>
         </div>
       </div>
+
 
       <div id="sqlConsole" style="margin-top: 1em; display: none;">
         <strong>SQL Console</strong><br>
