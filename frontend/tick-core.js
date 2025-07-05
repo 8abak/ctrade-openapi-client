@@ -98,13 +98,13 @@ async function loadInitialData() {
         {
           type: 'inside',
           startValue: latestUtc.getTime() - 4 * 60 * 1000, // 4 minutes before latest tick
-          endvalue: latestUtc.getTime(),
+          endValue: latestUtc.getTime(),
           realtime: false
         },
         {
           type: 'slider',
           startValue: latestUtc.getTime() - 4 * 60 * 1000, // 4 minutes before latest tick
-          endvalue: latestUtc.getTime(),
+          endValue: latestUtc.getTime(),
           bottom: 0,
           height: 40,
           realtime: false,
@@ -115,7 +115,18 @@ async function loadInitialData() {
     console.error("❌ loadInitialData() failed", err);
   }
 }
-loadInitialData();
+
+window.addEventListener('DOMContentLoaded', () => {
+  // Add checkbox listeners
+  ['ask', 'mid', 'bid'].forEach(type => {
+    const box = document.getElementById(`${type}Checkbox`);
+    box.addEventListener('change', updateSeries);
+  });
+
+  // Run the initial data loader AFTER DOM is ready
+  loadInitialData();
+});
+
 
 // ✅ Add update series function
 function updateSeries() {
