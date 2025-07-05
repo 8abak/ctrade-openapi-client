@@ -1,9 +1,8 @@
-// tick-core.js — Dot View, Locked Zoom Window, Sydney Day View with Ask/Mid/Bid Toggles
-const bver = '2025.07.05.004', fver = '2025.07.05.016';
+const bver = '2025.07.05.004', fver = '2025.07.06.001';
 let dataMid = [], dataAsk = [], dataBid = [], lastTimestamp = null;
 const chart = echarts.init(document.getElementById("main"));
 
-const SYDNEY_OFFSET = 600; // UTC+10:00
+const SYDNEY_OFFSET = 600;
 function toSydneyTime(date) {
   return new Date(date.getTime() + SYDNEY_OFFSET * 60000);
 }
@@ -41,10 +40,7 @@ const option = {
   },
   yAxis: {
     type: "value",
-    axisLabel: {
-      color: "#ccc",
-      formatter: val => Math.floor(val)
-    },
+    axisLabel: { color: "#ccc", formatter: val => Math.floor(val) },
     splitLine: { show: true, lineStyle: { color: "#333" } }
   },
   dataZoom: [
@@ -52,9 +48,9 @@ const option = {
     { type: 'slider', height: 40, bottom: 0, handleStyle: { color: '#3fa9f5' }, realtime: false }
   ],
   series: [
-    { id: 'ask', name: 'Ask', type: 'scatter', data: [], symbolSize: 4, itemStyle: { color: '#f5a623' }, show: true },
-    { id: 'mid', name: 'Mid', type: 'scatter', data: [], symbolSize: 4, itemStyle: { color: '#00bcd4' }, show: true },
-    { id: 'bid', name: 'Bid', type: 'scatter', data: [], symbolSize: 4, itemStyle: { color: '#4caf50' }, show: true }
+    { id: 'ask', name: 'Ask', type: 'scatter', data: [], symbolSize: 4, itemStyle: { color: '#f5a623' } },
+    { id: 'mid', name: 'Mid', type: 'scatter', data: [], symbolSize: 4, itemStyle: { color: '#00bcd4' } },
+    { id: 'bid', name: 'Bid', type: 'scatter', data: [], symbolSize: 4, itemStyle: { color: '#4caf50' } }
   ]
 };
 chart.setOption(option);
@@ -85,15 +81,14 @@ async function loadInitialData() {
     dataAsk = allTicks.map(t => [new Date(t.timestamp).getTime(), t.ask, t.id]);
     dataBid = allTicks.map(t => [new Date(t.timestamp).getTime(), t.bid, t.id]);
 
-    const priceVals = allTicks.flatMap(t => [t.mid, t.ask, t.bid]);
-    const yMin = Math.floor(Math.min(...priceVals));
-    const yMax = Math.ceil(Math.max(...priceVals));
+    const yMin = Math.floor(Math.min(...allTicks.flatMap(t => [t.mid, t.ask, t.bid])));
+    const yMax = Math.ceil(Math.max(...allTicks.flatMap(t => [t.mid, t.ask, t.bid])));
 
     chart.setOption({
       series: [
-        { id: 'mid', data: dataMid },
-        { id: 'ask', data: dataAsk },
-        { id: 'bid', data: dataBid }
+        { id: 'ask', data: dataAsk, show: document.getElementById('askCheckbox').checked },
+        { id: 'mid', data: dataMid, show: document.getElementById('midCheckbox').checked },
+        { id: 'bid', data: dataBid, show: document.getElementById('bidCheckbox').checked }
       ],
       xAxis: {
         min: startOfDay.getTime() - SYDNEY_OFFSET * 60000,
@@ -121,19 +116,19 @@ async function loadInitialData() {
     console.error("❌ loadInitialData() failed", err);
   }
 }
-loadInitialData();
 
-// Sync checkboxes with chart series visibility
+// ✅ Add checkbox toggles
 window.addEventListener('DOMContentLoaded', () => {
   const ask = document.getElementById('askCheckbox');
   const mid = document.getElementById('midCheckbox');
   const bid = document.getElementById('bidCheckbox');
+
   ask?.addEventListener('change', () => chart.setOption({ series: [{ id: 'ask', show: ask.checked }] }));
   mid?.addEventListener('change', () => chart.setOption({ series: [{ id: 'mid', show: mid.checked }] }));
   bid?.addEventListener('change', () => chart.setOption({ series: [{ id: 'bid', show: bid.checked }] }));
 });
 
-// Version footer display
+// ✅ Version display
 const versionDiv = document.createElement('div');
 versionDiv.style.position = 'absolute';
 versionDiv.style.left = '10px';
