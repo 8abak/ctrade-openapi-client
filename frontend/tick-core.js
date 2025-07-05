@@ -1,4 +1,4 @@
-const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.017';
+const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.018';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [], lastTimestamp = null;
 
@@ -52,6 +52,71 @@ const option = {
   ]
 };
 
+function getZoomRange() {
+  const zoom = chart.getOption().dataZoom?.[0];
+  if (!zoom) return { start: 0, end: 100 };
+  return { start: zoom.start ?? 0, end: zoom.end ?? 100 };
+}
+
+function getVisibleYRange(startPercent, endPercent) {
+  const total = dataMid.length;
+  const iStart = Math.floor((startPercent / 100) * total);
+  const iEnd = Math.ceil((endPercent / 100) * total);
+
+  const visiblePrices = [];
+
+  const useSeries = [];
+  if (document.getElementById('askCheckbox').checked) useSeries.push(dataAsk);
+  if (document.getElementById('midCheckbox').checked) useSeries.push(dataMid);
+  if (document.getElementById('bidCheckbox').checked) useSeries.push(dataBid);
+
+  for (const series of useSeries) {
+    for (let i = iStart; i < iEnd; i++) {
+      const price = series[i]?.[1];
+      if (typeof price === 'number') visiblePrices.push(price);
+    }
+  }
+
+  if (visiblePrices.length === 0) return [null, null];
+  return [Math.floor(Math.min(...visiblePrices)), Math.ceil(Math.max(...visiblePrices))];
+}
+
+function updateSeries() {
+  const askBox = document.getElementById('askCheckbox');
+  const midBox = document.getElementById('midCheckbox');
+  const bidBox = document.getElementById('bidCheckbox');
+  if (!askBox || !midBox || !bidBox || !chart) return;
+
+  const zoom = getZoomRange();
+  const [yMin, yMax] = getVisibleYRange(zoom.start, zoom.end);
+
+  const updatedSeries = [];
+  if (askBox.checked) updatedSeries.push({
+    id: 'ask', name: 'Ask', type: 'scatter', symbolSize: 4,
+    itemStyle: { color: '#f5a623' }, data: dataAsk
+  });
+  if (midBox.checked) updatedSeries.push({
+    id: 'mid', name: 'Mid', type: 'scatter', symbolSize: 4,
+    itemStyle: { color: '#00bcd4' }, data: dataMid
+  });
+  if (bidBox.checked) updatedSeries.push({
+    id: 'bid', name: 'Bid', type: 'scatter', symbolSize: 4,
+    itemStyle: { color: '#4caf50' }, data: dataBid
+  });
+
+  chart.setOption({
+    backgroundColor: option.backgroundColor,
+    tooltip: option.tooltip,
+    xAxis: option.xAxis,
+    yAxis: yMin !== null ? { ...option.yAxis, min: yMin, max: yMax } : option.yAxis,
+    dataZoom: [
+      { ...option.dataZoom[0], start: zoom.start, end: zoom.end },
+      { ...option.dataZoom[1], start: zoom.start, end: zoom.end }
+    ],
+    series: updatedSeries
+  }, true);
+}
+
 async function loadInitialData() {
   try {
     const latestRes = await fetch(`/ticks/recent?limit=1`);
@@ -78,108 +143,10 @@ async function loadInitialData() {
     dataAsk = allTicks.map(t => [new Date(t.timestamp).getTime(), t.ask, t.id]);
     dataBid = allTicks.map(t => [new Date(t.timestamp).getTime(), t.bid, t.id]);
 
-    const yMin = Math.floor(Math.min(...allTicks.flatMap(t => [t.mid, t.ask, t.bid])));
-    const yMax = Math.ceil(Math.max(...allTicks.flatMap(t => [t.mid, t.ask, t.bid])));
-
-    chart.setOption({
-      xAxis: {
-        min: startOfDay.getTime() - SYDNEY_OFFSET * 60000,
-        max: endOfDay.getTime() - SYDNEY_OFFSET * 60000
-      },
-      yAxis: { min: yMin, max: yMax },
-      dataZoom: [
-        {
-          type: 'inside',
-          startValue: latestUtc.getTime() - 4 * 60 * 1000,
-          endValue: latestUtc.getTime(),
-          realtime: false
-        },
-        {
-          type: 'slider',
-          startValue: latestUtc.getTime() - 4 * 60 * 1000,
-          endValue: latestUtc.getTime(),
-          bottom: 0,
-          height: 40,
-          realtime: false
-        }
-      ]
-    });
-
     updateSeries();
   } catch (err) {
     console.error("❌ loadInitialData() failed", err);
   }
-}
-
-function getVisibleYRange() {
-  const zoom = chart.getOption().dataZoom?.[0];
-  if (!zoom || dataMid.length === 0) return [null, null];
-
-  const start = zoom.start ?? 0;
-  const end = zoom.end ?? 100;
-
-  const total = dataMid.length;
-  const iStart = Math.floor((start / 100) * total);
-  const iEnd = Math.ceil((end / 100) * total);
-
-  const visiblePrices = [];
-
-  const useSeries = [];
-  if (document.getElementById('askCheckbox').checked) useSeries.push(dataAsk);
-  if (document.getElementById('midCheckbox').checked) useSeries.push(dataMid);
-  if (document.getElementById('bidCheckbox').checked) useSeries.push(dataBid);
-
-  for (const series of useSeries) {
-    for (let i = iStart; i < iEnd; i++) {
-      const price = series[i]?.[1];
-      if (typeof price === 'number') visiblePrices.push(price);
-    }
-  }
-
-  if (visiblePrices.length === 0) return [null, null];
-  return [Math.floor(Math.min(...visiblePrices)), Math.ceil(Math.max(...visiblePrices))];
-}
-
-
-function updateSeries() {
-  const askBox = document.getElementById('askCheckbox');
-  const midBox = document.getElementById('midCheckbox');
-  const bidBox = document.getElementById('bidCheckbox');
-  if (!askBox || !midBox || !bidBox || !chart) return;
-
-  const updatedSeries = [];
-
-  if (askBox.checked) {
-    updatedSeries.push({
-      id: 'ask', name: 'Ask', type: 'scatter', symbolSize: 4,
-      itemStyle: { color: '#f5a623' }, data: dataAsk
-    });
-  }
-  if (midBox.checked) {
-    updatedSeries.push({
-      id: 'mid', name: 'Mid', type: 'scatter', symbolSize: 4,
-      itemStyle: { color: '#00bcd4' }, data: dataMid
-    });
-  }
-  if (bidBox.checked) {
-    updatedSeries.push({
-      id: 'bid', name: 'Bid', type: 'scatter', symbolSize: 4,
-      itemStyle: { color: '#4caf50' }, data: dataBid
-    });
-  }
-  
-  const [yMin, yMax] = getVisibleYRange();
-
-  chart.setOption({
-    backgroundColor: option.backgroundColor,
-    tooltip: option.tooltip,
-    xAxis: option.xAxis,
-    yAxis: option.yAxis,
-    dataZoom: option.dataZoom,
-    series: updatedSeries
-  }, true);  // ✅ full overwrite
-
-  console.log("✅ Chart updated with series:", updatedSeries.map(s => s.name).join(', '));
 }
 
 window.addEventListener('DOMContentLoaded', () => {
