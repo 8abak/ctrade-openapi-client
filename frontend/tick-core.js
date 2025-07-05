@@ -1,26 +1,25 @@
-// tick-core.js — Dot View, Locked Zoom Window, Sydney Day View (Ask, Mid, Bid Toggle)
+// tick-core.js — Dot View, Locked Zoom Window, Sydney Day View with Ask/Mid/Bid Toggles
 const bver = '2025.07.05.004', fver = '2025.07.05.016';
 let dataMid = [], dataAsk = [], dataBid = [], lastTimestamp = null;
-const chart = echarts.init(document.getElementById('main'));
+const chart = echarts.init(document.getElementById("main"));
 
-const SYDNEY_OFFSET = 600; // +10:00 UTC in minutes
-
+const SYDNEY_OFFSET = 600; // UTC+10:00
 function toSydneyTime(date) {
   return new Date(date.getTime() + SYDNEY_OFFSET * 60000);
 }
 
 const option = {
-  backgroundColor: '#111',
+  backgroundColor: "#111",
   tooltip: {
-    trigger: 'axis',
-    backgroundColor: '#222',
-    borderColor: '#555',
+    trigger: "axis",
+    backgroundColor: "#222",
+    borderColor: "#555",
     borderWidth: 1,
-    textStyle: { color: '#fff', fontSize: 13 },
+    textStyle: { color: "#fff", fontSize: 13 },
     formatter: (params) => {
       const date = toSydneyTime(new Date(params[0].value[0]));
-      const timeStr = date.toLocaleTimeString('en-au', { hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true }).toLowerCase();
-      const dateStr = date.toLocaleDateString('en-AU');
+      const timeStr = date.toLocaleTimeString("en-AU", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true });
+      const dateStr = date.toLocaleDateString("en-AU");
       let tooltip = `<div style="padding: 8px;"><strong>${timeStr}</strong><br><span style="color: #ccc;">${dateStr}</span><br>`;
       params.forEach(p => {
         tooltip += `${p.seriesName}: <strong style="color: ${p.color};">${p.value[1].toFixed(2)}</strong><br>`;
@@ -30,37 +29,34 @@ const option = {
     }
   },
   xAxis: {
-    type: 'time',
+    type: "time",
     axisLabel: {
-      color: '#ccc',
+      color: "#ccc",
       formatter: val => {
         const d = toSydneyTime(new Date(val));
-        return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}` + `\n${d.toLocaleDateString('en-AU', { month: 'short', day: 'numeric' })}`;
+        return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}` + `\n${d.toLocaleDateString('en-AU', { month: 'short', day: 'numeric' })}`;
       }
     },
-    splitLine: { show: true, lineStyle: { color: '#333' } }
+    splitLine: { show: true, lineStyle: { color: "#333" } }
   },
   yAxis: {
-    type: 'value',
-    scale: true,
-    minInterval: 1,
+    type: "value",
     axisLabel: {
-      color: '#ccc',
+      color: "#ccc",
       formatter: val => Math.floor(val)
     },
-    splitLine: { show: true, lineStyle: { color: '#333' } }
+    splitLine: { show: true, lineStyle: { color: "#333" } }
   },
   dataZoom: [
     { type: 'inside', realtime: false },
     { type: 'slider', height: 40, bottom: 0, handleStyle: { color: '#3fa9f5' }, realtime: false }
   ],
   series: [
-    { name: 'Mid', type: 'scatter', symbolSize: 4, data: [] },
-    { name: 'Ask', type: 'scatter', symbolSize: 4, data: [] },
-    { name: 'Bid', type: 'scatter', symbolSize: 4, data: [] }
+    { id: 'ask', name: 'Ask', type: 'scatter', data: [], symbolSize: 4, itemStyle: { color: '#f5a623' }, show: true },
+    { id: 'mid', name: 'Mid', type: 'scatter', data: [], symbolSize: 4, itemStyle: { color: '#00bcd4' }, show: true },
+    { id: 'bid', name: 'Bid', type: 'scatter', data: [], symbolSize: 4, itemStyle: { color: '#4caf50' }, show: true }
   ]
 };
-
 chart.setOption(option);
 
 async function loadInitialData() {
@@ -95,18 +91,15 @@ async function loadInitialData() {
 
     chart.setOption({
       series: [
-        { name: 'Mid', data: dataMid },
-        { name: 'Ask', data: dataAsk },
-        { name: 'Bid', data: dataBid }
+        { id: 'mid', data: dataMid },
+        { id: 'ask', data: dataAsk },
+        { id: 'bid', data: dataBid }
       ],
       xAxis: {
         min: startOfDay.getTime() - SYDNEY_OFFSET * 60000,
         max: endOfDay.getTime() - SYDNEY_OFFSET * 60000
       },
-      yAxis: {
-        min: yMin,
-        max: yMax
-      },
+      yAxis: { min: yMin, max: yMax },
       dataZoom: [
         {
           type: 'inside',
@@ -124,32 +117,23 @@ async function loadInitialData() {
         }
       ]
     });
-
-    // Add checkbox toggles
-    ['Ask', 'Mid', 'Bid'].forEach((name, i) => {
-      const cb = document.createElement('input');
-      cb.type = 'checkbox';
-      cb.checked = true;
-      cb.id = `cb-${name}`;
-      cb.onchange = () => {
-        chart.dispatchAction({ type: 'legendToggleSelect', name });
-      };
-      const label = document.createElement('label');
-      label.style.marginRight = '12px';
-      label.style.color = '#ccc';
-      label.appendChild(cb);
-      label.appendChild(document.createTextNode(` ${name}`));
-      document.getElementById('labels')?.appendChild(label);
-    });
-
   } catch (err) {
     console.error("❌ loadInitialData() failed", err);
   }
 }
-
 loadInitialData();
 
-// Version footer
+// Sync checkboxes with chart series visibility
+window.addEventListener('DOMContentLoaded', () => {
+  const ask = document.getElementById('askCheckbox');
+  const mid = document.getElementById('midCheckbox');
+  const bid = document.getElementById('bidCheckbox');
+  ask?.addEventListener('change', () => chart.setOption({ series: [{ id: 'ask', show: ask.checked }] }));
+  mid?.addEventListener('change', () => chart.setOption({ series: [{ id: 'mid', show: mid.checked }] }));
+  bid?.addEventListener('change', () => chart.setOption({ series: [{ id: 'bid', show: bid.checked }] }));
+});
+
+// Version footer display
 const versionDiv = document.createElement('div');
 versionDiv.style.position = 'absolute';
 versionDiv.style.left = '10px';
