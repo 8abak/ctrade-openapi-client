@@ -130,13 +130,10 @@ function updateSeries() {
 
 // ✅ Add checkbox toggles
 window.addEventListener('DOMContentLoaded', () => {
-  const ask = document.getElementById('askCheckbox');
-  const mid = document.getElementById('midCheckbox');
-  const bid = document.getElementById('bidCheckbox');
-
-  ask?.addEventListener('change', () => chart.setOption({ series: [{ id: 'ask', show: ask.checked }] }));
-  mid?.addEventListener('change', () => chart.setOption({ series: [{ id: 'mid', show: mid.checked }] }));
-  bid?.addEventListener('change', () => chart.setOption({ series: [{ id: 'bid', show: bid.checked }] }));
+  ['ask', 'mid', 'bid'].forEach(type => {
+    const box = document.getElementById(`${type}Checkbox`);
+    box.addEventListener('change',updateSeries);
+  });
 });
 
 // ✅ Version display
