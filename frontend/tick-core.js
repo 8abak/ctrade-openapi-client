@@ -1,4 +1,4 @@
-const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.009';
+const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.010';
 let dataMid = [], dataAsk = [], dataBid = [], lastTimestamp = null;
 const chart = echarts.init(document.getElementById("main"));
 
@@ -116,24 +116,7 @@ async function loadInitialData() {
   }
 }
 
-window.addEventListener('DOMContentLoaded', () => {
-  console.log("✅ DOM fully loaded");
 
-  ['ask', 'mid', 'bid'].forEach(type => {
-    const box = document.getElementById(`${type}Checkbox`);
-    if (!box) {
-      console.warn(`❌ ${type}Checkbox not found in DOM`);
-    } else {
-      console.log(`✅ ${type}Checkbox found`);
-      box.addEventListener('change', () => {
-        console.log(`🔁 ${type} checkbox changed`);
-        updateSeries();
-      });
-    }
-  });
-
-  loadInitialData();
-});
 
 
 
@@ -179,33 +162,39 @@ function updateSeries() {
   chart.setOption({ series: updatedSeries });
 }
 
-// ✅ Add checkboxes
+//add checkbox listeners and initial data load
 window.addEventListener('DOMContentLoaded', () => {
-  console.log("✅ DOM loaded");
+  console.log("✅ DOM fully loaded");
 
   const ask = document.getElementById('askCheckbox');
   const mid = document.getElementById('midCheckbox');
   const bid = document.getElementById('bidCheckbox');
 
   if (!ask || !mid || !bid) {
-    console.error("❌ One or more checkboxes missing from DOM");
+    console.error("❌ One or more checkboxes not found");
     return;
   }
 
+  // Initial visibility
+  updateSeries();
+
+  // Bind listeners
   ask.addEventListener('change', () => {
     console.log("🔁 Ask toggled", ask.checked);
-    chart.setOption({ series: [{ id: 'ask', show: ask.checked }] });
+    updateSeries();
   });
   mid.addEventListener('change', () => {
     console.log("🔁 Mid toggled", mid.checked);
-    chart.setOption({ series: [{ id: 'mid', show: mid.checked }] });
+    updateSeries();
   });
   bid.addEventListener('change', () => {
     console.log("🔁 Bid toggled", bid.checked);
-    chart.setOption({ series: [{ id: 'bid', show: bid.checked }] });
+    updateSeries();
   });
-});
 
+  // Load data after DOM ready and bindings done
+  loadInitialData();
+});
 
 
 
