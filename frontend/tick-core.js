@@ -132,7 +132,7 @@ window.addEventListener('DOMContentLoaded', () => {
 function updateSeries() {
   console.log("Updating series visibility...");
 
-  const askBox = document.getElementById('askCheckbox').checked = false;
+  const askBox = document.getElementById('askCheckbox');
   const midBox = document.getElementById('midCheckbox');
   const bidBox = document.getElementById('bidCheckbox');
   if (!askBox || !midBox || !bidBox) return;
