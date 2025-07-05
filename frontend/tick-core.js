@@ -1,5 +1,5 @@
-// tick-core.js — Dot View, Locked Zoom Window, Sydney Day View (Last Tick Only + Full Day Range)
-const bver = '2025.07.05.004', fver = '2025.07.05.013';
+// tick-core.js — Dot View, Locked Zoom Window, Sydney Day View (Last Tick + 2 Prior)
+const bver = '2025.07.05.004', fver = '2025.07.05.014';
 let data = [], lastTimestamp = null;
 const chart = echarts.init(document.getElementById('main'));
 
@@ -62,22 +62,21 @@ chart.setOption(option);
 
 async function loadInitialData() {
   try {
-    const res = await fetch(`/ticks/recent?limit=1`);
+    const res = await fetch(`/ticks/recent?limit=3`);
     const ticks = await res.json();
     if (!Array.isArray(ticks) || ticks.length === 0) return;
 
-    const t = ticks[0];
-    const utcDate = new Date(t.timestamp);
-    const localDate = toSydneyTime(utcDate);
-    const tickTime = utcDate.getTime();
-    lastTimestamp = t.timestamp;
-    data = [[tickTime, t.mid, t.id]];
+    data = ticks.map(t => [new Date(t.timestamp).getTime(), t.mid, t.id]);
 
-    const price = t.mid;
-    const yMin = Math.floor(price);
-    const yMax = Number.isInteger(price) ? price + 1 : Math.ceil(price);
+    const latest = ticks[ticks.length - 1];
+    const latestUtc = new Date(latest.timestamp);
+    const localDate = toSydneyTime(latestUtc);
+    lastTimestamp = latest.timestamp;
 
-    // Determine start and end of Sydney day
+    const priceVals = ticks.map(t => t.mid);
+    const yMin = Math.floor(Math.min(...priceVals));
+    const yMax = Math.ceil(Math.max(...priceVals));
+
     const startOfDay = new Date(localDate);
     startOfDay.setHours(8, 0, 0, 0);
     const endOfDay = new Date(startOfDay);
@@ -86,12 +85,10 @@ async function loadInitialData() {
 
     chart.setOption({
       series: [{ data }],
-      xAxis: {
-        min: startOfDay.getTime() - SYDNEY_OFFSET * 60000,
+      xAxis: {\        min: startOfDay.getTime() - SYDNEY_OFFSET * 60000,
         max: endOfDay.getTime() - SYDNEY_OFFSET * 60000
       },
-      yAxis: {
-        min: yMin,
+      yAxis: {\        min: yMin,
         max: yMax
       },
       dataZoom: [
