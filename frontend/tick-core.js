@@ -1,4 +1,4 @@
-const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.005';
+const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.006';
 let dataMid = [], dataAsk = [], dataBid = [], lastTimestamp = null;
 const chart = echarts.init(document.getElementById("main"));
 
@@ -135,48 +135,39 @@ function updateSeries() {
   const bidBox = document.getElementById('bidCheckbox');
   if (!askBox || !midBox || !bidBox) return;
 
-  chart.setOption({
-    series: [
-      {
-        id: 'ask',
-        name: 'Ask',
-        type: 'scatter',
-        symbolSize: 4,
-        itemStyle: { color: '#f5a623' },
-        data: dataAsk,
-        show: askBox.checked
-      },
-      {
-        id: 'mid',
-        name: 'Mid',
-        type: 'scatter',
-        symbolSize: 4,
-        itemStyle: { color: '#00bcd4' },
-        data: dataMid,
-        show: midBox.checked
-      },
-      {
-        id: 'bid',
-        name: 'Bid',
-        type: 'scatter',
-        symbolSize: 4,
-        itemStyle: { color: '#4caf50' },
-        data: dataBid,
-        show: bidBox.checked
-      }
-    ]
-  }, true); // ✅ IMPORTANT: force overwrite!
+  const updatedSeries = [
+    {
+      id: 'ask',
+      name: 'Ask',
+      type: 'scatter',
+      symbolSize: 4,
+      itemStyle: { color: '#f5a623' },
+      data: dataAsk,
+      show: askBox.checked
+    },
+    {
+      id: 'mid',
+      name: 'Mid',
+      type: 'scatter',
+      symbolSize: 4,
+      itemStyle: { color: '#00bcd4' },
+      data: dataMid,
+      show: midBox.checked
+    },
+    {
+      id: 'bid',
+      name: 'Bid',
+      type: 'scatter',
+      symbolSize: 4,
+      itemStyle: { color: '#4caf50' },
+      data: dataBid,
+      show: bidBox.checked
+    }
+  ];
+
+  chart.setOption({ series: updatedSeries });
 }
 
-
-
-// ✅ Add checkbox toggles
-window.addEventListener('DOMContentLoaded', () => {
-  ['ask', 'mid', 'bid'].forEach(type => {
-    const box = document.getElementById(`${type}Checkbox`);
-    box.addEventListener('change',updateSeries);
-  });
-});
 
 // ✅ Version display
 const versionDiv = document.createElement('div');
