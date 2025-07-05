@@ -1,5 +1,5 @@
-// tick-core.js — Dot View, Locked Zoom Window, Sydney Day View (Last Tick + 2 Prior)
-const bver = '2025.07.05.004', fver = '2025.07.05.014';
+// tick-core.js — Dot View, Locked Zoom Window, Sydney Day View (Last Tick + 2 Prior, Load All for Day)
+const bver = '2025.07.05.004', fver = '2025.07.05.015';
 let data = [], lastTimestamp = null;
 const chart = echarts.init(document.getElementById('main'));
 
@@ -42,7 +42,7 @@ const option = {
     minInterval: 1,
     axisLabel: {
       color: '#ccc',
-      formatter: val => val.toFixed(1)
+      formatter: val => Math.floor(val)
     },
     splitLine: { show: true, lineStyle: { color: '#333' } }
   },
@@ -62,20 +62,14 @@ chart.setOption(option);
 
 async function loadInitialData() {
   try {
-    const res = await fetch(`/ticks/recent?limit=3`);
-    const ticks = await res.json();
-    if (!Array.isArray(ticks) || ticks.length === 0) return;
+    const latestRes = await fetch(`/ticks/recent?limit=1`);
+    const latestTicks = await latestRes.json();
+    if (!Array.isArray(latestTicks) || latestTicks.length === 0) return;
 
-    data = ticks.map(t => [new Date(t.timestamp).getTime(), t.mid, t.id]);
-
-    const latest = ticks[ticks.length - 1];
+    const latest = latestTicks[0];
     const latestUtc = new Date(latest.timestamp);
     const localDate = toSydneyTime(latestUtc);
     lastTimestamp = latest.timestamp;
-
-    const priceVals = ticks.map(t => t.mid);
-    const yMin = Math.floor(Math.min(...priceVals));
-    const yMax = Math.ceil(Math.max(...priceVals));
 
     const startOfDay = new Date(localDate);
     startOfDay.setHours(8, 0, 0, 0);
@@ -83,25 +77,40 @@ async function loadInitialData() {
     endOfDay.setDate(startOfDay.getDate() + 1);
     endOfDay.setHours(6, 59, 59, 999);
 
+    const dayStartISO = new Date(startOfDay.getTime() - SYDNEY_OFFSET * 60000).toISOString();
+    const dayEndISO = new Date(endOfDay.getTime() - SYDNEY_OFFSET * 60000).toISOString();
+
+    const dayRes = await fetch(`/ticks/after/${dayStartISO}?limit=5000`);
+    const allTicks = await dayRes.json();
+    if (!Array.isArray(allTicks)) return;
+
+    data = allTicks.map(t => [new Date(t.timestamp).getTime(), t.mid, t.id]);
+
+    const priceVals = allTicks.map(t => t.mid);
+    const yMin = Math.floor(Math.min(...priceVals));
+    const yMax = Math.ceil(Math.max(...priceVals));
+
     chart.setOption({
       series: [{ data }],
-      xAxis: {min: startOfDay.getTime() - SYDNEY_OFFSET * 60000,
+      xAxis: {
+        min: startOfDay.getTime() - SYDNEY_OFFSET * 60000,
         max: endOfDay.getTime() - SYDNEY_OFFSET * 60000
       },
-      yAxis: {min: yMin,
+      yAxis: {
+        min: yMin,
         max: yMax
       },
       dataZoom: [
         {
           type: 'inside',
-          startValue: startOfDay.getTime(),
-          endValue: endOfDay.getTime(),
+          startValue: latestUtc.getTime() - 4 * 60000,
+          endValue: latestUtc.getTime(),
           realtime: false
         },
         {
           type: 'slider',
-          startValue: startOfDay.getTime(),
-          endValue: endOfDay.getTime(),
+          startValue: latestUtc.getTime() - 4 * 60000,
+          endValue: latestUtc.getTime(),
           bottom: 0,
           height: 40,
           realtime: false
