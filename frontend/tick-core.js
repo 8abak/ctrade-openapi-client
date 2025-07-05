@@ -1,6 +1,5 @@
-const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.010';
+const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.011';
 let dataMid = [], dataAsk = [], dataBid = [], lastTimestamp = null;
-const chart = echarts.init(document.getElementById("main"));
 
 const SYDNEY_OFFSET = 600;
 function toSydneyTime(date) {
@@ -163,6 +162,8 @@ function updateSeries() {
 }
 
 //add checkbox listeners and initial data load
+let chart;
+
 window.addEventListener('DOMContentLoaded', () => {
   console.log("✅ DOM fully loaded");
 
