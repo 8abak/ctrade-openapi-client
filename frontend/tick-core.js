@@ -1,6 +1,6 @@
-const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.022';
+const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.023';
 let chart;
-let dataMid = [], dataAsk = [], dataBid = [];
+let dataMid = [], dataAsk = [], dataBid = [], lastTimestamp = null;
 
 const SYDNEY_OFFSET = 600;
 function toSydneyTime(date) {
@@ -52,44 +52,11 @@ const option = {
   ]
 };
 
-function getZoomRange() {
-  const zoom = chart.getOption().dataZoom?.[0];
-  return {
-    startValue: zoom?.startValue ?? null,
-    endValue: zoom?.endValue ?? null
-  };
-}
-
-function getVisibleYRange(startTime, endTime) {
-  const visiblePrices = [];
-
-  const useSeries = [];
-  if (document.getElementById('askCheckbox').checked) useSeries.push(dataAsk);
-  if (document.getElementById('midCheckbox').checked) useSeries.push(dataMid);
-  if (document.getElementById('bidCheckbox').checked) useSeries.push(dataBid);
-
-  for (const series of useSeries) {
-    for (const point of series) {
-      const t = point[0];
-      if (t >= startTime && t <= endTime) {
-        const price = point[1];
-        if (typeof price === 'number') visiblePrices.push(price);
-      }
-    }
-  }
-
-  if (visiblePrices.length === 0) return [null, null];
-  return [Math.floor(Math.min(...visiblePrices)), Math.ceil(Math.max(...visiblePrices))];
-}
-
 function updateSeries() {
   const askBox = document.getElementById('askCheckbox');
   const midBox = document.getElementById('midCheckbox');
   const bidBox = document.getElementById('bidCheckbox');
-  if (!askBox || !midBox || !bidBox || !chart) return;
-
-  const zoom = getZoomRange();
-  const [yMin, yMax] = getVisibleYRange(zoom.startValue ?? 0, zoom.endValue ?? Infinity);
+  if (!askBox || !midBox || !bidBox) return;
 
   const updatedSeries = [];
   if (askBox.checked) updatedSeries.push({
@@ -105,14 +72,7 @@ function updateSeries() {
     itemStyle: { color: '#4caf50' }, data: dataBid
   });
 
-  chart.setOption({
-    backgroundColor: option.backgroundColor,
-    tooltip: option.tooltip,
-    xAxis: option.xAxis,
-    yAxis: yMin !== null ? { ...option.yAxis, min: yMin, max: yMax } : option.yAxis,
-    dataZoom: chart.getOption().dataZoom,
-    series: updatedSeries
-  }, true);
+  chart.setOption({ series: updatedSeries });
 }
 
 async function loadInitialData() {
@@ -134,20 +94,26 @@ async function loadInitialData() {
     dataAsk = allTicks.map(t => [new Date(t.timestamp).getTime(), t.ask, t.id]);
     dataBid = allTicks.map(t => [new Date(t.timestamp).getTime(), t.bid, t.id]);
 
-    const [yMin, yMax] = getVisibleYRange(startZoom, endTime);
-
     chart.setOption({
-      backgroundColor: option.backgroundColor,
-      tooltip: option.tooltip,
       xAxis: {
-        ...option.xAxis,
         min: startTime,
         max: endTime
       },
-      yAxis: yMin !== null ? { ...option.yAxis, min: yMin, max: yMax } : option.yAxis,
       dataZoom: [
-        { ...option.dataZoom[0], startValue: startZoom, endValue: endTime },
-        { ...option.dataZoom[1], startValue: startZoom, endValue: endTime }
+        {
+          type: 'inside',
+          startValue: startZoom,
+          endValue: endTime,
+          realtime: false
+        },
+        {
+          type: 'slider',
+          startValue: startZoom,
+          endValue: endTime,
+          bottom: 0,
+          height: 40,
+          realtime: false
+        }
       ]
     });
 
@@ -160,14 +126,7 @@ async function loadInitialData() {
 window.addEventListener('DOMContentLoaded', () => {
   const main = document.getElementById('main');
   chart = echarts.init(main);
-
-  chart.setOption({
-    backgroundColor: option.backgroundColor,
-    tooltip: option.tooltip,
-    xAxis: option.xAxis,
-    yAxis: option.yAxis,
-    dataZoom: option.dataZoom
-  });
+  chart.setOption(option);
 
   const ask = document.getElementById('askCheckbox');
   const mid = document.getElementById('midCheckbox');
