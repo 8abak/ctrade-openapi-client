@@ -1,4 +1,4 @@
-const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.007';
+const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.008';
 let dataMid = [], dataAsk = [], dataBid = [], lastTimestamp = null;
 const chart = echarts.init(document.getElementById("main"));
 
@@ -117,15 +117,24 @@ async function loadInitialData() {
 }
 
 window.addEventListener('DOMContentLoaded', () => {
-  // Add checkbox listeners
+  console.log("✅ DOM fully loaded");
+
   ['ask', 'mid', 'bid'].forEach(type => {
     const box = document.getElementById(`${type}Checkbox`);
-    box.addEventListener('change', updateSeries);
+    if (!box) {
+      console.warn(`❌ ${type}Checkbox not found in DOM`);
+    } else {
+      console.log(`✅ ${type}Checkbox found`);
+      box.addEventListener('change', () => {
+        console.log(`🔁 ${type} checkbox changed`);
+        updateSeries();
+      });
+    }
   });
 
-  // Run the initial data loader AFTER DOM is ready
   loadInitialData();
 });
+
 
 
 // ✅ Add update series function
