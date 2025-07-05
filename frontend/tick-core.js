@@ -1,11 +1,9 @@
-// tick-core.js — Dot View, Locked Zoom Window, Sydney Day View
-const bver = '2025.07.05.004', fver = '2025.07.05.011';
+// tick-core.js — Dot View, Locked Zoom Window, Sydney Day View (Last Tick Only)
+const bver = '2025.07.05.004', fver = '2025.07.05.012';
 let data = [], lastTimestamp = null;
 const chart = echarts.init(document.getElementById('main'));
 
 const SYDNEY_OFFSET = 600; // +10:00 UTC in minutes
-const SYDNEY_DAY_START_HOUR = 8;
-const SYDNEY_DAY_END_HOUR = 6;
 
 function toSydneyTime(date) {
   return new Date(date.getTime() + SYDNEY_OFFSET * 60000);
@@ -36,12 +34,7 @@ const option = {
         return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}` + `\n${d.toLocaleDateString('en-AU', { month: 'short', day: 'numeric' })}`;
       }
     },
-    splitNumber: 12,
-    minInterval: 60 * 1000 * 5,
-    splitLine: {
-      show: true,
-      lineStyle: { color: '#333' }
-    }
+    splitLine: { show: true, lineStyle: { color: '#333' } }
   },
   yAxis: {
     type: 'value',
@@ -51,20 +44,11 @@ const option = {
       color: '#ccc',
       formatter: val => val.toFixed(1)
     },
-    splitLine: {
-      show: true,
-      lineStyle: { color: '#333' }
-    }
+    splitLine: { show: true, lineStyle: { color: '#333' } }
   },
   dataZoom: [
     { type: 'inside', realtime: false },
-    {
-      type: 'slider',
-      height: 40,
-      bottom: 0,
-      handleStyle: { color: '#3fa9f5' },
-      realtime: false
-    }
+    { type: 'slider', height: 40, bottom: 0, handleStyle: { color: '#3fa9f5' }, realtime: false }
   ],
   series: [{
     name: 'Mid Price',
@@ -89,7 +73,11 @@ async function loadInitialData() {
     lastTimestamp = t.timestamp;
     data = [[tickTime, t.mid, t.id]];
 
-    // Zoom range for initial display: last 5 minutes
+    const price = t.mid;
+    const yMin = Math.floor(price);
+    const yMax = Number.isInteger(price) ? price + 1 : Math.ceil(price);
+
+    // Show only 5-minute window around last tick
     const tickMinute = new Date(localDate);
     tickMinute.setSeconds(0, 0);
     const chartStart = new Date(tickMinute);
@@ -97,62 +85,21 @@ async function loadInitialData() {
     const chartEnd = new Date(tickMinute);
     chartEnd.setMinutes(chartEnd.getMinutes() + 1);
 
-    // Full Sydney trading session bounds
-    const sydneyStart = new Date(localDate);
-    if (sydneyStart.getHours() < SYDNEY_DAY_START_HOUR) {
-      sydneyStart.setDate(sydneyStart.getDate() - 1);
-    }
-    sydneyStart.setHours(SYDNEY_DAY_START_HOUR, 0, 0, 0);
-    const sydneyEnd = new Date(sydneyStart);
-    sydneyEnd.setDate(sydneyEnd.getDate() + 1);
-    sydneyEnd.setHours(SYDNEY_DAY_END_HOUR, 59, 59, 999);
-
-    const price = t.mid;
-    const yMin = Math.floor(price);
-    const yMax = Number.isInteger(price) ? price + 1 : Math.ceil(price);
-
     chart.setOption({
       series: [{ data }],
       xAxis: {
-        min: sydneyStart.getTime() - SYDNEY_OFFSET * 60000,
-        max: sydneyEnd.getTime() - SYDNEY_OFFSET * 60000
+        min: chartStart.getTime() - SYDNEY_OFFSET * 60000,
+        max: chartEnd.getTime() - SYDNEY_OFFSET * 60000
       },
       yAxis: {
         min: yMin,
         max: yMax
       },
       dataZoom: [
-        {
-          type: 'inside',
-          startValue: chartStart.getTime(),
-          endValue: chartEnd.getTime(),
-          realtime: false
-        },
-        {
-          type: 'slider',
-          startValue: chartStart.getTime(),
-          endValue: chartEnd.getTime(),
-          bottom: 0,
-          height: 40,
-          realtime: false
-        }
+        { type: 'inside', startValue: chartStart.getTime(), endValue: chartEnd.getTime(), realtime: false },
+        { type: 'slider', startValue: chartStart.getTime(), endValue: chartEnd.getTime(), bottom: 0, height: 40, realtime: false }
       ]
     });
-
-    // ✅ Load earlier ticks
-    const beforeRes = await fetch(`/ticks/before/${t.id}?limit=1000`);
-    const earlier = await beforeRes.json();
-    if (Array.isArray(earlier)) {
-      const additional = earlier.map(e => [new Date(e.timestamp).getTime(), e.mid, e.id]);
-      data.unshift(...additional);
-      chart.setOption({
-        series: [{ data }],
-        yAxis: {
-          min: Math.min(...data.map(d => d[1])) - 0.1,
-          max: Math.max(...data.map(d => d[1])) + 0.1
-        }
-      });
-    }
   } catch (err) {
     console.error("❌ loadInitialData() failed", err);
   }
