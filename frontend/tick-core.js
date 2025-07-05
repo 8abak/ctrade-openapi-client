@@ -1,4 +1,4 @@
-const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.012';
+const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.013';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [], lastTimestamp = null;
 
@@ -47,11 +47,6 @@ const option = {
   dataZoom: [
     { type: 'inside', realtime: false },
     { type: 'slider', height: 40, bottom: 0, handleStyle: { color: '#3fa9f5' }, realtime: false }
-  ],
-  series: [
-    { id: 'ask', name: 'Ask', type: 'scatter', data: [], symbolSize: 4, itemStyle: { color: '#f5a623' } },
-    { id: 'mid', name: 'Mid', type: 'scatter', data: [], symbolSize: 4, itemStyle: { color: '#00bcd4' } },
-    { id: 'bid', name: 'Bid', type: 'scatter', data: [], symbolSize: 4, itemStyle: { color: '#4caf50' } }
   ]
 };
 
@@ -111,6 +106,7 @@ async function loadInitialData() {
         }
       ]
     });
+    chart.setOption(option);
   } catch (err) {
     console.error("❌ loadInitialData() failed", err);
   }
@@ -174,7 +170,6 @@ window.addEventListener('DOMContentLoaded', () => {
   }
 
   chart = echarts.init(main);
-  chart.setOption(option); // ✅ Now it's safe to call
 
   const ask = document.getElementById('askCheckbox');
   const mid = document.getElementById('midCheckbox');
