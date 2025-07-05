@@ -1,4 +1,4 @@
-const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.008';
+const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.009';
 let dataMid = [], dataAsk = [], dataBid = [], lastTimestamp = null;
 const chart = echarts.init(document.getElementById("main"));
 
@@ -178,6 +178,35 @@ function updateSeries() {
 
   chart.setOption({ series: updatedSeries });
 }
+
+// ✅ Add checkboxes
+window.addEventListener('DOMContentLoaded', () => {
+  console.log("✅ DOM loaded");
+
+  const ask = document.getElementById('askCheckbox');
+  const mid = document.getElementById('midCheckbox');
+  const bid = document.getElementById('bidCheckbox');
+
+  if (!ask || !mid || !bid) {
+    console.error("❌ One or more checkboxes missing from DOM");
+    return;
+  }
+
+  ask.addEventListener('change', () => {
+    console.log("🔁 Ask toggled", ask.checked);
+    chart.setOption({ series: [{ id: 'ask', show: ask.checked }] });
+  });
+  mid.addEventListener('change', () => {
+    console.log("🔁 Mid toggled", mid.checked);
+    chart.setOption({ series: [{ id: 'mid', show: mid.checked }] });
+  });
+  bid.addEventListener('change', () => {
+    console.log("🔁 Bid toggled", bid.checked);
+    chart.setOption({ series: [{ id: 'bid', show: bid.checked }] });
+  });
+});
+
+
 
 
 // ✅ Version display
