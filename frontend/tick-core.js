@@ -1,5 +1,5 @@
 // tick-core.js — Dot View, Locked Zoom Window, Sydney Day View
-const bver = '2025.07.05.004', fver = '2025.07.05.010';
+const bver = '2025.07.05.004', fver = '2025.07.05.011';
 let data = [], lastTimestamp = null;
 const chart = echarts.init(document.getElementById('main'));
 
@@ -58,7 +58,13 @@ const option = {
   },
   dataZoom: [
     { type: 'inside', realtime: false },
-    { type: 'slider', height: 40, bottom: 0, handleStyle: { color: '#3fa9f5' }, realtime: false }
+    {
+      type: 'slider',
+      height: 40,
+      bottom: 0,
+      handleStyle: { color: '#3fa9f5' },
+      realtime: false
+    }
   ],
   series: [{
     name: 'Mid Price',
@@ -83,6 +89,7 @@ async function loadInitialData() {
     lastTimestamp = t.timestamp;
     data = [[tickTime, t.mid, t.id]];
 
+    // Zoom range for initial display: last 5 minutes
     const tickMinute = new Date(localDate);
     tickMinute.setSeconds(0, 0);
     const chartStart = new Date(tickMinute);
@@ -90,14 +97,14 @@ async function loadInitialData() {
     const chartEnd = new Date(tickMinute);
     chartEnd.setMinutes(chartEnd.getMinutes() + 1);
 
-    // Define Sydney session start/end
+    // Full Sydney trading session bounds
     const sydneyStart = new Date(localDate);
     if (sydneyStart.getHours() < SYDNEY_DAY_START_HOUR) {
       sydneyStart.setDate(sydneyStart.getDate() - 1);
     }
     sydneyStart.setHours(SYDNEY_DAY_START_HOUR, 0, 0, 0);
     const sydneyEnd = new Date(sydneyStart);
-    sydneyEnd.setDate(sydneyStart.getDate() + 1);
+    sydneyEnd.setDate(sydneyEnd.getDate() + 1);
     sydneyEnd.setHours(SYDNEY_DAY_END_HOUR, 59, 59, 999);
 
     const price = t.mid;
@@ -138,7 +145,13 @@ async function loadInitialData() {
     if (Array.isArray(earlier)) {
       const additional = earlier.map(e => [new Date(e.timestamp).getTime(), e.mid, e.id]);
       data.unshift(...additional);
-      chart.setOption({ series: [{ data }] });
+      chart.setOption({
+        series: [{ data }],
+        yAxis: {
+          min: Math.min(...data.map(d => d[1])) - 0.1,
+          max: Math.max(...data.map(d => d[1])) + 0.1
+        }
+      });
     }
   } catch (err) {
     console.error("❌ loadInitialData() failed", err);
@@ -146,3 +159,13 @@ async function loadInitialData() {
 }
 
 loadInitialData();
+
+// Version footer
+const versionDiv = document.createElement('div');
+versionDiv.style.position = 'absolute';
+versionDiv.style.left = '10px';
+versionDiv.style.bottom = '8px';
+versionDiv.style.color = '#777';
+versionDiv.style.fontSize = '11px';
+versionDiv.innerText = `bver: ${bver}, fver: ${fver}`;
+document.body.appendChild(versionDiv);
