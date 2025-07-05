@@ -1,4 +1,4 @@
-const bver = '2025.07.05.004', fver = '2025.07.06.001';
+const bver = '2025.07.05.004', fver = '2025.07.06.002';
 let dataMid = [], dataAsk = [], dataBid = [], lastTimestamp = null;
 const chart = echarts.init(document.getElementById("main"));
 
@@ -84,31 +84,30 @@ async function loadInitialData() {
     const yMin = Math.floor(Math.min(...allTicks.flatMap(t => [t.mid, t.ask, t.bid])));
     const yMax = Math.ceil(Math.max(...allTicks.flatMap(t => [t.mid, t.ask, t.bid])));
 
+    updateSeries();
     chart.setOption({
-      series: [
-        { id: 'ask', data: dataAsk, show: document.getElementById('askCheckbox').checked },
-        { id: 'mid', data: dataMid, show: document.getElementById('midCheckbox').checked },
-        { id: 'bid', data: dataBid, show: document.getElementById('bidCheckbox').checked }
-      ],
       xAxis: {
         min: startOfDay.getTime() - SYDNEY_OFFSET * 60000,
         max: endOfDay.getTime() - SYDNEY_OFFSET * 60000
       },
-      yAxis: { min: yMin, max: yMax },
+      yAxis: {
+        min: yMin,
+        max: yMax
+      },
       dataZoom: [
         {
           type: 'inside',
-          startValue: latestUtc.getTime() - 4 * 60000,
-          endValue: latestUtc.getTime(),
+          startValue: latestUtc.getTime() - 4 * 60 * 1000, // 4 minutes before latest tick
+          endvalue: latestUtc.getTime(),
           realtime: false
         },
         {
           type: 'slider',
-          startValue: latestUtc.getTime() - 4 * 60000,
-          endValue: latestUtc.getTime(),
+          startValue: latestUtc.getTime() - 4 * 60 * 1000, // 4 minutes before latest tick
+          endvalue: latestUtc.getTime(),
           bottom: 0,
           height: 40,
-          realtime: false
+          realtime: false,
         }
       ]
     });
@@ -117,6 +116,18 @@ async function loadInitialData() {
   }
 }
 loadInitialData();
+
+// ✅ Add update series function
+function updateSeries() {
+  chart.setOption({
+    series: [
+      { id: 'ask', data: dataAsk, show: document.getElementById('askCheckbox').checked },
+      { id: 'mid', data: dataMid, show: document.getElementById('midCheckbox').checked },
+      { id: 'bid', data: dataBid, show: document.getElementById('bidCheckbox').checked }
+    ]
+  });
+}
+
 // ✅ Add checkbox toggles
 window.addEventListener('DOMContentLoaded', () => {
   const ask = document.getElementById('askCheckbox');
