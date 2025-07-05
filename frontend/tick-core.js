@@ -1,4 +1,4 @@
-const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.018';
+const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.019';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [], lastTimestamp = null;
 
@@ -54,15 +54,14 @@ const option = {
 
 function getZoomRange() {
   const zoom = chart.getOption().dataZoom?.[0];
-  if (!zoom) return { start: 0, end: 100 };
-  return { start: zoom.start ?? 0, end: zoom.end ?? 100 };
+  if (!zoom) return { startValue: null, endValue: null };
+  return {
+    startValue: zoom.startValue ?? null,
+    endValue: zoom.endValue ?? null
+  };
 }
 
-function getVisibleYRange(startPercent, endPercent) {
-  const total = dataMid.length;
-  const iStart = Math.floor((startPercent / 100) * total);
-  const iEnd = Math.ceil((endPercent / 100) * total);
-
+function getVisibleYRange(startTime, endTime) {
   const visiblePrices = [];
 
   const useSeries = [];
@@ -71,9 +70,12 @@ function getVisibleYRange(startPercent, endPercent) {
   if (document.getElementById('bidCheckbox').checked) useSeries.push(dataBid);
 
   for (const series of useSeries) {
-    for (let i = iStart; i < iEnd; i++) {
-      const price = series[i]?.[1];
-      if (typeof price === 'number') visiblePrices.push(price);
+    for (const point of series) {
+      const t = point[0];
+      if (t >= startTime && t <= endTime) {
+        const price = point[1];
+        if (typeof price === 'number') visiblePrices.push(price);
+      }
     }
   }
 
@@ -88,7 +90,7 @@ function updateSeries() {
   if (!askBox || !midBox || !bidBox || !chart) return;
 
   const zoom = getZoomRange();
-  const [yMin, yMax] = getVisibleYRange(zoom.start, zoom.end);
+  const [yMin, yMax] = getVisibleYRange(zoom.startValue ?? 0, zoom.endValue ?? Infinity);
 
   const updatedSeries = [];
   if (askBox.checked) updatedSeries.push({
@@ -109,10 +111,7 @@ function updateSeries() {
     tooltip: option.tooltip,
     xAxis: option.xAxis,
     yAxis: yMin !== null ? { ...option.yAxis, min: yMin, max: yMax } : option.yAxis,
-    dataZoom: [
-      { ...option.dataZoom[0], start: zoom.start, end: zoom.end },
-      { ...option.dataZoom[1], start: zoom.start, end: zoom.end }
-    ],
+    dataZoom: chart.getOption().dataZoom, // preserve current zoom
     series: updatedSeries
   }, true);
 }
@@ -125,16 +124,10 @@ async function loadInitialData() {
 
     const latest = latestTicks[0];
     const latestUtc = new Date(latest.timestamp);
-    const localDate = toSydneyTime(latestUtc);
-    lastTimestamp = latest.timestamp;
+    const endTime = latestUtc.getTime();
+    const startTime = endTime - 5 * 60 * 1000; // last 5 minutes
 
-    const startOfDay = new Date(localDate);
-    startOfDay.setHours(8, 0, 0, 0);
-    const endOfDay = new Date(startOfDay);
-    endOfDay.setDate(startOfDay.getDate() + 1);
-    endOfDay.setHours(6, 59, 59, 999);
-
-    const dayStartISO = new Date(startOfDay.getTime() - SYDNEY_OFFSET * 60000).toISOString();
+    const dayStartISO = new Date(startTime - SYDNEY_OFFSET * 60000).toISOString();
     const dayRes = await fetch(`/ticks/after/${dayStartISO}?limit=5000`);
     const allTicks = await dayRes.json();
     if (!Array.isArray(allTicks)) return;
@@ -143,6 +136,21 @@ async function loadInitialData() {
     dataAsk = allTicks.map(t => [new Date(t.timestamp).getTime(), t.ask, t.id]);
     dataBid = allTicks.map(t => [new Date(t.timestamp).getTime(), t.bid, t.id]);
 
+    chart.setOption({
+      backgroundColor: option.backgroundColor,
+      tooltip: option.tooltip,
+      xAxis: {
+        ...option.xAxis,
+        min: startTime,
+        max: endTime
+      },
+      yAxis: option.yAxis, // we'll reset it in updateSeries()
+      dataZoom: [
+        { ...option.dataZoom[0], startValue: startTime, endValue: endTime },
+        { ...option.dataZoom[1], startValue: startTime, endValue: endTime }
+      ]
+    });
+
     updateSeries();
   } catch (err) {
     console.error("❌ loadInitialData() failed", err);
@@ -150,12 +158,9 @@ async function loadInitialData() {
 }
 
 window.addEventListener('DOMContentLoaded', () => {
-  console.log("✅ DOM fully loaded");
-
   const main = document.getElementById('main');
-  if (!main) return;
-
   chart = echarts.init(main);
+
   chart.setOption({
     backgroundColor: option.backgroundColor,
     tooltip: option.tooltip,
@@ -168,11 +173,10 @@ window.addEventListener('DOMContentLoaded', () => {
   const mid = document.getElementById('midCheckbox');
   const bid = document.getElementById('bidCheckbox');
 
-  if (!ask || !mid || !bid) return;
-
   ask.addEventListener('change', updateSeries);
   mid.addEventListener('change', updateSeries);
   bid.addEventListener('change', updateSeries);
+  chart.on('dataZoom', updateSeries); // ✅ recalculate on manual zoom
 
   loadInitialData();
 });
