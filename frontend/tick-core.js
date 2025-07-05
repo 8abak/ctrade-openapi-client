@@ -1,5 +1,7 @@
-const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.011';
+const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.012';
+let chart;
 let dataMid = [], dataAsk = [], dataBid = [], lastTimestamp = null;
+
 
 const SYDNEY_OFFSET = 600;
 function toSydneyTime(date) {
@@ -52,7 +54,6 @@ const option = {
     { id: 'bid', name: 'Bid', type: 'scatter', data: [], symbolSize: 4, itemStyle: { color: '#4caf50' } }
   ]
 };
-chart.setOption(option);
 
 async function loadInitialData() {
   try {
@@ -162,10 +163,18 @@ function updateSeries() {
 }
 
 //add checkbox listeners and initial data load
-let chart;
 
 window.addEventListener('DOMContentLoaded', () => {
   console.log("✅ DOM fully loaded");
+
+  const main = document.getElementById('main');
+  if (!main) {
+    console.error("❌ #main container not found!");
+    return;
+  }
+
+  chart = echarts.init(main);
+  chart.setOption(option); // ✅ Now it's safe to call
 
   const ask = document.getElementById('askCheckbox');
   const mid = document.getElementById('midCheckbox');
@@ -176,10 +185,8 @@ window.addEventListener('DOMContentLoaded', () => {
     return;
   }
 
-  // Initial visibility
   updateSeries();
 
-  // Bind listeners
   ask.addEventListener('change', () => {
     console.log("🔁 Ask toggled", ask.checked);
     updateSeries();
@@ -193,9 +200,9 @@ window.addEventListener('DOMContentLoaded', () => {
     updateSeries();
   });
 
-  // Load data after DOM ready and bindings done
   loadInitialData();
 });
+
 
 
 
