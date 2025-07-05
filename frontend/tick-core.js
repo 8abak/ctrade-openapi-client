@@ -1,6 +1,6 @@
-const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.023';
+const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.024';
 let chart;
-let dataMid = [], dataAsk = [], dataBid = [], lastTimestamp = null;
+let dataMid = [], dataAsk = [], dataBid = [];
 
 const SYDNEY_OFFSET = 600;
 function toSydneyTime(date) {
@@ -78,21 +78,26 @@ function updateSeries() {
 async function loadInitialData() {
   try {
     const now = new Date();
-    const endTime = now.getTime();
-    const startZoom = endTime - 5 * 60 * 1000;
-
     const dayStart = new Date(now);
     dayStart.setHours(8, 0, 0, 0);
+    const nextMorning = new Date(dayStart);
+    nextMorning.setDate(dayStart.getDate() + 1);
+    nextMorning.setHours(7, 0, 0, 0);
+
     const startTime = dayStart.getTime();
+    const endTime = nextMorning.getTime();
     const dayStartUTC = new Date(startTime - SYDNEY_OFFSET * 60000).toISOString();
 
     const res = await fetch(`/ticks/after/${dayStartUTC}?limit=5000`);
     const allTicks = await res.json();
-    if (!Array.isArray(allTicks)) return;
+    if (!Array.isArray(allTicks) || allTicks.length === 0) return;
 
     dataMid = allTicks.map(t => [new Date(t.timestamp).getTime(), t.mid, t.id]);
     dataAsk = allTicks.map(t => [new Date(t.timestamp).getTime(), t.ask, t.id]);
     dataBid = allTicks.map(t => [new Date(t.timestamp).getTime(), t.bid, t.id]);
+
+    const lastTickTime = dataMid[dataMid.length - 1][0];
+    const startZoom = lastTickTime - 4 * 60 * 1000;
 
     chart.setOption({
       xAxis: {
@@ -103,13 +108,13 @@ async function loadInitialData() {
         {
           type: 'inside',
           startValue: startZoom,
-          endValue: endTime,
+          endValue: lastTickTime,
           realtime: false
         },
         {
           type: 'slider',
           startValue: startZoom,
-          endValue: endTime,
+          endValue: lastTickTime,
           bottom: 0,
           height: 40,
           realtime: false
