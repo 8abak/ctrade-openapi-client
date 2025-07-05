@@ -1,7 +1,6 @@
-const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.013';
+const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.014';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [], lastTimestamp = null;
-
 
 const SYDNEY_OFFSET = 600;
 function toSydneyTime(date) {
@@ -18,7 +17,9 @@ const option = {
     textStyle: { color: "#fff", fontSize: 13 },
     formatter: (params) => {
       const date = toSydneyTime(new Date(params[0].value[0]));
-      const timeStr = date.toLocaleTimeString("en-AU", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true });
+      const timeStr = date.toLocaleTimeString("en-AU", {
+        hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true
+      });
       const dateStr = date.toLocaleDateString("en-AU");
       let tooltip = `<div style="padding: 8px;"><strong>${timeStr}</strong><br><span style="color: #ccc;">${dateStr}</span><br>`;
       params.forEach(p => {
@@ -34,7 +35,8 @@ const option = {
       color: "#ccc",
       formatter: val => {
         const d = toSydneyTime(new Date(val));
-        return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}` + `\n${d.toLocaleDateString('en-AU', { month: 'short', day: 'numeric' })}`;
+        return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}` +
+               `\n${d.toLocaleDateString('en-AU', { month: 'short', day: 'numeric' })}`;
       }
     },
     splitLine: { show: true, lineStyle: { color: "#333" } }
@@ -79,129 +81,94 @@ async function loadInitialData() {
     const yMin = Math.floor(Math.min(...allTicks.flatMap(t => [t.mid, t.ask, t.bid])));
     const yMax = Math.ceil(Math.max(...allTicks.flatMap(t => [t.mid, t.ask, t.bid])));
 
-    updateSeries();
     chart.setOption({
       xAxis: {
         min: startOfDay.getTime() - SYDNEY_OFFSET * 60000,
         max: endOfDay.getTime() - SYDNEY_OFFSET * 60000
       },
-      yAxis: {
-        min: yMin,
-        max: yMax
-      },
+      yAxis: { min: yMin, max: yMax },
       dataZoom: [
         {
           type: 'inside',
-          startValue: latestUtc.getTime() - 4 * 60 * 1000, // 4 minutes before latest tick
+          startValue: latestUtc.getTime() - 4 * 60 * 1000,
           endValue: latestUtc.getTime(),
           realtime: false
         },
         {
           type: 'slider',
-          startValue: latestUtc.getTime() - 4 * 60 * 1000, // 4 minutes before latest tick
+          startValue: latestUtc.getTime() - 4 * 60 * 1000,
           endValue: latestUtc.getTime(),
           bottom: 0,
           height: 40,
-          realtime: false,
+          realtime: false
         }
       ]
     });
-    chart.setOption(option);
+
+    updateSeries();
   } catch (err) {
     console.error("❌ loadInitialData() failed", err);
   }
 }
 
-
-
-
-
-// ✅ Add update series function
 function updateSeries() {
-  console.log("Updating series visibility...");
-
   const askBox = document.getElementById('askCheckbox');
   const midBox = document.getElementById('midCheckbox');
   const bidBox = document.getElementById('bidCheckbox');
-  if (!askBox || !midBox || !bidBox) return;
+  if (!askBox || !midBox || !bidBox || !chart) return;
 
-  const updatedSeries = [
-    {
-      id: 'ask',
-      name: 'Ask',
-      type: 'scatter',
-      symbolSize: 4,
-      itemStyle: { color: '#f5a623' },
-      data: dataAsk,
-      show: askBox.checked
-    },
-    {
-      id: 'mid',
-      name: 'Mid',
-      type: 'scatter',
-      symbolSize: 4,
-      itemStyle: { color: '#00bcd4' },
-      data: dataMid,
-      show: midBox.checked
-    },
-    {
-      id: 'bid',
-      name: 'Bid',
-      type: 'scatter',
-      symbolSize: 4,
-      itemStyle: { color: '#4caf50' },
-      data: dataBid,
-      show: bidBox.checked
-    }
-  ];
+  const updatedSeries = [];
+
+  if (askBox.checked) {
+    updatedSeries.push({
+      id: 'ask', name: 'Ask', type: 'scatter', symbolSize: 4,
+      itemStyle: { color: '#f5a623' }, data: dataAsk
+    });
+  }
+  if (midBox.checked) {
+    updatedSeries.push({
+      id: 'mid', name: 'Mid', type: 'scatter', symbolSize: 4,
+      itemStyle: { color: '#00bcd4' }, data: dataMid
+    });
+  }
+  if (bidBox.checked) {
+    updatedSeries.push({
+      id: 'bid', name: 'Bid', type: 'scatter', symbolSize: 4,
+      itemStyle: { color: '#4caf50' }, data: dataBid
+    });
+  }
 
   chart.setOption({ series: updatedSeries });
 }
-
-//add checkbox listeners and initial data load
 
 window.addEventListener('DOMContentLoaded', () => {
   console.log("✅ DOM fully loaded");
 
   const main = document.getElementById('main');
-  if (!main) {
-    console.error("❌ #main container not found!");
-    return;
-  }
+  if (!main) return;
 
   chart = echarts.init(main);
+  chart.setOption({
+    backgroundColor: option.backgroundColor,
+    tooltip: option.tooltip,
+    xAxis: option.xAxis,
+    yAxis: option.yAxis,
+    dataZoom: option.dataZoom
+  });
 
   const ask = document.getElementById('askCheckbox');
   const mid = document.getElementById('midCheckbox');
   const bid = document.getElementById('bidCheckbox');
 
-  if (!ask || !mid || !bid) {
-    console.error("❌ One or more checkboxes not found");
-    return;
-  }
+  if (!ask || !mid || !bid) return;
 
-  updateSeries();
-
-  ask.addEventListener('change', () => {
-    console.log("🔁 Ask toggled", ask.checked);
-    updateSeries();
-  });
-  mid.addEventListener('change', () => {
-    console.log("🔁 Mid toggled", mid.checked);
-    updateSeries();
-  });
-  bid.addEventListener('change', () => {
-    console.log("🔁 Bid toggled", bid.checked);
-    updateSeries();
-  });
+  ask.addEventListener('change', updateSeries);
+  mid.addEventListener('change', updateSeries);
+  bid.addEventListener('change', updateSeries);
 
   loadInitialData();
 });
 
-
-
-
-// ✅ Version display
 const versionDiv = document.createElement('div');
 versionDiv.style.position = 'absolute';
 versionDiv.style.left = '10px';
