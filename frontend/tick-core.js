@@ -106,7 +106,8 @@ async function loadInitialData() {
 
     chart.setOption({
       series: [{ data }],
-      xAxis: {\        min: sydneyStart.getTime() - SYDNEY_OFFSET * 60000,
+      xAxis: {
+        min: sydneyStart.getTime() - SYDNEY_OFFSET * 60000,
         max: sydneyEnd.getTime() - SYDNEY_OFFSET * 60000
       },
       yAxis: {
