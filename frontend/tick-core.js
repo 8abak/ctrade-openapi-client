@@ -1,4 +1,4 @@
-const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.026';
+const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.027';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [];
 
@@ -50,6 +50,11 @@ const option = {
   dataZoom: [
     { type: 'inside', realtime: false },
     { type: 'slider', height: 40, bottom: 0, handleStyle: { color: '#3fa9f5' }, realtime: false }
+  ],
+  series: [
+    { id: 'ask', name: 'Ask', type: 'scatter', data: [], symbolSize: 4, itemStyle: { color: '#f5a623' } },
+    { id: 'mid', name: 'Mid', type: 'scatter', data: [], symbolSize: 4, itemStyle: { color: '#00bcd4' } },
+    { id: 'bid', name: 'Bid', type: 'scatter', data: [], symbolSize: 4, itemStyle: { color: '#4caf50' } }
   ]
 };
 
@@ -59,26 +64,17 @@ function updateSeries() {
   const bidBox = document.getElementById('bidCheckbox');
   if (!askBox || !midBox || !bidBox) return;
 
-  const updatedSeries = [];
-  if (askBox.checked) updatedSeries.push({
-    id: 'ask', name: 'Ask', type: 'scatter', symbolSize: 4,
-    itemStyle: { color: '#f5a623' }, data: dataAsk
+  chart.setOption({
+    series: [
+      { id: 'ask', data: dataAsk, show: askBox.checked },
+      { id: 'mid', data: dataMid, show: midBox.checked },
+      { id: 'bid', data: dataBid, show: bidBox.checked }
+    ]
   });
-  if (midBox.checked) updatedSeries.push({
-    id: 'mid', name: 'Mid', type: 'scatter', symbolSize: 4,
-    itemStyle: { color: '#00bcd4' }, data: dataMid
-  });
-  if (bidBox.checked) updatedSeries.push({
-    id: 'bid', name: 'Bid', type: 'scatter', symbolSize: 4,
-    itemStyle: { color: '#4caf50' }, data: dataBid
-  });
-
-  chart.setOption({ series: updatedSeries });
 }
 
 async function loadInitialData() {
   try {
-    // Step 1: Get the latest tick
     const latestRes = await fetch(`/ticks/recent?limit=1`);
     const latestTicks = await latestRes.json();
     if (!Array.isArray(latestTicks) || latestTicks.length === 0) {
@@ -89,14 +85,13 @@ async function loadInitialData() {
     const latestTimeUTC = new Date(latestTick.timestamp);
     const latestTimeSydney = toSydneyTime(latestTimeUTC);
 
-    // Step 2: Get 08:00 local time of that day (in Sydney)
+    // Get 08:00 local time of that day (Sydney)
     const startLocal = new Date(latestTimeSydney);
     startLocal.setHours(8, 0, 0, 0);
-
     const startTimeUTC = new Date(startLocal.getTime() - SYDNEY_OFFSET * 60000);
     const startTimeISO = startTimeUTC.toISOString();
 
-    // Step 3: Load ticks from 08:00 local time (UTC-based query)
+    // Load ticks
     const dayRes = await fetch(`/ticks/after/${startTimeISO}?limit=5000`);
     const allTicks = await dayRes.json();
     if (!Array.isArray(allTicks) || allTicks.length === 0) {
@@ -104,16 +99,14 @@ async function loadInitialData() {
       return;
     }
 
-    // Step 4: Map ticks
     dataMid = allTicks.map(t => [new Date(t.timestamp).getTime(), t.mid, t.id]);
     dataAsk = allTicks.map(t => [new Date(t.timestamp).getTime(), t.ask, t.id]);
     dataBid = allTicks.map(t => [new Date(t.timestamp).getTime(), t.bid, t.id]);
 
-    // Step 5: Zoom window = last 5 minutes before last tick
     const lastTickTime = new Date(latestTick.timestamp).getTime();
     const zoomStart = lastTickTime - 4 * 60 * 1000;
 
-    // Step 6: xAxis range = 08:00 that day to 07:00 next day (local)
+    // Set xAxis min/max (08:00 → next day 07:00)
     const xMin = startLocal.getTime() - SYDNEY_OFFSET * 60000;
     const endLocal = new Date(startLocal);
     endLocal.setDate(endLocal.getDate() + 1);
@@ -122,11 +115,19 @@ async function loadInitialData() {
 
     chart.setOption({
       xAxis: { min: xMin, max: xMax },
+      series: [
+        { id: 'ask', data: dataAsk },
+        { id: 'mid', data: dataMid },
+        { id: 'bid', data: dataBid }
+      ]
+    }, false);
+
+    chart.setOption({
       dataZoom: [
         { type: 'inside', startValue: zoomStart, endValue: lastTickTime, realtime: false },
         { type: 'slider', startValue: zoomStart, endValue: lastTickTime, bottom: 0, height: 40, realtime: false }
       ]
-    });
+    }, false);
 
     updateSeries();
   } catch (err) {
@@ -135,19 +136,15 @@ async function loadInitialData() {
 }
 
 window.addEventListener('DOMContentLoaded', () => {
-  const main = document.getElementById('main');
-  chart = echarts.init(main);
+  chart = echarts.init(document.getElementById("main"));
   chart.setOption(option);
 
-  const ask = document.getElementById('askCheckbox');
-  const mid = document.getElementById('midCheckbox');
-  const bid = document.getElementById('bidCheckbox');
+  ['ask', 'mid', 'bid'].forEach(type => {
+    const box = document.getElementById(`${type}Checkbox`);
+    box.addEventListener('change', updateSeries);
+  });
 
-  ask.addEventListener('change', updateSeries);
-  mid.addEventListener('change', updateSeries);
-  bid.addEventListener('change', updateSeries);
   chart.on('dataZoom', updateSeries);
-
   loadInitialData();
 });
 
