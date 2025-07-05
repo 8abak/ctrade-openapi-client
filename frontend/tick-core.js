@@ -1,4 +1,4 @@
-const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.006';
+const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.007';
 let dataMid = [], dataAsk = [], dataBid = [], lastTimestamp = null;
 const chart = echarts.init(document.getElementById("main"));
 
@@ -130,7 +130,9 @@ window.addEventListener('DOMContentLoaded', () => {
 
 // ✅ Add update series function
 function updateSeries() {
-  const askBox = document.getElementById('askCheckbox');
+  console.log("Updating series visibility...");
+
+  const askBox = document.getElementById('askCheckbox').checked = false;
   const midBox = document.getElementById('midCheckbox');
   const bidBox = document.getElementById('bidCheckbox');
   if (!askBox || !midBox || !bidBox) return;
