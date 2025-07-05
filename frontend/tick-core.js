@@ -1,4 +1,4 @@
-const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.015';
+const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.016';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [], lastTimestamp = null;
 
@@ -138,7 +138,16 @@ function updateSeries() {
     });
   }
 
-  chart.setOption({ series: updatedSeries }, true);
+  chart.setOption({
+    backgroundColor: option.backgroundColor,
+    tooltip: option.tooltip,
+    xAxis: option.xAxis,
+    yAxis: option.yAxis,
+    dataZoom: option.dataZoom,
+    series: updatedSeries
+  }, true);  // ✅ full overwrite
+
+  console.log("✅ Chart updated with series:", updatedSeries.map(s => s.name).join(', '));
 }
 
 window.addEventListener('DOMContentLoaded', () => {
