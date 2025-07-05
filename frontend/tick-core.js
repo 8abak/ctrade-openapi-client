@@ -85,10 +85,10 @@ async function loadInitialData() {
 
     chart.setOption({
       series: [{ data }],
-      xAxis: {\        min: startOfDay.getTime() - SYDNEY_OFFSET * 60000,
+      xAxis: {min: startOfDay.getTime() - SYDNEY_OFFSET * 60000,
         max: endOfDay.getTime() - SYDNEY_OFFSET * 60000
       },
-      yAxis: {\        min: yMin,
+      yAxis: {min: yMin,
         max: yMax
       },
       dataZoom: [
