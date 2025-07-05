@@ -1,4 +1,4 @@
-const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.016';
+const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.017';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [], lastTimestamp = null;
 
@@ -111,6 +111,36 @@ async function loadInitialData() {
   }
 }
 
+function getVisibleYRange() {
+  const zoom = chart.getOption().dataZoom?.[0];
+  if (!zoom || dataMid.length === 0) return [null, null];
+
+  const start = zoom.start ?? 0;
+  const end = zoom.end ?? 100;
+
+  const total = dataMid.length;
+  const iStart = Math.floor((start / 100) * total);
+  const iEnd = Math.ceil((end / 100) * total);
+
+  const visiblePrices = [];
+
+  const useSeries = [];
+  if (document.getElementById('askCheckbox').checked) useSeries.push(dataAsk);
+  if (document.getElementById('midCheckbox').checked) useSeries.push(dataMid);
+  if (document.getElementById('bidCheckbox').checked) useSeries.push(dataBid);
+
+  for (const series of useSeries) {
+    for (let i = iStart; i < iEnd; i++) {
+      const price = series[i]?.[1];
+      if (typeof price === 'number') visiblePrices.push(price);
+    }
+  }
+
+  if (visiblePrices.length === 0) return [null, null];
+  return [Math.floor(Math.min(...visiblePrices)), Math.ceil(Math.max(...visiblePrices))];
+}
+
+
 function updateSeries() {
   const askBox = document.getElementById('askCheckbox');
   const midBox = document.getElementById('midCheckbox');
@@ -137,6 +167,8 @@ function updateSeries() {
       itemStyle: { color: '#4caf50' }, data: dataBid
     });
   }
+  
+  const [yMin, yMax] = getVisibleYRange();
 
   chart.setOption({
     backgroundColor: option.backgroundColor,
