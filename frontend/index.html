@@ -41,7 +41,10 @@
     th {
       background-color: #222;
     }
-    input, select {
+    input[type="checkbox"] {
+      margin-right: 6px;
+    }
+    select, textarea {
       padding: 6px;
       margin-top: 6px;
       width: 90%;
@@ -78,7 +81,11 @@
 
       <div id="labelSection" style="margin-top: 1em;">
         <strong>Labels</strong><br>
-        <div id="labels" style="margin-top: 6px;"></div>
+        <div id="labels" style="margin-top: 6px; display: flex; gap: 10px;">
+          <label><input type="checkbox" id="askCheckbox" checked />Ask</label>
+          <label><input type="checkbox" id="midCheckbox" checked />Mid</label>
+          <label><input type="checkbox" id="bidCheckbox" checked />Bid</label>
+        </div>
       </div>
 
       <div id="sqlConsole" style="margin-top: 1em; display: none;">
@@ -88,7 +95,6 @@
         <button onclick="runQuery()">Run</button>
       </div>
     </div>
-    <div id="version" style="padding: 1em; font-size: 0.8em; color: #888;">Version: frontend</div>
   </div>
 
   <div id="tickView">
