@@ -1,4 +1,4 @@
-const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.004';
+const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.005';
 let dataMid = [], dataAsk = [], dataBid = [], lastTimestamp = null;
 const chart = echarts.init(document.getElementById("main"));
 
@@ -130,19 +130,44 @@ window.addEventListener('DOMContentLoaded', () => {
 
 // ✅ Add update series function
 function updateSeries() {
-  const ask = document.getElementById('askCheckbox');
-  const mid = document.getElementById('midCheckbox');
-  const bid = document.getElementById('bidCheckbox');
-  if (!ask || !mid || !bid) return;
+  const askBox = document.getElementById('askCheckbox');
+  const midBox = document.getElementById('midCheckbox');
+  const bidBox = document.getElementById('bidCheckbox');
+  if (!askBox || !midBox || !bidBox) return;
 
   chart.setOption({
     series: [
-      { id: 'ask', data: dataAsk, show: ask.checked },
-      { id: 'mid', data: dataMid, show: mid.checked },
-      { id: 'bid', data: dataBid, show: bid.checked }
+      {
+        id: 'ask',
+        name: 'Ask',
+        type: 'scatter',
+        symbolSize: 4,
+        itemStyle: { color: '#f5a623' },
+        data: dataAsk,
+        show: askBox.checked
+      },
+      {
+        id: 'mid',
+        name: 'Mid',
+        type: 'scatter',
+        symbolSize: 4,
+        itemStyle: { color: '#00bcd4' },
+        data: dataMid,
+        show: midBox.checked
+      },
+      {
+        id: 'bid',
+        name: 'Bid',
+        type: 'scatter',
+        symbolSize: 4,
+        itemStyle: { color: '#4caf50' },
+        data: dataBid,
+        show: bidBox.checked
+      }
     ]
-  });
+  }, true); // ✅ IMPORTANT: force overwrite!
 }
+
 
 
 // ✅ Add checkbox toggles
