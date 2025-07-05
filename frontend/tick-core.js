@@ -116,7 +116,7 @@ async function loadInitialData() {
     console.error("❌ loadInitialData() failed", err);
   }
 }
-
+loadInitialData();
 // ✅ Add checkbox toggles
 window.addEventListener('DOMContentLoaded', () => {
   const ask = document.getElementById('askCheckbox');
