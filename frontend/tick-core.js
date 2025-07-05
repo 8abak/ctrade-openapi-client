@@ -1,5 +1,5 @@
-// tick-core.js — Dot View, Locked Zoom Window, Sydney Day View (Last Tick Only)
-const bver = '2025.07.05.004', fver = '2025.07.05.012';
+// tick-core.js — Dot View, Locked Zoom Window, Sydney Day View (Last Tick Only + Full Day Range)
+const bver = '2025.07.05.004', fver = '2025.07.05.013';
 let data = [], lastTimestamp = null;
 const chart = echarts.init(document.getElementById('main'));
 
@@ -77,27 +77,38 @@ async function loadInitialData() {
     const yMin = Math.floor(price);
     const yMax = Number.isInteger(price) ? price + 1 : Math.ceil(price);
 
-    // Show only 5-minute window around last tick
-    const tickMinute = new Date(localDate);
-    tickMinute.setSeconds(0, 0);
-    const chartStart = new Date(tickMinute);
-    chartStart.setMinutes(chartStart.getMinutes() - 4);
-    const chartEnd = new Date(tickMinute);
-    chartEnd.setMinutes(chartEnd.getMinutes() + 1);
+    // Determine start and end of Sydney day
+    const startOfDay = new Date(localDate);
+    startOfDay.setHours(8, 0, 0, 0);
+    const endOfDay = new Date(startOfDay);
+    endOfDay.setDate(startOfDay.getDate() + 1);
+    endOfDay.setHours(6, 59, 59, 999);
 
     chart.setOption({
       series: [{ data }],
       xAxis: {
-        min: chartStart.getTime() - SYDNEY_OFFSET * 60000,
-        max: chartEnd.getTime() - SYDNEY_OFFSET * 60000
+        min: startOfDay.getTime() - SYDNEY_OFFSET * 60000,
+        max: endOfDay.getTime() - SYDNEY_OFFSET * 60000
       },
       yAxis: {
         min: yMin,
         max: yMax
       },
       dataZoom: [
-        { type: 'inside', startValue: chartStart.getTime(), endValue: chartEnd.getTime(), realtime: false },
-        { type: 'slider', startValue: chartStart.getTime(), endValue: chartEnd.getTime(), bottom: 0, height: 40, realtime: false }
+        {
+          type: 'inside',
+          startValue: startOfDay.getTime(),
+          endValue: endOfDay.getTime(),
+          realtime: false
+        },
+        {
+          type: 'slider',
+          startValue: startOfDay.getTime(),
+          endValue: endOfDay.getTime(),
+          bottom: 0,
+          height: 40,
+          realtime: false
+        }
       ]
     });
   } catch (err) {
