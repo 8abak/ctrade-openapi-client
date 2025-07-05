@@ -1,7 +1,15 @@
-// tick-core.js — Dot View, Locked Zoom Window, Dual Version
-const bver = '2025.07.05.004', fver = '2025.07.05.008';
+// tick-core.js — Dot View, Locked Zoom Window, Sydney Day View
+const bver = '2025.07.05.004', fver = '2025.07.05.009';
 let data = [], lastTimestamp = null;
 const chart = echarts.init(document.getElementById('main'));
+
+const SYDNEY_OFFSET = 600; // +10:00 UTC in minutes
+const SYDNEY_DAY_START_HOUR = 8;
+const SYDNEY_DAY_END_HOUR = 6;
+
+function toSydneyTime(date) {
+  return new Date(date.getTime() + SYDNEY_OFFSET * 60000);
+}
 
 const option = {
   backgroundColor: '#111',
@@ -13,8 +21,7 @@ const option = {
     textStyle: { color: '#fff', fontSize: 13 },
     formatter: (params) => {
       const p = params[0];
-      const date = new Date(p.value[0]);
-      date.setMinutes(date.getMinutes() + 600);
+      const date = toSydneyTime(new Date(p.value[0]));
       const timeStr = date.toLocaleTimeString('en-au', { hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true }).toLowerCase();
       const dateStr = date.toLocaleDateString('en-AU');
       return `<div style="padding: 8px;"><strong>${timeStr}</strong><br><span style="color: #ccc;">${dateStr}</span><br>Mid: <strong style="color: #3fa9f5;">${p.value[1].toFixed(2)}</strong><br>ID: <span style="color:#aaa;">${p.value[2]}</span></div>`;
@@ -25,18 +32,15 @@ const option = {
     axisLabel: {
       color: '#ccc',
       formatter: val => {
-        const d = new Date(val);
-        d.setMinutes(d.getMinutes() + 600);
+        const d = toSydneyTime(new Date(val));
         return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}` + `\n${d.toLocaleDateString('en-AU', { month: 'short', day: 'numeric' })}`;
       }
     },
     splitNumber: 12,
-    minInterval: 5 * 60 * 1000,
+    minInterval: 60 * 1000 * 5,
     splitLine: {
       show: true,
-      lineStyle: {
-        color: '#333'
-      }
+      lineStyle: { color: '#333' }
     }
   },
   yAxis: {
@@ -49,9 +53,7 @@ const option = {
     },
     splitLine: {
       show: true,
-      lineStyle: {
-        color: '#333'
-      }
+      lineStyle: { color: '#333' }
     }
   },
   dataZoom: [
@@ -75,32 +77,38 @@ async function loadInitialData() {
     if (!Array.isArray(ticks) || ticks.length === 0) return;
 
     const t = ticks[0];
-    const tickDate = new Date(t.timestamp);
-    const tickTime = tickDate.getTime();
+    const utcDate = new Date(t.timestamp);
+    const localDate = toSydneyTime(utcDate);
+    const tickTime = utcDate.getTime();
     lastTimestamp = t.timestamp;
     data = [[tickTime, t.mid, t.id]];
 
-    const tickMinute = new Date(tickDate);
+    const tickMinute = new Date(localDate);
     tickMinute.setSeconds(0, 0);
     const chartStart = new Date(tickMinute);
     chartStart.setMinutes(chartStart.getMinutes() - 4);
     const chartEnd = new Date(tickMinute);
     chartEnd.setMinutes(chartEnd.getMinutes() + 1);
 
-    const dayStart = new Date(tickDate);
-    dayStart.setHours(0, 0, 0, 0);
-    const dayEnd = new Date(tickDate);
-    dayEnd.setHours(23, 59, 59, 999);
+    // Define Sydney session start/end
+    const sydneyStart = new Date(localDate);
+    if (sydneyStart.getHours() < SYDNEY_DAY_START_HOUR) {
+      sydneyStart.setDate(sydneyStart.getDate() - 1);
+    }
+    sydneyStart.setHours(SYDNEY_DAY_START_HOUR, 0, 0, 0);
+    const sydneyEnd = new Date(sydneyStart);
+    sydneyEnd.setDate(sydneyStart.getDate() + 1);
+    sydneyEnd.setHours(SYDNEY_DAY_END_HOUR, 59, 59, 999);
 
     const price = t.mid;
-    const yMin = Number.isInteger(price) ? price - 1 : Math.floor(price);
+    const yMin = Math.floor(price);
     const yMax = Number.isInteger(price) ? price + 1 : Math.ceil(price);
 
     chart.setOption({
       series: [{ data }],
       xAxis: {
-        min: dayStart.getTime(),
-        max: dayEnd.getTime()
+        min: sydneyStart.getTime() - SYDNEY_OFFSET * 60000,
+        max: sydneyEnd.getTime() - SYDNEY_OFFSET * 60000
       },
       yAxis: {
         min: yMin,
@@ -127,6 +135,5 @@ async function loadInitialData() {
     console.error("❌ loadInitialData() failed", err);
   }
 }
-
 
 loadInitialData();
