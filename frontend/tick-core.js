@@ -1,4 +1,4 @@
-const bver = '2025.07.05.004', fver = '2025.07.06.002';
+const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.003';
 let dataMid = [], dataAsk = [], dataBid = [], lastTimestamp = null;
 const chart = echarts.init(document.getElementById("main"));
 
