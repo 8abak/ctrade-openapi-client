@@ -1,4 +1,4 @@
-const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.019';
+const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.020';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [], lastTimestamp = null;
 
@@ -111,7 +111,7 @@ function updateSeries() {
     tooltip: option.tooltip,
     xAxis: option.xAxis,
     yAxis: yMin !== null ? { ...option.yAxis, min: yMin, max: yMax } : option.yAxis,
-    dataZoom: chart.getOption().dataZoom, // preserve current zoom
+    dataZoom: chart.getOption().dataZoom, // preserve zoom
     series: updatedSeries
   }, true);
 }
@@ -125,10 +125,13 @@ async function loadInitialData() {
     const latest = latestTicks[0];
     const latestUtc = new Date(latest.timestamp);
     const endTime = latestUtc.getTime();
-    const startTime = endTime - 5 * 60 * 1000; // last 5 minutes
+    const startZoom = endTime - 5 * 60 * 1000;
 
-    const dayStartISO = new Date(startTime - SYDNEY_OFFSET * 60000).toISOString();
-    const dayRes = await fetch(`/ticks/after/${dayStartISO}?limit=5000`);
+    const dayStart = new Date(latestUtc);
+    dayStart.setHours(8, 0, 0, 0); // 08:00 local
+    const dayStartUTC = new Date(dayStart.getTime() - SYDNEY_OFFSET * 60000).toISOString();
+
+    const dayRes = await fetch(`/ticks/after/${dayStartUTC}?limit=5000`);
     const allTicks = await dayRes.json();
     if (!Array.isArray(allTicks)) return;
 
@@ -141,13 +144,13 @@ async function loadInitialData() {
       tooltip: option.tooltip,
       xAxis: {
         ...option.xAxis,
-        min: startTime,
+        min: dayStart.getTime(),
         max: endTime
       },
-      yAxis: option.yAxis, // we'll reset it in updateSeries()
+      yAxis: option.yAxis, // will update after zoom calc
       dataZoom: [
-        { ...option.dataZoom[0], startValue: startTime, endValue: endTime },
-        { ...option.dataZoom[1], startValue: startTime, endValue: endTime }
+        { ...option.dataZoom[0], startValue: startZoom, endValue: endTime },
+        { ...option.dataZoom[1], startValue: startZoom, endValue: endTime }
       ]
     });
 
@@ -176,7 +179,7 @@ window.addEventListener('DOMContentLoaded', () => {
   ask.addEventListener('change', updateSeries);
   mid.addEventListener('change', updateSeries);
   bid.addEventListener('change', updateSeries);
-  chart.on('dataZoom', updateSeries); // ✅ recalculate on manual zoom
+  chart.on('dataZoom', updateSeries); // 📈 update price range when zooming
 
   loadInitialData();
 });
