@@ -1,4 +1,4 @@
-const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.024';
+const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.025';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [];
 
@@ -88,39 +88,55 @@ async function loadInitialData() {
     const endTime = nextMorning.getTime();
     const dayStartUTC = new Date(startTime - SYDNEY_OFFSET * 60000).toISOString();
 
+    console.log("📦 Requesting ticks from:", dayStartUTC);
+
     const res = await fetch(`/ticks/after/${dayStartUTC}?limit=5000`);
     const allTicks = await res.json();
-    if (!Array.isArray(allTicks) || allTicks.length === 0) return;
+    if (!Array.isArray(allTicks) || allTicks.length === 0) {
+      console.warn("⚠️ No ticks loaded from server.");
+      return;
+    }
 
     dataMid = allTicks.map(t => [new Date(t.timestamp).getTime(), t.mid, t.id]);
     dataAsk = allTicks.map(t => [new Date(t.timestamp).getTime(), t.ask, t.id]);
     dataBid = allTicks.map(t => [new Date(t.timestamp).getTime(), t.bid, t.id]);
 
-    const lastTickTime = dataMid[dataMid.length - 1][0];
-    const startZoom = lastTickTime - 4 * 60 * 1000;
+    console.log(`✅ Loaded ticks: ${allTicks.length}`);
+    console.log("⏱ First tick:", new Date(dataMid[0][0]).toLocaleString());
+    console.log("⏱ Last tick:", new Date(dataMid[dataMid.length - 1][0]).toLocaleString());
 
     chart.setOption({
       xAxis: {
         min: startTime,
         max: endTime
-      },
-      dataZoom: [
-        {
-          type: 'inside',
-          startValue: startZoom,
-          endValue: lastTickTime,
-          realtime: false
-        },
-        {
-          type: 'slider',
-          startValue: startZoom,
-          endValue: lastTickTime,
-          bottom: 0,
-          height: 40,
-          realtime: false
-        }
-      ]
+      }
     });
+
+    if (dataMid.length > 0) {
+      const lastTickTime = dataMid[dataMid.length - 1][0];
+      const startZoom = lastTickTime - 4 * 60 * 1000;
+
+      chart.setOption({
+        dataZoom: [
+          {
+            type: 'inside',
+            startValue: startZoom,
+            endValue: lastTickTime,
+            realtime: false
+          },
+          {
+            type: 'slider',
+            startValue: startZoom,
+            endValue: lastTickTime,
+            bottom: 0,
+            height: 40,
+            realtime: false
+          }
+        ]
+      });
+    } else {
+      console.warn("⚠️ No mid tick data to apply zoom.");
+    }
 
     updateSeries();
   } catch (err) {
