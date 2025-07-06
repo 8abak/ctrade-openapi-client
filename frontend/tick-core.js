@@ -1,6 +1,6 @@
 // ✅ FINAL VERSION of tick-core.js for real-time tick streaming with WebSocket
 
-const bver = '2025.07.05.004', fver = '2025.07.06.006';
+const bver = '2025.07.05.004', fver = '2025.07.06.007';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [];
 let lastTickTime = null;
@@ -133,37 +133,49 @@ async function loadTableNames() {
 }
 
 async function runQuery() {
-  const table = document.getElementById('tableSelect').value;
-  const raw = document.getElementById('queryInput').value;
+  const table = document.getElementById('tableSelect')?.value;
+  const raw = document.getElementById('queryInput')?.value;
   const query = raw || (table ? `SELECT * FROM ${table} ORDER BY id DESC LIMIT 20` : null);
   const container = document.getElementById('sqlResult');
   if (!query || !container) return;
-  
-  container.innerHTML = `<pre style="color: #999;>Running query...</pre>`;
+
+  container.innerHTML = `<pre style="color: #999;">Running query...</pre>`;
+
   try {
     const res = await fetch(`/sqlvw/query?query=${encodeURIComponent(query)}`);
     const text = await res.text();
+    
     try {
       const json = JSON.parse(text);
+
       if (Array.isArray(json)) {
-        if (json.length === 0) return container.innerHTML = '<p>No Results</p>';
+        if (json.length === 0) {
+          container.innerHTML = '<p>No Results</p>';
+          return;
+        }
+
         const headers = Object.keys(json[0]);
         let html = '<table><thead><tr>' + headers.map(h => `<th>${h}</th>`).join('') + '</tr></thead><tbody>';
+
         for (const row of json) {
           html += '<tr>' + headers.map(h => `<td>${row[h] != null ? row[h] : ''}</td>`).join('') + '</tr>';
         }
+
         html += '</tbody></table>';
         container.innerHTML = html;
+
       } else {
         container.innerHTML = `<pre>${JSON.stringify(json, null, 2)}</pre>`;
       }
     } catch (e) {
       container.innerHTML = `<pre style="color: green;">${text}</pre>`;
     }
+
   } catch (e) {
     container.innerHTML = `<pre style="color:red">Error: ${e.message}</pre>`;
   }
 }
+
 
 function setupLiveSocket() {
   const ws = new WebSocket("wss://www.datavis.au/ws/ticks");
