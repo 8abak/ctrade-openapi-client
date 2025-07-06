@@ -1,6 +1,6 @@
 // ✅ FINAL VERSION of tick-core.js for real-time tick streaming with WebSocket
 
-const bver = '2025.07.05.004', fver = '2025.07.06.007';
+const bver = '2025.07.05.004', fver = '2025.07.06.008';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [];
 let lastTickTime = null;
