@@ -137,6 +137,6 @@ window.addEventListener("DOMContentLoaded", () => {
   versionDiv.style.bottom = '8px';
   versionDiv.style.color = '#777';
   versionDiv.style.fontSize = '11px';
-  versionDiv.innerText = `bver: ${bver}\nhver: ${hver}`;
+  versionDiv.innerText = `bver: ${bver}\n hver: ${hver}`;
   document.body.appendChild(versionDiv);
 });
