@@ -1,9 +1,11 @@
-const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.029';
+// ✅ FINAL VERSION of tick-core.js for real-time tick streaming with WebSocket
+
+const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.030-final';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [];
+let lastTickTime = null;
 
 const SYDNEY_OFFSET = 600;
-
 function toSydneyTime(date) {
   return new Date(date.getTime() + SYDNEY_OFFSET * 60000);
 }
@@ -18,15 +20,13 @@ const option = {
     textStyle: { color: "#fff", fontSize: 13 },
     formatter: (params) => {
       const date = toSydneyTime(new Date(params[0].value[0]));
-      const timeStr = date.toLocaleTimeString("en-AU", {
-        hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true
-      });
+      const timeStr = date.toLocaleTimeString("en-AU", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true });
       const dateStr = date.toLocaleDateString("en-AU");
-      let tooltip = `<div style="padding: 8px;"><strong>${timeStr}</strong><br><span style="color: #ccc;">${dateStr}</span><br>`;
+      let tooltip = `<div style=\"padding: 8px;\"><strong>${timeStr}</strong><br><span style=\"color: #ccc;\">${dateStr}</span><br>`;
       params.forEach(p => {
-        tooltip += `${p.seriesName}: <strong style="color: ${p.color};">${p.value[1].toFixed(2)}</strong><br>`;
+        tooltip += `${p.seriesName}: <strong style=\"color: ${p.color};\">${p.value[1].toFixed(2)}</strong><br>`;
       });
-      tooltip += `ID: <span style="color:#aaa;">${params[0].value[2]}</span></div>`;
+      tooltip += `ID: <span style=\"color:#aaa;\">${params[0].value[2]}</span></div>`;
       return tooltip;
     }
   },
@@ -36,8 +36,7 @@ const option = {
       color: "#ccc",
       formatter: val => {
         const d = toSydneyTime(new Date(val));
-        return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}` +
-               `\n${d.toLocaleDateString('en-AU', { month: 'short', day: 'numeric' })}`;
+        return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}` + `\n${d.toLocaleDateString('en-AU', { month: 'short', day: 'numeric' })}`;
       }
     },
     splitLine: { show: true, lineStyle: { color: "#333" } }
@@ -61,19 +60,9 @@ function updateSeries() {
   if (!askBox || !midBox || !bidBox) return;
 
   const updatedSeries = [];
-
-  if (askBox.checked) updatedSeries.push({
-    id: 'ask', name: 'Ask', type: 'scatter', symbolSize: 4,
-    itemStyle: { color: '#f5a623' }, data: dataAsk
-  });
-  if (midBox.checked) updatedSeries.push({
-    id: 'mid', name: 'Mid', type: 'scatter', symbolSize: 4,
-    itemStyle: { color: '#00bcd4' }, data: dataMid
-  });
-  if (bidBox.checked) updatedSeries.push({
-    id: 'bid', name: 'Bid', type: 'scatter', symbolSize: 4,
-    itemStyle: { color: '#4caf50' }, data: dataBid
-  });
+  if (askBox.checked) updatedSeries.push({ id: 'ask', name: 'Ask', type: 'scatter', symbolSize: 4, itemStyle: { color: '#f5a623' }, data: dataAsk });
+  if (midBox.checked) updatedSeries.push({ id: 'mid', name: 'Mid', type: 'scatter', symbolSize: 4, itemStyle: { color: '#00bcd4' }, data: dataMid });
+  if (bidBox.checked) updatedSeries.push({ id: 'bid', name: 'Bid', type: 'scatter', symbolSize: 4, itemStyle: { color: '#4caf50' }, data: dataBid });
 
   chart.setOption({ series: updatedSeries }, { replaceMerge: ['series'] });
 
@@ -83,7 +72,6 @@ function updateSeries() {
   const end = zoom.endValue;
 
   const prices = [];
-
   if (askBox.checked) prices.push(...dataAsk.filter(p => p[0] >= start && p[0] <= end).map(p => p[1]));
   if (midBox.checked) prices.push(...dataMid.filter(p => p[0] >= start && p[0] <= end).map(p => p[1]));
   if (bidBox.checked) prices.push(...dataBid.filter(p => p[0] >= start && p[0] <= end).map(p => p[1]));
@@ -96,60 +84,69 @@ function updateSeries() {
 }
 
 async function loadInitialData() {
-  try {
-    const latestRes = await fetch(`/ticks/recent?limit=1`);
-    const latestTicks = await latestRes.json();
-    if (!Array.isArray(latestTicks) || latestTicks.length === 0) return;
+  const latestRes = await fetch(`/ticks/recent?limit=1`);
+  const latestTicks = await latestRes.json();
+  const latestTick = latestTicks[0];
+  const latestTimeUTC = new Date(latestTick.timestamp);
+  const latestTimeSydney = toSydneyTime(latestTimeUTC);
+  const startLocal = new Date(latestTimeSydney);
+  startLocal.setHours(8, 0, 0, 0);
+  const startTimeUTC = new Date(startLocal.getTime() - SYDNEY_OFFSET * 60000);
+  const dayRes = await fetch(`/ticks/after/${startTimeUTC.toISOString()}?limit=5000`);
+  const allTicks = await dayRes.json();
 
-    const latestTick = latestTicks[0];
-    const latestTimeUTC = new Date(latestTick.timestamp);
-    const latestTimeSydney = toSydneyTime(latestTimeUTC);
+  dataMid = allTicks.map(t => [new Date(t.timestamp).getTime(), t.mid, t.id]);
+  dataAsk = allTicks.map(t => [new Date(t.timestamp).getTime(), t.ask, t.id]);
+  dataBid = allTicks.map(t => [new Date(t.timestamp).getTime(), t.bid, t.id]);
 
-    const startLocal = new Date(latestTimeSydney);
-    startLocal.setHours(8, 0, 0, 0);
-    const startTimeUTC = new Date(startLocal.getTime() - SYDNEY_OFFSET * 60000);
-    const startTimeISO = startTimeUTC.toISOString();
+  lastTickTime = new Date(latestTick.timestamp);
+  const lastTime = lastTickTime.getTime();
+  const zoomStart = lastTime - 4 * 60 * 1000;
+  const xMin = startLocal.getTime() - SYDNEY_OFFSET * 60000;
+  const endLocal = new Date(startLocal);
+  endLocal.setDate(endLocal.getDate() + 1);
+  endLocal.setHours(7, 0, 0, 0);
+  const xMax = endLocal.getTime() - SYDNEY_OFFSET * 60000;
 
-    const res = await fetch(`/ticks/after/${startTimeISO}?limit=5000`);
-    const allTicks = await res.json();
-    if (!Array.isArray(allTicks) || allTicks.length === 0) return;
+  chart.setOption({
+    xAxis: { min: xMin, max: xMax },
+    dataZoom: [
+      { type: 'inside', startValue: zoomStart, endValue: lastTime },
+      { type: 'slider', startValue: zoomStart, endValue: lastTime, bottom: 0, height: 40 }
+    ]
+  });
 
-    dataMid = allTicks.map(t => [new Date(t.timestamp).getTime(), t.mid, t.id]);
-    dataAsk = allTicks.map(t => [new Date(t.timestamp).getTime(), t.ask, t.id]);
-    dataBid = allTicks.map(t => [new Date(t.timestamp).getTime(), t.bid, t.id]);
+  updateSeries();
+  setupLiveSocket();
+}
 
-    const lastTickTime = new Date(latestTick.timestamp).getTime();
-    const zoomStart = lastTickTime - 4 * 60 * 1000;
+function setupLiveSocket() {
+  const ws = new WebSocket("wss://www.datavis.au/ws/ticks");
 
-    const xMin = startLocal.getTime() - SYDNEY_OFFSET * 60000;
-    const endLocal = new Date(startLocal);
-    endLocal.setDate(endLocal.getDate() + 1);
-    endLocal.setHours(7, 0, 0, 0);
-    const xMax = endLocal.getTime() - SYDNEY_OFFSET * 60000;
+  ws.onopen = () => console.log("📡 WebSocket connected");
 
-    chart.setOption({
-      xAxis: { min: xMin, max: xMax },
-      dataZoom: [
-        { type: 'inside', startValue: zoomStart, endValue: lastTickTime },
-        { type: 'slider', startValue: zoomStart, endValue: lastTickTime, bottom: 0, height: 40 }
-      ]
-    });
-
+  ws.onmessage = (event) => {
+    const tick = JSON.parse(event.data);
+    const ts = new Date(tick.timestamp).getTime();
+    if (lastTickTime && ts <= lastTickTime.getTime()) return;
+    dataMid.push([ts, tick.mid, tick.id]);
+    dataAsk.push([ts, tick.ask, tick.id]);
+    dataBid.push([ts, tick.bid, tick.id]);
+    lastTickTime = new Date(tick.timestamp);
     updateSeries();
-  } catch (err) {
-    console.error("❌ loadInitialData() failed", err);
-  }
+  };
+
+  ws.onerror = (e) => console.warn("⚠️ WebSocket error", e);
+  ws.onclose = () => console.warn("🔌 WebSocket closed.");
 }
 
 window.addEventListener('DOMContentLoaded', () => {
   chart = echarts.init(document.getElementById("main"));
   chart.setOption(option);
-
-  ['ask', 'mid', 'bid'].forEach(type => {
-    const box = document.getElementById(`${type}Checkbox`);
+  ['ask', 'mid', 'bid'].forEach(id => {
+    const box = document.getElementById(id + 'Checkbox');
     box.addEventListener('change', updateSeries);
   });
-
   chart.on('dataZoom', updateSeries);
   loadInitialData();
 });
