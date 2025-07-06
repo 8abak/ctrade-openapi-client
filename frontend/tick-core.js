@@ -1,6 +1,6 @@
 // ✅ FINAL VERSION of tick-core.js for real-time tick streaming with WebSocket
 
-const bver = '2025.07.05.004', fver = '2025.07.06.004';
+const bver = '2025.07.05.004', fver = '2025.07.06.005';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [];
 let lastTickTime = null;
@@ -136,7 +136,7 @@ async function runQuery() {
   const table = document.getElementById('tableSelect').value;
   const raw = document.getElementById('queryInput').value;
   const query = raw || (table ? `SELECT * FROM ${table} ORDER BY timestamp DESC LIMIT 20` : null);
-  const container = document.getElementById('queryResults');
+  const container = document.getElementById('sqlResult');
   if (!query || !container) return;
   
   container.innerHTML = `<pre style="color: #999;>Running query...</pre>`;
