@@ -135,7 +135,7 @@ async function loadTableNames() {
 async function runQuery() {
   const table = document.getElementById('tableSelect').value;
   const raw = document.getElementById('queryInput').value;
-  const query = raw || (table ? `SELECT * FROM ${table} ORDER BY timestamp DESC LIMIT 20` : null);
+  const query = raw || (table ? `SELECT * FROM ${table} ORDER BY id DESC LIMIT 20` : null);
   const container = document.getElementById('sqlResult');
   if (!query || !container) return;
   
