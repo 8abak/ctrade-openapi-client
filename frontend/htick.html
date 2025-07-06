@@ -5,203 +5,49 @@
   <title>Historical Tick View</title>
   <script src="https://cdn.jsdelivr.net/npm/echarts@5"></script>
   <style>
-    body {
-      margin: 0;
-      font-family: sans-serif;
-      background: #111;
-      color: white;
-      display: flex;
-      height: 100vh;
-      overflow: hidden;
-    }
-    #sidebar {
-      width: 260px;
-      background: #1a1a1a;
-      color: white;
-      display: flex;
-      flex-direction: column;
-      justify-content: space-between;
-    }
-    #toolbar {
-      padding: 1em;
-    }
-    #toolbar input, #toolbar button {
-      margin-bottom: 10px;
-      width: 100%;
-      padding: 6px 10px;
-      font-size: 14px;
-      background: #222;
-      color: white;
-      border: 1px solid #444;
-    }
-    #toolbar label {
-      font-size: 14px;
-    }
-    #chart {
-      flex: 1;
-    }
-    #version {
-      padding: 1em;
-      font-size: 0.8em;
-      color: #888;
-    }
+    html, body { margin: 0; padding: 0; height: 100%; background: #111; color: white; font-family: sans-serif; }
+    #main { width: 100%; height: 100%; }
+    #controls { padding: 1em; background: #1a1a1a; display: flex; flex-direction: column; gap: 10px; width: 260px; }
+    #layout { display: flex; height: 100vh; }
+    label { display: block; margin-bottom: 5px; }
+    input, select, button { font-size: 14px; padding: 6px; background: #222; color: white; border: 1px solid #555; }
+    button { background: #3fa9f5; border: none; cursor: pointer; }
   </style>
 </head>
 <body>
-<div id="sidebar">
-  <div id="toolbar">
-    <label for="timestampInput">Start Timestamp:</label>
-    <input type="datetime-local" id="timestampInput" value="2025-07-02T00:00">
-    <button onclick="loadInitial()">Load</button>
+<div id="layout">
+  <div id="controls">
+    <h3>HTick View</h3>
+    <label>Date <input type="date" id="dayInput"></label>
+    <label>Start Hour
+      <select id="hourSelect">
+        <script>
+          for (let i = 0; i < 24; i++) document.write(`<option value='${i}'>${i}:00</option>`);
+        </script>
+      </select>
+    </label>
+    <button id="loadButton">Load Ticks</button>
 
-    <div style="margin-top: 1em;">
-      <strong>Show Prices:</strong>
-      <div style="display: flex; flex-wrap: wrap; gap: 10px; margin-top: 6px;">
-        <label style="display: flex; align-items: center; gap: 4px;">
-          <input type="checkbox" id="chkBid" onchange="refreshChart()"> Bid
-        </label>
-        <label style="display: flex; align-items: center; gap: 4px;">
-          <input type="checkbox" id="chkMid" onchange="refreshChart()" checked> Mid
-        </label>
-        <label style="display: flex; align-items: center; gap: 4px;">
-          <input type="checkbox" id="chkAsk" onchange="refreshChart()"> Ask
-        </label>
-      </div>
+    <strong>Base Layers</strong>
+    <label><input type="checkbox" id="askCheckbox"> Ask</label>
+    <label><input type="checkbox" id="midCheckbox" checked> Mid</label>
+    <label><input type="checkbox" id="bidCheckbox"> Bid</label>
+
+    <div>
+      <strong>Label Layers</strong>
+      <div id="labelCheckboxes"></div>
+    </div>
+
+    <div>
+      <strong>Create Label Table</strong>
+      <input type="text" id="newLabelInput" placeholder="label_table_name">
+      <button id="createLabelBtn">Create</button>
     </div>
   </div>
-  <div id="version">Version: frontend</div>
+
+  <div id="main"></div>
 </div>
-<div id="chart"></div>
 
-<script>
-let chart = echarts.init(document.getElementById('chart'));
-let allTicks = [], lastTickId = null;
-
-chart.setOption({
-  backgroundColor: '#111',
-  tooltip: {
-    trigger: 'axis',
-    backgroundColor: '#222',
-    borderColor: '#555',
-    borderWidth: 1,
-    textStyle: { color: '#fff', fontSize: 13 },
-    formatter: (params) => {
-      const p = params[0];
-      const tick = allTicks.find(t => t.id === p.value[0]);
-      if (!tick) return '';
-      const date = new Date(tick.timestamp);
-      const timeStr = date.toLocaleTimeString('en-au', { hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true }).toLowerCase();
-      const dateStr = date.toLocaleDateString('en-AU');
-      return `<div style="padding: 8px;"><strong>${timeStr}</strong><br><span style="color: #ccc;">${dateStr}</span><br>Value: <strong style="color: #3fa9f5;">${p.value[1].toFixed(2)}</strong><br>ID: <span style="color:#aaa;">${p.value[2]}</span></div>`;
-    }
-  },
-  xAxis: {
-    type: 'category',
-    data: [],
-    axisLabel: {
-      color: '#ccc',
-      formatter: val => val
-    }
-  },
-  yAxis: {
-    type: 'value',
-    scale: true,
-    axisLabel: { color: '#ccc' }
-  },
-  series: [
-    { name: 'Bid', type: 'line', showSymbol: false, data: [], lineStyle: { color: '#f55', width: 1 } },
-    { name: 'Mid', type: 'line', showSymbol: false, data: [], lineStyle: { color: '#3fa9f5', width: 1.2 } },
-    { name: 'Ask', type: 'line', showSymbol: false, data: [], lineStyle: { color: '#5f5', width: 1 } }
-  ],
-  dataZoom: [
-    { type: 'inside', start: 0, end: 100 },
-    { type: 'slider', start: 0, end: 100, bottom: 0, height: 40, handleStyle: { color: '#3fa9f5' } }
-  ]
-});
-
-function refreshChart() {
-  if (!allTicks.length || !chart) return;
-
-  let startVal = null, endVal = null;
-  try {
-    const zoomModel = chart.getModel().getComponent('dataZoom');
-    const range = zoomModel?.getRange?.();
-    startVal = range?.startValue;
-    endVal = range?.endValue;
-  } catch (e) {
-    console.warn("Zoom info unavailable yet:", e.message);
-  }
-
-  const showBid = document.getElementById('chkBid').checked;
-  const showMid = document.getElementById('chkMid').checked;
-  const showAsk = document.getElementById('chkAsk').checked;
-
-  const xIds = allTicks.map(t => t.id.toString());
-
-  const bidSeries = showBid ? allTicks.map(t => [t.id.toString(), t.bid, t.id]) : [];
-  const midSeries = showMid ? allTicks.map(t => [t.id.toString(), t.mid, t.id]) : [];
-  const askSeries = showAsk ? allTicks.map(t => [t.id.toString(), t.ask, t.id]) : [];
-
-  const newStartId = startVal?.toString() || xIds[0];
-  const newEndId = endVal?.toString() || xIds[xIds.length - 1];
-
-  chart.setOption({
-    xAxis: {
-      type: 'category',
-      data: xIds,
-      axisLabel: { color: '#ccc' }
-    },
-    series: [
-      { name: 'Bid', type: 'line', showSymbol: false, data: bidSeries, lineStyle: { color: '#f55', width: 1 } },
-      { name: 'Mid', type: 'line', showSymbol: false, data: midSeries, lineStyle: { color: '#3fa9f5', width: 1.2 } },
-      { name: 'Ask', type: 'line', showSymbol: false, data: askSeries, lineStyle: { color: '#5f5', width: 1 } }
-    ],
-    dataZoom: [
-      { type: 'inside', startValue: newStartId, endValue: newEndId },
-      { type: 'slider', startValue: newStartId, endValue: newEndId, bottom: 0, height: 40, handleStyle: { color: '#3fa9f5' } }
-    ]
-  });
-}
-
-
-
-async function loadInitial() {
-  const dt = document.getElementById('timestampInput').value;
-  if (!dt) return alert('Please select a timestamp.');
-  const iso = new Date(dt).toISOString();
-
-  const idRes = await fetch(`/sqlvw/query?query=${encodeURIComponent(`SELECT id FROM ticks WHERE timestamp >= '${iso}' ORDER BY timestamp ASC LIMIT 1`)}`);
-  const idData = await idRes.json();
-  if (!Array.isArray(idData) || idData.length === 0) {
-    alert("No tick found for that timestamp.");
-    return;
-  }
-
-  lastTickId = idData[0].id;
-  allTicks = [];
-  await loadNextBlock();
-}
-
-async function loadNextBlock() {
-  const res = await fetch(`/ticks/after/${lastTickId}?limit=3000`);
-  const ticks = await res.json();
-  if (!Array.isArray(ticks) || ticks.length === 0) return;
-  allTicks = allTicks.concat(ticks);
-  lastTickId = ticks[ticks.length - 1].id;
-  refreshChart();
-  setTimeout(loadNextBlock, 3000);
-}
-
-async function loadVersion() {
-  try {
-    const res = await fetch('/version');
-    const json = await res.json();
-    document.getElementById('version').textContent = `Version: ${json.version}`;
-  } catch {
-    document.getElementById('version').textContent = 'Version: unknown';
-  }
-}
-loadVersion();
-</script>
+<script src="htick-core.js"></script>
 </body>
 </html>
