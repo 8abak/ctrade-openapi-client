@@ -4,7 +4,7 @@ let chart;
 let dataMid = [], dataAsk = [], dataBid = [];
 let labelTables = [];
 
-const bver = '2025.07.05.004', hver = '2025.07.06.htick.003';
+const bver = '2025.07.05.004', hver = '2025.07.07.002';
 const SYDNEY_OFFSET = 600;
 function toSydneyTime(date) {
   return new Date(date.getTime() + SYDNEY_OFFSET * 60000);
@@ -86,27 +86,69 @@ async function loadDayTicks() {
   const date = document.getElementById("dayInput").value;
   const hour = parseInt(document.getElementById("hourSelect").value);
   if (!date) return;
+
+  // Convert selected local time to UTC bounds
   const startLocal = new Date(`${date}T${hour.toString().padStart(2, '0')}:00:00`);
   const endLocal = new Date(startLocal);
   endLocal.setDate(startLocal.getDate() + 1);
+
   const startUTC = new Date(startLocal.getTime() - SYDNEY_OFFSET * 60000);
   const endUTC = new Date(endLocal.getTime() - SYDNEY_OFFSET * 60000);
-  const res = await fetch(`/ticks/after/${startUTC.toISOString()}?limit=5000`);
-  const allTicks = await res.json();
   const endMillis = endUTC.getTime();
-  const inRange = allTicks.filter(t => new Date(t.timestamp).getTime() < endMillis);
-  dataMid = inRange.map(t => [new Date(t.timestamp).getTime(), t.mid, t.id]);
-  dataAsk = inRange.map(t => [new Date(t.timestamp).getTime(), t.ask, t.id]);
-  dataBid = inRange.map(t => [new Date(t.timestamp).getTime(), t.bid, t.id]);
+
+  // Data arrays
+  dataMid = [];
+  dataAsk = [];
+  dataBid = [];
+
+  let lastTickId = null;
+  let keepLoading = true;
+  let batch = [];
+
+  while (keepLoading) {
+    let url = '';
+    if (lastTickId === null) {
+      // First batch
+      url = `/ticks/after/${startUTC.toISOString()}?limit=5000`;
+    } else {
+      url = `/ticks/after-id/${lastTickId}?limit=5000`;
+    }
+
+    const res = await fetch(url);
+    batch = await res.json();
+
+    if (batch.length === 0) break;
+
+    // Filter by end time
+    const usableTicks = batch.filter(t => new Date(t.timestamp).getTime() < endMillis);
+
+    for (const t of usableTicks) {
+      const ts = new Date(t.timestamp).getTime();
+      dataMid.push([ts, t.mid, t.id]);
+      dataAsk.push([ts, t.ask, t.id]);
+      dataBid.push([ts, t.bid, t.id]);
+    }
+
+    lastTickId = batch[batch.length - 1].id;
+
+    // Stop if no more usable ticks
+    if (usableTicks.length < batch.length || new Date(batch[batch.length - 1].timestamp).getTime() >= endMillis) {
+      keepLoading = false;
+    }
+  }
+
+  // Set zoom and axis bounds
   chart.setOption({
-    xAxis: { min: startUTC.getTime(), max: endUTC.getTime() },
+    xAxis: { min: startUTC.getTime(), max: endMillis },
     dataZoom: [
-      { type: 'inside', startValue: startUTC.getTime(), endValue: endUTC.getTime() },
-      { type: 'slider', startValue: startUTC.getTime(), endValue: endUTC.getTime(), bottom: 0, height: 40 }
+      { type: 'inside', startValue: startUTC.getTime(), endValue: endMillis },
+      { type: 'slider', startValue: startUTC.getTime(), endValue: endMillis, bottom: 0, height: 40 }
     ]
   });
+
   updateSeries();
 }
+
 
 async function createNewLabelTable() {
   const input = document.getElementById("newLabelInput");
