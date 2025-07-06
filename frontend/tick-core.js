@@ -128,7 +128,7 @@ async function loadTableNames() {
     if (!select) return;
     select.innerHTML = tables.map(t => `<option value="${t}">${t}</option>`).join('');
   } catch (e) {
-    console.warn("Error loading table names:", e);
+    console.error("⚠️ Could not load table names:", e);
   }
 }
 
