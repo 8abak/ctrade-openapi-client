@@ -1,8 +1,8 @@
-const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.027';
+const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.028';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [];
 
-const SYDNEY_OFFSET = 600; // in minutes
+const SYDNEY_OFFSET = 600;
 
 function toSydneyTime(date) {
   return new Date(date.getTime() + SYDNEY_OFFSET * 60000);
@@ -64,6 +64,7 @@ function updateSeries() {
   const bidBox = document.getElementById('bidCheckbox');
   if (!askBox || !midBox || !bidBox) return;
 
+  // Apply selected data visibility
   chart.setOption({
     series: [
       { id: 'ask', data: dataAsk, show: askBox.checked },
@@ -71,33 +72,45 @@ function updateSeries() {
       { id: 'bid', data: dataBid, show: bidBox.checked }
     ]
   });
+
+  // ✅ Rescale y-axis based on visible range
+  const optionNow = chart.getOption();
+  const zoomStart = optionNow.dataZoom[0].startValue;
+  const zoomEnd = optionNow.dataZoom[0].endValue;
+
+  const visiblePrices = [];
+
+  if (askBox.checked) visiblePrices.push(...dataAsk.filter(p => p[0] >= zoomStart && p[0] <= zoomEnd).map(p => p[1]));
+  if (midBox.checked) visiblePrices.push(...dataMid.filter(p => p[0] >= zoomStart && p[0] <= zoomEnd).map(p => p[1]));
+  if (bidBox.checked) visiblePrices.push(...dataBid.filter(p => p[0] >= zoomStart && p[0] <= zoomEnd).map(p => p[1]));
+
+  if (visiblePrices.length > 0) {
+    const yMin = Math.floor(Math.min(...visiblePrices));
+    const yMax = Math.ceil(Math.max(...visiblePrices));
+    chart.setOption({
+      yAxis: { min: yMin, max: yMax }
+    });
+  }
 }
 
 async function loadInitialData() {
   try {
     const latestRes = await fetch(`/ticks/recent?limit=1`);
     const latestTicks = await latestRes.json();
-    if (!Array.isArray(latestTicks) || latestTicks.length === 0) {
-      console.warn("⚠️ No latest tick returned.");
-      return;
-    }
+    if (!Array.isArray(latestTicks) || latestTicks.length === 0) return;
+
     const latestTick = latestTicks[0];
     const latestTimeUTC = new Date(latestTick.timestamp);
     const latestTimeSydney = toSydneyTime(latestTimeUTC);
 
-    // Get 08:00 local time of that day (Sydney)
     const startLocal = new Date(latestTimeSydney);
     startLocal.setHours(8, 0, 0, 0);
     const startTimeUTC = new Date(startLocal.getTime() - SYDNEY_OFFSET * 60000);
     const startTimeISO = startTimeUTC.toISOString();
 
-    // Load ticks
-    const dayRes = await fetch(`/ticks/after/${startTimeISO}?limit=5000`);
-    const allTicks = await dayRes.json();
-    if (!Array.isArray(allTicks) || allTicks.length === 0) {
-      console.warn("⚠️ No ticks loaded from server.");
-      return;
-    }
+    const res = await fetch(`/ticks/after/${startTimeISO}?limit=5000`);
+    const allTicks = await res.json();
+    if (!Array.isArray(allTicks) || allTicks.length === 0) return;
 
     dataMid = allTicks.map(t => [new Date(t.timestamp).getTime(), t.mid, t.id]);
     dataAsk = allTicks.map(t => [new Date(t.timestamp).getTime(), t.ask, t.id]);
@@ -106,7 +119,6 @@ async function loadInitialData() {
     const lastTickTime = new Date(latestTick.timestamp).getTime();
     const zoomStart = lastTickTime - 4 * 60 * 1000;
 
-    // Set xAxis min/max (08:00 → next day 07:00)
     const xMin = startLocal.getTime() - SYDNEY_OFFSET * 60000;
     const endLocal = new Date(startLocal);
     endLocal.setDate(endLocal.getDate() + 1);
@@ -119,15 +131,12 @@ async function loadInitialData() {
         { id: 'ask', data: dataAsk },
         { id: 'mid', data: dataMid },
         { id: 'bid', data: dataBid }
-      ]
-    }, false);
-
-    chart.setOption({
+      ],
       dataZoom: [
         { type: 'inside', startValue: zoomStart, endValue: lastTickTime, realtime: false },
         { type: 'slider', startValue: zoomStart, endValue: lastTickTime, bottom: 0, height: 40, realtime: false }
       ]
-    }, false);
+    });
 
     updateSeries();
   } catch (err) {
