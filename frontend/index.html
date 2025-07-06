@@ -63,10 +63,12 @@
       cursor: pointer;
     }
     #sqlResult {
-      font-size: 13px;
-      padding: 6px;
-      overflow: auto;
-      max-height: 200px;
+      display: flex;
+      flex-direction: column;
+    }
+    #sqlResult table {
+      flex: 1;
+      width: 100%;
     }
   </style>
 </head>
