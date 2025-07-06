@@ -122,7 +122,7 @@ async function loadInitialData() {
 
 async function loadTableNames() {
   try {
-    const res = await fetch("/ticks/tables");
+    const res = await fetch("/sqlvw/tables");
     const tables = await res.json();
     const select = document.getElementById("tableSelect");
     if (!select) return;
