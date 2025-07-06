@@ -1,9 +1,10 @@
-// ✅ INITIAL VERSION of htick-core.js (Static Tick Viewer with Label Controls)
+// ✅ FINAL VERSION of htick-core.js (Static Tick Viewer with Label Controls)
 
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [];
 let labelTables = [];
 
+const bver = '2025.07.05.004', hver = '2025.07.06.htick.003';
 const SYDNEY_OFFSET = 600;
 function toSydneyTime(date) {
   return new Date(date.getTime() + SYDNEY_OFFSET * 60000);
@@ -53,15 +54,21 @@ const option = {
 };
 
 async function loadAvailableLabels() {
-  const res = await fetch("/api/labels/available");
-  labelTables = await res.json();
-  const container = document.getElementById("labelCheckboxes");
-  container.innerHTML = '';
-  labelTables.forEach(name => {
-    const label = document.createElement("label");
-    label.innerHTML = `<input type='checkbox' data-label='${name}'> ${name}`;
-    container.appendChild(label);
-  });
+  try {
+    const res = await fetch("/api/labels/available");
+    const list = await res.json();
+    if (!Array.isArray(list)) throw new Error("Invalid label list");
+    labelTables = list;
+    const container = document.getElementById("labelCheckboxes");
+    container.innerHTML = '';
+    labelTables.forEach(name => {
+      const label = document.createElement("label");
+      label.innerHTML = `<input type='checkbox' data-label='${name}'> ${name}`;
+      container.appendChild(label);
+    });
+  } catch (err) {
+    console.warn("⚠️ Could not load label tables:", err);
+  }
 }
 
 function updateSeries() {
@@ -79,24 +86,18 @@ async function loadDayTicks() {
   const date = document.getElementById("dayInput").value;
   const hour = parseInt(document.getElementById("hourSelect").value);
   if (!date) return;
-
   const startLocal = new Date(`${date}T${hour.toString().padStart(2, '0')}:00:00`);
   const endLocal = new Date(startLocal);
   endLocal.setDate(startLocal.getDate() + 1);
-
   const startUTC = new Date(startLocal.getTime() - SYDNEY_OFFSET * 60000);
   const endUTC = new Date(endLocal.getTime() - SYDNEY_OFFSET * 60000);
-
   const res = await fetch(`/ticks/after/${startUTC.toISOString()}?limit=5000`);
   const allTicks = await res.json();
-
   const endMillis = endUTC.getTime();
   const inRange = allTicks.filter(t => new Date(t.timestamp).getTime() < endMillis);
-
   dataMid = inRange.map(t => [new Date(t.timestamp).getTime(), t.mid, t.id]);
   dataAsk = inRange.map(t => [new Date(t.timestamp).getTime(), t.ask, t.id]);
   dataBid = inRange.map(t => [new Date(t.timestamp).getTime(), t.bid, t.id]);
-
   chart.setOption({
     xAxis: { min: startUTC.getTime(), max: endUTC.getTime() },
     dataZoom: [
@@ -104,7 +105,6 @@ async function loadDayTicks() {
       { type: 'slider', startValue: startUTC.getTime(), endValue: endUTC.getTime(), bottom: 0, height: 40 }
     ]
   });
-
   updateSeries();
 }
 
@@ -112,8 +112,10 @@ async function createNewLabelTable() {
   const input = document.getElementById("newLabelInput");
   const name = input.value.trim();
   if (!name) return alert("Label name required");
-  const res = await fetch(`/sqlvw/query?query=CREATE TABLE IF NOT EXISTS ${name} (id SERIAL PRIMARY KEY, tickid INT, content TEXT)`);
-  const result = await res.json();
+  const query = `CREATE TABLE IF NOT EXISTS ${name} (id SERIAL PRIMARY KEY, tickid INT, content TEXT)`;
+  const encoded = encodeURIComponent(query);
+  const res = await fetch(`/sqlvw/query?query=${encoded}`);
+  await res.json();
   input.value = '';
   await loadAvailableLabels();
   alert(`Label table '${name}' created.`);
@@ -128,4 +130,13 @@ window.addEventListener("DOMContentLoaded", () => {
     document.getElementById(id + 'Checkbox').addEventListener("change", updateSeries);
   });
   loadAvailableLabels();
+
+  const versionDiv = document.createElement('div');
+  versionDiv.style.position = 'absolute';
+  versionDiv.style.left = '10px';
+  versionDiv.style.bottom = '8px';
+  versionDiv.style.color = '#777';
+  versionDiv.style.fontSize = '11px';
+  versionDiv.innerText = `bver: ${bver}\nhver: ${hver}`;
+  document.body.appendChild(versionDiv);
 });
