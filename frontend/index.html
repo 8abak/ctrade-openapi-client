@@ -14,15 +14,16 @@
       color: white;
     }
     #tickView, #sqlView {
-      transition: opacity 0.3s ease;
+      flex: 1;
+      height: 100%;
     }
     #tickView {
-      flex: 1;
       display: flex;
       flex-direction: column;
     }
     #sqlView {
       display: none;
+      flex-direction: column;
     }
     #main {
       height: 100%;
@@ -41,6 +42,9 @@
     }
     th {
       background-color: #222;
+      position: sticky;
+      top: 0;
+      z-index: 1;
     }
     input[type="checkbox"] {
       margin-right: 6px;
@@ -64,12 +68,9 @@
       cursor: pointer;
     }
     #sqlResult {
-      display: flex;
-      flex-direction: column;
-    }
-    #sqlResult table {
       flex: 1;
-      width: 100%;
+      padding: 1em;
+      overflow: auto;
     }
   </style>
 </head>
@@ -91,7 +92,6 @@
         </div>
       </div>
 
-
       <div id="sqlConsole" style="margin-top: 1em; display: none;">
         <strong>SQL Console</strong><br>
         <select id="tableSelect"></select>
@@ -101,23 +101,22 @@
     </div>
   </div>
 
-  <div id="tickView" style="flex: 1;">
+  <!-- Chart View -->
+  <div id="tickView" style="flex: 1; display: flex; flex-direction: column;">
     <div id="main"></div>
   </div>
 
-  <div id="sqlView" style="flex: 1; height: 100%; display: flex;">
-    <div id="sqlResult" style="flex: 1; padding: 1em; overflow: auto;">
-    </div>
+  <!-- SQL Result View -->
+  <div id="sqlView" style="flex: 1; display: none; flex-direction: column;">
+    <div id="sqlResult"></div>
   </div>
-
-
 </div>
 
 <script>
 function showView(name) {
   const isTick = name === 'tick';
   document.getElementById('tickView').style.display = isTick ? 'flex' : 'none';
-  document.getElementById('sqlView').style.display = isTick ? 'none' : 'block';
+  document.getElementById('sqlView').style.display = isTick ? 'none' : 'flex';
   document.getElementById('sqlConsole').style.display = isTick ? 'none' : 'block';
 }
 </script>
