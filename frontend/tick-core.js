@@ -1,6 +1,6 @@
 // ✅ FINAL VERSION of tick-core.js for real-time tick streaming with WebSocket
 
-const bver = '2025.07.05.004', fver = '2025.07.06.005';
+const bver = '2025.07.05.004', fver = '2025.07.06.006';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [];
 let lastTickTime = null;
@@ -149,7 +149,9 @@ async function runQuery() {
         if (json.length === 0) return container.innerHTML = '<p>No Results</p>';
         const headers = Object.keys(json[0]);
         let html = '<table><thead><tr>' + headers.map(h => `<th>${h}</th>`).join('') + '</tr></thead><tbody>';
-        for (const row of json) html +- '<tr>' + headers.map(h => `<td>${row[h] !== null ? row[h] : ''}</td>`).join('') + '</tr>';
+        for (const row of json) {
+          html += '<tr>' + headers.map(h => `<td>${row[h] != null ? row[h] : ''}</td>`).join('') + '</tr>';
+        }
         html += '</tbody></table>';
         container.innerHTML = html;
       } else {
