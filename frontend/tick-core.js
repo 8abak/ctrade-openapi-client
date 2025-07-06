@@ -1,4 +1,4 @@
-const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.028';
+const bver = '2025.07.05.004', fver = '2025.07.06.ckbx.029';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [];
 
@@ -51,11 +51,7 @@ const option = {
     { type: 'inside', realtime: false },
     { type: 'slider', height: 40, bottom: 0, handleStyle: { color: '#3fa9f5' }, realtime: false }
   ],
-  series: [
-    { id: 'ask', name: 'Ask', type: 'scatter', data: [], symbolSize: 4, itemStyle: { color: '#f5a623' } },
-    { id: 'mid', name: 'Mid', type: 'scatter', data: [], symbolSize: 4, itemStyle: { color: '#00bcd4' } },
-    { id: 'bid', name: 'Bid', type: 'scatter', data: [], symbolSize: 4, itemStyle: { color: '#4caf50' } }
-  ]
+  series: []
 };
 
 function updateSeries() {
@@ -64,32 +60,38 @@ function updateSeries() {
   const bidBox = document.getElementById('bidCheckbox');
   if (!askBox || !midBox || !bidBox) return;
 
-  // Apply selected data visibility
-  chart.setOption({
-    series: [
-      { id: 'ask', data: dataAsk, show: askBox.checked },
-      { id: 'mid', data: dataMid, show: midBox.checked },
-      { id: 'bid', data: dataBid, show: bidBox.checked }
-    ]
+  const updatedSeries = [];
+
+  if (askBox.checked) updatedSeries.push({
+    id: 'ask', name: 'Ask', type: 'scatter', symbolSize: 4,
+    itemStyle: { color: '#f5a623' }, data: dataAsk
+  });
+  if (midBox.checked) updatedSeries.push({
+    id: 'mid', name: 'Mid', type: 'scatter', symbolSize: 4,
+    itemStyle: { color: '#00bcd4' }, data: dataMid
+  });
+  if (bidBox.checked) updatedSeries.push({
+    id: 'bid', name: 'Bid', type: 'scatter', symbolSize: 4,
+    itemStyle: { color: '#4caf50' }, data: dataBid
   });
 
-  // ✅ Rescale y-axis based on visible range
-  const optionNow = chart.getOption();
-  const zoomStart = optionNow.dataZoom[0].startValue;
-  const zoomEnd = optionNow.dataZoom[0].endValue;
+  chart.setOption({ series: updatedSeries }, { replaceMerge: ['series'] });
 
-  const visiblePrices = [];
+  const zoom = chart.getOption().dataZoom?.[0];
+  if (!zoom) return;
+  const start = zoom.startValue;
+  const end = zoom.endValue;
 
-  if (askBox.checked) visiblePrices.push(...dataAsk.filter(p => p[0] >= zoomStart && p[0] <= zoomEnd).map(p => p[1]));
-  if (midBox.checked) visiblePrices.push(...dataMid.filter(p => p[0] >= zoomStart && p[0] <= zoomEnd).map(p => p[1]));
-  if (bidBox.checked) visiblePrices.push(...dataBid.filter(p => p[0] >= zoomStart && p[0] <= zoomEnd).map(p => p[1]));
+  const prices = [];
 
-  if (visiblePrices.length > 0) {
-    const yMin = Math.floor(Math.min(...visiblePrices));
-    const yMax = Math.ceil(Math.max(...visiblePrices));
-    chart.setOption({
-      yAxis: { min: yMin, max: yMax }
-    });
+  if (askBox.checked) prices.push(...dataAsk.filter(p => p[0] >= start && p[0] <= end).map(p => p[1]));
+  if (midBox.checked) prices.push(...dataMid.filter(p => p[0] >= start && p[0] <= end).map(p => p[1]));
+  if (bidBox.checked) prices.push(...dataBid.filter(p => p[0] >= start && p[0] <= end).map(p => p[1]));
+
+  if (prices.length > 0) {
+    const yMin = Math.floor(Math.min(...prices));
+    const yMax = Math.ceil(Math.max(...prices));
+    chart.setOption({ yAxis: { min: yMin, max: yMax } });
   }
 }
 
@@ -127,14 +129,9 @@ async function loadInitialData() {
 
     chart.setOption({
       xAxis: { min: xMin, max: xMax },
-      series: [
-        { id: 'ask', data: dataAsk },
-        { id: 'mid', data: dataMid },
-        { id: 'bid', data: dataBid }
-      ],
       dataZoom: [
-        { type: 'inside', startValue: zoomStart, endValue: lastTickTime, realtime: false },
-        { type: 'slider', startValue: zoomStart, endValue: lastTickTime, bottom: 0, height: 40, realtime: false }
+        { type: 'inside', startValue: zoomStart, endValue: lastTickTime },
+        { type: 'slider', startValue: zoomStart, endValue: lastTickTime, bottom: 0, height: 40 }
       ]
     });
 
