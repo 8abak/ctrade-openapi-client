@@ -191,6 +191,7 @@ function setupLiveSocket() {
     dataBid.push([ts, tick.bid, tick.id]);
     lastTickTime = new Date(tick.timestamp);
     updateSeries();
+    console.log("New tick received:", ts, tick.mid, "Total mid:", dataMid.length);
   };
 
   ws.onerror = (e) => console.warn("⚠️ WebSocket error", e);
