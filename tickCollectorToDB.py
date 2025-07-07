@@ -111,6 +111,7 @@ def disconnected(_, reason):
     shutdown()
 
 def onMessage(_, message):
+    print("we are on message:", message.payloadType)
     if message.payloadType == ProtoOASpotEvent().payloadType:
         spot = Protobuf.extract(message)
         writeTick(spot.timestamp, spot.symbolId, getattr(spot, "bid", 0), getattr(spot, "ask", 0))
