@@ -116,6 +116,7 @@ def disconnected(_, reason):
 
 def onMessage(_, message):
     print("📦 Raw message received:", message.payloadType, "→", Protobuf.get(message.payloadType).__class__.__name__, flush=True)
+
     if message.payloadType == ProtoOASpotEvent().payloadType:
         try:
             spot = Protobuf.extract(message)
@@ -123,6 +124,17 @@ def onMessage(_, message):
             writeTick(spot.timestamp, spot.symbolId, getattr(spot, "bid", 0), getattr(spot, "ask", 0))
         except Exception as e:
             print("⚠️ Error processing spot message:", e, flush=True)
+
+    if message.payloadType == 2142:  # ProtoOAErrorRes
+        try:
+            error = Protobuf.extract(message)
+            print("❌ Error Received:")
+            print("  Error Code:", error.errorCode)
+            print("  Description:", error.description)
+            print("  Payload Type:", error.payloadType)
+        except Exception as e:
+            print("⚠️ Failed to parse error message:", e, flush=True)
+
 
 
 
