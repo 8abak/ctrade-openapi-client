@@ -131,7 +131,7 @@ def shutdown():
     if shutdown_event.is_set():
         return
     shutdown_event.set()
-    print("🚩 Gracefully shutting down...", flush=True)
+    print("🚩 Gracefully shutting down....", flush=True)
     try:
         cur.close()
         conn.close()
