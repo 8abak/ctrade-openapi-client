@@ -4,7 +4,6 @@ from twisted.internet.endpoints import clientFromString
 from twisted.application.internet import ClientService
 from ctrader_open_api.protobuf import Protobuf
 from ctrader_open_api.factory import Factory
-from ctrader_open_api.tcpProtocol import TcpProtocol  # ✅ required
 from twisted.internet import reactor, defer
 
 class Client(ClientService):
@@ -12,12 +11,11 @@ class Client(ClientService):
         self._runningReactor = reactor
         self.numberOfMessagesToSendPerSecond = numberOfMessagesToSendPerSecond
         endpoint = clientFromString(self._runningReactor, f"ssl:{host}:{port}")
-        factory = Factory(client=self)  # ✅ now using correct factory with buildProtocol()
+        factory = Factory.forProtocol(protocol, client=self)
         super().__init__(endpoint, factory, retryPolicy=retryPolicy, clock=clock, prepareConnection=prepareConnection)
         self._events = dict()
         self._responseDeferreds = dict()
         self.isConnected = False
-
 
     def startService(self):
         if self.running:
