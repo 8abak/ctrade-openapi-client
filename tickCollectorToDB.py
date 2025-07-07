@@ -86,7 +86,7 @@ def connected(_):
     authMsg.clientId = clientId
     authMsg.clientSecret = clientSecret
     deferred = client.send(authMsg)
-
+ 
     def afterAppAuth(_):
         print("🎉 API Application authorized", flush=True)
         accountAuth = ProtoOAAccountAuthReq()
@@ -118,7 +118,7 @@ def onMessage(_, message):
     if message.payloadType == ProtoOASpotEvent().payloadType:
         try:
             spot = Protobuf.extract(message)
-            print("📩 Spot:", spot.timestamp, getattr(spot, "bid", 0), getattr(spot, "ask", 0), flush=True)
+            print("📩  Spot:", spot.timestamp, getattr(spot, "bid", 0), getattr(spot, "ask", 0), flush=True)
             writeTick(spot.timestamp, spot.symbolId, getattr(spot, "bid", 0), getattr(spot, "ask", 0))
         except Exception as e:
             print("⚠️ Error processing spot message:", e, flush=True)
