@@ -114,7 +114,14 @@ def disconnected(_, reason):
     shutdown()
 
 def onMessage(_, message):
-    print("📨 payloadType:", message.payloadType)
+    if message.payloadType == ProtoOASpotEvent().payloadType:
+        try:
+            spot = Protobuf.extract(message)
+            print("📩 Spot received →", spot.symbolId, spot.timestamp, getattr(spot, "bid", 0), getattr(spot, "ask", 0))
+            writeTick(spot.timestamp, spot.symbolId, getattr(spot, "bid", 0), getattr(spot, "ask", 0))
+        except Exception as e:
+            print("⚠️ Error processing spot message:", e, flush=True)
+
 
 
 
