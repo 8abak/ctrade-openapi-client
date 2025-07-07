@@ -6,6 +6,8 @@ import signal
 import psycopg2
 from datetime import datetime
 from twisted.internet import reactor
+from threading import Event
+
 from ctrader_open_api import Client, Protobuf, TcpProtocol, EndPoints
 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOAApplicationAuthReq,
@@ -30,16 +32,15 @@ host = EndPoints.PROTOBUF_LIVE_HOST if connectionType == "live" else EndPoints.P
 port = EndPoints.PROTOBUF_PORT
 
 # Setup PostgreSQL connection
-conn = psycopg2.connect(dbname="trading", user="babak", password="BB@bb33044", host="localhost", port=5432)
+conn = psycopg2.connect(dbname="trading", user="babak", password="babak33044", host="localhost", port=5432)
 cur = conn.cursor()
 
 client = Client(host=host, port=port, protocol=TcpProtocol)
 
 seenTimestamps = set()
-
-# Track last good values
 lastValidBid = None
 lastValidAsk = None
+shutdown_event = Event()
 
 def writeTick(timestamp, symbolId, bid, ask):
     global lastValidBid, lastValidAsk
@@ -63,7 +64,6 @@ def writeTick(timestamp, symbolId, bid, ask):
     bidFloat = bid / 100000.0
     askFloat = ask / 100000.0
     mid = round((bidFloat + askFloat) / 2, 2)
-    
 
     try:
         cur.execute(
@@ -75,29 +75,27 @@ def writeTick(timestamp, symbolId, bid, ask):
             ("XAUUSD", dt, bidFloat, askFloat, mid)
         )
         conn.commit()
-        print(f"🧠 DB tick saved: {dt}  bid={bidFloat} ask={askFloat} mid={mid}")
+        print(f"🧠 DB tick saved: {dt}  bid={bidFloat} ask={askFloat} mid={mid}", flush=True)
     except Exception as e:
-        print(f"❌ DB error: {e}")
+        print(f"❌ DB error: {e}", flush=True)
         conn.rollback()
 
-
-
 def connected(_):
-    print("✅ Connected. Subscribing to spot data...")
+    print("✅ Connected. Subscribing to spot data...", flush=True)
     authMsg = ProtoOAApplicationAuthReq()
     authMsg.clientId = clientId
     authMsg.clientSecret = clientSecret
     deferred = client.send(authMsg)
 
     def afterAppAuth(_):
-        print("🎉 API Application authorized")
+        print("🎉 API Application authorized", flush=True)
         accountAuth = ProtoOAAccountAuthReq()
         accountAuth.ctidTraderAccountId = accountId
         accountAuth.accessToken = accessToken
         return client.send(accountAuth)
 
     def afterAccountAuth(_):
-        print(f"🔐 Account {accountId} authorized. Starting tick logging.")
+        print(f"🔐 Account {accountId} authorized. Starting tick logging.", flush=True)
         subscribeToSpot()
 
     deferred.addCallback(afterAppAuth)
@@ -105,6 +103,7 @@ def connected(_):
     deferred.addErrback(onError)
 
 def subscribeToSpot():
+    print("📡 Subscribing to symbolId:", symbolId, flush=True)
     req = ProtoOASubscribeSpotsReq()
     req.ctidTraderAccountId = accountId
     req.symbolId.append(symbolId)
@@ -112,30 +111,38 @@ def subscribeToSpot():
     client.send(req)
 
 def disconnected(_, reason):
-    print(f"🔌 Disconnected: {reason}")
-    cur.close()
-    conn.close()
-    reactor.stop()
+    print(f"🔌 Disconnected: {reason}", flush=True)
+    shutdown()
 
 def onMessage(_, message):
     if message.payloadType == ProtoOASpotEvent().payloadType:
-        spot = Protobuf.extract(message)
-        writeTick(spot.timestamp, spot.symbolId, getattr(spot, "bid", 0), getattr(spot, "ask", 0))
+        try:
+            spot = Protobuf.extract(message)
+            print("📩 Spot:", spot.timestamp, getattr(spot, "bid", 0), getattr(spot, "ask", 0), flush=True)
+            writeTick(spot.timestamp, spot.symbolId, getattr(spot, "bid", 0), getattr(spot, "ask", 0))
+        except Exception as e:
+            print("⚠️ Error processing spot message:", e, flush=True)
 
 def onError(err):
-    print("❌ Error during connection or authentication:")
-    print(err)
-    cur.close()
-    conn.close()
-    reactor.stop()
+    print("❌ Error during connection or authentication:", flush=True)
+    print(err, flush=True)
+    shutdown()
 
-def handleSigint(signum, frame):
-    print("\n🚩 Gracefully shutting down...")
-    cur.close()
-    conn.close()
-    #reactor.stop()
+def shutdown():
+    if shutdown_event.is_set():
+        return
+    shutdown_event.set()
+    print("🚩 Gracefully shutting down...", flush=True)
+    try:
+        cur.close()
+        conn.close()
+    except:
+        pass
+    if reactor.running:
+        reactor.callFromThread(reactor.stop)
 
-signal.signal(signal.SIGINT, handleSigint)
+signal.signal(signal.SIGINT, lambda s, f: shutdown())
+signal.signal(signal.SIGTERM, lambda s, f: shutdown())
 
 client.setConnectedCallback(connected)
 client.setDisconnectedCallback(disconnected)
