@@ -95,6 +95,7 @@ def connected(_):
 
     def afterAccountAuth(_):
         print(f"🔐 Account {accountId} authorized. Starting tick logging.", flush=True)
+        print("🚦 Calling subscribeToSpot now...", flush=True)
         subscribeToSpot()
 
     deferred.addCallback(afterAppAuth)
