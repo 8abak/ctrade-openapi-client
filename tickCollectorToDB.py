@@ -104,11 +104,18 @@ def connected(_):
 
 def subscribeToSpot():
     print("📡 Subscribing to symbolId:", symbolId, flush=True)
-    req = ProtoOASubscribeSpotsReq()
-    req.ctidTraderAccountId = accountId
-    req.symbolId.append(symbolId)
-    req.subscribeToSpotTimestamp = True
-    client.send(req)
+    try:
+        req = ProtoOASubscribeSpotsReq()
+        req.ctidTraderAccountId = accountId
+        req.symbolId.append(symbolId)
+        req.subscribeToSpotTimestamp = True
+        print("📨 About to send subscription request...", flush=True)
+        d = client.send(req)
+        d.addCallback(lambda _: print("✅ Subscription request sent successfully!", flush=True))
+        d.addErrback(lambda err: print("❌ Error sending subscription request:", err, flush=True))
+    except Exception as e:
+        print("❌ subscribeToSpot() exception:", e, flush=True)
+
 
 def disconnected(_, reason):
     print(f"🔌 Disconnected: {reason}", flush=True)
