@@ -4,7 +4,8 @@ import json
 import requests
 import os
 
-creds_path = os.path.expanduser("~/cTrade/creds.json")
+creds_path = "creds.json"
+
 
 # Load existing credentials
 with open(creds_path, "r") as f:
