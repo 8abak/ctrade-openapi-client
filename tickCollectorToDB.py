@@ -8,6 +8,8 @@ from datetime import datetime
 from twisted.internet import reactor
 from threading import Event
 
+from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOAClientFeaturesReq
+
 from ctrader_open_api import Client, Protobuf, TcpProtocol, EndPoints
 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOAApplicationAuthReq,
@@ -95,6 +97,12 @@ def connected(_):
 
     def afterAccountAuth(_):
         print(f"🔐 Account {accountId} authorized. Starting tick logging.", flush=True)
+
+        features = ProtoOAClientFeaturesReq()
+        features.ctidTraderAccountId = accountId
+        features.supportedFeatures.append("SPOT_SUBSCRIPTION")
+        client.send(features)
+        
         print("🚦 Calling subscribeToSpot now...", flush=True)
         subscribeToSpot()
 
