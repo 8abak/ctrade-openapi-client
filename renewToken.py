@@ -16,7 +16,7 @@ client_secret = creds["clientSecret"]
 use_live = creds.get("connectionType", "live").lower() == "live"
 
 # Choose correct token URL
-token_url = "https://live-api.ctrader.com/apps/token" if use_live else "https://sandbox-api.ctrader.com/apps/token"
+token_url = "https://oauth.ctrader.com/apps/token" if use_live else "https://sandbox-api.ctrader.com/apps/token"
 
 # Request new token
 response = requests.post(token_url, data={
