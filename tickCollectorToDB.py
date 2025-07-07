@@ -13,7 +13,6 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOAApplicationAuthReq,
     ProtoOAAccountAuthReq,
     ProtoOASubscribeSpotsReq,
-    ProtoOAUnsubscribeSpotsReq,
     ProtoOASpotEvent
 )
 
@@ -86,7 +85,7 @@ def connected(_):
     authMsg.clientId = clientId
     authMsg.clientSecret = clientSecret
     deferred = client.send(authMsg)
- 
+
     def afterAppAuth(_):
         print("🎉 API Application authorized", flush=True)
         accountAuth = ProtoOAAccountAuthReq()
@@ -95,7 +94,7 @@ def connected(_):
         return client.send(accountAuth)
 
     def afterAccountAuth(_):
-        print(f"🔐 Account {accountId} authorized. Starting tick logging...", flush=True)
+        print(f"🔐 Account {accountId} authorized. Starting tick logging.", flush=True)
         subscribeToSpot()
 
     deferred.addCallback(afterAppAuth)
@@ -118,7 +117,7 @@ def onMessage(_, message):
     if message.payloadType == ProtoOASpotEvent().payloadType:
         try:
             spot = Protobuf.extract(message)
-            print("📩  Spot:", spot.timestamp, getattr(spot, "bid", 0), getattr(spot, "ask", 0), flush=True)
+            print("📩 Spot:", spot.timestamp, getattr(spot, "bid", 0), getattr(spot, "ask", 0), flush=True)
             writeTick(spot.timestamp, spot.symbolId, getattr(spot, "bid", 0), getattr(spot, "ask", 0))
         except Exception as e:
             print("⚠️ Error processing spot message:", e, flush=True)
