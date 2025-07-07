@@ -102,7 +102,7 @@ def connected(_):
         features.ctidTraderAccountId = accountId
         features.supportedFeatures.append("SPOT_SUBSCRIPTION")
         client.send(features)
-        
+
         print("🚦 Calling subscribeToSpot now...", flush=True)
         subscribeToSpot()
 
@@ -123,7 +123,7 @@ def disconnected(_, reason):
     shutdown()
 
 def onMessage(_, message):
-    print("📦 Raw message received:", message.payloadType, flush=True)
+    print("📦 Raw message received:", message.payloadType, "→", Protobuf.get(message.payloadType).__class__.__name__, flush=True)
     if message.payloadType == ProtoOASpotEvent().payloadType:
         try:
             spot = Protobuf.extract(message)
