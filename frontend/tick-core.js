@@ -84,43 +84,45 @@ function updateSeries() {
 }
 
 async function loadInitialData() {
-  const latestRes = await fetch(`/ticks/lastid`);
-  const { lastId: id, timestamp } = await latestRes.json();
-  lastId = id;
+  const res = await fetch('/ticks/lastid');
+  const { lastId, timestamp } = await res.json();
 
-  const latestTime = new Date(timestamp);
-  const sydneyTime = toSydneyTime(latestTime);
+  const tickTimeUTC = new Date(timestamp);
+  const tickTimeSydney = toSydneyTime(tickTimeUTC);
+  const tickPrice = await fetch(`/sqlvw/query?query=${encodeURIComponent(`SELECT mid FROM ticks WHERE id=${lastId}`)}`)
+    .then(r => r.json()).then(d => d?.[0]?.mid || null);
 
-  const startLocal = new Date(sydneyTime);
-  startLocal.setHours(8, 0, 0, 0);
-  const startTimeUTC = new Date(startLocal.getTime() - SYDNEY_OFFSET * 60000);
+  if (!tickPrice) return;
 
-  const endLocal = new Date(startLocal);
-  endLocal.setDate(endLocal.getDate() + 1);
-  endLocal.setHours(8, 0, 0, 0);
-  const endTimeUTC = new Date(endLocal.getTime() - SYDNEY_OFFSET * 60000);
+  // Sydney day boundaries
+  const chartStart = new Date(tickTimeSydney);
+  if (chartStart.getHours() < 8) chartStart.setDate(chartStart.getDate() - 1);
+  chartStart.setHours(8, 0, 0, 0);
 
-  const dayRes = await fetch(`/ticks/after/${startTimeUTC.toISOString()}?limit=5000`);
-  const allTicks = await dayRes.json();
+  const chartEnd = new Date(chartStart);
+  chartEnd.setDate(chartEnd.getDate() + 1);
+  chartEnd.setMinutes(chartEnd.getMinutes() - 1);  // 7:59 AM next day
 
-  dataMid = allTicks.map(t => [new Date(t.timestamp).getTime(), t.mid, t.id]);
-  dataAsk = allTicks.map(t => [new Date(t.timestamp).getTime(), t.ask, t.id]);
-  dataBid = allTicks.map(t => [new Date(t.timestamp).getTime(), t.bid, t.id]);
+  // Convert back to UTC for chart
+  const xMin = new Date(chartStart.getTime() - SYDNEY_OFFSET * 60000).getTime();
+  const xMax = new Date(chartEnd.getTime() - SYDNEY_OFFSET * 60000).getTime();
+  const tickTime = tickTimeUTC.getTime();
 
-  const lastTime = new Date(allTicks[allTicks.length - 1]?.timestamp).getTime();
-  const zoomStart = lastTime - 4 * 60 * 1000;
+  dataMid = [[tickTime, tickPrice, lastId]];
 
   chart.setOption({
-    xAxis: { min: startTimeUTC.getTime(), max: endTimeUTC.getTime() },
-    dataZoom: [
-      { type: 'inside', startValue: zoomStart, endValue: lastTime },
-      { type: 'slider', startValue: zoomStart, endValue: lastTime, bottom: 0, height: 40 }
-    ]
+    xAxis: { min: xMin, max: xMax },
+    series: [{
+      id: 'mid',
+      name: 'Mid',
+      type: 'scatter',
+      symbolSize: 6,
+      itemStyle: { color: '#00bcd4' },
+      data: dataMid
+    }]
   });
-
-  updateSeries();
-  setupLiveSocket();
 }
+
 
 function setupLiveSocket() {
   const ws = new WebSocket("wss://www.datavis.au/ws/ticks");
