@@ -156,6 +156,23 @@ def get_label_tables():
         result = conn.execute(query)
         return sorted({row[0] for row in result})
 
+
+
+#get last id 
+@app.get("/ticks/latestid", response_model=List[Tick])
+def get_latest_ticks_after_id(after_id: int = Query(...)):
+    with engine.connect() as conn:
+        query = text("""
+            SELECT id, timestamp, bid, ask, mid
+            FROM ticks
+            WHERE id > :after_id
+            ORDER BY id ASC
+            LIMIT 1000
+        """)
+        result = conn.execute(query, {"after_id": after_id})
+        ticks = [dict(row._mapping) for row in result]
+    return ticks
+
 # SQL Table Browser (for SQL View)
 @app.get("/sqlvw/tables")
 def get_all_table_names():
