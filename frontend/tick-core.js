@@ -1,6 +1,4 @@
-// ✅ CLEAN DISPLAY version: tick-core.js to place one tick correctly, format axis in Sydney time, and remove extra y-axis grid lines
-
-const bver = '2025.07.05.004', fver = '2025.07.09.09';
+const bver = '2025.07.05.004', fver = '2025.07.09.10';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [];
 let lastId = null;
@@ -50,16 +48,7 @@ const option = {
     splitLine: { show: true, lineStyle: { color: "#333" } }
   },
   yAxis: {
-    type: "value",
-    axisLabel: {
-      color: "#ccc",
-      formatter: val => Number(val).toFixed(0)
-    },
-    splitLine: {
-      show: true,
-      lineStyle: { color: "#333" },
-      interval: (_, val) => Number(val) % 1 === 0
-    }
+    type: "value" // fully controlled dynamically
   },
   dataZoom: [
     { type: 'inside', realtime: false },
@@ -90,16 +79,11 @@ function adjustYAxisToZoom() {
   const start = zoom.startValue;
   const end = zoom.endValue;
 
-  const allVisible = [];
-  if (dataMid.length > 0) {
-    allVisible.push(...dataMid.filter(p => p[0] >= start && p[0] <= end).map(p => p[1]));
-  }
-  if (dataAsk.length > 0) {
-    allVisible.push(...dataAsk.filter(p => p[0] >= start && p[0] <= end).map(p => p[1]));
-  }
-  if (dataBid.length > 0) {
-    allVisible.push(...dataBid.filter(p => p[0] >= start && p[0] <= end).map(p => p[1]));
-  }
+  const allVisible = [
+    ...dataMid.filter(p => p[0] >= start && p[0] <= end).map(p => p[1]),
+    ...dataAsk.filter(p => p[0] >= start && p[0] <= end).map(p => p[1]),
+    ...dataBid.filter(p => p[0] >= start && p[0] <= end).map(p => p[1])
+  ];
 
   if (allVisible.length === 0) return;
 
@@ -112,7 +96,16 @@ function adjustYAxisToZoom() {
   chart.setOption({
     yAxis: {
       min: yMin,
-      max: yMax
+      max: yMax,
+      axisLabel: {
+        color: "#ccc",
+        formatter: val => Number(val).toFixed(0)
+      },
+      splitLine: {
+        show: true,
+        lineStyle: { color: "#333" },
+        interval: (_, val) => Number(val) % 1 === 0
+      }
     }
   });
 }
