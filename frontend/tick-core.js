@@ -1,12 +1,7 @@
-const bver = '2025.07.05.004', fver = '2025.07.09.10';
+const bver = '2025.07.05.004', fver = '2025.07.09.11';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [];
 let lastId = null;
-
-const SYDNEY_OFFSET = 600; // +10 hours
-function toSydneyTime(date) {
-  return new Date(date.getTime() + SYDNEY_OFFSET * 60000);
-}
 
 const option = {
   backgroundColor: "#111",
@@ -17,15 +12,15 @@ const option = {
     borderWidth: 1,
     textStyle: { color: "#fff", fontSize: 13 },
     formatter: (params) => {
-      const sydneyDate = new Date(params[0].value[0]);
-      const timeStr = sydneyDate.toLocaleTimeString("en-AU", {
+      const d = new Date(params[0].value[0]);
+      const timeStr = d.toLocaleTimeString("en-AU", {
         hour: "2-digit",
         minute: "2-digit",
         second: "2-digit",
         hour12: false,
         timeZone: "Australia/Sydney"
       });
-      const dateStr = sydneyDate.toLocaleDateString("en-AU", {
+      const dateStr = d.toLocaleDateString("en-AU", {
         timeZone: "Australia/Sydney"
       });
       let tooltip = `<div style="padding: 8px;"><strong>${timeStr}</strong><br><span style="color: #ccc;">${dateStr}</span><br>`;
@@ -42,22 +37,24 @@ const option = {
       color: "#ccc",
       formatter: val => {
         const d = new Date(val);
-        return d.toLocaleTimeString("en-AU", {
+        const time = d.toLocaleTimeString("en-AU", {
           hour: "2-digit",
           minute: "2-digit",
           hour12: false,
           timeZone: "Australia/Sydney"
-        }) + `\n` + d.toLocaleDateString("en-AU", {
-          timeZone: "Australia/Sydney",
-          month: "short",
-          day: "numeric"
         });
+        const date = d.toLocaleDateString("en-AU", {
+          month: "short",
+          day: "numeric",
+          timeZone: "Australia/Sydney"
+        });
+        return `${time}\n${date}`;
       }
     },
     splitLine: { show: true, lineStyle: { color: "#333" } }
   },
   yAxis: {
-    type: "value" // fully controlled dynamically
+    type: "value" // configured dynamically
   },
   dataZoom: [
     { type: 'inside', realtime: false },
@@ -125,7 +122,8 @@ async function loadInitialData() {
   lastId = id;
 
   const lastTickTime = new Date(timestamp);
-  const lastSydney = toSydneyTime(lastTickTime);
+  const sydneyOffset = 10 * 60 * 60 * 1000;
+  const lastSydney = new Date(lastTickTime.getTime() + sydneyOffset);
 
   const dayStart = new Date(lastSydney);
   if (dayStart.getHours() < 8) dayStart.setDate(dayStart.getDate() - 1);
@@ -134,8 +132,8 @@ async function loadInitialData() {
   dayEnd.setDate(dayEnd.getDate() + 1);
   dayEnd.setHours(7, 59, 0, 0);
 
-  const xMin = new Date(dayStart.getTime() - SYDNEY_OFFSET * 60000).getTime();
-  const xMax = new Date(dayEnd.getTime() - SYDNEY_OFFSET * 60000).getTime();
+  const xMin = new Date(dayStart.getTime() - sydneyOffset).getTime();
+  const xMax = new Date(dayEnd.getTime() - sydneyOffset).getTime();
 
   const tickRes = await fetch(`/sqlvw/query?query=${encodeURIComponent(`SELECT bid, ask, mid, timestamp FROM ticks WHERE id = ${lastId}`)}`);
   const tickData = await tickRes.json();
