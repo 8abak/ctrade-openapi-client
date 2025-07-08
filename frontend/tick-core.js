@@ -1,4 +1,4 @@
-const bver = '2025.07.05.004', fver = '2025.07.09.13';
+const bver = '2025.07.05.004', fver = '2025.07.09.14';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [];
 let lastId = null;
@@ -122,19 +122,20 @@ async function loadInitialData() {
   lastId = id;
 
   const lastTickTime = new Date(timestamp);
+  const lastSydneyString = lastTickTime.toLocaleString("en-AU", { timeZone: "Australia/Sydney" });
+  const tickSydney = new Date(lastSydneyString);
 
-  // Convert to Sydney time by re-parsing locale string
-  const sydneyDateString = lastTickTime.toLocaleString("en-AU", { timeZone: "Australia/Sydney" });
-  const lastSydney = new Date(sydneyDateString);
+  const nowSydneyString = new Date().toLocaleString("en-AU", { timeZone: "Australia/Sydney" });
+  const nowSydney = new Date(nowSydneyString);
 
-  // Define chart segment window: 8AM → 8AM
-  const dayStart = new Date(lastSydney);
-  if (dayStart.getHours() < 8) dayStart.setDate(dayStart.getDate() - 1);
-  dayStart.setHours(8, 0, 0, 0);
+  // Reference window is today’s 8AM → tomorrow 8AM in Sydney time
+  const ref = new Date(nowSydney);
+  if (nowSydney.getHours() < 8) ref.setDate(ref.getDate() - 1);
+  ref.setHours(8, 0, 0, 0);
 
-  const dayEnd = new Date(dayStart);
+  const dayStart = new Date(ref);
+  const dayEnd = new Date(ref);
   dayEnd.setDate(dayEnd.getDate() + 1);
-  dayEnd.setHours(8, 0, 0, 0);
 
   const xMin = dayStart.getTime();
   const xMax = dayEnd.getTime();
