@@ -41,8 +41,17 @@ const option = {
     axisLabel: {
       color: "#ccc",
       formatter: val => {
-        const d = toSydneyTime(new Date(val));
-        return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}` + `\n${d.toLocaleDateString('en-AU', { month: 'short', day: 'numeric' })}`;
+        const d = new Date(val);
+        return d.toLocaleTimeString("en-AU", {
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false,
+          timeZone: "Australia/Sydney"
+        }) + `\n` + d.toLocaleDateString("en-AU", {
+          timeZone: "Australia/Sydney",
+          month: "short",
+          day: "numeric"
+        });
       }
     },
     splitLine: { show: true, lineStyle: { color: "#333" } }
