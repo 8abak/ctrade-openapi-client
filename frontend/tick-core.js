@@ -1,6 +1,6 @@
 // ✅ CLEAN DISPLAY version: tick-core.js to place one tick correctly, format axis in Sydney time, and remove extra y-axis grid lines
 
-const bver = '2025.07.05.004', fver = '2025.07.09.08';
+const bver = '2025.07.05.004', fver = '2025.07.09.09';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [];
 let lastId = null;
@@ -51,16 +51,15 @@ const option = {
   },
   yAxis: {
     type: "value",
-    axisLabel: { color: "#ccc", formatter: val => val.toFixed(0) },
+    axisLabel: {
+      color: "#ccc",
+      formatter: val => Number(val).toFixed(0)
+    },
     splitLine: {
       show: true,
       lineStyle: { color: "#333" },
-      interval: function (index, value) {
-        return Number(value) % 1 === 0;
-      }
-    },
-    min: 'dataMin',
-    max: 'dataMax'
+      interval: (_, val) => Number(val) % 1 === 0
+    }
   },
   dataZoom: [
     { type: 'inside', realtime: false },
@@ -107,24 +106,13 @@ function adjustYAxisToZoom() {
   const rawMin = Math.min(...allVisible);
   const rawMax = Math.max(...allVisible);
 
-  const min = Math.floor(rawMin) - 1;
-  const max = Math.ceil(rawMax) + 1;
+  const yMin = Math.floor(rawMin) - 1;
+  const yMax = Math.ceil(rawMax) + 1;
 
   chart.setOption({
     yAxis: {
-      min,
-      max,
-      splitLine: {
-        show: true,
-        lineStyle: { color: "#333" },
-        interval: function (_, value) {
-          return value % 1 === 0; // only full dollar levels
-        }
-      },
-      axisLabel: {
-        color: "#ccc",
-        formatter: val => val.toFixed(0)
-      }
+      min: yMin,
+      max: yMax
     }
   });
 }
