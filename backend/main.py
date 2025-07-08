@@ -159,6 +159,15 @@ def get_label_tables():
 
 
 #get last id 
+@app.get("/ticks/lastid")
+def get_last_id():
+    with engine.connect() as conn:
+        query = text("SELECT id FROM ticks ORDER BY id DESC LIMIT 1")
+        result = conn.execute(query).fetchone()
+        return {"lastId": result[0] if result else None}
+        
+        
+#get the latest ids
 @app.get("/ticks/latestid", response_model=List[Tick])
 def get_latest_ticks_after_id(after_id: int = Query(...)):
     with engine.connect() as conn:
