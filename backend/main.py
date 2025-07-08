@@ -162,9 +162,13 @@ def get_label_tables():
 @app.get("/ticks/lastid")
 def get_last_id():
     with engine.connect() as conn:
-        query = text("SELECT id FROM ticks ORDER BY id DESC LIMIT 1")
+        query = text("SELECT id, timestamp FROM ticks ORDER BY id DESC LIMIT 1")
         result = conn.execute(query).fetchone()
-        return {"lastId": result[0] if result else None}
+        return {
+            "lastId": result[0] if result else None,
+            "timestamp": result[1].isoformat() if result else None
+        }
+
         
         
 #get the latest ids
@@ -209,4 +213,4 @@ def run_sql_query(query: str = Query(...)):
 # Version check
 @app.get("/version")
 def get_version():
-    return {"version": "2025.07.05.004"}
+    return {"version": "2025.07.05.005"}
