@@ -22,11 +22,11 @@ const option = {
       const date = toSydneyTime(new Date(params[0].value[0]));
       const timeStr = date.toLocaleTimeString("en-AU", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true });
       const dateStr = date.toLocaleDateString("en-AU");
-      let tooltip = `<div style=\"padding: 8px;\"><strong>${timeStr}</strong><br><span style=\"color: #ccc;\">${dateStr}</span><br>`;
+      let tooltip = `<div style="padding: 8px;"><strong>${timeStr}</strong><br><span style="color: #ccc;">${dateStr}</span><br>`;
       params.forEach(p => {
-        tooltip += `${p.seriesName}: <strong style=\"color: ${p.color};\">${p.value[1].toFixed(2)}</strong><br>`;
+        tooltip += `${p.seriesName}: <strong style="color: ${p.color};">${p.value[1].toFixed(2)}</strong><br>`;
       });
-      tooltip += `ID: <span style=\"color:#aaa;\">${params[0].value[2]}</span></div>`;
+      tooltip += `ID: <span style="color:#aaa;">${params[0].value[2]}</span></div>`;
       return tooltip;
     }
   },
@@ -99,8 +99,9 @@ async function loadInitialData() {
   dataAsk = allTicks.map(t => [new Date(t.timestamp).getTime(), t.ask, t.id]);
   dataBid = allTicks.map(t => [new Date(t.timestamp).getTime(), t.bid, t.id]);
 
-  lastId = ticks[ticks.length - 1]?.[2];  // id is at index 2
-  const lastTime = lastTickTime.getTime();
+  lastId = allTicks[allTicks.length - 1]?.id;
+
+  const lastTime = new Date(allTicks[allTicks.length - 1]?.timestamp).getTime();
   const zoomStart = lastTime - 4 * 60 * 1000;
   const xMin = startLocal.getTime() - SYDNEY_OFFSET * 60000;
   const endLocal = new Date(startLocal);
@@ -118,6 +119,26 @@ async function loadInitialData() {
 
   updateSeries();
   setupLiveSocket();
+}
+
+function setupLiveSocket() {
+  const ws = new WebSocket("wss://www.datavis.au/ws/ticks");
+
+  ws.onopen = () => console.log("📡 WebSocket connected");
+
+  ws.onmessage = (event) => {
+    const tick = JSON.parse(event.data);
+    const ts = new Date(tick.timestamp).getTime();
+    if (tick.id <= lastId) return;
+    dataMid.push([ts, tick.mid, tick.id]);
+    dataAsk.push([ts, tick.ask, tick.id]);
+    dataBid.push([ts, tick.bid, tick.id]);
+    lastId = tick.id;
+    updateSeries();
+  };
+
+  ws.onerror = (e) => console.warn("⚠️ WebSocket error", e);
+  ws.onclose = () => console.warn("🔌 WebSocket closed.");
 }
 
 async function loadTableNames() {
@@ -144,7 +165,7 @@ async function runQuery() {
   try {
     const res = await fetch(`/sqlvw/query?query=${encodeURIComponent(query)}`);
     const text = await res.text();
-    
+
     try {
       const json = JSON.parse(text);
 
@@ -174,28 +195,6 @@ async function runQuery() {
   } catch (e) {
     container.innerHTML = `<pre style="color:red">Error: ${e.message}</pre>`;
   }
-}
-
-
-function setupLiveSocket() {
-  const ws = new WebSocket("wss://www.datavis.au/ws/ticks");
-
-  ws.onopen = () => console.log("📡 WebSocket connected");
-
-  ws.onmessage = (event) => {
-    const tick = JSON.parse(event.data);
-    const ts = new Date(tick.timestamp).getTime();
-    if (lastTickTime && ts <= lastTickTime.getTime()) return;
-    dataMid.push([ts, tick.mid, tick.id]);
-    dataAsk.push([ts, tick.ask, tick.id]);
-    dataBid.push([ts, tick.bid, tick.id]);
-    lastTickTime = new Date(tick.timestamp);
-    updateSeries();
-    console.log("New tick received:", ts, tick.mid, "Total mid:", dataMid.length);
-  };
-
-  ws.onerror = (e) => console.warn("⚠️ WebSocket error", e);
-  ws.onclose = () => console.warn("🔌 WebSocket closed.");
 }
 
 window.addEventListener('DOMContentLoaded', () => {
