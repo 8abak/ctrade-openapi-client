@@ -1,6 +1,6 @@
 // ✅ FINAL VERSION of tick-core.js with Sydney-aware viewport and dynamic zooming
 
-const bver = '2025.07.05.004', fver = '2025.07.08.2';
+const bver = '2025.07.05.004', fver = '2025.07.09.02';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [];
 let lastId = null;
