@@ -1,11 +1,11 @@
-// ✅ FINAL VERSION of tick-core.js with Sydney-aware viewport and dynamic zooming
+// ✅ FINAL VERSION of tick-core.js with Sydney-aware chart window, correct price scaling, and fixed SQL view
 
-const bver = '2025.07.05.004', fver = '2025.07.09.02';
+const bver = '2025.07.05.004', fver = '2025.07.09.03';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [];
 let lastId = null;
 
-const SYDNEY_OFFSET = 600; // in minutes (+10 hours)
+const SYDNEY_OFFSET = 600; // +10 hours
 function toSydneyTime(date) {
   return new Date(date.getTime() + SYDNEY_OFFSET * 60000);
 }
@@ -65,17 +65,15 @@ function updateSeries() {
   if (bidBox.checked) updatedSeries.push({ id: 'bid', name: 'Bid', type: 'scatter', symbolSize: 4, itemStyle: { color: '#4caf50' }, data: dataBid });
 
   chart.setOption({ series: updatedSeries }, { replaceMerge: ['series'] });
+  adjustYAxisToZoom();
+}
 
+function adjustYAxisToZoom() {
   const zoom = chart.getOption().dataZoom?.[0];
   if (!zoom) return;
   const start = zoom.startValue;
   const end = zoom.endValue;
-
-  const prices = [];
-  if (askBox.checked) prices.push(...dataAsk.filter(p => p[0] >= start && p[0] <= end).map(p => p[1]));
-  if (midBox.checked) prices.push(...dataMid.filter(p => p[0] >= start && p[0] <= end).map(p => p[1]));
-  if (bidBox.checked) prices.push(...dataBid.filter(p => p[0] >= start && p[0] <= end).map(p => p[1]));
-
+  const prices = dataMid.filter(p => p[0] >= start && p[0] <= end).map(p => p[1]);
   if (prices.length > 0) {
     const yMin = Math.floor(Math.min(...prices));
     const yMax = Math.ceil(Math.max(...prices));
@@ -85,44 +83,43 @@ function updateSeries() {
 
 async function loadInitialData() {
   const res = await fetch('/ticks/lastid');
-  const { lastId, timestamp } = await res.json();
+  const { lastId: id, timestamp } = await res.json();
+  lastId = id;
 
-  const tickTimeUTC = new Date(timestamp);
-  const tickTimeSydney = toSydneyTime(tickTimeUTC);
-  const tickPrice = await fetch(`/sqlvw/query?query=${encodeURIComponent(`SELECT mid FROM ticks WHERE id=${lastId}`)}`)
-    .then(r => r.json()).then(d => d?.[0]?.mid || null);
+  const lastTickTime = new Date(timestamp);
+  const lastSydney = toSydneyTime(lastTickTime);
 
-  if (!tickPrice) return;
+  const dayStart = new Date(lastSydney);
+  if (dayStart.getHours() < 8) dayStart.setDate(dayStart.getDate() - 1);
+  dayStart.setHours(8, 0, 0, 0);
+  const dayEnd = new Date(dayStart);
+  dayEnd.setDate(dayEnd.getDate() + 1);
+  dayEnd.setHours(7, 59, 0, 0);
 
-  // Sydney day boundaries
-  const chartStart = new Date(tickTimeSydney);
-  if (chartStart.getHours() < 8) chartStart.setDate(chartStart.getDate() - 1);
-  chartStart.setHours(8, 0, 0, 0);
+  const xMin = new Date(dayStart.getTime() - SYDNEY_OFFSET * 60000).getTime();
+  const xMax = new Date(dayEnd.getTime() - SYDNEY_OFFSET * 60000).getTime();
 
-  const chartEnd = new Date(chartStart);
-  chartEnd.setDate(chartEnd.getDate() + 1);
-  chartEnd.setMinutes(chartEnd.getMinutes() - 1);  // 7:59 AM next day
+  const tickRes = await fetch(`/sqlvw/query?query=${encodeURIComponent(`SELECT bid, ask, mid, timestamp FROM ticks WHERE id = ${lastId}`)}`);
+  const tickData = await tickRes.json();
+  const t = tickData[0];
+  if (!t) return;
 
-  // Convert back to UTC for chart
-  const xMin = new Date(chartStart.getTime() - SYDNEY_OFFSET * 60000).getTime();
-  const xMax = new Date(chartEnd.getTime() - SYDNEY_OFFSET * 60000).getTime();
-  const tickTime = tickTimeUTC.getTime();
-
-  dataMid = [[tickTime, tickPrice, lastId]];
+  const ts = new Date(t.timestamp).getTime();
+  dataMid = [[ts, t.mid, lastId]];
+  dataAsk = [[ts, t.ask, lastId]];
+  dataBid = [[ts, t.bid, lastId]];
 
   chart.setOption({
     xAxis: { min: xMin, max: xMax },
-    series: [{
-      id: 'mid',
-      name: 'Mid',
-      type: 'scatter',
-      symbolSize: 6,
-      itemStyle: { color: '#00bcd4' },
-      data: dataMid
-    }]
+    dataZoom: [
+      { type: 'inside', startValue: ts - 2 * 60 * 1000, endValue: ts + 2 * 60 * 1000 },
+      { type: 'slider', startValue: ts - 2 * 60 * 1000, endValue: ts + 2 * 60 * 1000, bottom: 0, height: 40 }
+    ]
   });
-}
 
+  updateSeries();
+  setupLiveSocket();
+}
 
 function setupLiveSocket() {
   const ws = new WebSocket("wss://www.datavis.au/ws/ticks");
@@ -141,7 +138,20 @@ function setupLiveSocket() {
   ws.onclose = () => console.warn("🔌 WebSocket closed.");
 }
 
-// -- Additional UI Functions Unchanged --
+async function loadTableNames() {
+  try {
+    const res = await fetch("/sqlvw/tables");
+    const tables = await res.json();
+    const select = document.getElementById("tableSelect");
+    if (!select) return;
+    console.log("Available tables:", tables);
+    select.innerHTML = tables.map(t => `<option value="${t}">${t}</option>`).join('');
+  } catch (e) {
+    console.error("⚠️ Could not load table names:", e);
+  }
+}
+
+// rest unchanged...
 
 window.addEventListener('DOMContentLoaded', () => {
   chart = echarts.init(document.getElementById("main"));
