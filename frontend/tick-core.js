@@ -1,4 +1,4 @@
-const bver = '2025.07.05.004', fver = '2025.07.09.12';
+const bver = '2025.07.05.004', fver = '2025.07.09.13';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [];
 let lastId = null;
@@ -123,10 +123,11 @@ async function loadInitialData() {
 
   const lastTickTime = new Date(timestamp);
 
-  // Convert to Sydney timezone reference using toLocaleString + Date
+  // Convert to Sydney time by re-parsing locale string
   const sydneyDateString = lastTickTime.toLocaleString("en-AU", { timeZone: "Australia/Sydney" });
   const lastSydney = new Date(sydneyDateString);
 
+  // Define chart segment window: 8AM → 8AM
   const dayStart = new Date(lastSydney);
   if (dayStart.getHours() < 8) dayStart.setDate(dayStart.getDate() - 1);
   dayStart.setHours(8, 0, 0, 0);
@@ -148,11 +149,14 @@ async function loadInitialData() {
   dataAsk = [[ts, t.ask, lastId]];
   dataBid = [[ts, t.bid, lastId]];
 
+  const zoomStart = Math.max(xMin, ts - 2 * 60 * 1000);
+  const zoomEnd = Math.min(xMax, ts + 2 * 60 * 1000);
+
   chart.setOption({
     xAxis: { min: xMin, max: xMax },
     dataZoom: [
-      { type: 'inside', startValue: ts - 2 * 60 * 1000, endValue: ts + 2 * 60 * 1000 },
-      { type: 'slider', startValue: ts - 2 * 60 * 1000, endValue: ts + 2 * 60 * 1000, bottom: 0, height: 40 }
+      { type: 'inside', startValue: zoomStart, endValue: zoomEnd },
+      { type: 'slider', startValue: zoomStart, endValue: zoomEnd, bottom: 0, height: 40 }
     ]
   });
 
