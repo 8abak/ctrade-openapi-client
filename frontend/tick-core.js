@@ -1,6 +1,6 @@
 // ✅ CLEAN DISPLAY version: tick-core.js to place one tick correctly, format axis in Sydney time, and remove extra y-axis grid lines
 
-const bver = '2025.07.05.004', fver = '2025.07.09.07';
+const bver = '2025.07.05.004', fver = '2025.07.09.08';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [];
 let lastId = null;
@@ -87,14 +87,46 @@ function updateSeries() {
 function adjustYAxisToZoom() {
   const zoom = chart.getOption().dataZoom?.[0];
   if (!zoom) return;
+
   const start = zoom.startValue;
   const end = zoom.endValue;
-  const prices = dataMid.filter(p => p[0] >= start && p[0] <= end).map(p => p[1]);
-  if (prices.length > 0) {
-    const yMin = Math.floor(Math.min(...prices));
-    const yMax = Math.ceil(Math.max(...prices));
-    chart.setOption({ yAxis: { min: yMin, max: yMax } });
+
+  const allVisible = [];
+  if (dataMid.length > 0) {
+    allVisible.push(...dataMid.filter(p => p[0] >= start && p[0] <= end).map(p => p[1]));
   }
+  if (dataAsk.length > 0) {
+    allVisible.push(...dataAsk.filter(p => p[0] >= start && p[0] <= end).map(p => p[1]));
+  }
+  if (dataBid.length > 0) {
+    allVisible.push(...dataBid.filter(p => p[0] >= start && p[0] <= end).map(p => p[1]));
+  }
+
+  if (allVisible.length === 0) return;
+
+  const rawMin = Math.min(...allVisible);
+  const rawMax = Math.max(...allVisible);
+
+  const min = Math.floor(rawMin) - 1;
+  const max = Math.ceil(rawMax) + 1;
+
+  chart.setOption({
+    yAxis: {
+      min,
+      max,
+      splitLine: {
+        show: true,
+        lineStyle: { color: "#333" },
+        interval: function (_, value) {
+          return value % 1 === 0; // only full dollar levels
+        }
+      },
+      axisLabel: {
+        color: "#ccc",
+        formatter: val => val.toFixed(0)
+      }
+    }
+  });
 }
 
 async function loadInitialData() {
