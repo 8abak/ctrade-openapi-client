@@ -1,6 +1,6 @@
 // ✅ CLEAN DISPLAY version: tick-core.js to place one tick correctly, format axis in Sydney time, and remove extra y-axis grid lines
 
-const bver = '2025.07.05.004', fver = '2025.07.09.05';
+const bver = '2025.07.05.004', fver = '2025.07.09.06';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [];
 let lastId = null;
@@ -25,9 +25,12 @@ const option = {
         hour: "2-digit",
         minute: "2-digit",
         second: "2-digit",
-        hour12: false
+        hour12: false,
+        timeZone: "Australia/Sydney"
       });
-      const dateStr = sydneyDate.toLocaleDateString("en-AU");
+      const dateStr = sydneyDate.toLocaleDateString("en-AU", {
+        timeZone: "Australia/Sydney"
+      });
       let tooltip = `<div style="padding: 8px;"><strong>${timeStr}</strong><br><span style="color: #ccc;">${dateStr}</span><br>`;
       params.forEach(p => {
         tooltip += `${p.seriesName}: <strong style="color: ${p.color};">${p.value[1].toFixed(2)}</strong><br>`;
