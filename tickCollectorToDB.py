@@ -4,6 +4,7 @@ import json
 import os
 import signal
 import psycopg2
+import logging
 from datetime import datetime
 from twisted.internet import reactor
 from threading import Event
@@ -15,6 +16,22 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOASubscribeSpotsReq,
     ProtoOASpotEvent
 )
+
+#setup loggin to file
+logFile = os.path.expanduser("~/cTrade/tickCollector.log")
+logging.basicConfig(
+    filename=logFile,
+    filemode="a",
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    level=logging.INFO
+)
+
+def log_info(msg):
+    logging.info(msg)
+
+def log_error(msg):
+    logging.error(msg)
 
 # Load credentials
 with open(os.path.expanduser("~/cTrade/creds.json"), "r") as f:
@@ -74,28 +91,28 @@ def writeTick(timestamp, symbolId, bid, ask):
             ("XAUUSD", dt, bidFloat, askFloat, mid)
         )
         conn.commit()
-        print(f"🧠 DB tick saved: {dt}  bid={bidFloat} ask={askFloat} mid={mid}", flush=True)
+        #print(f"🧠 DB tick saved: {dt}  bid={bidFloat} ask={askFloat} mid={mid}", flush=True)
     except Exception as e:
-        print(f"❌ DB error: {e}", flush=True)
+        log_error(f"DB error: {e}")
         conn.rollback()
 
 def connected(_):
-    print("✅ Connected. Subscribing to spot data...", flush=True)
+    log_error("Connected. Subscribing to spot data...")
     authMsg = ProtoOAApplicationAuthReq()
     authMsg.clientId = clientId
     authMsg.clientSecret = clientSecret
     deferred = client.send(authMsg)
 
     def afterAppAuth(_):
-        print("🎉 API Application authorized", flush=True)
+        log_error("API Application authorized")
         accountAuth = ProtoOAAccountAuthReq()
         accountAuth.ctidTraderAccountId = accountId
         accountAuth.accessToken = accessToken
         return client.send(accountAuth)
 
     def afterAccountAuth(_):
-        print(f"🔐 Account {accountId} authorized. Starting tick logging.", flush=True)
-        print("🚦 Calling subscribeToSpot now...", flush=True)
+        log_error(f"Account {accountId} authorized. Starting tick logging.")
+        log_error("Calling subscribeToSpot now...")
         subscribeToSpot()
 
     deferred.addCallback(afterAppAuth)
@@ -103,7 +120,7 @@ def connected(_):
     deferred.addErrback(onError)
 
 def subscribeToSpot():
-    print("📡 Subscribing to symbolId:", symbolId, flush=True)
+    log_error("Subscribing to symbolId:", symbolId)
     req = ProtoOASubscribeSpotsReq()
     req.ctidTraderAccountId = accountId
     req.symbolId.append(symbolId)
@@ -111,44 +128,44 @@ def subscribeToSpot():
     client.send(req)
 
 def disconnected(_, reason):
-    print(f"🔌 Disconnected: {reason}", flush=True)
+    log_error(f"Disconnected: {reason}")
     shutdown()
 
 def onMessage(_, message):
-    print("📦 Raw message received:", message.payloadType, "→", Protobuf.get(message.payloadType).__class__.__name__, flush=True)
+    #print("📦 Raw message received:", message.payloadType, "→", Protobuf.get(message.payloadType).__class__.__name__, flush=True)
 
     if message.payloadType == ProtoOASpotEvent().payloadType:
         try:
             spot = Protobuf.extract(message)
-            print("📩 Spot received →", spot.symbolId, spot.timestamp, getattr(spot, "bid", 0), getattr(spot, "ask", 0))
+            log_error("Spot received →", spot.symbolId, spot.timestamp, getattr(spot, "bid", 0), getattr(spot, "ask", 0))
             writeTick(spot.timestamp, spot.symbolId, getattr(spot, "bid", 0), getattr(spot, "ask", 0))
         except Exception as e:
-            print("⚠️ Error processing spot message:", e, flush=True)
+            log_error("Error processing spot message:", e,)
 
     if message.payloadType == 2142:  # ProtoOAErrorRes
         try:
             error = Protobuf.extract(message)
-            print("❌ Error Received:")
-            print("  Error Code:", error.errorCode)
-            print("  Description:", error.description)
-            print("  Payload Type:", error.payloadType)
+            log_error("Error Received:")
+            log_error("Error Code:", error.errorCode)
+            log_error("Description:", error.description)
+            log_error("Payload Type:", error.payloadType)
         except Exception as e:
-            print("⚠️ Failed to parse error message:", e, flush=True)
+            log_error("Failed to parse error message:", e)
 
 
 
 
 
 def onError(err):
-    print("❌ Error during connection or authentication:", flush=True)
-    print(err, flush=True)
+    log_error("❌ Error during connection or authentication:")
+    log_error(err)
     shutdown()
 
 def shutdown():
     if shutdown_event.is_set():
         return
     shutdown_event.set()
-    print("🚩 Gracefully shutting down....", flush=True)
+    log_error("Gracefully shutting down....")
     try:
         cur.close()
         conn.close()
