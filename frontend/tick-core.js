@@ -3,7 +3,7 @@
 const bver = '2025.07.05.004', fver = '2025.07.06.008';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [];
-let lastTickTime = null;
+let lastId = null;
 
 const SYDNEY_OFFSET = 600;
 function toSydneyTime(date) {
@@ -99,7 +99,7 @@ async function loadInitialData() {
   dataAsk = allTicks.map(t => [new Date(t.timestamp).getTime(), t.ask, t.id]);
   dataBid = allTicks.map(t => [new Date(t.timestamp).getTime(), t.bid, t.id]);
 
-  lastTickTime = new Date(latestTick.timestamp);
+  lastId = ticks[ticks.length - 1]?.[2];  // id is at index 2
   const lastTime = lastTickTime.getTime();
   const zoomStart = lastTime - 4 * 60 * 1000;
   const xMin = startLocal.getTime() - SYDNEY_OFFSET * 60000;
