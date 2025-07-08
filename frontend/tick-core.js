@@ -1,6 +1,6 @@
-// ✅ FINAL VERSION of tick-core.js with Sydney-aware chart window, correct price scaling, and fixed SQL view
+// ✅ CLEAN DISPLAY version: tick-core.js to place one tick correctly, format axis in Sydney time, and remove extra y-axis grid lines
 
-const bver = '2025.07.05.004', fver = '2025.07.09.03';
+const bver = '2025.07.05.004', fver = '2025.07.09.04';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [];
 let lastId = null;
@@ -19,9 +19,10 @@ const option = {
     borderWidth: 1,
     textStyle: { color: "#fff", fontSize: 13 },
     formatter: (params) => {
-      const date = toSydneyTime(new Date(params[0].value[0]));
-      const timeStr = date.toLocaleTimeString("en-AU", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true });
-      const dateStr = date.toLocaleDateString("en-AU");
+      const date = new Date(params[0].value[0]);
+      const sydneyDate = toSydneyTime(date);
+      const timeStr = sydneyDate.toLocaleTimeString("en-AU", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true });
+      const dateStr = sydneyDate.toLocaleDateString("en-AU");
       let tooltip = `<div style="padding: 8px;"><strong>${timeStr}</strong><br><span style="color: #ccc;">${dateStr}</span><br>`;
       params.forEach(p => {
         tooltip += `${p.seriesName}: <strong style="color: ${p.color};">${p.value[1].toFixed(2)}</strong><br>`;
@@ -43,8 +44,16 @@ const option = {
   },
   yAxis: {
     type: "value",
-    axisLabel: { color: "#ccc", formatter: val => Math.floor(val) },
-    splitLine: { show: true, lineStyle: { color: "#333" } }
+    axisLabel: { color: "#ccc", formatter: val => val.toFixed(0) },
+    splitLine: {
+      show: true,
+      lineStyle: { color: "#333" },
+      interval: function (index, value) {
+        return Number(value) % 1 === 0;
+      }
+    },
+    min: 'dataMin',
+    max: 'dataMax'
   },
   dataZoom: [
     { type: 'inside', realtime: false },
@@ -150,8 +159,6 @@ async function loadTableNames() {
     console.error("⚠️ Could not load table names:", e);
   }
 }
-
-// rest unchanged...
 
 window.addEventListener('DOMContentLoaded', () => {
   chart = echarts.init(document.getElementById("main"));
