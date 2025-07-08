@@ -1,4 +1,4 @@
-const bver = '2025.07.05.004', fver = '2025.07.09.11';
+const bver = '2025.07.05.004', fver = '2025.07.09.12';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [];
 let lastId = null;
@@ -54,7 +54,7 @@ const option = {
     splitLine: { show: true, lineStyle: { color: "#333" } }
   },
   yAxis: {
-    type: "value" // configured dynamically
+    type: "value"
   },
   dataZoom: [
     { type: 'inside', realtime: false },
@@ -122,18 +122,21 @@ async function loadInitialData() {
   lastId = id;
 
   const lastTickTime = new Date(timestamp);
-  const sydneyOffset = 10 * 60 * 60 * 1000;
-  const lastSydney = new Date(lastTickTime.getTime() + sydneyOffset);
+
+  // Convert to Sydney timezone reference using toLocaleString + Date
+  const sydneyDateString = lastTickTime.toLocaleString("en-AU", { timeZone: "Australia/Sydney" });
+  const lastSydney = new Date(sydneyDateString);
 
   const dayStart = new Date(lastSydney);
   if (dayStart.getHours() < 8) dayStart.setDate(dayStart.getDate() - 1);
   dayStart.setHours(8, 0, 0, 0);
+
   const dayEnd = new Date(dayStart);
   dayEnd.setDate(dayEnd.getDate() + 1);
-  dayEnd.setHours(7, 59, 0, 0);
+  dayEnd.setHours(8, 0, 0, 0);
 
-  const xMin = new Date(dayStart.getTime() - sydneyOffset).getTime();
-  const xMax = new Date(dayEnd.getTime() - sydneyOffset).getTime();
+  const xMin = dayStart.getTime();
+  const xMax = dayEnd.getTime();
 
   const tickRes = await fetch(`/sqlvw/query?query=${encodeURIComponent(`SELECT bid, ask, mid, timestamp FROM ticks WHERE id = ${lastId}`)}`);
   const tickData = await tickRes.json();
