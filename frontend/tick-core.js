@@ -121,24 +121,23 @@ async function loadInitialData() {
   const { lastId: id, timestamp } = await res.json();
   lastId = id;
 
-  const lastTickTime = new Date(timestamp);
-  const lastSydneyString = lastTickTime.toLocaleString("en-AU", { timeZone: "Australia/Sydney" });
-  const tickSydney = new Date(lastSydneyString);
+  // Get the timestamp of the latest tick, convert to Sydney time
+  const tickUTC = new Date(timestamp);
+  const tickSydney = new Date(tickUTC.toLocaleString("en-AU", { timeZone: "Australia/Sydney" }));
 
-  const nowSydneyString = new Date().toLocaleString("en-AU", { timeZone: "Australia/Sydney" });
-  const nowSydney = new Date(nowSydneyString);
-
-  // Reference window is today’s 8AM → tomorrow 8AM in Sydney time
-  const ref = new Date(nowSydney);
-  if (nowSydney.getHours() < 8) ref.setDate(ref.getDate() - 1);
+  // Compute 8:00AM Sydney start of that day
+  const ref = new Date(tickSydney);
+  if (tickSydney.getHours() < 8) ref.setDate(ref.getDate() - 1);
   ref.setHours(8, 0, 0, 0);
 
-  const dayStart = new Date(ref);
-  const dayEnd = new Date(ref);
-  dayEnd.setDate(dayEnd.getDate() + 1);
+  const dayStartSydney = new Date(ref);
+  const dayEndSydney = new Date(ref);
+  dayEndSydney.setDate(ref.getDate() + 1);
 
-  const xMin = dayStart.getTime();
-  const xMax = dayEnd.getTime();
+  // Convert to UTC for comparison in JS (because `Date.getTime()` always returns UTC milliseconds)
+  const xMin = new Date(dayStartSydney.toLocaleString("en-AU", { timeZone: "UTC" })).getTime();
+  const xMax = new Date(dayEndSydney.toLocaleString("en-AU", { timeZone: "UTC" })).getTime();
+
 
   const tickRes = await fetch(`/sqlvw/query?query=${encodeURIComponent(`SELECT bid, ask, mid, timestamp FROM ticks WHERE id = ${lastId}`)}`);
   const tickData = await tickRes.json();
