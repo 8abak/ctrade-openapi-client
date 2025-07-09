@@ -1,6 +1,6 @@
-// tick-core.js (fixed: initial load must zoom to latest tick time properly)
+// tick-core.js (live flow + backward loader)
 
-const bver = '2025.07.05.004', fver = '2025.07.10.22';
+const bver = '2025.07.05.004', fver = '2025.07.10.load001';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [];
 let lastId = null;
@@ -69,6 +69,21 @@ const option = {
   series: []
 };
 
+function updateSeries() {
+  const askBox = document.getElementById('askCheckbox');
+  const midBox = document.getElementById('midCheckbox');
+  const bidBox = document.getElementById('bidCheckbox');
+  if (!askBox || !midBox || !bidBox) return;
+
+  const updatedSeries = [];
+  if (askBox.checked) updatedSeries.push({ id: 'ask', name: 'Ask', type: 'scatter', symbolSize: 4, itemStyle: { color: '#f5a623' }, data: dataAsk });
+  if (midBox.checked) updatedSeries.push({ id: 'mid', name: 'Mid', type: 'scatter', symbolSize: 4, itemStyle: { color: '#00bcd4' }, data: dataMid });
+  if (bidBox.checked) updatedSeries.push({ id: 'bid', name: 'Bid', type: 'scatter', symbolSize: 4, itemStyle: { color: '#4caf50' }, data: dataBid });
+
+  chart.setOption({ series: updatedSeries }, { replaceMerge: ['series'] });
+  adjustYAxisToZoom();
+}
+
 function adjustYAxisToZoom() {
   const zoom = chart.getOption().dataZoom?.[0];
   if (!zoom || zoom.startValue === undefined || zoom.endValue === undefined) return;
@@ -98,21 +113,6 @@ function adjustYAxisToZoom() {
   });
 }
 
-
-function updateSeries() {
-  const askBox = document.getElementById('askCheckbox');
-  const midBox = document.getElementById('midCheckbox');
-  const bidBox = document.getElementById('bidCheckbox');
-  if (!askBox || !midBox || !bidBox) return;
-
-  const updatedSeries = [];
-  if (askBox.checked) updatedSeries.push({ id: 'ask', name: 'Ask', type: 'scatter', symbolSize: 4, itemStyle: { color: '#f5a623' }, data: dataAsk });
-  if (midBox.checked) updatedSeries.push({ id: 'mid', name: 'Mid', type: 'scatter', symbolSize: 4, itemStyle: { color: '#00bcd4' }, data: dataMid });
-  if (bidBox.checked) updatedSeries.push({ id: 'bid', name: 'Bid', type: 'scatter', symbolSize: 4, itemStyle: { color: '#4caf50' }, data: dataBid });
-
-  chart.setOption({ series: updatedSeries }, { replaceMerge: ['series'] });
-}
-
 async function loadInitialData() {
   const res = await fetch('/ticks/lastid');
   const { lastId: id, timestamp } = await res.json();
@@ -139,7 +139,7 @@ async function loadInitialData() {
   dataAsk = [[ts, t.ask, lastId]];
   dataBid = [[ts, t.bid, lastId]];
 
-  const zoomEnd = Math.ceil(ts / (60 * 1000)) * 60 * 1000; // end of current minute
+  const zoomEnd = Math.ceil(ts / (60 * 1000)) * 60 * 1000;
   const zoomStart = zoomEnd - 5 * 60 * 1000;
 
   chart.setOption({
@@ -153,7 +153,7 @@ async function loadInitialData() {
 
   updateSeries();
   setupLiveSocket();
-  adjustYAxisToZoom();
+  loadPreviousTicks();
 }
 
 function setupLiveSocket() {
@@ -168,10 +168,28 @@ function setupLiveSocket() {
     dataBid.push([ts, tick.bid, tick.id]);
     lastId = tick.id;
     updateSeries();
-    adjustYAxisToZoom();
   };
   ws.onerror = (e) => console.warn("⚠️ WebSocket error", e);
   ws.onclose = () => console.warn("🔌 WebSocket closed.");
+}
+
+async function loadPreviousTicks() {
+  const oldest = dataMid[0]?.[2];
+  if (!oldest) return;
+
+  const res = await fetch(`/ticks/before/${oldest}?limit=5000`);
+  const prev = await res.json();
+  if (!prev.length) return;
+
+  const mappedMid = prev.map(t => [new Date(t.timestamp).getTime(), t.mid, t.id]);
+  const mappedAsk = prev.map(t => [new Date(t.timestamp).getTime(), t.ask, t.id]);
+  const mappedBid = prev.map(t => [new Date(t.timestamp).getTime(), t.bid, t.id]);
+
+  dataMid = [...mappedMid, ...dataMid];
+  dataAsk = [...mappedAsk, ...dataAsk];
+  dataBid = [...mappedBid, ...dataBid];
+
+  updateSeries();
 }
 
 window.addEventListener('DOMContentLoaded', () => {
