@@ -1,4 +1,6 @@
-const bver = '2025.07.05.004', fver = '2025.07.09.18';
+// tick-core.js (fully updated)
+
+const bver = '2025.07.05.004', fver = '2025.07.09.19';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [];
 let lastId = null;
@@ -30,7 +32,7 @@ const option = {
   },
   xAxis: {
     type: "time",
-    minInterval: 60 * 1000, // No finer than 1-minute grid
+    minInterval: 60 * 1000,
     axisLabel: {
       color: "#ccc",
       formatter: val => {
@@ -45,13 +47,12 @@ const option = {
     },
     splitLine: {
       show: true,
-      interval: 60 * 1000,
       lineStyle: { color: "#333" }
     }
   },
   yAxis: {
     type: "value",
-    minInterval: 1, // no finer than $1 steps
+    minInterval: 1,
     axisLabel: {
       color: "#ccc",
       formatter: val => Number(val).toFixed(0)
@@ -80,45 +81,6 @@ function updateSeries() {
   if (bidBox.checked) updatedSeries.push({ id: 'bid', name: 'Bid', type: 'scatter', symbolSize: 4, itemStyle: { color: '#4caf50' }, data: dataBid });
 
   chart.setOption({ series: updatedSeries }, { replaceMerge: ['series'] });
-  adjustYAxisToZoom();
-}
-
-function adjustYAxisToZoom() {
-  const zoom = chart.getOption().dataZoom?.[0];
-  if (!zoom) return;
-
-  const start = zoom.startValue;
-  const end = zoom.endValue;
-
-  const allVisible = [
-    ...dataMid.filter(p => p[0] >= start && p[0] <= end).map(p => p[1]),
-    ...dataAsk.filter(p => p[0] >= start && p[0] <= end).map(p => p[1]),
-    ...dataBid.filter(p => p[0] >= start && p[0] <= end).map(p => p[1])
-  ];
-
-  if (allVisible.length === 0) return;
-
-  const rawMin = Math.min(...allVisible);
-  const rawMax = Math.max(...allVisible);
-
-  const yMin = Math.floor(rawMin) - 1;
-  const yMax = Math.ceil(rawMax) + 1;
-
-  chart.setOption({
-    yAxis: {
-      min: yMin,
-      max: yMax,
-      axisLabel: {
-        color: "#ccc",
-        formatter: val => Number(val).toFixed(0)
-      },
-      splitLine: {
-        show: true,
-        lineStyle: { color: "#333" },
-        interval: (_, val) => Number(val) % 1 === 0
-      }
-    }
-  });
 }
 
 async function loadInitialData() {
@@ -126,27 +88,28 @@ async function loadInitialData() {
   const { lastId: id, timestamp } = await res.json();
   lastId = id;
 
-  // Last tick time (already in Sydney time format)
-  const tickSydney = new Date(timestamp);
+  const latestTickTime = new Date(timestamp);
+  const tradingStart = new Date(latestTickTime);
+  if (tradingStart.getHours() < 8) tradingStart.setDate(tradingStart.getDate() - 1);
+  tradingStart.setHours(8, 0, 0, 0);
 
-  // Always snap current time to start of current minute
-  const nowSydney = new Date(new Date().toLocaleString("en-AU", { timeZone: "Australia/Sydney" }));
-  nowSydney.setSeconds(0, 0); // strip seconds/millis
+  const tradingEnd = new Date(tradingStart);
+  tradingEnd.setDate(tradingStart.getDate() + 1);
 
-  const endTime = new Date(nowSydney); // right edge of chart
-  const startTime = new Date(nowSydney);
-  startTime.setMinutes(nowSydney.getMinutes() - 4); // show last 5 minutes total
+  const xMin = tradingStart.getTime();
+  const xMax = tradingEnd.getTime();
 
-  const xMin = startTime.getTime();
-  const xMax = endTime.getTime();
+  const now = new Date();
+  now.setSeconds(0, 0);
+  const zoomEnd = now.getTime();
+  const zoomStart = zoomEnd - 5 * 60 * 1000;
 
-  // Load the latest tick to initialize chart
   const tickRes = await fetch(`/sqlvw/query?query=${encodeURIComponent(`SELECT bid, ask, mid, timestamp FROM ticks WHERE id = ${lastId}`)}`);
   const tickData = await tickRes.json();
   const t = tickData[0];
   if (!t) return;
 
-  const ts = new Date(t.timestamp).getTime(); // timestamp already Sydney
+  const ts = new Date(t.timestamp).getTime();
 
   dataMid = [[ts, t.mid, lastId]];
   dataAsk = [[ts, t.ask, lastId]];
@@ -155,16 +118,14 @@ async function loadInitialData() {
   chart.setOption({
     xAxis: { min: xMin, max: xMax },
     dataZoom: [
-      { type: 'inside', startValue: xMin, endValue: xMax },
-      { type: 'slider', startValue: xMin, endValue: xMax, bottom: 0, height: 40 }
+      { type: 'inside', startValue: zoomStart, endValue: zoomEnd },
+      { type: 'slider', startValue: zoomStart, endValue: zoomEnd, bottom: 0, height: 40 }
     ]
   });
 
   updateSeries();
   setupLiveSocket();
 }
-
-
 
 function setupLiveSocket() {
   const ws = new WebSocket("wss://www.datavis.au/ws/ticks");
@@ -183,19 +144,6 @@ function setupLiveSocket() {
   ws.onclose = () => console.warn("🔌 WebSocket closed.");
 }
 
-async function loadTableNames() {
-  try {
-    const res = await fetch("/sqlvw/tables");
-    const tables = await res.json();
-    const select = document.getElementById("tableSelect");
-    if (!select) return;
-    console.log("Available tables:", tables);
-    select.innerHTML = tables.map(t => `<option value="${t}">${t}</option>`).join('');
-  } catch (e) {
-    console.error("⚠️ Could not load table names:", e);
-  }
-}
-
 window.addEventListener('DOMContentLoaded', () => {
   chart = echarts.init(document.getElementById("main"));
   chart.setOption(option);
@@ -205,7 +153,6 @@ window.addEventListener('DOMContentLoaded', () => {
   });
   chart.on('dataZoom', updateSeries);
   loadInitialData();
-  loadTableNames();
 });
 
 const versionDiv = document.createElement('div');
