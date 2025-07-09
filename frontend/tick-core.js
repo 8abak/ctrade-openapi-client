@@ -1,6 +1,6 @@
 // tick-core.js (fixed: initial load must zoom to latest tick time properly)
 
-const bver = '2025.07.05.004', fver = '2025.07.10.21';
+const bver = '2025.07.05.004', fver = '2025.07.10.22';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [];
 let lastId = null;
@@ -69,6 +69,36 @@ const option = {
   series: []
 };
 
+function adjustYAxisToZoom() {
+  const zoom = chart.getOption().dataZoom?.[0];
+  if (!zoom || zoom.startValue === undefined || zoom.endValue === undefined) return;
+
+  const start = zoom.startValue;
+  const end = zoom.endValue;
+
+  const visiblePrices = [
+    ...dataMid.filter(p => p[0] >= start && p[0] <= end).map(p => p[1]),
+    ...dataAsk.filter(p => p[0] >= start && p[0] <= end).map(p => p[1]),
+    ...dataBid.filter(p => p[0] >= start && p[0] <= end).map(p => p[1])
+  ];
+
+  if (visiblePrices.length === 0) return;
+
+  const min = Math.min(...visiblePrices);
+  const max = Math.max(...visiblePrices);
+
+  const paddedMin = Math.floor(min) - 1;
+  const paddedMax = Math.ceil(max) + 1;
+
+  chart.setOption({
+    yAxis: {
+      min: paddedMin,
+      max: paddedMax
+    }
+  });
+}
+
+
 function updateSeries() {
   const askBox = document.getElementById('askCheckbox');
   const midBox = document.getElementById('midCheckbox');
@@ -123,6 +153,7 @@ async function loadInitialData() {
 
   updateSeries();
   setupLiveSocket();
+  adjustYAxisToZoom();
 }
 
 function setupLiveSocket() {
@@ -137,6 +168,7 @@ function setupLiveSocket() {
     dataBid.push([ts, tick.bid, tick.id]);
     lastId = tick.id;
     updateSeries();
+    adjustYAxisToZoom();
   };
   ws.onerror = (e) => console.warn("⚠️ WebSocket error", e);
   ws.onclose = () => console.warn("🔌 WebSocket closed.");
