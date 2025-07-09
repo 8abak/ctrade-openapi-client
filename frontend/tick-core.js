@@ -30,6 +30,7 @@ const option = {
   },
   xAxis: {
     type: "time",
+    minInterval: 60 * 1000, // No finer than 1-minute grid
     axisLabel: {
       color: "#ccc",
       formatter: val => {
@@ -37,21 +38,28 @@ const option = {
         const time = d.toLocaleTimeString("en-AU", {
           hour: "2-digit",
           minute: "2-digit",
-          hour12: false,
-          timeZone: "Australia/Sydney"
+          hour12: false
         });
-        const date = d.toLocaleDateString("en-AU", {
-          month: "short",
-          day: "numeric",
-          timeZone: "Australia/Sydney"
-        });
-        return `${time}\n${date}`;
+        return `${time}\n${d.getDate()} ${d.toLocaleString('default', { month: 'short' })}`;
       }
     },
-    splitLine: { show: true, lineStyle: { color: "#333" } }
+    splitLine: {
+      show: true,
+      interval: 60 * 1000,
+      lineStyle: { color: "#333" }
+    }
   },
   yAxis: {
-    type: "value"
+    type: "value",
+    minInterval: 1, // no finer than $1 steps
+    axisLabel: {
+      color: "#ccc",
+      formatter: val => Number(val).toFixed(0)
+    },
+    splitLine: {
+      show: true,
+      lineStyle: { color: "#333" }
+    }
   },
   dataZoom: [
     { type: 'inside', realtime: false },
@@ -118,45 +126,44 @@ async function loadInitialData() {
   const { lastId: id, timestamp } = await res.json();
   lastId = id;
 
-  // Last tick time as-is (Sydney time is already stored)
+  // Last tick time (already in Sydney time format)
   const tickSydney = new Date(timestamp);
 
-  // Define today’s trading window: 8AM → 8AM next day (Sydney time, already in stored format)
-  const dayStart = new Date(tickSydney);
-  if (dayStart.getHours() < 8) dayStart.setDate(dayStart.getDate() - 1);
-  dayStart.setHours(8, 0, 0, 0);
+  // Always snap current time to start of current minute
+  const nowSydney = new Date(new Date().toLocaleString("en-AU", { timeZone: "Australia/Sydney" }));
+  nowSydney.setSeconds(0, 0); // strip seconds/millis
 
-  const dayEnd = new Date(dayStart);
-  dayEnd.setDate(dayEnd.getDate() + 1);
+  const endTime = new Date(nowSydney); // right edge of chart
+  const startTime = new Date(nowSydney);
+  startTime.setMinutes(nowSydney.getMinutes() - 4); // show last 5 minutes total
 
-  const xMin = dayStart.getTime();
-  const xMax = dayEnd.getTime();
+  const xMin = startTime.getTime();
+  const xMax = endTime.getTime();
 
-  // Load the last tick from the DB (for position and test)
+  // Load the latest tick to initialize chart
   const tickRes = await fetch(`/sqlvw/query?query=${encodeURIComponent(`SELECT bid, ask, mid, timestamp FROM ticks WHERE id = ${lastId}`)}`);
   const tickData = await tickRes.json();
   const t = tickData[0];
   if (!t) return;
 
-  const ts = new Date(t.timestamp).getTime(); // no re-zoning
+  const ts = new Date(t.timestamp).getTime(); // timestamp already Sydney
+
   dataMid = [[ts, t.mid, lastId]];
   dataAsk = [[ts, t.ask, lastId]];
   dataBid = [[ts, t.bid, lastId]];
 
-  const zoomStart = Math.max(xMin, ts - 2 * 60 * 1000);
-  const zoomEnd = Math.min(xMax, ts + 2 * 60 * 1000);
-
   chart.setOption({
     xAxis: { min: xMin, max: xMax },
     dataZoom: [
-      { type: 'inside', startValue: zoomStart, endValue: zoomEnd },
-      { type: 'slider', startValue: zoomStart, endValue: zoomEnd, bottom: 0, height: 40 }
+      { type: 'inside', startValue: xMin, endValue: xMax },
+      { type: 'slider', startValue: xMin, endValue: xMax, bottom: 0, height: 40 }
     ]
   });
 
   updateSeries();
   setupLiveSocket();
 }
+
 
 
 function setupLiveSocket() {
