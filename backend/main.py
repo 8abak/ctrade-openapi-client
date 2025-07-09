@@ -175,6 +175,11 @@ def get_last_id():
             "timestamp": result[1].isoformat() if result else None
         }
 
+#get latest id
+def get_latest_id():
+    with engine.connect() as conn:
+        result = conn.execute(text("SELECT id FROM ticks ORDER BY id DESC LIMIT 1")).fetchone()
+        return result[0] if result else 0
         
         
 #get the latest ids
@@ -217,22 +222,29 @@ def run_sql_query(query: str = Query(...)):
         return JSONResponse(status_code=400, content={"error": str(e)})
 
 @app.websocket("/ws/ticks")
-async def stream_ticks(websocket: WebSocket):
+async def stream_real_ticks(websocket: WebSocket):
     await websocket.accept()
-    tick_id = 200000  # Start from a safe ID range
+    latest_id = get_latest_id()
 
     while True:
-        # Simulate random live tick (or later replace with actual DB tail query)
-        tick = {
-            "id": tick_id,
-            "timestamp": datetime.now(timezone(timedelta(hours=10))).isoformat(),
-            "bid": round(3310 + random.uniform(-1, 1), 2),
-            "ask": round(3311 + random.uniform(-1, 1), 2),
-            "mid": round(3310.5 + random.uniform(-1, 1), 2)
-        }
-        await websocket.send_json(tick)
-        tick_id += 1
         await asyncio.sleep(1)
+
+        with engine.connect() as conn:
+            result = conn.execute(text("""
+                SELECT id, timestamp, bid, ask, mid
+                FROM ticks
+                WHERE id > :latest_id
+                ORDER BY id ASC
+                LIMIT 10
+            """), {"latest_id": latest_id})
+
+            new_ticks = [dict(row._mapping) for row in result]
+
+        if new_ticks:
+            for tick in new_ticks:
+                await websocket.send_json(tick)
+            latest_id = new_ticks[-1]["id"]
+
 
 
 # Version check
