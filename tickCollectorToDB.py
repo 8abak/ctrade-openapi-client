@@ -59,7 +59,16 @@ def writeTick(timestamp, symbolId, bid, ask):
         lastValidAsk = ask
 
     seenTimestamps.add(str(timestamp))
-    dt = datetime.fromtimestamp(timestamp / 1000.0)
+    utcDt = datetime.utcfromtimestamp(timestamp / 1000.0)
+    sydneyOffsetMinutes = 600  # Sydney is UTC+10
+    if os.environ.get("USE_DST", "true").lower() == "true":
+        import pytz
+        utcDt = pytz.utc.localize(utcDt)
+        sydneyDt = utcDt.astimezone(pytz.timezone("Australia/Sydney"))
+    else:
+        sydneyDt = utcDt + timedelta(minutes=sydneyOffsetMinutes)
+
+    
     bidFloat = bid / 100000.0
     askFloat = ask / 100000.0
     mid = round((bidFloat + askFloat) / 2, 2)
@@ -71,7 +80,7 @@ def writeTick(timestamp, symbolId, bid, ask):
             VALUES (%s, %s, %s, %s, %s)
             ON CONFLICT (symbol, timestamp) DO NOTHING;
             """,
-            ("XAUUSD", dt, bidFloat, askFloat, mid)
+            ("XAUUSD", sydneyDt, bidFloat, askFloat, mid)
         )
         conn.commit()
         #print(f"🧠 DB tick saved: {dt}  bid={bidFloat} ask={askFloat} mid={mid}", flush=True)
