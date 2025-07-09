@@ -71,6 +71,7 @@ def writeTick(timestamp, symbolId, bid, ask):
     mid = round((bidFloat + askFloat) / 2, 2)
 
     try:
+        print(f"🕒 Inserting timestamp: {sydney_dt} | tzinfo: {sydney_dt.tzinfo}", flush=True)
         cur.execute(
             """
             INSERT INTO ticks (symbol, timestamp, bid, ask, mid)
