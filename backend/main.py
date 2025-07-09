@@ -8,6 +8,12 @@ from sqlalchemy import create_engine, text
 import os
 from datetime import datetime
 from fastapi.responses import JSONResponse
+from fastapi import WebSocket
+import asyncio
+import random
+from datetime import timezone, timedelta
+
+
 
 # Initialize FastAPI test to see version 002
 app = FastAPI()
@@ -209,6 +215,25 @@ def run_sql_query(query: str = Query(...)):
             return {"message": "Query executed successfully."}
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
+
+@app.websocket("/ws/ticks")
+async def stream_ticks(websocket: WebSocket):
+    await websocket.accept()
+    tick_id = 200000  # Start from a safe ID range
+
+    while True:
+        # Simulate random live tick (or later replace with actual DB tail query)
+        tick = {
+            "id": tick_id,
+            "timestamp": datetime.now(timezone(timedelta(hours=10))).isoformat(),
+            "bid": round(3310 + random.uniform(-1, 1), 2),
+            "ask": round(3311 + random.uniform(-1, 1), 2),
+            "mid": round(3310.5 + random.uniform(-1, 1), 2)
+        }
+        await websocket.send_json(tick)
+        tick_id += 1
+        await asyncio.sleep(1)
+
 
 # Version check
 @app.get("/version")
