@@ -1,6 +1,6 @@
-// tick-core.js (fixed initial zoom + better tick positioning)
+// tick-core.js (fixed: initial load must zoom to latest tick time properly)
 
-const bver = '2025.07.05.004', fver = '2025.07.09.20';
+const bver = '2025.07.05.004', fver = '2025.07.10.21';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [];
 let lastId = null;
@@ -99,11 +99,6 @@ async function loadInitialData() {
   const xMin = tradingStart.getTime();
   const xMax = tradingEnd.getTime();
 
-  const now = new Date();
-  now.setSeconds(0, 0);
-  const zoomEnd = now.getTime();
-  const zoomStart = zoomEnd - 5 * 60 * 1000;
-
   const tickRes = await fetch(`/sqlvw/query?query=${encodeURIComponent(`SELECT bid, ask, mid, timestamp FROM ticks WHERE id = ${lastId}`)}`);
   const tickData = await tickRes.json();
   const t = tickData[0];
@@ -113,6 +108,9 @@ async function loadInitialData() {
   dataMid = [[ts, t.mid, lastId]];
   dataAsk = [[ts, t.ask, lastId]];
   dataBid = [[ts, t.bid, lastId]];
+
+  const zoomEnd = Math.ceil(ts / (60 * 1000)) * 60 * 1000; // end of current minute
+  const zoomStart = zoomEnd - 5 * 60 * 1000;
 
   chart.setOption({
     xAxis: { min: xMin, max: xMax },
