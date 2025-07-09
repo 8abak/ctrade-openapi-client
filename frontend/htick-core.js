@@ -1,14 +1,11 @@
-// ✅ FINAL VERSION of htick-core.js (Static Tick Viewer with Label Controls)
+// htick-core.js
 
+const bver = '2025.07.05.004', fver = '2025.07.10.htick001';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [];
-let labelTables = [];
-
-const bver = '2025.07.05.004', hver = '2025.07.07.002';
-const SYDNEY_OFFSET = 600;
-function toSydneyTime(date) {
-  return new Date(date.getTime() + SYDNEY_OFFSET * 60000);
-}
+let labelSeries = [];
+let currentStartEpoch = null;
+let currentEndEpoch = null;
 
 const option = {
   backgroundColor: "#111",
@@ -19,31 +16,38 @@ const option = {
     borderWidth: 1,
     textStyle: { color: "#fff", fontSize: 13 },
     formatter: (params) => {
-      const date = toSydneyTime(new Date(params[0].value[0]));
-      const timeStr = date.toLocaleTimeString("en-AU", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true });
-      const dateStr = date.toLocaleDateString("en-AU");
-      let tooltip = `<div style=\"padding: 8px;\"><strong>${timeStr}</strong><br><span style=\"color: #ccc;\">${dateStr}</span><br>`;
-      params.forEach(p => {
-        tooltip += `${p.seriesName}: <strong style=\"color: ${p.color};\">${p.value[1].toFixed(2)}</strong><br>`;
+      const d = new Date(params[0].value[0]);
+      const timeStr = d.toLocaleTimeString("en-AU", {
+        hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false
       });
-      tooltip += `ID: <span style=\"color:#aaa;\">${params[0].value[2]}</span></div>`;
+      const dateStr = d.toLocaleDateString("en-AU");
+      let tooltip = `<div style="padding: 8px;"><strong>${timeStr}</strong><br><span style="color: #ccc;">${dateStr}</span><br>`;
+      params.forEach(p => {
+        tooltip += `${p.seriesName}: <strong style="color: ${p.color};">${p.value[1]}</strong><br>`;
+      });
+      tooltip += `</div>`;
       return tooltip;
     }
   },
   xAxis: {
     type: "time",
+    minInterval: 60 * 1000,
     axisLabel: {
       color: "#ccc",
       formatter: val => {
-        const d = toSydneyTime(new Date(val));
-        return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}` + `\n${d.toLocaleDateString('en-AU', { month: 'short', day: 'numeric' })}`;
+        const d = new Date(val);
+        return `${d.toLocaleTimeString("en-AU", { hour: '2-digit', minute: '2-digit', hour12: false })}\n${d.getDate()} ${d.toLocaleString('default', { month: 'short' })}`;
       }
     },
     splitLine: { show: true, lineStyle: { color: "#333" } }
   },
   yAxis: {
     type: "value",
-    axisLabel: { color: "#ccc", formatter: val => Math.floor(val) },
+    minInterval: 1,
+    axisLabel: {
+      color: "#ccc",
+      formatter: val => Number(val).toFixed(0)
+    },
     splitLine: { show: true, lineStyle: { color: "#333" } }
   },
   dataZoom: [
@@ -53,132 +57,129 @@ const option = {
   series: []
 };
 
-async function loadAvailableLabels() {
-  try {
-    const res = await fetch("/api/labels/available");
-    const list = await res.json();
-    if (!Array.isArray(list)) throw new Error("Invalid label list");
-    labelTables = list;
-    const container = document.getElementById("labelCheckboxes");
-    container.innerHTML = '';
-    labelTables.forEach(name => {
-      const label = document.createElement("label");
-      label.innerHTML = `<input type='checkbox' data-label='${name}'> ${name}`;
-      container.appendChild(label);
-    });
-  } catch (err) {
-    console.warn("⚠️ Could not load label tables:", err);
-  }
+function updateSeries() {
+  const askBox = document.getElementById('askCheckbox');
+  const midBox = document.getElementById('midCheckbox');
+  const bidBox = document.getElementById('bidCheckbox');
+
+  const updated = [];
+  if (askBox?.checked) updated.push({ id: 'ask', name: 'Ask', type: 'scatter', symbolSize: 4, itemStyle: { color: '#f5a623' }, data: dataAsk });
+  if (midBox?.checked) updated.push({ id: 'mid', name: 'Mid', type: 'scatter', symbolSize: 4, itemStyle: { color: '#00bcd4' }, data: dataMid });
+  if (bidBox?.checked) updated.push({ id: 'bid', name: 'Bid', type: 'scatter', symbolSize: 4, itemStyle: { color: '#4caf50' }, data: dataBid });
+
+  const checkedLabels = Array.from(document.querySelectorAll(".labelCheckbox:checked")).map(c => c.value);
+  const labelSeriesFiltered = labelSeries.filter(s => checkedLabels.includes(s.name));
+  chart.setOption({ series: [...updated, ...labelSeriesFiltered] }, { replaceMerge: ['series'] });
+  adjustYAxisToZoom();
 }
 
-function updateSeries() {
-  const ask = document.getElementById("askCheckbox").checked;
-  const mid = document.getElementById("midCheckbox").checked;
-  const bid = document.getElementById("bidCheckbox").checked;
-  const series = [];
-  if (ask) series.push({ id: 'ask', name: 'Ask', type: 'scatter', data: dataAsk, symbolSize: 4, itemStyle: { color: '#f5a623' }});
-  if (mid) series.push({ id: 'mid', name: 'Mid', type: 'scatter', data: dataMid, symbolSize: 4, itemStyle: { color: '#00bcd4' }});
-  if (bid) series.push({ id: 'bid', name: 'Bid', type: 'scatter', data: dataBid, symbolSize: 4, itemStyle: { color: '#4caf50' }});
-  chart.setOption({ series }, { replaceMerge: ['series'] });
+function adjustYAxisToZoom() {
+  const zoom = chart.getOption().dataZoom?.[0];
+  if (!zoom || zoom.startValue === undefined || zoom.endValue === undefined) return;
+
+  const start = zoom.startValue;
+  const end = zoom.endValue;
+
+  const prices = [...dataMid, ...dataAsk, ...dataBid].filter(p => p[0] >= start && p[0] <= end).map(p => p[1]);
+  if (!prices.length) return;
+
+  chart.setOption({ yAxis: { min: Math.floor(Math.min(...prices)) - 1, max: Math.ceil(Math.max(...prices)) + 1 } });
 }
 
 async function loadDayTicks() {
-  const date = document.getElementById("dayInput").value;
-  const hour = parseInt(document.getElementById("hourSelect").value);
-  if (!date) return;
+  const dateStr = document.getElementById("dateInput").value;
+  const hour = parseInt(document.getElementById("hourInput").value, 10);
 
-  // Convert selected local time to UTC bounds
-  const startLocal = new Date(`${date}T${hour.toString().padStart(2, '0')}:00:00`);
-  const endLocal = new Date(startLocal);
-  endLocal.setDate(startLocal.getDate() + 1);
+  if (!dateStr || isNaN(hour)) return;
 
-  const startUTC = new Date(startLocal.getTime() - SYDNEY_OFFSET * 60000);
-  const endUTC = new Date(endLocal.getTime() - SYDNEY_OFFSET * 60000);
-  const endMillis = endUTC.getTime();
+  const start = new Date(`${dateStr}T${hour.toString().padStart(2, '0')}:00:00+10:00`);
+  const end = new Date(start);
+  end.setDate(start.getDate() + 1);
 
-  // Data arrays
-  dataMid = [];
-  dataAsk = [];
-  dataBid = [];
+  currentStartEpoch = start.getTime();
+  currentEndEpoch = end.getTime();
 
-  let lastTickId = null;
-  let keepLoading = true;
-  let batch = [];
+  const q = `SELECT id, timestamp, bid, ask, mid FROM ticks WHERE timestamp >= '${start.toISOString()}' AND timestamp < '${end.toISOString()}' ORDER BY id ASC`;
+  const res = await fetch(`/sqlvw/query?query=${encodeURIComponent(q)}`);
+  const ticks = await res.json();
 
-  while (keepLoading) {
-    let url = '';
-    if (lastTickId === null) {
-      // First batch
-      url = `/ticks/after/${startUTC.toISOString()}?limit=5000`;
-    } else {
-      url = `/ticks/after-id/${lastTickId}?limit=5000`;
-    }
+  dataMid = ticks.map(t => [new Date(t.timestamp).getTime(), t.mid, t.id]);
+  dataAsk = ticks.map(t => [new Date(t.timestamp).getTime(), t.ask, t.id]);
+  dataBid = ticks.map(t => [new Date(t.timestamp).getTime(), t.bid, t.id]);
 
-    const res = await fetch(url);
-    batch = await res.json();
+  const minTime = currentStartEpoch;
+  const maxTime = currentEndEpoch;
 
-    if (batch.length === 0) break;
-
-    // Filter by end time
-    const usableTicks = batch.filter(t => new Date(t.timestamp).getTime() < endMillis);
-
-    for (const t of usableTicks) {
-      const ts = new Date(t.timestamp).getTime();
-      dataMid.push([ts, t.mid, t.id]);
-      dataAsk.push([ts, t.ask, t.id]);
-      dataBid.push([ts, t.bid, t.id]);
-    }
-
-    lastTickId = batch[batch.length - 1].id;
-
-    // Stop if no more usable ticks
-    if (usableTicks.length < batch.length || new Date(batch[batch.length - 1].timestamp).getTime() >= endMillis) {
-      keepLoading = false;
-    }
-  }
-
-  // Set zoom and axis bounds
   chart.setOption({
-    xAxis: { min: startUTC.getTime(), max: endMillis },
+    xAxis: { min: minTime, max: maxTime },
     dataZoom: [
-      { type: 'inside', startValue: startUTC.getTime(), endValue: endMillis },
-      { type: 'slider', startValue: startUTC.getTime(), endValue: endMillis, bottom: 0, height: 40 }
+      { type: 'inside', startValue: minTime, endValue: maxTime },
+      { type: 'slider', startValue: minTime, endValue: maxTime, bottom: 0, height: 40 }
     ]
   });
 
+  await loadAllLabels(); // overlays from DB
   updateSeries();
 }
 
+async function loadAllLabels() {
+  const labelList = await fetch("/labels/available").then(res => res.json());
+  const listContainer = document.getElementById("labelCheckboxes");
+  listContainer.innerHTML = "";
 
-async function createNewLabelTable() {
-  const input = document.getElementById("newLabelInput");
-  const name = input.value.trim();
-  if (!name) return alert("Label name required");
-  const query = `CREATE TABLE IF NOT EXISTS ${name} (id SERIAL PRIMARY KEY, tickid INT, content TEXT)`;
-  const encoded = encodeURIComponent(query);
-  const res = await fetch(`/sqlvw/query?query=${encoded}`);
-  await res.json();
-  input.value = '';
-  await loadAvailableLabels();
-  alert(`Label table '${name}' created.`);
+  labelSeries = [];
+
+  for (const table of labelList) {
+    const div = document.createElement("div");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.value = table;
+    box.className = "labelCheckbox";
+    box.id = `label_${table}`;
+    box.addEventListener("change", updateSeries);
+    div.appendChild(box);
+
+    const lbl = document.createElement("label");
+    lbl.innerText = table;
+    lbl.setAttribute("for", box.id);
+    lbl.style.color = "#fff";
+    div.appendChild(lbl);
+    listContainer.appendChild(div);
+
+    const q = `SELECT tickid, label FROM ${table}`;
+    const res = await fetch(`/sqlvw/query?query=${encodeURIComponent(q)}`).then(r => r.json());
+    const points = res.map(row => [tickTimeById(row.tickid), row.label, row.tickid]).filter(p => p[0] !== null);
+
+    const s = {
+      id: table,
+      name: table,
+      type: 'scatter',
+      symbolSize: 6,
+      itemStyle: { color: '#e91e63' },
+      data: points.map(p => [p[0], p[1], p[2]])
+    };
+    labelSeries.push(s);
+  }
 }
 
-window.addEventListener("DOMContentLoaded", () => {
+function tickTimeById(tickid) {
+  const match = dataMid.find(p => p[2] === tickid);
+  return match?.[0] ?? null;
+}
+
+window.addEventListener('DOMContentLoaded', () => {
   chart = echarts.init(document.getElementById("main"));
   chart.setOption(option);
-  document.getElementById("loadButton").addEventListener("click", loadDayTicks);
-  document.getElementById("createLabelBtn").addEventListener("click", createNewLabelTable);
-  ['ask', 'mid', 'bid'].forEach(id => {
-    document.getElementById(id + 'Checkbox').addEventListener("change", updateSeries);
-  });
-  loadAvailableLabels();
+  chart.on('dataZoom', updateSeries);
 
-  const versionDiv = document.createElement('div');
-  versionDiv.style.position = 'absolute';
-  versionDiv.style.left = '10px';
-  versionDiv.style.bottom = '8px';
-  versionDiv.style.color = '#777';
-  versionDiv.style.fontSize = '11px';
-  versionDiv.innerText = `bver: ${bver}\n hver: ${hver}`;
-  document.body.appendChild(versionDiv);
+  document.getElementById("loadButton").addEventListener("click", loadDayTicks);
 });
+
+const versionDiv = document.createElement('div');
+versionDiv.style.position = 'absolute';
+versionDiv.style.left = '10px';
+versionDiv.style.bottom = '8px';
+versionDiv.style.color = '#777';
+versionDiv.style.fontSize = '11px';
+versionDiv.innerText = `bver: ${bver}, fver: ${fver}`;
+document.body.appendChild(versionDiv);
