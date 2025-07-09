@@ -1,9 +1,10 @@
-// tick-core.js (live flow + backward loader)
+// tick-core.js (live flow + recursive backward loader)
 
-const bver = '2025.07.05.004', fver = '2025.07.10.load001';
+const bver = '2025.07.05.004', fver = '2025.07.10.load002';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [];
 let lastId = null;
+let tradingStartEpoch = null;
 
 const option = {
   backgroundColor: "#111",
@@ -122,6 +123,7 @@ async function loadInitialData() {
   const tradingStart = new Date(latestTickTime);
   if (tradingStart.getHours() < 8) tradingStart.setDate(tradingStart.getDate() - 1);
   tradingStart.setHours(8, 0, 0, 0);
+  tradingStartEpoch = tradingStart.getTime();
 
   const tradingEnd = new Date(tradingStart);
   tradingEnd.setDate(tradingStart.getDate() + 1);
@@ -153,7 +155,7 @@ async function loadInitialData() {
 
   updateSeries();
   setupLiveSocket();
-  loadPreviousTicks();
+  loadPreviousTicksRecursive();
 }
 
 function setupLiveSocket() {
@@ -173,7 +175,7 @@ function setupLiveSocket() {
   ws.onclose = () => console.warn("🔌 WebSocket closed.");
 }
 
-async function loadPreviousTicks() {
+async function loadPreviousTicksRecursive() {
   const oldest = dataMid[0]?.[2];
   if (!oldest) return;
 
@@ -190,6 +192,11 @@ async function loadPreviousTicks() {
   dataBid = [...mappedBid, ...dataBid];
 
   updateSeries();
+
+  const firstTimestamp = mappedMid[0][0];
+  if (firstTimestamp > tradingStartEpoch) {
+    setTimeout(() => loadPreviousTicksRecursive(), 50); // small delay to allow UI update
+  }
 }
 
 window.addEventListener('DOMContentLoaded', () => {
