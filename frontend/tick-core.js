@@ -1,4 +1,4 @@
-const bver = '2025.07.05.004', fver = '2025.07.09.14';
+const bver = '2025.07.05.004', fver = '2025.07.09.15';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [];
 let lastId = null;
