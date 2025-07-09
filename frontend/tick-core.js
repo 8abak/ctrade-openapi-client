@@ -1,4 +1,4 @@
-const bver = '2025.07.05.004', fver = '2025.07.09.15';
+const bver = '2025.07.05.004', fver = '2025.07.09.16';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [];
 let lastId = null;
@@ -121,30 +121,27 @@ async function loadInitialData() {
   const { lastId: id, timestamp } = await res.json();
   lastId = id;
 
-  // Get the timestamp of the latest tick, convert to Sydney time
-  const tickUTC = new Date(timestamp);
-  const tickSydney = new Date(tickUTC.toLocaleString("en-AU", { timeZone: "Australia/Sydney" }));
+  // Last tick time as-is (Sydney time is already stored)
+  const tickSydney = new Date(timestamp);
 
-  // Compute 8:00AM Sydney start of that day
-  const ref = new Date(tickSydney);
-  if (tickSydney.getHours() < 8) ref.setDate(ref.getDate() - 1);
-  ref.setHours(8, 0, 0, 0);
+  // Define today’s trading window: 8AM → 8AM next day (Sydney time, already in stored format)
+  const dayStart = new Date(tickSydney);
+  if (dayStart.getHours() < 8) dayStart.setDate(dayStart.getDate() - 1);
+  dayStart.setHours(8, 0, 0, 0);
 
-  const dayStartSydney = new Date(ref);
-  const dayEndSydney = new Date(ref);
-  dayEndSydney.setDate(ref.getDate() + 1);
+  const dayEnd = new Date(dayStart);
+  dayEnd.setDate(dayEnd.getDate() + 1);
 
-  // Convert to UTC for comparison in JS (because `Date.getTime()` always returns UTC milliseconds)
-  const xMin = new Date(dayStartSydney.toLocaleString("en-AU", { timeZone: "UTC" })).getTime();
-  const xMax = new Date(dayEndSydney.toLocaleString("en-AU", { timeZone: "UTC" })).getTime();
+  const xMin = dayStart.getTime();
+  const xMax = dayEnd.getTime();
 
-
+  // Load the last tick from the DB (for position and test)
   const tickRes = await fetch(`/sqlvw/query?query=${encodeURIComponent(`SELECT bid, ask, mid, timestamp FROM ticks WHERE id = ${lastId}`)}`);
   const tickData = await tickRes.json();
   const t = tickData[0];
   if (!t) return;
 
-  const ts = new Date(t.timestamp).getTime();
+  const ts = new Date(t.timestamp).getTime(); // no re-zoning
   dataMid = [[ts, t.mid, lastId]];
   dataAsk = [[ts, t.ask, lastId]];
   dataBid = [[ts, t.bid, lastId]];
@@ -163,6 +160,7 @@ async function loadInitialData() {
   updateSeries();
   setupLiveSocket();
 }
+
 
 function setupLiveSocket() {
   const ws = new WebSocket("wss://www.datavis.au/ws/ticks");
