@@ -1,14 +1,7 @@
-// ✅ CLEAN DISPLAY version: tick-core.js to place one tick correctly, format axis in Sydney time, and remove extra y-axis grid lines
-
-const bver = '2025.07.05.004', fver = '2025.07.09.07';
+const bver = '2025.07.05.004', fver = '2025.07.09.14';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [];
 let lastId = null;
-
-const SYDNEY_OFFSET = 600; // +10 hours
-function toSydneyTime(date) {
-  return new Date(date.getTime() + SYDNEY_OFFSET * 60000);
-}
 
 const option = {
   backgroundColor: "#111",
@@ -19,15 +12,15 @@ const option = {
     borderWidth: 1,
     textStyle: { color: "#fff", fontSize: 13 },
     formatter: (params) => {
-      const sydneyDate = new Date(params[0].value[0]);
-      const timeStr = sydneyDate.toLocaleTimeString("en-AU", {
+      const d = new Date(params[0].value[0]);
+      const timeStr = d.toLocaleTimeString("en-AU", {
         hour: "2-digit",
         minute: "2-digit",
         second: "2-digit",
         hour12: false,
         timeZone: "Australia/Sydney"
       });
-      const dateStr = sydneyDate.toLocaleDateString("en-AU", {
+      const dateStr = d.toLocaleDateString("en-AU", {
         timeZone: "Australia/Sydney"
       });
       let tooltip = `<div style="padding: 8px;"><strong>${timeStr}</strong><br><span style="color: #ccc;">${dateStr}</span><br>`;
@@ -43,24 +36,25 @@ const option = {
     axisLabel: {
       color: "#ccc",
       formatter: val => {
-        const d = toSydneyTime(new Date(val));
-        return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}` + `\n${d.toLocaleDateString('en-AU', { month: 'short', day: 'numeric' })}`;
+        const d = new Date(val);
+        const time = d.toLocaleTimeString("en-AU", {
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false,
+          timeZone: "Australia/Sydney"
+        });
+        const date = d.toLocaleDateString("en-AU", {
+          month: "short",
+          day: "numeric",
+          timeZone: "Australia/Sydney"
+        });
+        return `${time}\n${date}`;
       }
     },
     splitLine: { show: true, lineStyle: { color: "#333" } }
   },
   yAxis: {
-    type: "value",
-    axisLabel: { color: "#ccc", formatter: val => val.toFixed(0) },
-    splitLine: {
-      show: true,
-      lineStyle: { color: "#333" },
-      interval: function (index, value) {
-        return Number(value) % 1 === 0;
-      }
-    },
-    min: 'dataMin',
-    max: 'dataMax'
+    type: "value"
   },
   dataZoom: [
     { type: 'inside', realtime: false },
@@ -87,14 +81,39 @@ function updateSeries() {
 function adjustYAxisToZoom() {
   const zoom = chart.getOption().dataZoom?.[0];
   if (!zoom) return;
+
   const start = zoom.startValue;
   const end = zoom.endValue;
-  const prices = dataMid.filter(p => p[0] >= start && p[0] <= end).map(p => p[1]);
-  if (prices.length > 0) {
-    const yMin = Math.floor(Math.min(...prices));
-    const yMax = Math.ceil(Math.max(...prices));
-    chart.setOption({ yAxis: { min: yMin, max: yMax } });
-  }
+
+  const allVisible = [
+    ...dataMid.filter(p => p[0] >= start && p[0] <= end).map(p => p[1]),
+    ...dataAsk.filter(p => p[0] >= start && p[0] <= end).map(p => p[1]),
+    ...dataBid.filter(p => p[0] >= start && p[0] <= end).map(p => p[1])
+  ];
+
+  if (allVisible.length === 0) return;
+
+  const rawMin = Math.min(...allVisible);
+  const rawMax = Math.max(...allVisible);
+
+  const yMin = Math.floor(rawMin) - 1;
+  const yMax = Math.ceil(rawMax) + 1;
+
+  chart.setOption({
+    yAxis: {
+      min: yMin,
+      max: yMax,
+      axisLabel: {
+        color: "#ccc",
+        formatter: val => Number(val).toFixed(0)
+      },
+      splitLine: {
+        show: true,
+        lineStyle: { color: "#333" },
+        interval: (_, val) => Number(val) % 1 === 0
+      }
+    }
+  });
 }
 
 async function loadInitialData() {
@@ -103,17 +122,23 @@ async function loadInitialData() {
   lastId = id;
 
   const lastTickTime = new Date(timestamp);
-  const lastSydney = toSydneyTime(lastTickTime);
+  const lastSydneyString = lastTickTime.toLocaleString("en-AU", { timeZone: "Australia/Sydney" });
+  const tickSydney = new Date(lastSydneyString);
 
-  const dayStart = new Date(lastSydney);
-  if (dayStart.getHours() < 8) dayStart.setDate(dayStart.getDate() - 1);
-  dayStart.setHours(8, 0, 0, 0);
-  const dayEnd = new Date(dayStart);
+  const nowSydneyString = new Date().toLocaleString("en-AU", { timeZone: "Australia/Sydney" });
+  const nowSydney = new Date(nowSydneyString);
+
+  // Reference window is today’s 8AM → tomorrow 8AM in Sydney time
+  const ref = new Date(nowSydney);
+  if (nowSydney.getHours() < 8) ref.setDate(ref.getDate() - 1);
+  ref.setHours(8, 0, 0, 0);
+
+  const dayStart = new Date(ref);
+  const dayEnd = new Date(ref);
   dayEnd.setDate(dayEnd.getDate() + 1);
-  dayEnd.setHours(7, 59, 0, 0);
 
-  const xMin = new Date(dayStart.getTime() - SYDNEY_OFFSET * 60000).getTime();
-  const xMax = new Date(dayEnd.getTime() - SYDNEY_OFFSET * 60000).getTime();
+  const xMin = dayStart.getTime();
+  const xMax = dayEnd.getTime();
 
   const tickRes = await fetch(`/sqlvw/query?query=${encodeURIComponent(`SELECT bid, ask, mid, timestamp FROM ticks WHERE id = ${lastId}`)}`);
   const tickData = await tickRes.json();
@@ -125,11 +150,14 @@ async function loadInitialData() {
   dataAsk = [[ts, t.ask, lastId]];
   dataBid = [[ts, t.bid, lastId]];
 
+  const zoomStart = Math.max(xMin, ts - 2 * 60 * 1000);
+  const zoomEnd = Math.min(xMax, ts + 2 * 60 * 1000);
+
   chart.setOption({
     xAxis: { min: xMin, max: xMax },
     dataZoom: [
-      { type: 'inside', startValue: ts - 2 * 60 * 1000, endValue: ts + 2 * 60 * 1000 },
-      { type: 'slider', startValue: ts - 2 * 60 * 1000, endValue: ts + 2 * 60 * 1000, bottom: 0, height: 40 }
+      { type: 'inside', startValue: zoomStart, endValue: zoomEnd },
+      { type: 'slider', startValue: zoomStart, endValue: zoomEnd, bottom: 0, height: 40 }
     ]
   });
 
