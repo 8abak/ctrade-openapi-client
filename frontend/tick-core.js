@@ -1,6 +1,6 @@
 // tick-core.js (live flow + recursive backward loader)
 
-const bver = '2025.07.10.ws001', fver = '2025.07.10.load002';
+const bver = '2025.07.05.004', fver = '2025.07.10.ws002';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [];
 let lastId = null;
@@ -162,14 +162,18 @@ function setupLiveSocket() {
   const ws = new WebSocket("wss://www.datavis.au/ws/ticks");
   ws.onopen = () => console.log("📡 WebSocket connected");
   ws.onmessage = (event) => {
-    const tick = JSON.parse(event.data);
-    const ts = new Date(tick.timestamp).getTime();
-    if (tick.id <= lastId) return;
-    dataMid.push([ts, tick.mid, tick.id]);
-    dataAsk.push([ts, tick.ask, tick.id]);
-    dataBid.push([ts, tick.bid, tick.id]);
-    lastId = tick.id;
-    updateSeries();
+    try {
+      const tick = JSON.parse(event.data);
+      const ts = new Date(tick.timestamp).getTime();
+      if (tick.id <= lastId) return;
+      dataMid.push([ts, tick.mid, tick.id]);
+      dataAsk.push([ts, tick.ask, tick.id]);
+      dataBid.push([ts, tick.bid, tick.id]);
+      lastId = tick.id;
+      updateSeries();
+    } catch (err) {
+      console.warn("🔄 Bad tick payload:", event.data);
+    }
   };
   ws.onerror = (e) => console.warn("⚠️ WebSocket error", e);
   ws.onclose = () => console.warn("🔌 WebSocket closed.");
@@ -195,7 +199,7 @@ async function loadPreviousTicksRecursive() {
 
   const firstTimestamp = mappedMid[0][0];
   if (firstTimestamp > tradingStartEpoch) {
-    setTimeout(() => loadPreviousTicksRecursive(), 50); // small delay to allow UI update
+    setTimeout(() => loadPreviousTicksRecursive(), 50);
   }
 }
 
