@@ -1,6 +1,6 @@
-// tick-core.js (fully updated)
+// tick-core.js (fixed initial zoom + better tick positioning)
 
-const bver = '2025.07.05.004', fver = '2025.07.09.19';
+const bver = '2025.07.05.004', fver = '2025.07.09.20';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [];
 let lastId = null;
@@ -110,13 +110,13 @@ async function loadInitialData() {
   if (!t) return;
 
   const ts = new Date(t.timestamp).getTime();
-
   dataMid = [[ts, t.mid, lastId]];
   dataAsk = [[ts, t.ask, lastId]];
   dataBid = [[ts, t.bid, lastId]];
 
   chart.setOption({
     xAxis: { min: xMin, max: xMax },
+    series: [{ data: dataMid }, { data: dataAsk }, { data: dataBid }],
     dataZoom: [
       { type: 'inside', startValue: zoomStart, endValue: zoomEnd },
       { type: 'slider', startValue: zoomStart, endValue: zoomEnd, bottom: 0, height: 40 }
