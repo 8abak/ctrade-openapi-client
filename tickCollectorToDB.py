@@ -5,6 +5,7 @@ import os
 import signal
 import psycopg2
 from datetime import datetime, timedelta
+from psycopg2.tz import FixedOffsetTimezone
 import pytz
 from twisted.internet import reactor
 from threading import Event
@@ -64,7 +65,9 @@ def writeTick(timestamp, symbolId, bid, ask):
     # Convert from milliseconds since epoch to datetime in Sydney time
     utc_dt = datetime.utcfromtimestamp(timestamp / 1000.0)
     utc_dt = pytz.utc.localize(utc_dt)
-    sydney_dt = utc_dt.astimezone(pytz.timezone("Australia/Sydney"))
+    offset_minutes = 600  # +10:00
+    sydney_dt = utc_dt.astimezone(FixedOffsetTimezone(offset_minutes, "AEST"))
+
 
     bidFloat = bid / 100000.0
     askFloat = ask / 100000.0
