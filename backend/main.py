@@ -13,7 +13,8 @@ import asyncio
 import random
 from datetime import timezone, timedelta
 from fastapi import WebSocket, WebSocketDisconnect
-from wsmanager import connectedClients
+from backend.wsmanager import connectedClients
+
 
 
 # Initialize FastAPI test to see version 002
