@@ -86,8 +86,14 @@ def writeTick(timestamp, symbolId, bid, ask):
             ("XAUUSD", sydney_dt, bidFloat, askFloat, mid)
         )
         conn.commit()
+        cur.execute(
+            "select id from ticks where symbol = %s and timestamp = %s",
+            ("XAUUSD", sydney_dt)
+        )
+        result = cur.fetchone()
+        tickIdn = result[0] if result else None
         tickData = {
-            "id": None,
+            "id": tickIdn,
             "timestamp": sydney_dt.isoformat(),
             "bid": bidFloat,
             "ask": askFloat,
