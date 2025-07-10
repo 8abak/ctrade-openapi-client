@@ -99,6 +99,7 @@ def writeTick(timestamp, symbolId, bid, ask):
             "ask": askFloat,
             "mid": mid
         }
+        print("🔥 Calling pushTick with:", tickData, flush=True)
         asyncio.get_event_loop().call_soon_threadsafe(asyncio.create_task, pushTick(tickData))
     except Exception as e:
         print(f"❌ DB error: {e}", flush=True)

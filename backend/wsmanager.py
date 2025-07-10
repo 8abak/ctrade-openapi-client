@@ -4,6 +4,7 @@ from typing import Set
 connectedClients: Set[WebSocket] = set()
 
 async def pushTick(tick: dict):
+    print(f"📡 Total clients: {len(connectedClients)}", flush=True)
     for ws in list(connectedClients):
         try:
             await ws.send_json(tick)
