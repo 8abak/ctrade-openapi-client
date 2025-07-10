@@ -44,6 +44,17 @@ class Tick(BaseModel):
 def home():
     return {"message": "Tick API is live. Try /ticks or /ticks/latest."}
 
+#get last id 
+@app.get("/ticks/lastid")
+def get_last_id():
+    with engine.connect() as conn:
+        query = text("SELECT id, timestamp FROM ticks ORDER BY id DESC LIMIT 1")
+        result = conn.execute(query).fetchone()
+        return {
+            "lastId": result[0] if result else None,
+            "timestamp": result[1].isoformat() if result else None
+        }
+
 # Get ticks with offset (legacy)
 @app.get("/ticks", response_model=List[Tick])
 def get_ticks(offset: int = 0, limit: int = 2000):
@@ -160,19 +171,6 @@ def get_label_tables():
         """)
         result = conn.execute(query)
         return sorted({row[0] for row in result})
-
-
-
-#get last id 
-@app.get("/ticks/lastid")
-def get_last_id():
-    with engine.connect() as conn:
-        query = text("SELECT id, timestamp FROM ticks ORDER BY id DESC LIMIT 1")
-        result = conn.execute(query).fetchone()
-        return {
-            "lastId": result[0] if result else None,
-            "timestamp": result[1].isoformat() if result else None
-        }
 
 #get latest id
 def get_latest_id():
