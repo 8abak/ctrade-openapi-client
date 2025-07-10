@@ -166,7 +166,10 @@ function setupLiveSocket() {
       const tick = JSON.parse(event.data);
       console.log("📩 Tick received via WS:", tick, "LastID:", lastId);
       const ts = new Date(tick.timestamp).getTime();
-      if (tick.id <= lastId) return;
+      if (tick.id <= lastId) {
+        console.warn("Dropped tick (duplicate or stale):", tick.id, "LastID:", lastId);
+        return;
+      }
       dataMid.push([ts, tick.mid, tick.id]);
       dataAsk.push([ts, tick.ask, tick.id]);
       dataBid.push([ts, tick.bid, tick.id]);
