@@ -12,13 +12,12 @@ from fastapi import WebSocket
 import asyncio
 import random
 from datetime import timezone, timedelta
-
+from fastapi import WebSocket, WebSocketDisconnect
+from wsmanager import connectedClients
 
 
 # Initialize FastAPI test to see version 002
 app = FastAPI()
-
-#new test
 
 # Allow cross-origin requests (frontend calling this backend)
 app.add_middleware(
@@ -222,28 +221,15 @@ def run_sql_query(query: str = Query(...)):
         return JSONResponse(status_code=400, content={"error": str(e)})
 
 @app.websocket("/ws/ticks")
-async def stream_real_ticks(websocket: WebSocket):
+async def streamRealTickets(websocket: WebSocket):
     await websocket.accept()
-    latest_id = get_latest_id()
+    connectedClients.add(websocket)
 
-    while True:
-        await asyncio.sleep(1)
-
-        with engine.connect() as conn:
-            result = conn.execute(text("""
-                SELECT id, timestamp, bid, ask, mid
-                FROM ticks
-                WHERE id > :latest_id
-                ORDER BY id ASC
-                LIMIT 10
-            """), {"latest_id": latest_id})
-
-            new_ticks = [dict(row._mapping) for row in result]
-
-        if new_ticks:
-            for tick in new_ticks:
-                await websocket.send_json(tick)
-            latest_id = new_ticks[-1]["id"]
+    try:
+        while True:
+            await asyncio.sleep(3600)
+    except WebSocketDisconnect:
+        connectedClients.remove(websocket)
 
 
 

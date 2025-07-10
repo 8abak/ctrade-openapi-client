@@ -9,7 +9,9 @@ from psycopg2.tz import FixedOffsetTimezone
 import pytz
 from twisted.internet import reactor
 from threading import Event
-
+import asyncio
+from fastapi.websockets import WebSocket
+from backend.wsmanager import pushTick
 from ctrader_open_api import Client, Protobuf, TcpProtocol, EndPoints
 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOAApplicationAuthReq,
@@ -84,6 +86,14 @@ def writeTick(timestamp, symbolId, bid, ask):
             ("XAUUSD", sydney_dt, bidFloat, askFloat, mid)
         )
         conn.commit()
+        tickData = {
+            "id": None,
+            "timestamp": sydney_dt.isoformat(),
+            "bid": bidFloat,
+            "ask": askFloat,
+            "mid": mid
+        }
+        asyncio.run(pushTick(tickData))
     except Exception as e:
         print(f"❌ DB error: {e}", flush=True)
         conn.rollback()
