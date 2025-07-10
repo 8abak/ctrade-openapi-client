@@ -164,6 +164,7 @@ function setupLiveSocket() {
   ws.onmessage = (event) => {
     try {
       const tick = JSON.parse(event.data);
+      console.log("📩 Tick received via WS:", tick, "LastID:", lastId);
       const ts = new Date(tick.timestamp).getTime();
       if (tick.id <= lastId) return;
       dataMid.push([ts, tick.mid, tick.id]);
