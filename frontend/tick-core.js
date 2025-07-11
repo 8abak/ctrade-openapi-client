@@ -160,6 +160,7 @@ async function loadInitialData() {
   updateSeries();
   setupLiveSocket();
   loadPreviousTicksRecursive();
+  showVersion();
 }
 
 function setupLiveSocket() {
@@ -187,6 +188,23 @@ function setupLiveSocket() {
   };
   ws.onerror = (e) => console.warn("⚠️ WebSocket error", e);
   ws.onclose = () => console.warn("🔌 WebSocket closed.");
+}
+
+async function showVersion(){
+  try{
+    const res = await fetch('/version');
+    const versions = await res.json();
+    const v = vestions["tick"];
+
+    if (!v) {
+      versionDiv.innerText = "Version data not available";
+      return;
+    }
+
+    versionDiv.innerHTML = `J: ${v.js || '-'}\nB: ${v.py || '-'}\nH: ${v.html || '-'}`;
+  } catch {
+    versionDiv.innerText = "Error loading version data";
+  }
 }
 
 async function loadPreviousTicksRecursive() {
@@ -238,5 +256,4 @@ versionDiv.style.left = '10px';
 versionDiv.style.bottom = '8px';
 versionDiv.style.color = '#777';
 versionDiv.style.fontSize = '11px';
-versionDiv.innerText = `bver: ${bver}, fver: ${fver}`;
 document.body.appendChild(versionDiv);

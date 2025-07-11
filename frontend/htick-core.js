@@ -7,6 +7,13 @@ let labelSeries = [];
 let currentStartEpoch = null;
 let currentEndEpoch = null;
 
+let zoomTimer = null;
+chart.on('dataZoom', () => {
+  if (zoomTimer) clearTimeout(zoomTimer);
+  zoomTimer = setTimeout(() => updateSeries(), 80); // throttle to every 80ms
+});
+
+
 const option = {
   backgroundColor: "#111",
   tooltip: {
@@ -62,13 +69,23 @@ function updateSeries() {
   const midBox = document.getElementById('midCheckbox');
   const bidBox = document.getElementById('bidCheckbox');
 
+  const baseProbs = {
+    type: 'scatter',
+    symbolSize: 3,
+    progressive: 5000,
+    large: true,
+    largeThreshold: 10000,
+    animation: false
+  };
+
   const updated = [];
-  if (askBox?.checked) updated.push({ id: 'ask', name: 'Ask', type: 'scatter', symbolSize: 4, itemStyle: { color: '#f5a623' }, data: dataAsk });
-  if (midBox?.checked) updated.push({ id: 'mid', name: 'Mid', type: 'scatter', symbolSize: 4, itemStyle: { color: '#00bcd4' }, data: dataMid });
-  if (bidBox?.checked) updated.push({ id: 'bid', name: 'Bid', type: 'scatter', symbolSize: 4, itemStyle: { color: '#4caf50' }, data: dataBid });
+  if (askBox?.checked) updated.push({ ...baseProps, id: 'ask', name: 'Ask', itemStyle: { color: '#f5a623' }, data: dataAsk });
+  if (midBox?.checked) updated.push({ ...baseProps, id: 'mid', name: 'Mid', itemStyle: { color: '#00bcd4' }, data: dataMid });
+  if (bidBox?.checked) updated.push({ ...baseProps, id: 'bid', name: 'Bid', itemStyle: { color: '#4caf50' }, data: dataBid });
 
   const checkedLabels = Array.from(document.querySelectorAll(".labelCheckbox:checked")).map(c => c.value);
   const labelSeriesFiltered = labelSeries.filter(s => checkedLabels.includes(s.name));
+
   chart.setOption({ series: [...updated, ...labelSeriesFiltered] }, { replaceMerge: ['series'] });
   adjustYAxisToZoom();
 }
@@ -120,6 +137,24 @@ async function loadDayTicks() {
 
   await loadAllLabels(); // overlays from DB
   updateSeries();
+  showVersion();
+}
+
+async function showVersion(){
+  try{
+    const res = await fetch('/version');
+    const versions = await res.json();
+    const v = vestions["htick"];
+
+    if (!v) {
+      versionDiv.innerText = "Version data not available";
+      return;
+    }
+
+    versionDiv.innerHTML = `J: ${v.js || '-'}\nB: ${v.py || '-'}\nH: ${v.html || '-'}`;
+  } catch {
+    versionDiv.innerText = "Error loading version data";
+  }
 }
 
 async function loadAllLabels() {
@@ -168,6 +203,7 @@ function tickTimeById(tickid) {
 }
 
 window.addEventListener('DOMContentLoaded', () => {
+  chart = echarts.init(document.getElementById("main"), null, { renderer: 'canvas' });
   chart = echarts.init(document.getElementById("main"));
   chart.setOption(option);
   chart.on('dataZoom', updateSeries);
@@ -181,5 +217,4 @@ versionDiv.style.left = '10px';
 versionDiv.style.bottom = '8px';
 versionDiv.style.color = '#777';
 versionDiv.style.fontSize = '11px';
-versionDiv.innerText = `bver: ${bver}, fver: ${fver}`;
 document.body.appendChild(versionDiv);
