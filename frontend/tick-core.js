@@ -191,21 +191,22 @@ function setupLiveSocket() {
 }
 
 async function showVersion(){
-  try{
+  try {
     const res = await fetch('/version');
     const versions = await res.json();
-    const v = vestions["tick"];
+    const v = versions["tick"];  // ✅ FIXED typo
 
     if (!v) {
       versionDiv.innerText = "Version data not available";
       return;
     }
 
-    versionDiv.innerHTML = `J: ${v.js || '-'}\nB: ${v.py || '-'}\nH: ${v.html || '-'}`;
+    versionDiv.innerHTML = `J: ${v.js || '-'}<br>B: ${v.py || '-'}<br>H: ${v.html || '-'}`;
   } catch {
     versionDiv.innerText = "Error loading version data";
   }
 }
+
 
 async function loadPreviousTicksRecursive() {
   const oldest = dataMid[0]?.[2];
