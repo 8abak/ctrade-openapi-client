@@ -217,5 +217,4 @@ versionDiv.style.left = '10px';
 versionDiv.style.bottom = '8px';
 versionDiv.style.color = '#777';
 versionDiv.style.fontSize = '11px';
-versionDiv.innerText = `bver: ${bver}, fver: ${fver}`;
 document.body.appendChild(versionDiv);
