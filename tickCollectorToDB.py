@@ -4,6 +4,7 @@ import json
 import os
 import signal
 import psycopg2
+import requests
 from datetime import datetime, timedelta
 from psycopg2.tz import FixedOffsetTimezone
 import pytz
@@ -100,7 +101,6 @@ def writeTick(timestamp, symbolId, bid, ask):
             "mid": mid
         }
         print("🔥 Calling pushTick with:", tickData, flush=True)
-        import requests
         requests.post("http://localhost:8000/tickstream/push", json=tickData)
     except Exception as e:
         print(f"❌ DB error: {e}", flush=True)
