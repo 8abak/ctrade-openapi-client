@@ -244,4 +244,7 @@ async def streamRealTickets(websocket: WebSocket):
 # Version check
 @app.get("/version")
 def get_version():
-    return {"version": "2025.07.05.005"}
+    import json
+    with open("static/version.json") as f:
+        return json.load(f)
+
