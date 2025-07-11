@@ -15,8 +15,6 @@ from datetime import timezone, timedelta
 from fastapi import WebSocket, WebSocketDisconnect
 from backend.wsmanager import connectedClients
 
-
-
 # Initialize FastAPI test to see version 002
 app = FastAPI()
 
@@ -74,6 +72,7 @@ def get_ticks(offset: int = 0, limit: int = 2000):
 async def receive_tick(tick: Tick):
     for ws in list(connectedClients):
         try:
+            print(f"✅ Broadcasting tick ID {tick.id} to {len(connectedClients)} clients", flush=True)
             await ws.send_json(tick.dict())
         except:
             connectedClients.remove(ws)

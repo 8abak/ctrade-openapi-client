@@ -6,6 +6,10 @@ let dataMid = [], dataAsk = [], dataBid = [];
 let lastId = null;
 let tradingStartEpoch = null;
 
+// adding loading set to avoid repeated loading
+const loadedIds = new Set();
+
+
 const option = {
   backgroundColor: "#111",
   tooltip: {
@@ -170,10 +174,12 @@ function setupLiveSocket() {
         console.warn("Dropped tick (duplicate or stale):", tick.id, "LastID:", lastId);
         return;
       }
+      if (loadedIds.has(tick.id)) return;
       dataMid.push([ts, tick.mid, tick.id]);
       dataAsk.push([ts, tick.ask, tick.id]);
       dataBid.push([ts, tick.bid, tick.id]);
       lastId = tick.id;
+      loadedIds.add(tick.id);
       updateSeries();
     } catch (err) {
       console.warn("🔄 Bad tick payload:", event.data);
@@ -195,9 +201,17 @@ async function loadPreviousTicksRecursive() {
   const mappedAsk = prev.map(t => [new Date(t.timestamp).getTime(), t.ask, t.id]);
   const mappedBid = prev.map(t => [new Date(t.timestamp).getTime(), t.bid, t.id]);
 
-  dataMid = [...mappedMid, ...dataMid];
-  dataAsk = [...mappedAsk, ...dataAsk];
-  dataBid = [...mappedBid, ...dataBid];
+  const newMid = mappedMid.filter(t => !dataMid.some(d => d[2] === t[2]));
+  const newAsk = mappedAsk.filter(t => !dataAsk.some(d => d[2] === t[2]));
+  const newBid = mappedBid.filter(t => !dataBid.some(d => d[2] === t[2]));
+
+  newMid.forEach(p => loadedIds.add(p[2]));
+  newAsk.forEach(p => loadedIds.add(p[2]));
+  newBid.forEach(p => loadedIds.add(p[2]));
+
+  dataMid = [...newMid, ...dataMid];
+  dataAsk = [...newAsk, ...dataAsk];
+  dataBid = [...newBid, ...dataBid];
 
   updateSeries();
 
