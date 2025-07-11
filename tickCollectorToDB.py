@@ -100,7 +100,8 @@ def writeTick(timestamp, symbolId, bid, ask):
             "mid": mid
         }
         print("🔥 Calling pushTick with:", tickData, flush=True)
-        asyncio.get_event_loop().call_soon_threadsafe(asyncio.create_task, pushTick(tickData))
+        import requests
+        requests.post("http://localhost:8000/tickstream/push", json=tickData)
     except Exception as e:
         print(f"❌ DB error: {e}", flush=True)
         conn.rollback()

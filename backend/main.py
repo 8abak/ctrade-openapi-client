@@ -69,6 +69,16 @@ def get_ticks(offset: int = 0, limit: int = 2000):
         result = conn.execute(query, {"offset": offset, "limit": limit})
         return [dict(row._mapping) for row in result]
 
+# get ticks from ws
+@app.post("/tickstream/push")
+async def receive_tick(tick: Tick):
+    for ws in list(connectedClients):
+        try:
+            await ws.send_json(tick.dict())
+        except:
+            connectedClients.remove(ws)
+    return {"status": "ok"}
+
 # Get latest ticks after timestamp
 @app.get("/ticks/latest", response_model=List[Tick])
 def get_latest_ticks(after: str = Query(...)):
