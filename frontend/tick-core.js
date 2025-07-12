@@ -191,7 +191,7 @@ function setupLiveSocket() {
 
 async function showVersion() {
   try {
-    if (!window.versionDiv) return;  // Ensure it's declared
+    //if (!window.versionDiv) return;  // Ensure it's declared
 
     const res = await fetch('/version');
     const versions = await res.json();
@@ -244,6 +244,15 @@ async function loadPreviousTicksRecursive() {
   }
 }
 
+const versionDiv = document.createElement('div');
+versionDiv.style.position = 'absolute';
+versionDiv.style.left = '10px';
+versionDiv.style.bottom = '8px';
+versionDiv.style.color = '#777';
+versionDiv.style.fontSize = '11px';
+versionDiv.style.whiteSpace = 'pre-line';
+document.body.appendChild(versionDiv);
+
 window.addEventListener('DOMContentLoaded', () => {
   chart = echarts.init(document.getElementById("main"));
   chart.setOption(option);
@@ -255,10 +264,4 @@ window.addEventListener('DOMContentLoaded', () => {
   loadInitialData();
 });
 
-const versionDiv = document.createElement('div');
-versionDiv.style.position = 'absolute';
-versionDiv.style.left = '10px';
-versionDiv.style.bottom = '8px';
-versionDiv.style.color = '#777';
-versionDiv.style.fontSize = '11px';
-document.body.appendChild(versionDiv);
+
