@@ -2,9 +2,20 @@ const { execSync } = require('child_process');
 const fs = require('fs');
 
 const pages = [
-    { key: "tick", js: "tick-core.js", html: "index.html", py: "main.py" },
-    { key: "htick", js: "htick-core.js", html: "htick.html", py: "main.py" }
+  {
+    key: "tick",
+    js: "frontend/tick-core.js",
+    html: "frontend/index.html",
+    py: "backend/main.py"
+  },
+  {
+    key: "htick",
+    js: "frontend/htick-core.js",
+    html: "frontend/htick.html",
+    py: "backend/main.py"
+  }
 ];
+
 
 function getLastChange(file){
     try {
@@ -34,6 +45,7 @@ pages.forEach(({key, js, py, html}) => {
     output[key] = result;
 });
 
+fs.mkdirSync("static", { recursive: true });
 fs.writeFileSync("static/version.json", JSON.stringify(output, null, 2));
 console.log("✔ version.json updated:");
 console.table(output);
