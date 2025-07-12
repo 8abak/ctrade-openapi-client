@@ -1,5 +1,5 @@
 const { execSync } = require('child_process');
-const fs = required('fs');
+const fs = require('fs');
 
 const pages = [
     { key: "htick", js: "htick-core.js", html: "htick.html", py: "main.py"},
