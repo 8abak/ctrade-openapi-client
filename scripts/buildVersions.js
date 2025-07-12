@@ -1,4 +1,4 @@
-const { execSync } = required('child_process');
+const { execSync } = require('child_process');
 const fs = required('fs');
 
 const pages = [
