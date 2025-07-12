@@ -190,22 +190,27 @@ function setupLiveSocket() {
   ws.onclose = () => console.warn("🔌 WebSocket closed.");
 }
 
-async function showVersion(){
+async function showVersion() {
   try {
+    if (!window.versionDiv) return;  // Ensure it's declared
+
     const res = await fetch('/version');
     const versions = await res.json();
-    const v = versions["tick"];  // ✅ FIXED typo
+    const v = versions["tick"];
 
     if (!v) {
       versionDiv.innerText = "Version data not available";
       return;
     }
 
-    versionDiv.innerHTML = `J: ${v.js}<br>B: ${v.py}<br>H: ${v.html}`;
+    versionDiv.innerHTML = `J: ${v.js || '-'}<br>B: ${v.py || '-'}<br>H: ${v.html || '-'}`;
   } catch {
-    versionDiv.innerText = "Error loading version data";
+    if (window.versionDiv) {
+      versionDiv.innerText = "Error loading version data";
+    }
   }
 }
+
 
 
 async function loadPreviousTicksRecursive() {
