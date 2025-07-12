@@ -210,8 +210,6 @@ async function showVersion() {
   }
 }
 
-
-
 async function loadPreviousTicksRecursive() {
   const oldest = dataMid[0]?.[2];
   if (!oldest) return;
