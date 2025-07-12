@@ -201,7 +201,7 @@ async function showVersion(){
       return;
     }
 
-    versionDiv.innerHTML = `J: ${v.js || '-'}<br>B: ${v.py || '-'}<br>H: ${v.html || '-'}`;
+    versionDiv.innerHTML = `J: ${v.js}<br>B: ${v.py}<br>H: ${v.html}`;
   } catch {
     versionDiv.innerText = "Error loading version data";
   }

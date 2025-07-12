@@ -7,7 +7,10 @@ on:
 
 jobs:
   deploy:
-      - name: 🔁 Deploy to EC2 via SSH
+    name: Deploy to EC2
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📦 Deploy to EC2 via SSH
         uses: appleboy/ssh-action@v0.1.5
         with:
           host: ${{ secrets.EC2_HOST }}
@@ -28,7 +31,7 @@ jobs:
               sudo systemctl restart backend.service
             fi
 
-            # Restart tickCollector if that script changed
+            # Restart tickCollector if it changed
             if echo "$changed" | grep -q 'tickCollectorToDB.py'; then
               echo "🔁 Restarting tickCollector service..."
               sudo systemctl restart tickcollector.service
