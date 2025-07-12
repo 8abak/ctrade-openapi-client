@@ -2,8 +2,8 @@ const { execSync } = require('child_process');
 const fs = require('fs');
 
 const pages = [
-    { key: "htick", js: "htick-core.js", html: "htick.html", py: "main.py"},
-    { key: "tick", js: "tick-core.js", html: "tick.html", py: "main.py" }
+    { key: "tick", js: "tick-core.js", html: "index.html", py: "main.py" },
+    { key: "htick", js: "htick-core.js", html: "htick.html", py: "main.py" }
 ];
 
 function getLastChange(file){
