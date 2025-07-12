@@ -189,10 +189,12 @@ function setupLiveSocket() {
   ws.onclose = () => console.warn("🔌 WebSocket closed.");
 }
 
+function format(v){
+  return v ? `${v.datetime} ${v.message}` : '-';
+}
+
 async function showVersion() {
   try {
-    //if (!window.versionDiv) return;  // Ensure it's declared
-
     const res = await fetch('/version');
     const versions = await res.json();
     const v = versions["tick"];
@@ -202,11 +204,9 @@ async function showVersion() {
       return;
     }
 
-    versionDiv.innerHTML = `J: ${v.js || '-'}<br>B: ${v.py || '-'}<br>H: ${v.html || '-'}`;
+    versionDiv.innerHTML = `J: ${format(v.js)}<br>B: ${format(v.py)}<br>H: ${format(v.html)}`;
   } catch {
-    if (window.versionDiv) {
-      versionDiv.innerText = "Error loading version data";
-    }
+    versionDiv.innerText = "Error loading version data";
   }
 }
 
