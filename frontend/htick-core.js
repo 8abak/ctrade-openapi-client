@@ -1,6 +1,5 @@
 // htick-core.js
 
-const bver = '2025.07.05.004', fver = '2025.07.10.htick001';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [];
 let labelSeries = [];

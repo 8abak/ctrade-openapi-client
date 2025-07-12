@@ -1,6 +1,5 @@
 // tick-core.js (live flow + recursive backward loader)
 
-const bver = '2025.07.05.004', fver = '2025.07.10.ws003';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [];
 let lastId = null;
