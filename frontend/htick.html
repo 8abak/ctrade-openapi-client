@@ -2,86 +2,84 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Historical Tick Chart</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
   <style>
     body {
       margin: 0;
       background: #111;
       font-family: sans-serif;
-      color: #ddd;
       display: flex;
-    }
-    #sidebar {
-      width: 220px;
-      background: #181818;
-      padding: 20px;
-      box-sizing: border-box;
-    }
-    #main {
-      flex-grow: 1;
       height: 100vh;
     }
-    label {
-      margin-left: 5px;
+    #sidebar {
+      width: 200px;
+      background: #111;
+      padding: 20px;
+      box-sizing: border-box;
+      color: #fff;
+      border-right: 1px solid #333;
     }
-    .section {
-      margin-bottom: 20px;
+    #main {
+      flex: 1;
     }
-    input[type="date"], input[type="number"], button {
-      width: 100%;
-      padding: 6px;
-      margin-top: 4px;
-      margin-bottom: 8px;
-      background: #222;
-      border: 1px solid #555;
-      color: #eee;
+    h2, h3 {
+      margin-top: 0;
+      color: #ddd;
     }
-    button {
-      background: #3fa9f5;
-      border: none;
-      cursor: pointer;
+    input, label {
+      margin-right: 10px;
     }
-    button:hover {
-      background: #4fbaf8;
+    #labelCheckboxes {
+      margin-top: 10px;
+    }
+    .version {
+      position: absolute;
+      left: 10px;
+      bottom: 8px;
+      color: #777;
+      font-size: 11px;
+    }
+    a {
+      color: #56caff;
+      text-decoration: none;
+    }
+    a:hover {
+      text-decoration: underline;
     }
   </style>
 </head>
 <body>
-
   <div id="sidebar">
     <h3>Htick View</h3>
-
-    <div class="section">
-      <label for="dateInput">Date</label><br />
-      <input type="date" id="dateInput" />
+    <div>
+      <label>Date</label><br />
+      <input type="date" id="dateInput" style="width: 100%" />
+    </div>
+    <div style="margin-top: 10px;">
+      <label>Start Hour</label><br />
+      <input type="number" id="hourInput" min="0" max="23" value="8" style="width: 100%" />
+    </div>
+    <div style="margin-top: 10px;">
+      <button id="loadButton" style="width: 100%; background: #3498db; color: white; padding: 6px; border: none;">Load Chart</button>
     </div>
 
-    <div class="section">
-      <label for="hourInput">Start Hour</label><br />
-      <input type="number" id="hourInput" min="0" max="23" value="8" />
-      <button id="loadButton">Load Chart</button>
-    </div>
-
-    <div class="section">
-      <strong>Labels</strong><br />
+    <h3>Labels</h3>
+    <div>
       <input type="checkbox" id="askCheckbox" checked />
       <label for="askCheckbox">Ask</label><br />
       <input type="checkbox" id="midCheckbox" checked />
       <label for="midCheckbox">Mid</label><br />
       <input type="checkbox" id="bidCheckbox" checked />
-      <label for="bidCheckbox">Bid</label><br />
+      <label for="bidCheckbox">Bid</label>
     </div>
 
-    <div class="section">
-      <strong>ML Tables</strong>
-      <div id="labelCheckboxes" style="margin-top: 6px;"></div>
-    </div>
+    <div id="labelCheckboxes"></div>
   </div>
 
   <div id="main"></div>
 
-  <script src="https://cdn.jsdelivr.net/npm/echarts@5"></script>
   <script src="/htick-core.js"></script>
 </body>
 </html>
