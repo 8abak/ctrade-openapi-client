@@ -22,6 +22,9 @@ jobs:
             git pull origin main
             source venv/bin/activate
 
+            echo "🛠 Building version.json..."
+            node scripts/buildVersions.js || echo "⚠️ Failed to build version.json"
+
             # Detect changed files in latest commit
             changed=$(git diff --name-only HEAD@{1})
 
@@ -38,3 +41,4 @@ jobs:
             fi
 
             echo "✅ Deployment complete"
+
