@@ -6,12 +6,33 @@ let labelSeries = [];
 let currentStartEpoch = null;
 let currentEndEpoch = null;
 
-let zoomTimer = null;
-chart.on('dataZoom', () => {
-  if (zoomTimer) clearTimeout(zoomTimer);
-  zoomTimer = setTimeout(() => updateSeries(), 80); // throttle to every 80ms
-});
+// Create version footer
+const versionDiv = document.createElement('div');
+versionDiv.style.position = 'absolute';
+versionDiv.style.left = '10px';
+versionDiv.style.bottom = '8px';
+versionDiv.style.color = '#777';
+versionDiv.style.fontSize = '11px';
+document.body.appendChild(versionDiv);
 
+function format(v) {
+  return v ? `${v.datetime} ${v.message}` : '-';
+}
+
+async function showVersion() {
+  try {
+    const res = await fetch('/version');
+    const versions = await res.json();
+    const v = versions["htick"];
+    if (!v) {
+      versionDiv.innerText = "Version data not available";
+      return;
+    }
+    versionDiv.innerHTML = `J: ${format(v.js)}<br>B: ${format(v.py)}<br>H: ${format(v.html)}`;
+  } catch {
+    versionDiv.innerText = "Error loading version data";
+  }
+}
 
 const option = {
   backgroundColor: "#111",
@@ -68,19 +89,10 @@ function updateSeries() {
   const midBox = document.getElementById('midCheckbox');
   const bidBox = document.getElementById('bidCheckbox');
 
-  const baseProbs = {
-    type: 'scatter',
-    symbolSize: 3,
-    progressive: 5000,
-    large: true,
-    largeThreshold: 10000,
-    animation: false
-  };
-
   const updated = [];
-  if (askBox?.checked) updated.push({ ...baseProps, id: 'ask', name: 'Ask', itemStyle: { color: '#f5a623' }, data: dataAsk });
-  if (midBox?.checked) updated.push({ ...baseProps, id: 'mid', name: 'Mid', itemStyle: { color: '#00bcd4' }, data: dataMid });
-  if (bidBox?.checked) updated.push({ ...baseProps, id: 'bid', name: 'Bid', itemStyle: { color: '#4caf50' }, data: dataBid });
+  if (askBox?.checked) updated.push({ id: 'ask', name: 'Ask', type: 'scatter', symbolSize: 4, itemStyle: { color: '#f5a623' }, data: dataAsk });
+  if (midBox?.checked) updated.push({ id: 'mid', name: 'Mid', type: 'scatter', symbolSize: 4, itemStyle: { color: '#00bcd4' }, data: dataMid });
+  if (bidBox?.checked) updated.push({ id: 'bid', name: 'Bid', type: 'scatter', symbolSize: 4, itemStyle: { color: '#4caf50' }, data: dataBid });
 
   const checkedLabels = Array.from(document.querySelectorAll(".labelCheckbox:checked")).map(c => c.value);
   const labelSeriesFiltered = labelSeries.filter(s => checkedLabels.includes(s.name));
@@ -105,7 +117,6 @@ function adjustYAxisToZoom() {
 async function loadDayTicks() {
   const dateStr = document.getElementById("dateInput").value;
   const hour = parseInt(document.getElementById("hourInput").value, 10);
-
   if (!dateStr || isNaN(hour)) return;
 
   const start = new Date(`${dateStr}T${hour.toString().padStart(2, '0')}:00:00+10:00`);
@@ -123,37 +134,16 @@ async function loadDayTicks() {
   dataAsk = ticks.map(t => [new Date(t.timestamp).getTime(), t.ask, t.id]);
   dataBid = ticks.map(t => [new Date(t.timestamp).getTime(), t.bid, t.id]);
 
-  const minTime = currentStartEpoch;
-  const maxTime = currentEndEpoch;
-
   chart.setOption({
-    xAxis: { min: minTime, max: maxTime },
+    xAxis: { min: currentStartEpoch, max: currentEndEpoch },
     dataZoom: [
-      { type: 'inside', startValue: minTime, endValue: maxTime },
-      { type: 'slider', startValue: minTime, endValue: maxTime, bottom: 0, height: 40 }
+      { type: 'inside', startValue: currentStartEpoch, endValue: currentEndEpoch },
+      { type: 'slider', startValue: currentStartEpoch, endValue: currentEndEpoch, bottom: 0, height: 40 }
     ]
   });
 
-  await loadAllLabels(); // overlays from DB
+  await loadAllLabels();
   updateSeries();
-  showVersion();
-}
-
-async function showVersion(){
-  try{
-    const res = await fetch('/version');
-    const versions = await res.json();
-    const v = vestions["htick"];
-
-    if (!v) {
-      versionDiv.innerText = "Version data not available";
-      return;
-    }
-
-    versionDiv.innerHTML = `J: ${v.js || '-'}\nB: ${v.py || '-'}\nH: ${v.html || '-'}`;
-  } catch {
-    versionDiv.innerText = "Error loading version data";
-  }
 }
 
 async function loadAllLabels() {
@@ -202,18 +192,11 @@ function tickTimeById(tickid) {
 }
 
 window.addEventListener('DOMContentLoaded', () => {
-  chart = echarts.init(document.getElementById("main"), null, { renderer: 'canvas' });
   chart = echarts.init(document.getElementById("main"));
   chart.setOption(option);
   chart.on('dataZoom', updateSeries);
 
   document.getElementById("loadButton").addEventListener("click", loadDayTicks);
-});
 
-const versionDiv = document.createElement('div');
-versionDiv.style.position = 'absolute';
-versionDiv.style.left = '10px';
-versionDiv.style.bottom = '8px';
-versionDiv.style.color = '#777';
-versionDiv.style.fontSize = '11px';
-document.body.appendChild(versionDiv);
+  showVersion(); // Load version on startup
+});
