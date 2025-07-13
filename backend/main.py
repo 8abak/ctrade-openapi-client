@@ -175,12 +175,13 @@ def get_label_tables():
     with engine.connect() as conn:
         query = text("""
             SELECT table_name
-            FROM information_schema.columns
-            WHERE column_name ILIKE 'tickid'
-              AND table_schema = 'public'
+            FROM information_schema.tables
+            WHERE table_schema = 'public'
+              AND table_type = 'BASE TABLE'
+              AND table_name NOT IN ('ticks', 'version')
         """)
         result = conn.execute(query)
-        return sorted({row[0] for row in result})
+        return sorted(row[0] for row in result)
 
 #get latest id
 def get_latest_id():
