@@ -1,6 +1,4 @@
 // htick-core.js – Optimized for large datasets + clustering prep
-
-const bver = '2025.07.05.004', fver = '2025.07.13.htick002';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [], labelSeries = [];
 let currentStartEpoch = null, currentEndEpoch = null;
