@@ -1,4 +1,6 @@
 // htick-core.js – Optimized for large datasets + clustering prep
+
+const bver = '2025.07.05.004', fver = '2025.07.13.htick002';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [], labelSeries = [];
 let currentStartEpoch = null, currentEndEpoch = null;
@@ -62,12 +64,7 @@ function updateSeries() {
 
   const checkedLabels = Array.from(document.querySelectorAll(".labelCheckbox:checked")).map(c => c.value);
   const labelSeriesFiltered = labelSeries.filter(s => checkedLabels.includes(s.name));
-  chart.setOption({
-    yAxis: {
-        min: Math.floor(Math.min(...prices)) - 1,
-        max: Math.ceil(Math.max(...prices)) + 1
-      }
-  }, { notMerge: true, lazyUpdate: false });
+  chart.setOption({ series: [...updated, ...labelSeriesFiltered] }, { replaceMerge: ['series'], lazyUpdate: true });
   adjustYAxisToZoom();
 }
 
@@ -108,7 +105,7 @@ async function loadDayTicks() {
   });
 
   await loadAllLabels();
-  setTimeout(updateSeries, 50);
+  updateSeries();
 }
 
 async function loadAllLabels() {
@@ -152,31 +149,7 @@ window.addEventListener('DOMContentLoaded', () => {
   chart.setOption(option);
   chart.on('dataZoom', debounce(updateSeries, 100));
   document.getElementById("loadButton").addEventListener("click", loadDayTicks);
-
-  // 🧠 Smart default date load
-  const today = new Date();
-  const dow = today.getDay(); // 0 = Sunday, 1 = Monday, ..., 6 = Saturday
-  let defaultDate = new Date();
-
-  if (dow === 1) {        // Monday
-    defaultDate.setDate(today.getDate() - 3);
-  } else if (dow === 0) { // Sunday
-    defaultDate.setDate(today.getDate() - 2);
-  } else if (dow === 6) { // Saturday
-    defaultDate.setDate(today.getDate() - 1);
-  } else {
-    defaultDate.setDate(today.getDate() - 1);
-  }
-
-  const yyyy = defaultDate.getFullYear();
-  const mm = String(defaultDate.getMonth() + 1).padStart(2, '0');
-  const dd = String(defaultDate.getDate()).padStart(2, '0');
-  document.getElementById("dateInput").value = `${yyyy}-${mm}-${dd}`;
-  document.getElementById("hourInput").value = "8";
-
-  loadDayTicks(); // Automatically load default day
 });
-
 
 const versionDiv = document.createElement('div');
 versionDiv.style.position = 'absolute';
