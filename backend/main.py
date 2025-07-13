@@ -239,8 +239,6 @@ async def streamRealTickets(websocket: WebSocket):
     except WebSocketDisconnect:
         connectedClients.remove(websocket)
 
-
-
 # Version check
 @app.get("/version")
 def get_version():
