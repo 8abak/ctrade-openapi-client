@@ -119,7 +119,7 @@ async function loadDayTicks() {
 async function loadAllLabels() {
   let labelList;
   try {
-    labelList = await fetch("/labels/available").then(res => res.json());
+    labelList = await fetch("/available").then(res => res.json());
   } catch (err) {
     console.error("❌ Failed to fetch label list:", err);
     return;

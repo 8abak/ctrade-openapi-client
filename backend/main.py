@@ -164,13 +164,8 @@ def get_labels_by_name(name: str):
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
 
-# ✅ NEW: Mirror route expected by frontend
-@app.get("/api/labels/available")
-def get_label_tables_api():
-    return get_label_tables()
-
 # Get label-related tables that contain tickid
-@app.get("/labels/available")
+@app.get("/available")
 def get_label_tables():
     with engine.connect() as conn:
         query = text("""
