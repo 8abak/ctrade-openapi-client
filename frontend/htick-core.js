@@ -117,7 +117,19 @@ async function loadDayTicks() {
 }
 
 async function loadAllLabels() {
-  const labelList = await fetch("/labels/available").then(res => res.json());
+  let labelList;
+  try {
+    labelList = await fetch("/labels/available").then(res => res.json());
+  } catch (err) {
+    console.error("❌ Failed to fetch label list:", err);
+    return;
+  }
+
+  if (!Array.isArray(labelList)) {
+    console.error("❌ Label list is not an array:", labelList);
+    return;
+  }
+
   const listContainer = document.getElementById("labelCheckboxes");
   listContainer.innerHTML = "";
   labelSeries = [];
@@ -128,17 +140,45 @@ async function loadAllLabels() {
     box.type = "checkbox"; box.value = table; box.className = "labelCheckbox";
     box.id = `label_${table}`; box.addEventListener("change", updateSeries);
     div.appendChild(box);
+
     const lbl = document.createElement("label");
-    lbl.innerText = table; lbl.setAttribute("for", box.id); lbl.style.color = "#fff";
+    lbl.innerText = table;
+    lbl.setAttribute("for", box.id);
+    lbl.style.color = "#fff";
     div.appendChild(lbl);
     listContainer.appendChild(div);
 
-    const q = `SELECT tickid, label FROM ${table}`;
-    const res = await fetch(`/sqlvw/query?query=${encodeURIComponent(q)}`).then(r => r.json());
-    const points = res.map(row => [tickTimeById(row.tickid), row.label, row.tickid]).filter(p => p[0] !== null);
-    labelSeries.push({ id: table, name: table, type: 'scatter', symbolSize: 6, itemStyle: { color: '#e91e63' }, data: points.map(p => [p[0], p[1], p[2]]) });
+    try {
+      const q = `SELECT * FROM ${table}`;
+      const res = await fetch(`/sqlvw/query?query=${encodeURIComponent(q)}`).then(r => r.json());
+
+      if (!Array.isArray(res)) {
+        console.warn(`⚠️ Table ${table} did not return rows.`);
+        continue;
+      }
+
+      const hasTickId = res.length > 0 && 'tickid' in res[0];
+      if (!hasTickId) {
+        console.warn(`ℹ️ Skipping label table ${table}: no tickid field.`);
+        continue;
+      }
+
+      const points = res.map(row => [tickTimeById(row.tickid), row.label, row.tickid]).filter(p => p[0] !== null);
+      labelSeries.push({
+        id: table,
+        name: table,
+        type: 'scatter',
+        symbolSize: 6,
+        itemStyle: { color: '#e91e63' },
+        data: points.map(p => [p[0], p[1], p[2]])
+      });
+
+    } catch (err) {
+      console.error(`❌ Failed to load label table ${table}:`, err);
+    }
   }
 }
+
 
 function tickTimeById(tickid) {
   const match = dataMid.find(p => p[2] === tickid);

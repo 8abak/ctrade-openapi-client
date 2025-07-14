@@ -174,13 +174,16 @@ def get_label_tables_api():
 def get_label_tables():
     with engine.connect() as conn:
         query = text("""
-            SELECT table_name
-            FROM information_schema.tables
+            SELECT t.table_name
+            FROM information_schema.tables t
             JOIN information_schema.columns c ON t.table_name = c.table_name
             WHERE t.table_schema = 'public'
+              AND c.column_name ILIKE 'tickid'
+              AND t.table_type = 'BASE TABLE'
         """)
         result = conn.execute(query)
         return sorted({row[0] for row in result})
+
 
 
 #get latest id
