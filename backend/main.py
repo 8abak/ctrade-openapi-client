@@ -178,13 +178,11 @@ def get_label_tables():
             FROM information_schema.tables t
             JOIN information_schema.columns c ON t.table_name = c.table_name
             WHERE t.table_schema = 'public'
-              AND c.column_name ILIKE 'tickid'
               AND t.table_type = 'BASE TABLE'
+              AND c.column_name ILIKE 'tickid'
         """)
         result = conn.execute(query)
         return sorted({row[0] for row in result})
-
-
 
 #get latest id
 def get_latest_id():
