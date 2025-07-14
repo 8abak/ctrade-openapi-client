@@ -4,6 +4,7 @@ const bver = '2025.07.05.004', fver = '2025.07.13.htick002';
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [], labelSeries = [];
 let currentStartEpoch = null, currentEndEpoch = null;
+let adjusting = false;.
 
 const option = {
   backgroundColor: '#111',
@@ -69,15 +70,22 @@ function updateSeries() {
 }
 
 function adjustYAxisToZoom() {
-  const zoom = chart.getOption().dataZoom?.[0];
-  if (!zoom || zoom.startValue === undefined || zoom.endValue === undefined) return;
+  if (adjusting) return;
+  adjusting = true;
+  try {
+    const zoom = chart.getOption().dataZoom?.[0];
+    if (!zoom || zoom.startValue === undefined || zoom.endValue === undefined) return;
 
-  const start = zoom.startValue;
-  const end = zoom.endValue;
-  const prices = [...dataMid, ...dataAsk, ...dataBid].filter(p => p[0] >= start && p[0] <= end).map(p => p[1]);
-  if (!prices.length) return;
-  chart.setOption({ yAxis: { min: Math.floor(Math.min(...prices)) - 1, max: Math.ceil(Math.max(...prices)) + 1 } }, true);
+    const start = zoom.startValue;
+    const end = zoom.endValue;
+    const prices = [...dataMid, ...dataAsk, ...dataBid].filter(p => p[0] >= start && p[0] <= end).map(p => p[1]);
+    if (!prices.length) return;
+    chart.setOption({ yAxis: { min: Math.floor(Math.min(...prices)) - 1, max: Math.ceil(Math.max(...prices)) + 1 } }, true);
+  } finally {
+    adjusting = false;
+  }
 }
+
 
 async function loadDayTicks() {
   const dateStr = document.getElementById("dateInput").value;

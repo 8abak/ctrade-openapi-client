@@ -175,9 +175,9 @@ def get_label_tables():
     with engine.connect() as conn:
         query = text("""
             SELECT table_name
-            FROM information_schema.columns
-            WHERE column_name ILIKE 'tickid'
-              AND table_schema = 'public'
+            FROM information_schema.tables
+            JOIN information_schema.columns c ON t.table_name = c.table_name
+            WHERE t.table_schema = 'public'
         """)
         result = conn.execute(query)
         return sorted({row[0] for row in result})
