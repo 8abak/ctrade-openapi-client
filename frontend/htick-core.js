@@ -72,19 +72,31 @@ function updateSeries() {
 function adjustYAxisToZoom() {
   if (adjusting) return;
   adjusting = true;
+
   try {
     const zoom = chart.getOption().dataZoom?.[0];
     if (!zoom || zoom.startValue === undefined || zoom.endValue === undefined) return;
 
     const start = zoom.startValue;
     const end = zoom.endValue;
-    const prices = [...dataMid, ...dataAsk, ...dataBid].filter(p => p[0] >= start && p[0] <= end).map(p => p[1]);
+    const prices = [...dataMid, ...dataAsk, ...dataBid]
+      .filter(p => p[0] >= start && p[0] <= end)
+      .map(p => p[1]);
+
     if (!prices.length) return;
-    chart.setOption({ yAxis: { min: Math.floor(Math.min(...prices)) - 1, max: Math.ceil(Math.max(...prices)) + 1 } }, true);
+
+    const newMin = Math.floor(Math.min(...prices)) - 1;
+    const newMax = Math.ceil(Math.max(...prices)) + 1;
+
+    const current = chart.getOption()?.yAxis?.[0];
+    if (current?.min === newMin && current?.max === newMax) return;
+
+    chart.setOption({ yAxis: { min: newMin, max: newMax } }, true);
   } finally {
     adjusting = false;
   }
 }
+
 
 
 async function loadDayTicks() {
@@ -93,8 +105,11 @@ async function loadDayTicks() {
   if (!dateStr || isNaN(hour)) return;
 
   const start = new Date(`${dateStr}T${hour.toString().padStart(2, '0')}:00:00+10:00`);
-  const end = new Date(start); end.setDate(start.getDate() + 1);
-  currentStartEpoch = start.getTime(); currentEndEpoch = end.getTime();
+  const end = new Date(start);
+  end.setDate(start.getDate() + 1);
+
+  currentStartEpoch = start.getTime();
+  currentEndEpoch = end.getTime();
 
   const q = `SELECT id, timestamp, bid, ask, mid FROM ticks WHERE timestamp >= '${start.toISOString()}' AND timestamp < '${end.toISOString()}' ORDER BY id ASC`;
   const res = await fetch(`/sqlvw/query?query=${encodeURIComponent(q)}`);
@@ -104,17 +119,21 @@ async function loadDayTicks() {
   dataAsk = ticks.map(t => [new Date(t.timestamp).getTime(), t.ask, t.id]);
   dataBid = ticks.map(t => [new Date(t.timestamp).getTime(), t.bid, t.id]);
 
+  const zoomStart = currentStartEpoch;
+  const zoomEnd = zoomStart + 2 * 60 * 60 * 1000; // 2 hours later
+
   chart.setOption({
     xAxis: { min: currentStartEpoch, max: currentEndEpoch },
     dataZoom: [
-      { type: 'inside', startValue: currentStartEpoch, endValue: currentEndEpoch },
-      { type: 'slider', startValue: currentStartEpoch, endValue: currentEndEpoch }
+      { type: 'inside', startValue: zoomStart, endValue: zoomEnd },
+      { type: 'slider', startValue: zoomStart, endValue: zoomEnd }
     ]
   });
 
   await loadAllLabels();
   updateSeries();
 }
+
 
 async function loadAllLabels() {
   let labelList;
