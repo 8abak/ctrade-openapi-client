@@ -112,15 +112,27 @@ async function loadDayTicks() {
   currentEndEpoch = end.getTime();
 
   const q = `SELECT id, timestamp, bid, ask, mid FROM ticks WHERE timestamp >= '${start.toISOString()}' AND timestamp < '${end.toISOString()}' ORDER BY id ASC`;
+  console.log("Running tick query:", q);
+
   const res = await fetch(`/sqlvw/query?query=${encodeURIComponent(q)}`);
   const ticks = await res.json();
 
-  dataMid = ticks.map(t => [new Date(t.timestamp).getTime(), t.mid, t.id]);
-  dataAsk = ticks.map(t => [new Date(t.timestamp).getTime(), t.ask, t.id]);
-  dataBid = ticks.map(t => [new Date(t.timestamp).getTime(), t.bid, t.id]);
+  if (!Array.isArray(ticks) || ticks.length === 0) {
+    console.warn("⚠️ No tick data returned.");
+    return;
+  }
+
+  console.log("Fetched tick count:", ticks.length);
+  const parseTime = ts => Date.parse(ts);
+
+  dataMid = ticks.map(t => [parseTime(t.timestamp), t.mid, t.id]);
+  dataAsk = ticks.map(t => [parseTime(t.timestamp), t.ask, t.id]);
+  dataBid = ticks.map(t => [parseTime(t.timestamp), t.bid, t.id]);
+
+  console.log("Sample dataMid:", dataMid[0]);
 
   const zoomStart = currentStartEpoch;
-  const zoomEnd = zoomStart + 2 * 60 * 60 * 1000; // 2 hours later
+  const zoomEnd = zoomStart + 2 * 60 * 60 * 1000; // limit to 2 hours
 
   chart.setOption({
     xAxis: { min: currentStartEpoch, max: currentEndEpoch },
@@ -133,6 +145,7 @@ async function loadDayTicks() {
   await loadAllLabels();
   updateSeries();
 }
+
 
 
 async function loadAllLabels() {
