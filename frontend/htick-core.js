@@ -176,27 +176,33 @@ async function loadAllLabels() {
         continue;
       }
 
-      const hasTickId = res.length > 0 && 'tickid' in res[0];
-      if (!hasTickId) {
-        console.warn(`ℹ️ Skipping label table ${table}: no tickid field.`);
-        continue;
-      }
+      const sampleRow = res[0];
+      if (!sampleRow) continue;
 
-      const points = res.map(row => [tickTimeById(row.tickid), row.label, row.tickid]).filter(p => p[0] !== null);
-      labelSeries.push({
-        id: table,
-        name: table,
-        type: 'scatter',
-        symbolSize: 6,
-        itemStyle: { color: '#e91e63' },
-        data: points.map(p => [p[0], p[1], p[2]])
-      });
+      if ('tickid' in sampleRow) {
+        const points = res.map(row => {
+          const ts = tickTimeById(row.tickid);
+          return ts !== null ? [ts, row.label || 1, row.tickid] : null;
+        }).filter(Boolean);
+
+        labelSeries.push({
+          id: table,
+          name: table,
+          type: 'scatter',
+          symbolSize: 6,
+          itemStyle: { color: '#e91e63' },
+          data: points.map(p => [p[0], p[1], p[2]])
+        });
+      } else {
+        console.warn(`ℹ️ Skipping label table ${table}: no tickid field.`);
+      }
 
     } catch (err) {
       console.error(`❌ Failed to load label table ${table}:`, err);
     }
   }
 }
+
 
 
 function tickTimeById(tickid) {
