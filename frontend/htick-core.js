@@ -55,19 +55,27 @@ const option = {
 };
 
 function updateSeries() {
+  if (!chart) return;
   const askBox = document.getElementById('askCheckbox');
   const midBox = document.getElementById('midCheckbox');
   const bidBox = document.getElementById('bidCheckbox');
   const updated = [];
+
+  // Don't try updating chart if dataMid is empty
+  if (dataMid.length === 0) return;
+
   if (askBox?.checked) updated.push({ id: 'ask', name: 'Ask', type: 'scatter', symbolSize: 2, itemStyle: { color: '#f5a623' }, data: sampleData(dataAsk) });
   if (midBox?.checked) updated.push({ id: 'mid', name: 'Mid', type: 'line', symbol: 'none', lineStyle: { width: 1, color: '#00bcd4' }, data: sampleData(dataMid) });
   if (bidBox?.checked) updated.push({ id: 'bid', name: 'Bid', type: 'scatter', symbolSize: 2, itemStyle: { color: '#4caf50' }, data: sampleData(dataBid) });
 
   const checkedLabels = Array.from(document.querySelectorAll(".labelCheckbox:checked")).map(c => c.value);
   const labelSeriesFiltered = labelSeries.filter(s => checkedLabels.includes(s.name));
+
   chart.setOption({ series: [...updated, ...labelSeriesFiltered] }, { replaceMerge: ['series'], lazyUpdate: true });
+
   adjustYAxisToZoom();
 }
+
 
 function adjustYAxisToZoom() {
   if (adjusting) return;
