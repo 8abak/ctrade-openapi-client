@@ -73,10 +73,7 @@ function updateSeries() {
   const filteredLabels = labelSeries.filter(s => checkedLabels.includes(s.name));
 
   chart.setOption({ series: [...updated, ...filteredLabels] }, { replaceMerge: ['series'], lazyUpdate: true });
-}
-
-function tickTimeById(tickid) {
-  return dataMid.find(p => p[2] === tickid)?.[0] ?? null;
+  adjustYAxisToZoom();
 }
 
 function adjustYAxisToZoom() {
@@ -98,6 +95,9 @@ function adjustYAxisToZoom() {
   chart.setOption({ yAxis: { min: newMin, max: newMax } });
 }
 
+function tickTimeById(tickid) {
+  return dataMid.find(p => p[2] === tickid)?.[0] ?? null;
+}
 
 async function loadDayTicks() {
   const dateStr = document.getElementById("htickDate").value;
@@ -126,7 +126,6 @@ async function loadDayTicks() {
   });
 
   updateSeries();
-  adjustYAxisToZoom();
   setTimeout(loadAllLabels, 300);
 }
 
@@ -186,7 +185,10 @@ function debounce(fn, delay) {
 window.addEventListener('DOMContentLoaded', () => {
   chart = echarts.init(document.getElementById("main"));
   chart.setOption(option);
-  chart.on('dataZoom', debounce(updateSeries, 100));
+  chart.on('dataZoom', debounce(() => {
+    updateSeries();
+    adjustYAxisToZoom();
+  }, 100));
 
   const loadBtn = document.getElementById("loadButton");
   if (loadBtn) loadBtn.addEventListener("click", loadDayTicks);
