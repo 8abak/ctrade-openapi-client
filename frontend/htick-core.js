@@ -107,7 +107,8 @@ async function loadDayTicks() {
   if (!dateStr) return;
 
   const localHour = parseInt(document.getElementById("hourInput")?.value || '8', 10);
-  const start = new Date(`${dateStr}T${String(localHour).padStart(2, '0')}:00:00+10:00`);
+  const start = new Date(dateStr);
+  start.setHours(localHour, 0, 0, 0);
   const end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
   currentStartEpoch = start.getTime();
   currentEndEpoch = end.getTime();
@@ -122,7 +123,7 @@ async function loadDayTicks() {
   dataBid = ticks.map(t => [parseTime(t.timestamp), t.bid, t.id]);
 
   const totalWindow = currentEndEpoch - currentStartEpoch;
-  const defaultZoomEnd = currentStartEpoch + totalWindow / 2; // half-day default zoom
+  const defaultZoomEnd = currentStartEpoch + totalWindow / 6; // smaller initial window
 
   chart.setOption({
     xAxis: { min: currentStartEpoch, max: currentEndEpoch },
