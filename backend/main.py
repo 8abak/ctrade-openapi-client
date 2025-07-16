@@ -78,6 +78,21 @@ async def receive_tick(tick: Tick):
             connectedClients.remove(ws)
     return {"status": "ok"}
 
+@app.post("/tickstream/push2")
+async def receive_tick(tick: dict):
+    print("📥 Received push", tick)
+    dead = set()
+    for ws in connectedClients:
+        try:
+            await ws.send_json(tick)
+        except Exception as e:
+            print("❌ Error sending to WS:", e)
+            dead.add(ws)
+    for ws in dead:
+        connectedClients.remove(ws)
+    return {"status": "broadcasted", "clients": len(connectedClients)}
+
+
 # Get latest ticks after timestamp
 @app.get("/ticks/latest", response_model=List[Tick])
 def get_latest_ticks(after: str = Query(...)):
