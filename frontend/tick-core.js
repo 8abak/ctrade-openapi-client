@@ -117,10 +117,7 @@ async function loadInitialTickRange() {
   });
 
   
-      chart.appendData({
-        seriesIndex: 1,
-        data: [[ts, tick.ask, tick.id]]
-      });
+      // Removed broken appendData usage; replaced with updateSeries() below
       chart.appendData({
         seriesIndex: 2,
         data: [[ts, tick.bid, tick.id]]
