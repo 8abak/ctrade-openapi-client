@@ -76,8 +76,8 @@ function updateSeries() {
   const filteredLabels = labelSeries.filter(s => checkedLabels.includes(s.name));
 
   chart.setOption({ series: [...updated, ...filteredLabels] }, { replaceMerge: ['series'], lazyUpdate: true });
+  adjustYAxisToZoom();
 }
-
 
 function adjustYAxisToZoom() {
   const zoom = chart.getOption()?.dataZoom?.[0];
@@ -106,7 +106,8 @@ async function loadDayTicks() {
   const dateStr = document.getElementById("htickDate").value;
   if (!dateStr) return;
 
-  const start = new Date(`${dateStr}T18:00:00Z`);
+  const localHour = parseInt(document.getElementById("hourInput")?.value || '8', 10);
+  const start = new Date(`${dateStr}T${String(localHour).padStart(2, '0')}:00:00+10:00`);
   const end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
   currentStartEpoch = start.getTime();
   currentEndEpoch = end.getTime();
