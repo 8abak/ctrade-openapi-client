@@ -116,7 +116,18 @@ async function loadInitialTickRange() {
     ]
   });
 
-  updateSeries();
+  chart.appendData({
+        seriesIndex: 0,
+        data: [[ts, tick.mid, tick.id]]
+      });
+      chart.appendData({
+        seriesIndex: 1,
+        data: [[ts, tick.ask, tick.id]]
+      });
+      chart.appendData({
+        seriesIndex: 2,
+        data: [[ts, tick.bid, tick.id]]
+      });
   connectLiveSocket();
   showVersion();
 }
@@ -128,7 +139,7 @@ function connectLiveSocket() {
     try {
       const tick = JSON.parse(e.data);
       const ts = Date.parse(tick.timestamp);
-      if (ts <= lastTimestamp) return;
+      if (ts <= lastTimestamp && tick.id <= dataMid[dataMid.length - 1]?.[2]) return;
       lastTimestamp = ts;
       dataMid.push([ts, tick.mid, tick.id]);
       dataAsk.push([ts, tick.ask, tick.id]);
