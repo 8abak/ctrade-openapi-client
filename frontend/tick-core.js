@@ -116,10 +116,7 @@ async function loadInitialTickRange() {
     ]
   });
 
-  chart.appendData({
-        seriesIndex: 0,
-        data: [[ts, tick.mid, tick.id]]
-      });
+  
       chart.appendData({
         seriesIndex: 1,
         data: [[ts, tick.ask, tick.id]]
@@ -195,5 +192,6 @@ window.addEventListener('DOMContentLoaded', () => {
     updateSeries();
     adjustYAxisToZoom();
   }, 100));
+  updateSeries();
   loadInitialTickRange();
 });
