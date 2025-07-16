@@ -106,7 +106,6 @@ def writeTick(timestamp, symbolId, bid, ask):
         print(f"❌ DB error: {e}", flush=True)
         conn.rollback()
 
-
 def connected(_):
     print("✅ Connected. Subscribing to spot data...", flush=True)
     authMsg = ProtoOAApplicationAuthReq()
