@@ -76,8 +76,8 @@ function updateSeries() {
   const filteredLabels = labelSeries.filter(s => checkedLabels.includes(s.name));
 
   chart.setOption({ series: [...updated, ...filteredLabels] }, { replaceMerge: ['series'], lazyUpdate: true });
-  adjustYAxisToZoom();
 }
+
 
 function adjustYAxisToZoom() {
   const zoom = chart.getOption()?.dataZoom?.[0];
