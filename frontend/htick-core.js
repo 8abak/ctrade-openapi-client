@@ -77,6 +77,7 @@ function updateSeries() {
 }
 
 
+
 function adjustYAxisToZoom() {
   if (adjusting) return;
   adjusting = true;
@@ -150,8 +151,8 @@ async function loadDayTicks() {
     ]
   });
 
-  await loadAllLabels();
   updateSeries();
+  setTimeout(loadAllLabels, 300);
 }
 
 
