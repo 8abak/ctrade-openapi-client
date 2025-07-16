@@ -53,9 +53,9 @@
 <body>
   <div id="sidebar">
     <h3>Htick View</h3>
-    <div>
-      <label>Date</label><br />
-      <input type="date" id="dateInput" style="width: 100%" />
+    <div style="margin-top: 1em;">
+      <label for="htickDate">Select Day:</label>
+      <input type="date" id="htickDate" onchange="onHtDateChange()" style="width: 100%;" />
     </div>
     <div style="margin-top: 10px;">
       <label>Start Hour</label><br />

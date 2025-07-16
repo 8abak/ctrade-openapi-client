@@ -155,6 +155,30 @@ async function loadDayTicks() {
   setTimeout(loadAllLabels, 300);
 }
 
+async function loadTicksByDay(dateStr) {
+  const start = new Date(`${dateStr}T08:00:00Z`);
+  const end = new Date(start.getTime() + 24 * 60 * 60 * 1000);  // +1 day
+
+  const startIso = start.toISOString();
+  const endIso = end.toISOString();
+
+  const res = await fetch(`/ticks/range?start=${startIso}&end=${endIso}`);
+  const ticks = await res.json();
+  if (!Array.isArray(ticks) || ticks.length === 0) {
+    console.warn("No ticks for this range.");
+    return;
+  }
+
+  data = ticks.map(t => [t.timestamp, t.mid, t.id]);
+  lastTimestamp = ticks[ticks.length - 1]?.timestamp;
+
+  chart.setOption({
+    xAxis: { data: data.map(d => d[0]) },
+    series: [{ data }]
+  });
+
+  updateLabelView();
+}
 
 
 async function loadAllLabels() {
@@ -225,6 +249,12 @@ async function loadAllLabels() {
   }
 }
 
+function onHtDateChange() {
+  const date = document.getElementById('htickDate').value;
+  if (date) {
+    loadDayTicks(date);
+  }
+}
 
 
 function tickTimeById(tickid) {

@@ -1,6 +1,6 @@
 # backend/main.py
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List
@@ -91,6 +91,20 @@ def get_latest_ticks(after: str = Query(...)):
         """)
         result = conn.execute(query, {"after": after})
         return [dict(row._mapping) for row in result]
+
+# Get ticks in a specific range for htick view
+@app.get("/ticks/range", response_model=List[Tick])
+def get_ticks_range(start: str, end: str):
+    with engine.connect() as conn:
+        query = text("""
+            SELECT id, timestamp, bid, ask, mid
+            FROM ticks
+            WHERE timestamp >= :start AND timestamp < :end
+            ORDER BY timestamp ASC
+        """)
+        result = conn.execute(query, {"start": start, "end": end})
+        ticks = [dict(row._mapping) for row in result]
+    return ticks
 
 # Get recent N ticks
 @app.get("/ticks/recent", response_model=List[Tick])
