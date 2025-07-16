@@ -118,10 +118,7 @@ async function loadInitialTickRange() {
 
   
       // Removed broken appendData usage; replaced with updateSeries() below
-      chart.appendData({
-        seriesIndex: 2,
-        data: [[ts, tick.bid, tick.id]]
-      });
+  updateSeries();
   connectLiveSocket();
   showVersion();
 }
