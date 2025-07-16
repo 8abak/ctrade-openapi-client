@@ -5,6 +5,9 @@ let chart;
 let dataMid = [], dataAsk = [], dataBid = [], labelSeries = [];
 let currentStartEpoch = null, currentEndEpoch = null;
 
+const MAX_VISIBLE_POINTS = 3000;
+const MAX_TOTAL_POINTS = 60000;  // Can be adjusted based on browser memory
+
 const option = {
   backgroundColor: '#111',
   tooltip: {
@@ -53,8 +56,8 @@ const option = {
 };
 
 function sampleData(data) {
-  if (data.length < 5000) return data;
-  const step = Math.floor(data.length / 3000);
+  if (data.length <= MAX_VISIBLE_POINTS) return data;
+  const step = Math.floor(data.length / MAX_VISIBLE_POINTS);
   return data.filter((_, i) => i % step === 0);
 }
 
@@ -103,7 +106,7 @@ async function loadDayTicks() {
   const dateStr = document.getElementById("htickDate").value;
   if (!dateStr) return;
 
-  const start = new Date(`${dateStr}T08:00:00Z`);
+  const start = new Date(`${dateStr}T18:00:00Z`);
   const end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
   currentStartEpoch = start.getTime();
   currentEndEpoch = end.getTime();
@@ -117,11 +120,14 @@ async function loadDayTicks() {
   dataAsk = ticks.map(t => [parseTime(t.timestamp), t.ask, t.id]);
   dataBid = ticks.map(t => [parseTime(t.timestamp), t.bid, t.id]);
 
+  const totalWindow = currentEndEpoch - currentStartEpoch;
+  const defaultZoomEnd = currentStartEpoch + totalWindow / 2; // half-day default zoom
+
   chart.setOption({
     xAxis: { min: currentStartEpoch, max: currentEndEpoch },
     dataZoom: [
-      { startValue: currentStartEpoch, endValue: currentStartEpoch + 2 * 60 * 60 * 1000 },
-      { startValue: currentStartEpoch, endValue: currentStartEpoch + 2 * 60 * 60 * 1000 }
+      { startValue: currentStartEpoch, endValue: defaultZoomEnd },
+      { startValue: currentStartEpoch, endValue: defaultZoomEnd }
     ]
   });
 
