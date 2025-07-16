@@ -79,6 +79,26 @@ function tickTimeById(tickid) {
   return dataMid.find(p => p[2] === tickid)?.[0] ?? null;
 }
 
+function adjustYAxisToZoom() {
+  const zoom = chart.getOption()?.dataZoom?.[0];
+  if (!zoom || zoom.startValue === undefined || zoom.endValue === undefined) return;
+
+  const start = zoom.startValue;
+  const end = zoom.endValue;
+
+  const visiblePoints = [...dataMid, ...dataAsk, ...dataBid]
+    .filter(p => p[0] >= start && p[0] <= end)
+    .map(p => p[1]);
+
+  if (visiblePoints.length === 0) return;
+
+  const newMin = Math.floor(Math.min(...visiblePoints)) - 1;
+  const newMax = Math.ceil(Math.max(...visiblePoints)) + 1;
+
+  chart.setOption({ yAxis: { min: newMin, max: newMax } });
+}
+
+
 async function loadDayTicks() {
   const dateStr = document.getElementById("htickDate").value;
   if (!dateStr) return;
@@ -106,11 +126,12 @@ async function loadDayTicks() {
   });
 
   updateSeries();
+  adjustYAxisToZoom();
   setTimeout(loadAllLabels, 300);
 }
 
 async function loadAllLabels() {
-  let labelList = await fetch("/labels/available").then(res => res.json()).catch(console.error);
+  let labelList = await fetch("/available").then(res => res.json()).catch(console.error);
   if (!Array.isArray(labelList)) return;
 
   const container = document.getElementById("labelCheckboxes");
