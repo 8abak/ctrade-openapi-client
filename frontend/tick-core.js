@@ -103,11 +103,13 @@ async function loadInitialTickRange() {
   dataAsk = ticks.map(t => [parse(t.timestamp), t.ask, t.id]);
   dataBid = ticks.map(t => [parse(t.timestamp), t.bid, t.id]);
 
+  const tradingEnd = new Date(tradingStart);
+  tradingEnd.setDate(tradingEnd.getDate() + 1);
   const zoomEnd = Math.ceil(lastTimestamp / (60 * 1000)) * 60 * 1000;
   const zoomStart = zoomEnd - 5 * 60 * 1000;
 
   chart.setOption({
-    xAxis: { min: tradingStart.getTime(), max: zoomEnd + 60 * 1000 },
+    xAxis: { min: tradingStart.getTime(), max: tradingEnd.getTime() },
     dataZoom: [
       { startValue: zoomStart, endValue: zoomEnd },
       { startValue: zoomStart, endValue: zoomEnd }
@@ -116,6 +118,7 @@ async function loadInitialTickRange() {
 
   updateSeries();
   connectLiveSocket();
+  showVersion();
 }
 
 function connectLiveSocket() {
@@ -145,6 +148,29 @@ function debounce(fn, delay) {
     clearTimeout(timeout);
     timeout = setTimeout(() => fn(...args), delay);
   };
+}
+
+function format(v) {
+  return v ? `${v.datetime} ${v.message}` : '-';
+}
+
+function showVersion() {
+  fetch("/version")
+    .then(res => res.json())
+    .then(v => {
+      const val = v["tick"];
+      const versionDiv = document.createElement('div');
+      versionDiv.style.position = 'absolute';
+      versionDiv.style.left = '10px';
+      versionDiv.style.bottom = '8px';
+      versionDiv.style.color = '#777';
+      versionDiv.style.fontSize = '11px';
+      versionDiv.style.whiteSpace = 'pre-line';
+      versionDiv.innerHTML = `J: ${format(val?.js)}
+B: ${format(val?.py)}
+H: ${format(val?.html)}`;
+      document.body.appendChild(versionDiv);
+    });
 }
 
 window.addEventListener('DOMContentLoaded', () => {
