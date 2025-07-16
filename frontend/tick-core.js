@@ -139,6 +139,14 @@ function connectLiveSocket() {
   ws.onclose = () => console.warn("🔌 WebSocket closed");
 }
 
+function debounce(fn, delay) {
+  let timeout;
+  return (...args) => {
+    clearTimeout(timeout);
+    timeout = setTimeout(() => fn(...args), delay);
+  };
+}
+
 window.addEventListener('DOMContentLoaded', () => {
   chart = echarts.init(document.getElementById("main"));
   chart.setOption(option);
