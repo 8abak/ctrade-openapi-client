@@ -66,7 +66,7 @@ function updateSeries() {
 
   const updated = [];
   if (ask) updated.push({ id: 'ask', name: 'Ask', type: 'scatter', symbolSize: 2, itemStyle: { color: '#f5a623' }, data: sampleData(dataAsk) });
-  if (mid) updated.push({ id: 'mid', name: 'Mid', type: 'line', symbol: 'none', lineStyle: { width: 1, color: '#00bcd4' }, data: sampleData(dataMid) });
+  if (mid) updated.push({ id: 'mid', name: 'Mid', type: 'scatter', symbolSize: 2, itemStyle: { color: '#00bcd4' }, data: sampleData(dataMid) });
   if (bid) updated.push({ id: 'bid', name: 'Bid', type: 'scatter', symbolSize: 2, itemStyle: { color: '#4caf50' }, data: sampleData(dataBid) });
 
   const checkedLabels = Array.from(document.querySelectorAll(".labelCheckbox:checked")).map(c => c.value);
