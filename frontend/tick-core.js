@@ -125,7 +125,10 @@ async function loadInitialTickRange() {
 
 function connectLiveSocket() {
   const ws = new WebSocket("wss://www.datavis.au/ws/ticks");
-  ws.onopen = () => console.log("📡 Connected");
+  ws.onopen = () => {
+    console.log("📡 Connected to WebSocket");
+    ws.send("ping from frontend");
+  };
   ws.onmessage = (e) => {
     try {
       const tick = JSON.parse(e.data);
