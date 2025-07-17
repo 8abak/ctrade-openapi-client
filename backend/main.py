@@ -258,7 +258,7 @@ def run_sql_query(query: str = Query(...)):
 async def streamRealTickets(websocket: WebSocket):
     await websocket.accept()
     connectedClients.add(websocket)
-    print(f"🎯 WebSocket connected. Total clients: {len(connectedClients)}", flush=True)
+    print(f"🎯 WebSocket connected from {websocket.client.host}. Total: {len(connectedClients)}", flush=True)
 
     try:
         while True:
