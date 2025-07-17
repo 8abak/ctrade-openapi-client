@@ -251,15 +251,16 @@ async def streamRealTickets(websocket: WebSocket):
     connectedClients.add(websocket)
     print(f"🎯 WebSocket connected from {websocket.client.host}. Total: {len(connectedClients)}", flush=True)
 
-    try:
-        while True:
-            await asyncio.sleep(3600)
-            msg = await websocket.receive_text()
-            print(f"📬 Received message: {msg}", flush=True)
-    except WebSocketDisconnect:
-        connectedClients.remove(websocket)
-        print("❌ WebSocket disconnected", flush=True)
-        return
+    async def receive_loop():
+        try:
+            while True:
+                msg = await websocket.receive_text()
+                print(f"📬 Received message: {msg}", flush=True)
+        except WebSocketDisconnect:
+            print("❌ WebSocket disconnected", flush=True)
+            connectedClients.remove(websocket)
+
+    asyncio.create_task(receive_loop())  # Non-blocking
 
 # Version check
 @app.get("/version")
