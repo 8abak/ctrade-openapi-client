@@ -70,28 +70,19 @@ def get_ticks(offset: int = 0, limit: int = 2000):
 # get ticks from ws
 @app.post("/tickstream/push")
 async def receive_tick(tick: Tick):
+    print(f"📨 Received tick push: {tick}", flush=True)
+    print(f"🧩 Connected clients at push: {len(connectedClients)}", flush=True)
+    dead = set()
     for ws in list(connectedClients):
         try:
-            print(f"✅ Broadcasting tick ID {tick.id} to {len(connectedClients)} clients", flush=True)
             await ws.send_json(tick.dict())
-        except:
-            connectedClients.remove(ws)
-    return {"status": "ok"}
-
-@app.post("/tickstream/push2")
-async def receive_tick(tick: dict):
-    print("📥 Received push", tick)
-    dead = set()
-    for ws in connectedClients:
-        try:
-            await ws.send_json(tick)
+            print(f"📤 Tick sent to client", flush=True)
         except Exception as e:
-            print("❌ Error sending to WS:", e)
+            print(f"❌ Error sending tick to client: {e}", flush=True)
             dead.add(ws)
     for ws in dead:
         connectedClients.remove(ws)
-    return {"status": "broadcasted", "clients": len(connectedClients)}
-
+    return {"status": "ok"}
 
 # Get latest ticks after timestamp
 @app.get("/ticks/latest", response_model=List[Tick])
