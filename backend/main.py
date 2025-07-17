@@ -259,7 +259,7 @@ async def streamRealTickets(websocket: WebSocket):
     await websocket.accept()
     connectedClients.add(websocket)
     print(f"🎯 WebSocket connected. Total clients: {len(connectedClients)}", flush=True)
-    
+
     try:
         while True:
             await asyncio.sleep(3600)
