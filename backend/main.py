@@ -1,36 +1,30 @@
-# backend/main.py
-
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import List
-from sqlalchemy import create_engine, text
-import os
-from datetime import datetime
 from fastapi.responses import JSONResponse
-from fastapi import WebSocket
+from pydantic import BaseModel
+from typing import List, Set
+from sqlalchemy import create_engine, text
+from datetime import datetime
 import asyncio
-import random
-from datetime import timezone, timedelta
-from fastapi import WebSocket, WebSocketDisconnect
-from backend.wsmanager import connectedClients
+import os
+import json
 
-# Initialize FastAPI test to see version 002
 app = FastAPI()
+connectedClients: Set[WebSocket] = set()
 
-# Allow cross-origin requests (frontend calling this backend)
+# CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # You can restrict this to "https://www.datavis.au" later
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Database connection
+# DB setup
 db_url = os.getenv("DATABASE_URL", "postgresql+psycopg2://babak:babak33044@localhost:5432/trading")
 engine = create_engine(db_url)
 
-# Tick model
+# Models
 class Tick(BaseModel):
     id: int
     timestamp: datetime
@@ -38,201 +32,140 @@ class Tick(BaseModel):
     ask: float
     mid: float
 
-# Home route to check if API is live
 @app.get("/")
 def home():
-    return {"message": "Tick API is live. Try /ticks or /ticks/latest."}
+    return {"message": "Tick API is live."}
 
-#get last id 
 @app.get("/ticks/lastid")
 def get_last_id():
     with engine.connect() as conn:
-        query = text("SELECT id, timestamp FROM ticks ORDER BY id DESC LIMIT 1")
-        result = conn.execute(query).fetchone()
+        row = conn.execute(text("SELECT id, timestamp FROM ticks ORDER BY id DESC LIMIT 1")).fetchone()
         return {
-            "lastId": result[0] if result else None,
-            "timestamp": result[1].isoformat() if result else None
+            "lastId": row[0] if row else None,
+            "timestamp": row[1].isoformat() if row else None
         }
 
-# Get ticks with offset (legacy)
 @app.get("/ticks", response_model=List[Tick])
 def get_ticks(offset: int = 0, limit: int = 2000):
     with engine.connect() as conn:
-        query = text("""
-            SELECT id, timestamp, bid, ask, mid
-            FROM ticks
-            ORDER BY timestamp ASC
-            OFFSET :offset LIMIT :limit
-        """)
-        result = conn.execute(query, {"offset": offset, "limit": limit})
-        return [dict(row._mapping) for row in result]
+        rows = conn.execute(text("""
+            SELECT id, timestamp, bid, ask, mid FROM ticks
+            ORDER BY timestamp ASC OFFSET :offset LIMIT :limit
+        """), {"offset": offset, "limit": limit})
+        return [dict(r._mapping) for r in rows]
 
-# get ticks from ws
 @app.post("/tickstream/push")
 async def receive_tick(tick: Tick):
-    print(f"📨 Received tick push: {tick}", flush=True)
-    print(f"🧩 Connected clients at push: {len(connectedClients)}", flush=True)
-    dead = set()
+    print(f"📨 Received tick: {tick}", flush=True)
+    print(f"🧩 Connected clients: {len(connectedClients)}", flush=True)
+    to_remove = set()
     for ws in list(connectedClients):
         try:
             await ws.send_json(tick.dict())
-            print(f"📤 Tick sent to client", flush=True)
+            print("📤 Sent to client", flush=True)
         except Exception as e:
-            print(f"❌ Error sending tick to client: {e}", flush=True)
-            dead.add(ws)
-    for ws in dead:
+            print(f"❌ Failed to send: {e}", flush=True)
+            to_remove.add(ws)
+    for ws in to_remove:
         connectedClients.remove(ws)
     return {"status": "ok"}
 
-# Get latest ticks after timestamp
 @app.get("/ticks/latest", response_model=List[Tick])
 def get_latest_ticks(after: str = Query(...)):
     with engine.connect() as conn:
-        query = text("""
-            SELECT id, timestamp, bid, ask, mid
-            FROM ticks
+        rows = conn.execute(text("""
+            SELECT id, timestamp, bid, ask, mid FROM ticks
             WHERE timestamp > :after
-            ORDER BY timestamp ASC
-            LIMIT 1000
-        """)
-        result = conn.execute(query, {"after": after})
-        return [dict(row._mapping) for row in result]
+            ORDER BY timestamp ASC LIMIT 1000
+        """), {"after": after})
+        return [dict(r._mapping) for r in rows]
 
-# Get ticks in a specific range for htick view
 @app.get("/ticks/range", response_model=List[Tick])
 def get_ticks_range(start: str, end: str):
     with engine.connect() as conn:
-        query = text("""
-            SELECT id, timestamp, bid, ask, mid
-            FROM ticks
+        rows = conn.execute(text("""
+            SELECT id, timestamp, bid, ask, mid FROM ticks
             WHERE timestamp >= :start AND timestamp < :end
             ORDER BY timestamp ASC
-        """)
-        result = conn.execute(query, {"start": start, "end": end})
-        ticks = [dict(row._mapping) for row in result]
-    return ticks
+        """), {"start": start, "end": end})
+        return [dict(r._mapping) for r in rows]
 
-# Get recent N ticks
 @app.get("/ticks/recent", response_model=List[Tick])
 def get_recent_ticks(limit: int = Query(2200, le=5000)):
     with engine.connect() as conn:
-        query = text("""
-            SELECT id, timestamp, bid, ask, mid
-            FROM (
-                SELECT id, timestamp, bid, ask, mid
-                FROM ticks
-                ORDER BY timestamp DESC
-                LIMIT :limit
-            ) sub
-            ORDER BY timestamp ASC
-        """)
-        result = conn.execute(query, {"limit": limit})
-        return [dict(row._mapping) for row in result]
+        rows = conn.execute(text("""
+            SELECT id, timestamp, bid, ask, mid FROM (
+                SELECT id, timestamp, bid, ask, mid FROM ticks
+                ORDER BY timestamp DESC LIMIT :limit
+            ) sub ORDER BY timestamp ASC
+        """), {"limit": limit})
+        return [dict(r._mapping) for r in rows]
 
-# Get ticks before a specific tick ID
 @app.get("/ticks/before/{tickid}", response_model=List[Tick])
 def get_ticks_before(tickid: int, limit: int = 2000):
     with engine.connect() as conn:
-        query = text("""
-            SELECT id, timestamp, bid, ask, mid
-            FROM ticks
-            WHERE id < :tickid
-            ORDER BY timestamp DESC
-            LIMIT :limit
-        """)
-        result = conn.execute(query, {"tickid": tickid, "limit": limit})
-        return list(reversed([dict(row._mapping) for row in result]))
+        rows = conn.execute(text("""
+            SELECT id, timestamp, bid, ask, mid FROM ticks
+            WHERE id < :tickid ORDER BY timestamp DESC LIMIT :limit
+        """), {"tickid": tickid, "limit": limit})
+        return list(reversed([dict(r._mapping) for r in rows]))
 
-# Get ticks after a tick ID (used for Htick View scroll)
 @app.get("/ticks/after-id/{tickid}", response_model=List[Tick])
 def get_ticks_after_id(tickid: int, limit: int = 2000):
     with engine.connect() as conn:
-        query = text("""
-            SELECT id, timestamp, bid, ask, mid
-            FROM ticks
-            WHERE id > :tickid
-            ORDER BY id ASC
-            LIMIT :limit
-        """)
-        result = conn.execute(query, {"tickid": tickid, "limit": limit})
-        return [dict(row._mapping) for row in result]
+        rows = conn.execute(text("""
+            SELECT id, timestamp, bid, ask, mid FROM ticks
+            WHERE id > :tickid ORDER BY id ASC LIMIT :limit
+        """), {"tickid": tickid, "limit": limit})
+        return [dict(r._mapping) for r in rows]
 
-# ✅ NEW: Get ticks after a timestamp (used for main chart startup)
 @app.get("/ticks/after/{timestamp}", response_model=List[Tick])
 def get_ticks_after_timestamp(timestamp: str, limit: int = 5000):
     with engine.connect() as conn:
-        query = text("""
-            SELECT id, timestamp, bid, ask, mid
-            FROM ticks
-            WHERE timestamp >= :timestamp
-            ORDER BY timestamp ASC
-            LIMIT :limit
-        """)
-        result = conn.execute(query, {"timestamp": timestamp, "limit": limit})
-        return [dict(row._mapping) for row in result]
+        rows = conn.execute(text("""
+            SELECT id, timestamp, bid, ask, mid FROM ticks
+            WHERE timestamp >= :timestamp ORDER BY timestamp ASC LIMIT :limit
+        """), {"timestamp": timestamp, "limit": limit})
+        return [dict(r._mapping) for r in rows]
 
-# ✅ NEW: Fetch all labels from a table like /labels/upmoves
 @app.get("/labels/{name}")
 def get_labels_by_name(name: str):
     try:
         with engine.connect() as conn:
-            result = conn.execute(text(f"""
-                SELECT * FROM {name}
-                ORDER BY tickid ASC
-            """))
-            return [dict(row._mapping) for row in result]
+            result = conn.execute(text(f"SELECT * FROM {name} ORDER BY tickid ASC"))
+            return [dict(r._mapping) for r in result]
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
 
-# Get label-related tables that contain tickid
 @app.get("/available")
 def get_label_tables():
     with engine.connect() as conn:
-        query = text("""
-            SELECT t.table_name
-            FROM information_schema.tables t
+        rows = conn.execute(text("""
+            SELECT t.table_name FROM information_schema.tables t
             JOIN information_schema.columns c ON t.table_name = c.table_name
             WHERE t.table_schema = 'public'
-              AND t.table_type = 'BASE TABLE'
-              AND c.column_name ILIKE 'tickid'
-        """)
-        result = conn.execute(query)
-        return sorted({row[0] for row in result})
+            AND t.table_type = 'BASE TABLE'
+            AND c.column_name ILIKE 'tickid'
+        """))
+        return sorted({row[0] for row in rows})
 
-#get latest id
-def get_latest_id():
-    with engine.connect() as conn:
-        result = conn.execute(text("SELECT id FROM ticks ORDER BY id DESC LIMIT 1")).fetchone()
-        return result[0] if result else 0
-        
-        
-#get the latest ids
 @app.get("/ticks/latestid", response_model=List[Tick])
 def get_latest_ticks_after_id(after_id: int = Query(...)):
     with engine.connect() as conn:
-        query = text("""
-            SELECT id, timestamp, bid, ask, mid
-            FROM ticks
-            WHERE id > :after_id
-            ORDER BY id ASC
-            LIMIT 1000
-        """)
-        result = conn.execute(query, {"after_id": after_id})
-        ticks = [dict(row._mapping) for row in result]
-    return ticks
+        rows = conn.execute(text("""
+            SELECT id, timestamp, bid, ask, mid FROM ticks
+            WHERE id > :after_id ORDER BY id ASC LIMIT 1000
+        """), {"after_id": after_id})
+        return [dict(r._mapping) for r in rows]
 
-# SQL Table Browser (for SQL View)
 @app.get("/sqlvw/tables")
 def get_all_table_names():
     with engine.connect() as conn:
-        query = text("""
-            SELECT table_name
-            FROM information_schema.tables
-            WHERE table_schema='public'
-              AND table_type='BASE TABLE'
-        """)
-        result = conn.execute(query)
-        return [row[0] for row in result]
+        rows = conn.execute(text("""
+            SELECT table_name FROM information_schema.tables
+            WHERE table_schema='public' AND table_type='BASE TABLE'
+        """))
+        return [row[0] for row in rows]
 
 @app.get("/sqlvw/query")
 def run_sql_query(query: str = Query(...)):
@@ -251,21 +184,14 @@ async def streamRealTickets(websocket: WebSocket):
     connectedClients.add(websocket)
     print(f"🎯 WebSocket connected from {websocket.client.host}. Total: {len(connectedClients)}", flush=True)
 
-    async def receive_loop():
-        try:
-            while True:
-                msg = await websocket.receive_text()
-                print(f"📬 Received message: {msg}", flush=True)
-        except WebSocketDisconnect:
-            print("❌ WebSocket disconnected", flush=True)
-            connectedClients.remove(websocket)
+    try:
+        while True:
+            await websocket.receive_text()  # keep connection alive
+    except WebSocketDisconnect:
+        print("❌ WebSocket disconnected", flush=True)
+        connectedClients.remove(websocket)
 
-    asyncio.create_task(receive_loop())  # Non-blocking
-
-# Version check
 @app.get("/version")
 def get_version():
-    import json
     with open("static/version.json") as f:
         return json.load(f)
-
