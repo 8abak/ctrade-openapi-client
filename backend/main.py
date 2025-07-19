@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from typing import List, Set
 from sqlalchemy import create_engine, text
 from datetime import datetime
+from backend.wsmanager import pushTick
 import asyncio
 import os
 import json
@@ -54,21 +55,14 @@ def get_ticks(offset: int = 0, limit: int = 2000):
         """), {"offset": offset, "limit": limit})
         return [dict(r._mapping) for r in rows]
 
+from backend.wsmanager import pushTick
+
 @app.post("/tickstream/push")
 async def receive_tick(tick: Tick):
     print(f"📨 Received tick: {tick}", flush=True)
-    print(f"🧩 Connected clients: {len(connectedClients)}", flush=True)
-    to_remove = set()
-    for ws in list(connectedClients):
-        try:
-            await ws.send_json(tick.dict())
-            print("📤 Sent to client", flush=True)
-        except Exception as e:
-            print(f"❌ Failed to send: {e}", flush=True)
-            to_remove.add(ws)
-    for ws in to_remove:
-        connectedClients.remove(ws)
+    await pushTick(tick.model_dump())
     return {"status": "ok"}
+
 
 @app.get("/ticks/latest", response_model=List[Tick])
 def get_latest_ticks(after: str = Query(...)):
