@@ -22,7 +22,7 @@ const option = {
       const dateStr = d.toLocaleDateString("en-AU");
       let tooltip = `<div style='padding:8px'><strong>${timeStr}</strong><br><span style='color:#ccc'>${dateStr}</span><br>`;
       params.forEach(p => {
-        tooltip += `${p.seriesName}: <strong style='color:${p.color}'>${p.value[1]}</strong><br>`;
+        tooltip += `${p.seriesName}: <strong style='color:${p.color}'>${p.value[1]}</strong> <span style='color:#888'>(ID: ${p.value[2]})</span><br>`;
       });
       tooltip += '</div>';
       return tooltip;
