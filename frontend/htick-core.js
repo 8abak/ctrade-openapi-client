@@ -18,15 +18,20 @@ const option = {
     textStyle: { color: '#fff', fontSize: 13 },
     formatter: (params) => {
       const d = new Date(params[0].value[0]);
-      const timeStr = d.toLocaleTimeString("en-AU", { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+      const timeStr = d.toLocaleTimeString("en-AU", {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false
+      });
       const dateStr = d.toLocaleDateString("en-AU");
-      const tickId = params[0].value[2];  // consistent across series
+      const tickId = params[0].value[2];
+      const spread = params[0].value[3];
 
-      let tooltip = `<div style='padding:8px'>🆔 <strong>${tickId}</strong><br>`;
-      tooltip += `${timeStr}<br><span style='color:#ccc'>${dateStr}</span><br>`;
+      let tooltip = `<div style='padding:8px'>🆔 <strong>${tickId}</strong><br>${timeStr}<br><span style='color:#ccc'>${dateStr}</span><br>`;
       params.forEach(p => {
         if (p.seriesName === 'Mid') {
-          tooltip += `${p.seriesName}: <strong style='color:${p.color}'>${p.value[1]}</strong> <span style='color:#aaa'>(Spread: ${p.value[3]?.toFixed(2)})</span><br>`;
+          tooltip += `${p.seriesName}: <strong style='color:${p.color}'>${p.value[1]}</strong> <span style='color:#aaa'>(Spread: ${spread})</span><br>`;
         } else {
           tooltip += `${p.seriesName}: <strong style='color:${p.color}'>${p.value[1]}</strong><br>`;
         }
@@ -125,7 +130,13 @@ async function loadDayTicks() {
   if (!Array.isArray(ticks) || ticks.length === 0) return;
 
   const parseTime = ts => Date.parse(ts);
-  dataMid = ticks.map(t => [parseTime(t.timestamp), t.mid, t.id]);
+  dataMid = ticks.map(t => [
+    parseTime(t.timestamp),
+    t.mid,
+    t.id,
+    (t.ask-t.bid).toFixed(2)  // Calculate spread
+  ]);
+    
   dataAsk = ticks.map(t => [parseTime(t.timestamp), t.ask, t.id]);
   dataBid = ticks.map(t => [parseTime(t.timestamp), t.bid, t.id]);
 
