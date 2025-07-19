@@ -20,9 +20,16 @@ const option = {
       const d = new Date(params[0].value[0]);
       const timeStr = d.toLocaleTimeString("en-AU", { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
       const dateStr = d.toLocaleDateString("en-AU");
-      let tooltip = `<div style='padding:8px'><strong>${timeStr}</strong><br><span style='color:#ccc'>${dateStr}</span><br>`;
+      const tickId = params[0].value[2];  // consistent across series
+
+      let tooltip = `<div style='padding:8px'>🆔 <strong>${tickId}</strong><br>`;
+      tooltip += `${timeStr}<br><span style='color:#ccc'>${dateStr}</span><br>`;
       params.forEach(p => {
-        tooltip += `${p.seriesName}: <strong style='color:${p.color}'>${p.value[1]}</strong> <span style='color:#888'>(ID: ${p.value[2]})</span><br>`;
+        if (p.seriesName === 'Mid') {
+          tooltip += `${p.seriesName}: <strong style='color:${p.color}'>${p.value[1]}</strong> <span style='color:#aaa'>(Spread: ${p.value[3]?.toFixed(2)})</span><br>`;
+        } else {
+          tooltip += `${p.seriesName}: <strong style='color:${p.color}'>${p.value[1]}</strong><br>`;
+        }
       });
       tooltip += '</div>';
       return tooltip;
