@@ -63,9 +63,9 @@ function sampleData(data) {
 
 function updateSeries() {
   if (!chart || dataMid.length === 0) return;
-  const ask = document.getElementById('askCheckbox')?.checked;
+  const ask = document.getElementById('askCheckbox');
   const mid = document.getElementById('midCheckbox')?.checked;
-  const bid = document.getElementById('bidCheckbox')?.checked;
+  const bid = document.getElementById('bidCheckbox');
 
   const updated = [];
   if (ask) updated.push({ id: 'ask', name: 'Ask', type: 'scatter', symbolSize: 2, itemStyle: { color: '#f5a623' }, data: sampleData(dataAsk) });
