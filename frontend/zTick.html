@@ -23,16 +23,17 @@
       background: #1a1a1a;
       display: flex;
       flex-direction: column;
-      gap: 12px;
+      justify-content: space-between;
     }
     label { font-size: 13px; margin-top: 4px; }
-    select, button {
+    select, input, button, textarea {
       width: 100%;
       padding: 6px;
       font-size: 14px;
       background: #222;
       color: white;
       border: 1px solid #555;
+      margin-top: 4px;
     }
     input[type="checkbox"] {
       margin-right: 6px;
@@ -40,51 +41,47 @@
     #main {
       flex-grow: 1;
     }
-    textarea {
-      width: 100%;
-      padding: 6px;
-      font-size: 14px;
-      background: #222;
-      color: white;
-      border: 1px solid #555;
-    }
+    .section { margin-bottom: 1em; }
   </style>
 </head>
 <body>
 <div id="container">
   <div id="sidebar">
-    <h3>ZTick View</h3>
+    <div>
+      <h3>ZTick View</h3>
 
-    <div><strong>Start Time</strong></div>
-    <select id="startYear"></select>
-    <select id="startMonth"></select>
-    <select id="startDay"></select>
-    <select id="startHour"></select>
-    <select id="startMinute"></select>
+      <div class="section">
+        <label for="startTime">Start Time</label>
+        <input type="datetime-local" id="startTime">
+      </div>
 
-    <div><strong>End Time</strong></div>
-    <select id="endYear"></select>
-    <select id="endMonth"></select>
-    <select id="endDay"></select>
-    <select id="endHour"></select>
-    <select id="endMinute"></select>
+      <div class="section">
+        <label for="endTime">End Time</label>
+        <input type="datetime-local" id="endTime">
+      </div>
 
-    <button onclick="loadZTickChart()">Load Chart</button>
+      <button onclick="loadZTickChart()">Load Chart</button>
 
-    <div style="margin-top: 1em;"><strong>Series</strong></div>
-    <label><input type="checkbox" id="askCheckbox"> Ask</label>
-    <label><input type="checkbox" id="midCheckbox" checked> Mid</label>
-    <label><input type="checkbox" id="bidCheckbox"> Bid</label>
+      <div class="section">
+        <strong>Series</strong><br>
+        <label><input type="checkbox" id="askCheckbox"> Ask</label><br>
+        <label><input type="checkbox" id="midCheckbox" checked> Mid</label><br>
+        <label><input type="checkbox" id="bidCheckbox"> Bid</label>
+      </div>
 
-    <div id="labelCheckboxes"></div>
+      <div id="labelCheckboxes" class="section"></div>
 
-    <hr>
-    <div><strong>Selected Ticks:</strong></div>
-    <div id="selectedIdsText">None</div>
-    <textarea id="labelNote" rows="2" placeholder="Optional label note..."></textarea>
-    <select id="labelTableSelect"></select>
-    <button onclick="submitLabel()">Submit Labels</button>
-    <button onclick="exportSelectedTicks()">Export CSV</button>
+      <div class="section">
+        <strong>Selected Ticks:</strong>
+        <div id="selectedIdsText">None</div>
+        <textarea id="labelNote" rows="2" placeholder="Optional label note..."></textarea>
+        <select id="labelTableSelect"></select>
+        <button onclick="submitLabel()">Submit Labels</button>
+        <button onclick="exportSelectedTicks()">Export CSV</button>
+      </div>
+    </div>
+
+    <div id="version" style="font-size: 11px; color: #777; text-align: left;"></div>
   </div>
   <div id="main"></div>
 </div>
