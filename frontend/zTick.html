@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>ZTick Chart</title>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5"></script>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      background: #111;
+      color: white;
+      font-family: sans-serif;
+    }
+    #container {
+      display: flex;
+      height: 100vh;
+    }
+    #sidebar {
+      width: 280px;
+      padding: 1em;
+      background: #1a1a1a;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    label { font-size: 13px; margin-top: 4px; }
+    select, button {
+      width: 100%;
+      padding: 6px;
+      font-size: 14px;
+      background: #222;
+      color: white;
+      border: 1px solid #555;
+    }
+    input[type="checkbox"] {
+      margin-right: 6px;
+    }
+    #main {
+      flex-grow: 1;
+    }
+    textarea {
+      width: 100%;
+      padding: 6px;
+      font-size: 14px;
+      background: #222;
+      color: white;
+      border: 1px solid #555;
+    }
+  </style>
+</head>
+<body>
+<div id="container">
+  <div id="sidebar">
+    <h3>ZTick View</h3>
+
+    <div><strong>Start Time</strong></div>
+    <select id="startYear"></select>
+    <select id="startMonth"></select>
+    <select id="startDay"></select>
+    <select id="startHour"></select>
+    <select id="startMinute"></select>
+
+    <div><strong>End Time</strong></div>
+    <select id="endYear"></select>
+    <select id="endMonth"></select>
+    <select id="endDay"></select>
+    <select id="endHour"></select>
+    <select id="endMinute"></select>
+
+    <button onclick="loadZTickChart()">Load Chart</button>
+
+    <div style="margin-top: 1em;"><strong>Series</strong></div>
+    <label><input type="checkbox" id="askCheckbox"> Ask</label>
+    <label><input type="checkbox" id="midCheckbox" checked> Mid</label>
+    <label><input type="checkbox" id="bidCheckbox"> Bid</label>
+
+    <div id="labelCheckboxes"></div>
+
+    <hr>
+    <div><strong>Selected Ticks:</strong></div>
+    <div id="selectedIdsText">None</div>
+    <textarea id="labelNote" rows="2" placeholder="Optional label note..."></textarea>
+    <select id="labelTableSelect"></select>
+    <button onclick="submitLabel()">Submit Labels</button>
+    <button onclick="exportSelectedTicks()">Export CSV</button>
+  </div>
+  <div id="main"></div>
+</div>
+<script src="ztick-core.js"></script>
+</body>
+</html>
