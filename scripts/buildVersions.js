@@ -13,6 +13,12 @@ const pages = [
     js: "frontend/htick-core.js",
     html: "frontend/htick.html",
     py: "backend/main.py"
+  },
+  {
+    key: "ztick",
+    js: "frontend/ztick-core.js",
+    html: "frontend/zTick.html",
+    py: "backend/main.py"
   }
 ];
 

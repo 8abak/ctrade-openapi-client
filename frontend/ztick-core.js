@@ -1,5 +1,6 @@
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [], labelSeries = [], selectedTickIds = [];
+let lastChecked = "";
 
 function initializeChart() {
   chart = echarts.init(document.getElementById("main"));
@@ -66,20 +67,25 @@ function updateZSeries() {
   const mid = document.getElementById('midCheckbox').checked;
   const ask = document.getElementById('askCheckbox').checked;
   const bid = document.getElementById('bidCheckbox').checked;
+  const checked = Array.from(document.querySelectorAll(".labelCheckbox:checked")).map(e => e.value).join(",");
+
+  const state = `${mid}${ask}${bid}:${checked}`;
+  if (state === lastChecked) return; // prevent unnecessary redraw
+  lastChecked = state;
+
   const base = [];
   if (ask) base.push({ name: 'Ask', type: 'scatter', symbolSize: 2, itemStyle: { color: '#f5a623' }, data: dataAsk });
   if (mid) base.push({ name: 'Mid', type: 'scatter', symbolSize: 2, itemStyle: { color: '#00bcd4' }, data: dataMid });
   if (bid) base.push({ name: 'Bid', type: 'scatter', symbolSize: 2, itemStyle: { color: '#4caf50' }, data: dataBid });
 
-  const checked = Array.from(document.querySelectorAll(".labelCheckbox:checked")).map(e => e.value);
   const extras = labelSeries.filter(s => checked.includes(s.name));
-  chart.setOption({ series: [...base, ...extras] }, { replaceMerge: ["series"], lazyUpdate: true });
+  chart.setOption({ series: [...base, ...extras] }, { replaceMerge: ['series'], lazyUpdate: true });
 }
 
 async function loadLabelCheckboxes() {
   const container = document.getElementById("labelCheckboxes");
   const selector = document.getElementById("labelTableSelect");
-  const tables = await fetch("/labels/available").then(r => r.json());
+  const tables = await fetch("/available").then(r => r.json());
   container.innerHTML = "";
   selector.innerHTML = "";
   for (const name of tables) {
