@@ -31,7 +31,7 @@ const option = {
       let tooltip = `<div style='padding:8px'>🆔 <strong>${tickId}</strong><br>${timeStr}<br><span style='color:#ccc'>${dateStr}</span><br>`;
       params.forEach(p => {
         if (p.seriesName === 'Mid') {
-          tooltip += `${p.seriesName}: <strong style='color:${p.color}'>${p.value[1]}</strong> <span style='color:#aaa'>(Spread: ${spread})</span><br>`;
+          tooltip += `${p.seriesName}: <strong style='color:${p.color}'>${p.value[1]}</strong> <span style='color:#aaa'>(${spread})</span><br>`;
         } else {
           tooltip += `${p.seriesName}: <strong style='color:${p.color}'>${p.value[1]}</strong><br>`;
         }
