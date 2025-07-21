@@ -4,7 +4,7 @@ let chart;
 let dataMid = [], dataAsk = [], dataBid = [];
 let lastTimestamp = null;
 let tradingStartEpoch = null;
-const MAX_VISIBLE_POINTS = 3000;
+const MAX_VISIBLE_POINTS = 30000;
 
 const option = {
   backgroundColor: '#111',
