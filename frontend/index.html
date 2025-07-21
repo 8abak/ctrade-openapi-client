@@ -94,9 +94,9 @@
 
       <div id="sqlConsole" style="margin-top: 1em; display: none;">
         <strong>SQL Console</strong><br>
-        <select id="tableSelect"></select>
-        <textarea id="queryInput" placeholder="Write query here..." rows="5" style="width: 100%; resize: vertical;"></textarea>
-        <button onclick="runQuery()">Run</button>
+        <select id="tableSelect" onchange="autoFillQuery()" style="width: 100%; margin-bottom: 6px;"></select>
+        <textarea id="queryInput" placeholder="Write SQL query here..." rows="6" style="width: 100%; resize: vertical;"></textarea>
+        <button onclick="runQuery()" style="margin-top: 6px;">Run</button>
       </div>
     </div>
   </div>
