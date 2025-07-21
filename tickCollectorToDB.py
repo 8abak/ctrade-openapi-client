@@ -4,15 +4,11 @@ import json
 import os
 import signal
 import psycopg2
-import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 from psycopg2.tz import FixedOffsetTimezone
 import pytz
-from twisted.internet import reactor
 from threading import Event
-import asyncio
-from fastapi.websockets import WebSocket
-from backend.wsmanager import pushTick
+from twisted.internet import reactor
 from ctrader_open_api import Client, Protobuf, TcpProtocol, EndPoints
 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOAApplicationAuthReq,
@@ -41,7 +37,6 @@ cur = conn.cursor()
 
 client = Client(host=host, port=port, protocol=TcpProtocol)
 
-seenTimestamps = set()
 lastValidBid = None
 lastValidAsk = None
 shutdown_event = Event()
@@ -49,10 +44,7 @@ shutdown_event = Event()
 def writeTick(timestamp, symbolId, bid, ask):
     global lastValidBid, lastValidAsk
 
-    if str(timestamp) in seenTimestamps:
-        return
-
-    # Forward-fill
+    # Forward-fill if needed
     if bid == 0.0 and lastValidBid is not None:
         bid = lastValidBid
     elif bid != 0.0:
@@ -63,45 +55,38 @@ def writeTick(timestamp, symbolId, bid, ask):
     elif ask != 0.0:
         lastValidAsk = ask
 
-    seenTimestamps.add(str(timestamp))
-
-    # Convert from milliseconds since epoch to datetime in Sydney time
-    utc_dt = datetime.utcfromtimestamp(timestamp / 1000.0)
-    utc_dt = pytz.utc.localize(utc_dt)
-    offset_minutes = 600  # +10:00
-    sydney_dt = utc_dt.astimezone(FixedOffsetTimezone(offset_minutes, "AEST"))
-
+    # Convert timestamp to Sydney time
+    utc_dt = datetime.utcfromtimestamp(timestamp / 1000.0).replace(tzinfo=pytz.utc)
+    sydney_dt = utc_dt.astimezone(FixedOffsetTimezone(600, "AEST"))
 
     bidFloat = bid / 100000.0
     askFloat = ask / 100000.0
     mid = round((bidFloat + askFloat) / 2, 2)
 
     try:
-        print(f"🕒 Inserting timestamp: {sydney_dt} | tzinfo: {sydney_dt.tzinfo}", flush=True)
+        # Check for true duplicates before inserting
+        cur.execute(
+            """
+            SELECT 1 FROM ticks 
+            WHERE symbol = %s AND timestamp = %s AND bid = %s AND ask = %s
+            LIMIT 1
+            """,
+            ("XAUUSD", sydney_dt, bidFloat, askFloat)
+        )
+        if cur.fetchone():
+            return  # Exact same tick already exists
+
+        # Insert new tick
         cur.execute(
             """
             INSERT INTO ticks (symbol, timestamp, bid, ask, mid)
             VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (symbol, timestamp) DO NOTHING;
             """,
             ("XAUUSD", sydney_dt, bidFloat, askFloat, mid)
         )
         conn.commit()
-        cur.execute(
-            "select id from ticks where symbol = %s and timestamp = %s",
-            ("XAUUSD", sydney_dt)
-        )
-        result = cur.fetchone()
-        tickIdn = result[0] if result else None
-        tickData = {
-            "id": tickIdn,
-            "timestamp": sydney_dt.isoformat(),
-            "bid": bidFloat,
-            "ask": askFloat,
-            "mid": mid
-        }
-        print("🔥 Calling pushTick with:", tickData, flush=True)
-        requests.post("http://localhost:8000/tickstream/push", json=tickData)
+        print(f"✅ Saved tick: {sydney_dt} → bid={bidFloat:.2f}, ask={askFloat:.2f}, mid={mid}", flush=True)
+
     except Exception as e:
         print(f"❌ DB error: {e}", flush=True)
         conn.rollback()
@@ -114,15 +99,14 @@ def connected(_):
     deferred = client.send(authMsg)
 
     def afterAppAuth(_):
-        print("🎉 API Application authorized", flush=True)
+        print("🎉 Application authorized", flush=True)
         accountAuth = ProtoOAAccountAuthReq()
         accountAuth.ctidTraderAccountId = accountId
         accountAuth.accessToken = accessToken
         return client.send(accountAuth)
 
     def afterAccountAuth(_):
-        print(f"🔐 Account {accountId} authorized. Starting tick logging.", flush=True)
-        print("🚦 Calling subscribeToSpot now...", flush=True)
+        print(f"🔐 Account {accountId} authorized. Subscribing...", flush=True)
         subscribeToSpot()
 
     deferred.addCallback(afterAppAuth)
@@ -130,7 +114,6 @@ def connected(_):
     deferred.addErrback(onError)
 
 def subscribeToSpot():
-    print("📡 Subscribing to symbolId:", symbolId, flush=True)
     req = ProtoOASubscribeSpotsReq()
     req.ctidTraderAccountId = accountId
     req.symbolId.append(symbolId)
@@ -142,12 +125,9 @@ def disconnected(_, reason):
     shutdown()
 
 def onMessage(_, message):
-    #print("📦 Raw message received:", message.payloadType, "→", Protobuf.get(message.payloadType).__class__.__name__, flush=True)
-
     if message.payloadType == ProtoOASpotEvent().payloadType:
         try:
             spot = Protobuf.extract(message)
-            print("📩 Spot received →", spot.symbolId, spot.timestamp, getattr(spot, "bid", 0), getattr(spot, "ask", 0))
             writeTick(spot.timestamp, spot.symbolId, getattr(spot, "bid", 0), getattr(spot, "ask", 0))
         except Exception as e:
             print("⚠️ Error processing spot message:", e, flush=True)
@@ -155,27 +135,21 @@ def onMessage(_, message):
     if message.payloadType == 2142:  # ProtoOAErrorRes
         try:
             error = Protobuf.extract(message)
-            print("❌ Error Received:")
-            print("  Error Code:", error.errorCode)
-            print("  Description:", error.description)
-            print("  Payload Type:", error.payloadType)
+            print("❌ Error:")
+            print("  Code:", error.errorCode)
+            print("  Desc:", error.description)
         except Exception as e:
             print("⚠️ Failed to parse error message:", e, flush=True)
 
-
-
-
-
 def onError(err):
-    print("❌ Error during connection or authentication:", flush=True)
-    print(err, flush=True)
+    print("❌ Connection/auth error:", err, flush=True)
     shutdown()
 
 def shutdown():
     if shutdown_event.is_set():
         return
     shutdown_event.set()
-    print("🚩 Gracefully shutting down....", flush=True)
+    print("🛑 Shutting down...", flush=True)
     try:
         cur.close()
         conn.close()
