@@ -17,7 +17,7 @@ function initializeChart() {
         let html = `<div>🆔 <strong>${tickId}</strong><br>${timeStr}<br>${dateStr}<br>`;
         params.forEach(p => {
           if (p.seriesName === 'Mid') {
-            html += `${p.seriesName}: <strong style='color:${p.color}'>${p.value[1]}</strong> (Spread: ${spread})<br>`;
+            html += `${p.seriesName}: <strong style='color:${p.color}'>${p.value[1]}</strong> (${spread})<br>`;
           } else {
             html += `${p.seriesName}: <strong style='color:${p.color}'>${p.value[1]}</strong><br>`;
           }
