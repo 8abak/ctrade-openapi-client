@@ -42,6 +42,11 @@
       flex-grow: 1;
     }
     .section { margin-bottom: 1em; }
+    .checkbox-row {
+      display: flex;
+      gap: 12px;
+      margin-top: 4px;
+    }
   </style>
 </head>
 <body>
@@ -64,9 +69,11 @@
 
       <div class="section">
         <strong>Series</strong><br>
-        <label><input type="checkbox" id="askCheckbox"> Ask</label><br>
-        <label><input type="checkbox" id="midCheckbox" checked> Mid</label><br>
-        <label><input type="checkbox" id="bidCheckbox"> Bid</label>
+        <div class="checkbox-row">
+          <label><input type="checkbox" id="askCheckbox"> Ask</label>
+          <label><input type="checkbox" id="midCheckbox" checked> Mid</label>
+          <label><input type="checkbox" id="bidCheckbox"> Bid</label>
+        </div>
       </div>
 
       <div id="labelCheckboxes" class="section"></div>
@@ -75,6 +82,7 @@
         <strong>Selected Ticks:</strong>
         <div id="selectedIdsText">None</div>
         <textarea id="labelNote" rows="2" placeholder="Optional label note..."></textarea>
+        <input type="text" id="customTickIds" placeholder="Extra Tick IDs (e.g., 53212,53214-53220)">
         <select id="labelTableSelect"></select>
         <button onclick="submitLabel()">Submit Labels</button>
         <button onclick="exportSelectedTicks()">Export CSV</button>
