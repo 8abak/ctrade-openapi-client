@@ -1,3 +1,5 @@
+// Updated ztick-core.js
+
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [], labelSeries = [], selectedTickIds = [];
 let lastChecked = "";
@@ -6,25 +8,7 @@ function initializeChart() {
   chart = echarts.init(document.getElementById("main"));
   chart.setOption({
     backgroundColor: "#111",
-    tooltip: {
-      trigger: "axis",
-      formatter: (params) => {
-        const d = new Date(params[0].value[0]);
-        const timeStr = d.toLocaleTimeString("en-AU", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-        const dateStr = d.toLocaleDateString("en-AU");
-        const tickId = params[0].value[2];
-        const spread = params[0].value[3];
-        let html = `<div>🆔 <strong>${tickId}</strong><br>${timeStr}<br>${dateStr}<br>`;
-        params.forEach(p => {
-          if (p.seriesName === 'Mid') {
-            html += `${p.seriesName}: <strong style='color:${p.color}'>${p.value[1]}</strong> (${spread})<br>`;
-          } else {
-            html += `${p.seriesName}: <strong style='color:${p.color}'>${p.value[1]}</strong><br>`;
-          }
-        });
-        return html + '</div>';
-      }
-    },
+    tooltip: { show: false },
     xAxis: { type: 'time', axisLabel: { color: '#ccc' }, splitLine: { lineStyle: { color: '#333' } } },
     yAxis: { type: 'value', scale: true, axisLabel: { color: '#ccc' }, splitLine: { lineStyle: { color: '#333' } } },
     dataZoom: [
@@ -37,18 +21,21 @@ function initializeChart() {
   chart.on("click", function (params) {
     const id = params?.value?.[2];
     if (!id) return;
-    if (window.event.ctrlKey) {
-      if (!selectedTickIds.includes(id)) selectedTickIds.push(id);
-    } else {
-      selectedTickIds = [id];
-    }
-    document.getElementById("selectedIdsText").textContent = selectedTickIds.join(", ") || "None";
+    selectedTickIds = [id];
+    document.getElementById("selectedIdsText").textContent = id;
   });
 }
 
 function parseDatetime(inputId) {
   const val = document.getElementById(inputId).value;
   return new Date(val);
+}
+
+function setDefaultTimeRange() {
+  const now = new Date();
+  const tenMinAgo = new Date(now.getTime() - 10 * 60 * 1000);
+  document.getElementById("startTime").value = tenMinAgo.toISOString().slice(0, 16);
+  document.getElementById("endTime").value = now.toISOString().slice(0, 16);
 }
 
 async function loadZTickChart() {
@@ -68,15 +55,14 @@ function updateZSeries() {
   const ask = document.getElementById('askCheckbox').checked;
   const bid = document.getElementById('bidCheckbox').checked;
   const checked = Array.from(document.querySelectorAll(".labelCheckbox:checked")).map(e => e.value).join(",");
-
   const state = `${mid}${ask}${bid}:${checked}`;
-  if (state === lastChecked) return; // prevent unnecessary redraw
+  if (state === lastChecked) return;
   lastChecked = state;
 
   const base = [];
-  if (ask) base.push({ name: 'Ask', type: 'scatter', symbolSize: 2, itemStyle: { color: '#f5a623' }, data: dataAsk });
-  if (mid) base.push({ name: 'Mid', type: 'scatter', symbolSize: 2, itemStyle: { color: '#00bcd4' }, data: dataMid });
-  if (bid) base.push({ name: 'Bid', type: 'scatter', symbolSize: 2, itemStyle: { color: '#4caf50' }, data: dataBid });
+  if (ask) base.push({ name: 'Ask', type: 'scatter', symbolSize: 1, itemStyle: { color: '#f5a623' }, data: dataAsk });
+  if (mid) base.push({ name: 'Mid', type: 'scatter', symbolSize: 1, itemStyle: { color: '#00bcd4' }, data: dataMid });
+  if (bid) base.push({ name: 'Bid', type: 'scatter', symbolSize: 1, itemStyle: { color: '#4caf50' }, data: dataBid });
 
   const extras = labelSeries.filter(s => checked.includes(s.name));
   chart.setOption({ series: [...base, ...extras] }, { replaceMerge: ['series'], lazyUpdate: true });
@@ -104,11 +90,22 @@ async function loadLabelCheckboxes() {
 async function submitLabel() {
   const table = document.getElementById("labelTableSelect").value;
   const note = document.getElementById("labelNote").value;
-  if (!table || selectedTickIds.length === 0) return;
+  const extraInput = document.getElementById("customTickIds").value;
+  let extraIds = [];
+  if (extraInput.includes("-")) {
+    const [start, end] = extraInput.split("-").map(Number);
+    extraIds = Array.from({ length: end - start + 1 }, (_, i) => start + i);
+  } else if (extraInput.includes(",")) {
+    extraIds = extraInput.split(",").map(x => parseInt(x.trim())).filter(Boolean);
+  } else if (extraInput) {
+    extraIds = [parseInt(extraInput)];
+  }
+  const idsToSubmit = [...selectedTickIds, ...extraIds];
+  if (!table || idsToSubmit.length === 0) return;
   await fetch("/labels/assign", {
     method: "POST",
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ table, ids: selectedTickIds, note })
+    body: JSON.stringify({ table, ids: idsToSubmit, note })
   });
   alert("Labels submitted");
 }
@@ -146,9 +143,10 @@ function loadVersion() {
 
 window.addEventListener("DOMContentLoaded", () => {
   initializeChart();
+  setDefaultTimeRange();
   loadVersion();
   loadLabelCheckboxes();
-  document.getElementById("askCheckbox").addEventListener("change", updateZSeries);
-  document.getElementById("midCheckbox").addEventListener("change", updateZSeries);
-  document.getElementById("bidCheckbox").addEventListener("change", updateZSeries);
+  ["askCheckbox", "midCheckbox", "bidCheckbox"].forEach(id => {
+    document.getElementById(id).addEventListener("change", updateZSeries);
+  });
 });
