@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -171,6 +171,26 @@ def run_sql_query(query: str = Query(...)):
             return {"message": "Query executed successfully."}
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
+
+@app.post("/labels/assign")
+def assign_labels(payload: dict = Body(...)):
+    table = payload.get("table")
+    ids = payload.get("ids", [])
+    note = payload.get("note", None)
+
+    if not table or not ids:
+        return JSONResponse(status_code=400, content={"error": "Missing table or ids"})
+
+    try:
+        with engine.begin() as conn:
+            for tickid in ids:
+                if note:
+                    conn.execute(text(f"INSERT INTO {table} (tickid, note) VALUES (:id, :note) ON CONFLICT DO NOTHING"), {"id": tickid, "note": note})
+                else:
+                    conn.execute(text(f"INSERT INTO {table} (tickid) VALUES (:id) ON CONFLICT DO NOTHING"), {"id": tickid})
+        return {"status": "success", "inserted": len(ids)}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.websocket("/ws/ticks")
 async def streamRealTickets(websocket: WebSocket):

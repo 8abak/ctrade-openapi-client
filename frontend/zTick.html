@@ -57,12 +57,12 @@
 
       <div class="section">
         <label for="startTime">Start Time</label>
-        <input type="datetime-local" id="startTime">
+        <input type="text" id="startTime" placeholder="dd/mm/yyyy hh:mm">
       </div>
 
       <div class="section">
         <label for="endTime">End Time</label>
-        <input type="datetime-local" id="endTime">
+        <input type="text" id="endTime" placeholder="dd/mm/yyyy hh:mm">
       </div>
 
       <button onclick="loadZTickChart()">Load Chart</button>
@@ -79,11 +79,10 @@
       <div id="labelCheckboxes" class="section"></div>
 
       <div class="section">
-        <strong>Selected Ticks:</strong>
-        <div id="selectedIdsText">None</div>
-        <textarea id="labelNote" rows="2" placeholder="Optional label note..."></textarea>
-        <input type="text" id="customTickIds" placeholder="Extra Tick IDs (e.g., 53212,53214-53220)">
+        <strong>Selected Tick:</strong> <span id="selectedIdsText">None</span>
         <select id="labelTableSelect"></select>
+        <input type="text" id="customTickIds" placeholder="Extra Tick IDs (e.g., 53212,53214-53220)">
+        <textarea id="labelNote" rows="2" placeholder="Optional label note..."></textarea>
         <button onclick="submitLabel()">Submit Labels</button>
         <button onclick="exportSelectedTicks()">Export CSV</button>
       </div>
