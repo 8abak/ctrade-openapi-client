@@ -96,43 +96,6 @@
 <script>
   const AVAILABLE_LABELS_ENDPOINT = "/available";
 </script>
-<script>
-  let chartRef;
-  window.addEventListener("DOMContentLoaded", () => {
-    chartRef = echarts.init(document.getElementById("main"));
-    chartRef.getZr().on("click", function (params) {
-      const pointInPixel = [params.offsetX, params.offsetY];
-      const pointInGrid = chartRef.convertFromPixel({ seriesIndex: 0 }, pointInPixel);
-      const clickedTime = pointInGrid[0];
-
-      const allData = [...(window.dataMid || [])];
-      if (!allData.length) return;
-      let closest = allData[0];
-      let minDist = Math.abs(closest[0] - clickedTime);
-
-      for (const p of allData) {
-        const dist = Math.abs(p[0] - clickedTime);
-        if (dist < minDist) {
-          minDist = dist;
-          closest = p;
-        }
-      }
-
-      if (closest) {
-        window.selectedTickIds = [closest[2]];
-        document.getElementById("selectedIdsText").textContent = closest[2];
-        highlightSelectedTick(closest[2]);
-      }
-    });
-  });
-
-  function highlightSelectedTick(tickId) {
-    const series = chartRef.getOption().series || [];
-    const overlay = window.dataMid.filter(d => d[2] === tickId);
-    const mark = overlay.length ? [{ name: 'Selected', type: 'scatter', symbolSize: 8, itemStyle: { color: '#fff' }, data: overlay }] : [];
-    chartRef.setOption({ series: [...series.filter(s => s.name !== 'Selected'), ...mark] }, { replaceMerge: ['series'], lazyUpdate: true });
-  }
-</script>
 <script src="ztick-core.js"></script>
 </body>
 </html>
