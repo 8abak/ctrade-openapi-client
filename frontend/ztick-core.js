@@ -1,4 +1,4 @@
-// Updated ztick-core.js
+// ✅ FINAL ztick-core.js with standalone chart logic + clean reload
 
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [], labelSeries = [], selectedTickIds = [];
@@ -47,6 +47,8 @@ async function loadZTickChart() {
   dataMid = ticks.map(t => [parseTime(t.timestamp), t.mid, t.id, ((t.ask - t.bid) / 2).toFixed(2)]);
   dataAsk = ticks.map(t => [parseTime(t.timestamp), t.ask, t.id]);
   dataBid = ticks.map(t => [parseTime(t.timestamp), t.bid, t.id]);
+  selectedTickIds = [];
+  chart.setOption({ series: [] });
   updateZSeries();
 }
 
@@ -69,6 +71,7 @@ function updateZSeries() {
 }
 
 async function loadLabelCheckboxes() {
+  labelSeries = [];
   const container = document.getElementById("labelCheckboxes");
   const selector = document.getElementById("labelTableSelect");
   const tables = await fetch("/available").then(r => r.json());
