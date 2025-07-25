@@ -1,7 +1,7 @@
-// ✅ FINAL ztick-core.js with fixes for reload + label debug
+// ✅ FINAL ztick-core.js with reload + label glow support
 
 let chart;
-let dataMid = [], dataAsk = [], dataBid = [], labelSeries = [], selectedTickIds = [];
+let dataMid = [], dataAsk = [], dataBid = [], labelSeries = [], selectedTickIds = [], customHighlightIds = [];
 let lastChecked = "";
 
 function initializeChart() {
@@ -23,6 +23,7 @@ function initializeChart() {
     if (!id) return;
     selectedTickIds = [id];
     document.getElementById("selectedIdsText").textContent = id;
+    updateZSeries();
   });
 }
 
@@ -48,6 +49,7 @@ async function loadZTickChart() {
   dataAsk = ticks.map(t => [parseTime(t.timestamp), t.ask, t.id]);
   dataBid = ticks.map(t => [parseTime(t.timestamp), t.bid, t.id]);
   selectedTickIds = [];
+  customHighlightIds = [];
   chart.setOption({ series: [] });
   lastChecked = "";
   updateZSeries();
@@ -58,7 +60,7 @@ function updateZSeries() {
   const ask = document.getElementById('askCheckbox').checked;
   const bid = document.getElementById('bidCheckbox').checked;
   const checked = Array.from(document.querySelectorAll(".labelCheckbox:checked")).map(e => e.value).join(",");
-  const state = `${mid}${ask}${bid}:${checked}`;
+  const state = `${mid}${ask}${bid}:${checked}:${selectedTickIds.join(',')}:${customHighlightIds.join(',')}`;
   if (state === lastChecked) return;
   lastChecked = state;
 
@@ -68,6 +70,17 @@ function updateZSeries() {
   if (bid) base.push({ name: 'Bid', type: 'scatter', symbolSize: 1, itemStyle: { color: '#4caf50' }, data: dataBid });
 
   const extras = labelSeries.filter(s => checked.includes(s.name));
+
+  if (selectedTickIds.length) {
+    const points = dataMid.filter(d => selectedTickIds.includes(d[2]));
+    extras.push({ name: 'Selected', type: 'scatter', symbolSize: 7, itemStyle: { color: '#ff0', borderColor: '#fff', borderWidth: 1 }, data: points });
+  }
+
+  if (customHighlightIds.length) {
+    const points = dataMid.filter(d => customHighlightIds.includes(d[2]));
+    extras.push({ name: 'Extra', type: 'scatter', symbolSize: 6, itemStyle: { color: '#0ff', borderColor: '#fff', borderWidth: 1 }, data: points });
+  }
+
   chart.setOption({ series: [...base, ...extras] }, { replaceMerge: ['series'], lazyUpdate: true });
 }
 
@@ -79,7 +92,6 @@ async function loadLabelCheckboxes() {
   container.innerHTML = "";
   selector.innerHTML = "";
   for (const name of tables) {
-    const id = `label_${name}`;
     container.insertAdjacentHTML('beforeend', `<label><input type="checkbox" class="labelCheckbox" value="${name}" onchange="updateZSeries()"> ${name}</label><br>`);
     selector.insertAdjacentHTML('beforeend', `<option value="${name}">${name}</option>`);
     const data = await fetch(`/labels/${name}`).then(r => r.json()).catch(() => []);
@@ -91,9 +103,7 @@ async function loadLabelCheckboxes() {
   }
 }
 
-async function submitLabel() {
-  const table = document.getElementById("labelTableSelect").value;
-  const note = document.getElementById("labelNote").value;
+function parseExtraTickIds() {
   const extraInput = document.getElementById("customTickIds").value;
   let extraIds = [];
   if (extraInput.includes("-")) {
@@ -104,7 +114,15 @@ async function submitLabel() {
   } else if (extraInput) {
     extraIds = [parseInt(extraInput)];
   }
-  const idsToSubmit = [...selectedTickIds, ...extraIds];
+  customHighlightIds = extraIds;
+  updateZSeries();
+}
+
+async function submitLabel() {
+  const table = document.getElementById("labelTableSelect").value;
+  const note = document.getElementById("labelNote").value;
+  parseExtraTickIds();
+  const idsToSubmit = [...selectedTickIds, ...customHighlightIds];
   if (!table || idsToSubmit.length === 0) return;
   const payload = { table, ids: idsToSubmit, note };
   console.log("Submitting labels:", JSON.stringify(payload));
@@ -155,4 +173,5 @@ window.addEventListener("DOMContentLoaded", () => {
   ["askCheckbox", "midCheckbox", "bidCheckbox"].forEach(id => {
     document.getElementById(id).addEventListener("change", updateZSeries);
   });
+  document.getElementById("customTickIds").addEventListener("input", parseExtraTickIds);
 });
