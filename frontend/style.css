@@ -1,0 +1,80 @@
+/* style.css — shared global dark theme for all pages */
+
+body {
+  background-color: #111;
+  color: #eee;
+  font-family: sans-serif;
+  margin: 0;
+  padding: 0;
+}
+
+#side {
+  width: 260px;
+  float: left;
+  padding: 1rem;
+}
+
+#resultBox {
+  margin-left: 270px;
+  padding: 1rem;
+}
+
+a {
+  color: #66f;
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+textarea, select, input[type="text"] {
+  width: 100%;
+  margin: 0.4rem 0;
+  background-color: #222;
+  color: #eee;
+  border: 1px solid #444;
+  padding: 0.4rem;
+  font-family: monospace;
+}
+
+button {
+  background-color: #0066cc;
+  color: white;
+  padding: 0.4rem 1rem;
+  border: none;
+  margin-top: 0.5rem;
+  cursor: pointer;
+  font-weight: bold;
+}
+
+button:hover {
+  background-color: #005bb5;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin-top: 1rem;
+}
+
+th, td {
+  border: 1px solid #444;
+  padding: 6px 10px;
+  text-align: left;
+}
+
+th {
+  background-color: #222;
+}
+
+h3 {
+  margin-top: 1.5rem;
+  color: #ccc;
+}
+
+#version {
+  font-size: 0.85rem;
+  color: #aaa;
+  margin-top: 1rem;
+}
