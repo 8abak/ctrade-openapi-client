@@ -19,6 +19,27 @@ body {
   padding: 1rem;
 }
 
+#resultBox table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+#resultBox th, #resultBox td {
+  border: 1px solid #444;
+  padding: 6px 10px;
+  text-align: left;
+}
+
+#resultBox th {
+  background-color: #222;
+  color: #ccc;
+}
+
+#resultBox td {
+  background-color: #111;
+  color: #ddd;
+}
+
 a {
   color: #66f;
   text-decoration: none;
