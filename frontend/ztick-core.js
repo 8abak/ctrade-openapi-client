@@ -1,4 +1,4 @@
-// ✅ UPDATED ztick-core.js — Fixes time alignment + chart refresh
+// Updated ztick-core.js
 
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [], labelSeries = [], selectedTickIds = [];
@@ -8,35 +8,9 @@ function initializeChart() {
   chart = echarts.init(document.getElementById("main"));
   chart.setOption({
     backgroundColor: "#111",
-    tooltip: {
-      trigger: 'axis',
-      backgroundColor: '#222',
-      borderColor: '#555',
-      borderWidth: 1,
-      textStyle: { color: '#fff', fontSize: 13 },
-      formatter: function (params) {
-        const d = new Date(params[0].value[0]);
-        const timeStr = d.toLocaleTimeString("en-AU", { timeZone: "Australia/Sydney", hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
-        return `${timeStr}<br>${params.map(p => `${p.seriesName}: ${p.value[1]}`).join('<br>')}`;
-      }
-    },
-    xAxis: {
-      type: 'time',
-      axisLabel: {
-        color: '#ccc',
-        formatter: function (val) {
-          const d = new Date(val);
-          return d.toLocaleTimeString("en-AU", { timeZone: "Australia/Sydney", hour: '2-digit', minute: '2-digit' });
-        }
-      },
-      splitLine: { lineStyle: { color: '#333' } }
-    },
-    yAxis: {
-      type: 'value',
-      scale: true,
-      axisLabel: { color: '#ccc' },
-      splitLine: { lineStyle: { color: '#333' } }
-    },
+    tooltip: { show: false },
+    xAxis: { type: 'time', axisLabel: { color: '#ccc' }, splitLine: { lineStyle: { color: '#333' } } },
+    yAxis: { type: 'value', scale: true, axisLabel: { color: '#ccc' }, splitLine: { lineStyle: { color: '#333' } } },
     dataZoom: [
       { type: 'inside' },
       { type: 'slider', height: 40, bottom: 0 }
@@ -49,7 +23,6 @@ function initializeChart() {
     if (!id) return;
     selectedTickIds = [id];
     document.getElementById("selectedIdsText").textContent = id;
-    updateZSeries(); // ensures re-render for thickness
   });
 }
 
@@ -60,18 +33,10 @@ function parseDatetime(inputId) {
 
 function setDefaultTimeRange() {
   const now = new Date();
-  const sydneyNow = new Date(now.toLocaleString("en-US", { timeZone: "Australia/Sydney" }));
-  const sydneyStart = new Date(sydneyNow.getTime() - 10 * 60 * 1000);
-
-  const formatInput = d => {
-    const pad = n => n.toString().padStart(2, '0');
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  };
-
-  document.getElementById("startTime").value = formatInput(sydneyStart);
-  document.getElementById("endTime").value = formatInput(sydneyNow);
+  const tenMinAgo = new Date(now.getTime() - 10 * 60 * 1000);
+  document.getElementById("startTime").value = tenMinAgo.toISOString().slice(0, 16);
+  document.getElementById("endTime").value = now.toISOString().slice(0, 16);
 }
-
 
 async function loadZTickChart() {
   const start = parseDatetime("startTime");
@@ -82,7 +47,6 @@ async function loadZTickChart() {
   dataMid = ticks.map(t => [parseTime(t.timestamp), t.mid, t.id, ((t.ask - t.bid) / 2).toFixed(2)]);
   dataAsk = ticks.map(t => [parseTime(t.timestamp), t.ask, t.id]);
   dataBid = ticks.map(t => [parseTime(t.timestamp), t.bid, t.id]);
-  chart.clear();
   updateZSeries();
 }
 
@@ -91,7 +55,7 @@ function updateZSeries() {
   const ask = document.getElementById('askCheckbox').checked;
   const bid = document.getElementById('bidCheckbox').checked;
   const checked = Array.from(document.querySelectorAll(".labelCheckbox:checked")).map(e => e.value).join(",");
-  const state = `${mid}${ask}${bid}:${checked}:${selectedTickIds.join(',')}`;
+  const state = `${mid}${ask}${bid}:${checked}`;
   if (state === lastChecked) return;
   lastChecked = state;
 
@@ -101,15 +65,10 @@ function updateZSeries() {
   if (bid) base.push({ name: 'Bid', type: 'scatter', symbolSize: 1, itemStyle: { color: '#4caf50' }, data: dataBid });
 
   const extras = labelSeries.filter(s => checked.includes(s.name));
-  const selected = dataMid.filter(d => selectedTickIds.includes(d[2])).map(d => [d[0], d[1], d[2]]);
-  if (selected.length)
-    extras.push({ name: 'Selected', type: 'scatter', symbolSize: 7, itemStyle: { color: '#ff0', borderColor: '#fff', borderWidth: 1 }, data: selected });
-
-  chart.setOption({ series: [...base, ...extras] }, { replaceMerge: ['series'], lazyUpdate: false });
+  chart.setOption({ series: [...base, ...extras] }, { replaceMerge: ['series'], lazyUpdate: true });
 }
 
 async function loadLabelCheckboxes() {
-  labelSeries = [];
   const container = document.getElementById("labelCheckboxes");
   const selector = document.getElementById("labelTableSelect");
   const tables = await fetch("/available").then(r => r.json());
