@@ -60,10 +60,18 @@ function parseDatetime(inputId) {
 
 function setDefaultTimeRange() {
   const now = new Date();
-  const tenMinAgo = new Date(now.getTime() - 10 * 60 * 1000);
-  document.getElementById("startTime").value = tenMinAgo.toISOString().slice(0, 16);
-  document.getElementById("endTime").value = now.toISOString().slice(0, 16);
+  const sydneyNow = new Date(now.toLocaleString("en-US", { timeZone: "Australia/Sydney" }));
+  const sydneyStart = new Date(sydneyNow.getTime() - 10 * 60 * 1000);
+
+  const formatInput = d => {
+    const pad = n => n.toString().padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  };
+
+  document.getElementById("startTime").value = formatInput(sydneyStart);
+  document.getElementById("endTime").value = formatInput(sydneyNow);
 }
+
 
 async function loadZTickChart() {
   const start = parseDatetime("startTime");
