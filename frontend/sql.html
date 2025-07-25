@@ -1,32 +1,37 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-  <meta charset="UTF-8">
+  <meta charset="UTF-8" />
   <title>SQL Console Admin</title>
   <link rel="stylesheet" href="style.css">
-  <script defer src="sql-core.js"></script>
 </head>
 <body>
-  <div id="side">
-    <h3>Menu</h3>
-    <div><a href="index.html">Tick View</a></div>
-    <div><a href="ztick.html">ZTick View</a></div>
-    <div><a href="htick.html">HTick View</a></div>
+  <div id="container">
+    <div id="left">
+      <h3>Menu</h3>
+      <div><a href="index.html">Tick View</a></div>
+      <div><a href="ztick.html">ZTick View</a></div>
+      <div><a href="htick.html">HTick View</a></div>
 
-    <h3>SQL Console</h3>
-    <select id="tableSelect" onchange="sqlEditor.value = `SELECT * FROM ${this.value} ORDER BY timestamp DESC LIMIT 100`;"></select>
-    <textarea id="sqlEditor" rows="5">SELECT * FROM ticks ORDER BY timestamp DESC LIMIT 100</textarea>
-    <button id="runButton">Run</button>
+      <h3>SQL Console</h3>
+      <select id="tableSelect"></select><br />
+      <textarea id="sqlEditor" rows="4" cols="40">SELECT * FROM ticks ORDER BY timestamp DESC LIMIT 100</textarea><br />
+      <button id="runButton">Run</button>
 
-    <h3>Create New Label Table</h3>
-    <input type="text" id="labelTableName" placeholder="table name" />
-    <label><input type="radio" id="tickBasedRadio" name="tableType" checked /> Tick-based</label><br>
-    <label><input type="radio" id="areaBasedRadio" name="tableType" /> Time/Price-based</label><br>
-    <button id="createButton">Create Table</button>
+      <h3>Create New Label Table</h3>
+      <input id="labelTableName" placeholder="table name"><br />
+      <label><input type="radio" name="tableType" id="tickBasedRadio" checked> Tick-based</label><br />
+      <label><input type="radio" name="tableType" id="areaBasedRadio"> Time/Price-based</label><br />
+      <button id="createButton">Create Table</button>
 
-    <div id="version">Loading...</div>
+      <div id="version"></div>
+    </div>
+
+    <div id="right">
+      <div id="resultBox">Loading...</div>
+    </div>
   </div>
 
-  <div id="resultBox">Loading...</div>
+  <script src="sql-core.js"></script>
 </body>
 </html>
