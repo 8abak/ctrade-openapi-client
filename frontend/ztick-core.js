@@ -1,4 +1,4 @@
-// ✅ FINAL ztick-core.js with standalone chart logic + clean reload
+// ✅ FINAL ztick-core.js with fixes for reload + label debug
 
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [], labelSeries = [], selectedTickIds = [];
@@ -49,6 +49,7 @@ async function loadZTickChart() {
   dataBid = ticks.map(t => [parseTime(t.timestamp), t.bid, t.id]);
   selectedTickIds = [];
   chart.setOption({ series: [] });
+  lastChecked = "";
   updateZSeries();
 }
 
@@ -105,10 +106,12 @@ async function submitLabel() {
   }
   const idsToSubmit = [...selectedTickIds, ...extraIds];
   if (!table || idsToSubmit.length === 0) return;
+  const payload = { table, ids: idsToSubmit, note };
+  console.log("Submitting labels:", JSON.stringify(payload));
   await fetch("/labels/assign", {
     method: "POST",
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ table, ids: idsToSubmit, note })
+    body: JSON.stringify(payload)
   });
   alert("Labels submitted");
 }
