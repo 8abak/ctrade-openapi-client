@@ -1,49 +1,37 @@
+<!-- ✅ FINAL sql.html with version + create table + clean layout -->
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <title>SQL Console Admin</title>
-  <link rel="stylesheet" href="/style.css">
-  <script src="/sql-core.js" defer></script>
-  <style>
-    body { background-color: #111; color: #eee; font-family: sans-serif; }
-    .sidebar { width: 250px; float: left; padding: 20px; background-color: #000; height: 100vh; }
-    .content { margin-left: 270px; padding: 20px; }
-    select, textarea, input[type="text"] { width: 100%; margin-bottom: 10px; background: #222; color: #eee; border: 1px solid #444; padding: 5px; }
-    button { padding: 5px 10px; background: #0af; color: black; border: none; cursor: pointer; }
-    table { width: 100%; border-collapse: collapse; }
-    td, th { padding: 5px 10px; border: 1px solid #444; }
-    th { background: #222; }
-  </style>
+  <link rel="stylesheet" href="style.css">
+  <script src="sql-core.js" defer></script>
 </head>
 <body>
-  <div class="sidebar">
-    <h2>Menu</h2>
-    <a href="/index.html">Tick View</a><br>
-    <a href="/ztick.html">ZTick View</a><br>
-    <a href="/htick.html">HTick View</a><br>
-
-    <h3>Labels</h3>
-    <label><input type="checkbox" id="askCheckbox"> Ask</label><br>
-    <label><input type="checkbox" id="midCheckbox" checked> Mid</label><br>
-    <label><input type="checkbox" id="bidCheckbox"> Bid</label><br>
+  <div id="left">
+    <h3>Menu</h3>
+    <p><a href="index.html">Tick View</a></p>
+    <p><a href="ztick.html">ZTick View</a></p>
+    <p><a href="htick.html">HTick View</a></p>
 
     <h3>SQL Console</h3>
-    <select id="tableSelector"></select>
-    <textarea id="sqlBox" rows="5">SELECT * FROM ticks ORDER BY timestamp DESC LIMIT 100</textarea>
-    <button onclick="runSql()">Run</button>
+    <select id="tableSelect"></select>
+    <textarea id="sqlEditor" rows="5" style="width: 100%;">SELECT * FROM ticks ORDER BY timestamp DESC LIMIT 100</textarea>
+    <button id="runButton">Run</button>
 
     <h3>Create New Label Table</h3>
-    <input type="text" id="newTableName" placeholder="table name">
-    <label><input type="radio" name="baseType" value="tick" checked> Tick-based</label><br>
-    <label><input type="radio" name="baseType" value="zone"> Time/Price-based</label><br>
-    <button onclick="createLabelTable()">Create Table</button>
+    <input type="text" id="labelTableName" placeholder="table name" style="width: 100%;" />
+    <div style="margin-top: 5px;">
+      <label><input type="radio" id="tickBasedRadio" name="type" checked /> Tick-based</label><br>
+      <label><input type="radio" id="areaBasedRadio" name="type" /> Time/Price-based</label>
+    </div>
+    <button id="createButton">Create Table</button>
 
-    <div id="message" style="margin-top:10px;color:#0f0;"></div>
+    <div id="version" style="margin-top: 20px; font-size: 13px; color: #999;">Loading version...</div>
   </div>
 
-  <div class="content">
-    <div id="sqlResult">Loading...</div>
+  <div id="right">
+    <div id="resultBox">Loading...</div>
   </div>
 </body>
 </html>

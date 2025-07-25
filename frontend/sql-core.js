@@ -1,72 +1,87 @@
-// ✅ sql-core.js — Admin SQL + Table Creator for datavis.au
+// ✅ FINAL sql-core.js with working run + table creation + version
 
-async function runSqlQuery() {
-  const table = document.getElementById("sqlTableSelect").value;
-  const query = document.getElementById("sqlQueryInput").value;
-  const res = await fetch(`/sql/query?table=${table}`, {
+let tableSelect, sqlEditor, resultBox, tableInput, tickRadio, areaRadio;
+
+function runSql() {
+  const query = sqlEditor.value;
+  resultBox.innerHTML = "Loading...";
+  fetch(`/sqlvw/query?query=${encodeURIComponent(query)}`)
+    .then(res => res.json())
+    .then(data => {
+      if (Array.isArray(data)) {
+        if (!data.length) return resultBox.innerHTML = "<p>No results.</p>";
+        const headers = Object.keys(data[0]);
+        const rows = data.map(r =>
+          `<tr>${headers.map(h => `<td>${r[h]}</td>`).join("")}</tr>`
+        ).join("");
+        resultBox.innerHTML = `
+          <table>
+            <thead><tr>${headers.map(h => `<th>${h}</th>`).join("")}</tr></thead>
+            <tbody>${rows}</tbody>
+          </table>`;
+      } else {
+        resultBox.innerHTML = `<p>${data.message || "Success."}</p>`;
+      }
+    })
+    .catch(err => {
+      resultBox.innerHTML = `<pre style="color:red">${err}</pre>`;
+    });
+}
+
+function createLabelTable() {
+  const table = tableInput.value.trim();
+  const mode = tickRadio.checked ? "tick" : "area";
+  if (!table) return alert("Please enter table name");
+  fetch("/sqlvw/create", {
     method: "POST",
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query })
-  });
-  const data = await res.json();
-  const out = document.getElementById("sqlResult");
-  if (!data || !Array.isArray(data.rows)) {
-    out.innerHTML = `<p style="color:red">Query Error</p>`;
-    return;
-  }
-  if (data.rows.length === 0) {
-    out.innerHTML = `<p style="color:gray">No results.</p>`;
-    return;
-  }
-  const headers = Object.keys(data.rows[0]);
-  let html = '<table><thead><tr>' + headers.map(h => `<th>${h}</th>`).join('') + '</tr></thead><tbody>';
-  for (const row of data.rows) {
-    html += '<tr>' + headers.map(h => `<td>${row[h]}</td>`).join('') + '</tr>';
-  }
-  html += '</tbody></table>';
-  out.innerHTML = html;
+    body: JSON.stringify({ table, mode })
+  })
+    .then(res => res.json())
+    .then(d => alert(d.message || JSON.stringify(d)))
+    .catch(e => alert("Error creating table"));
 }
 
-async function refreshTableList() {
-  const select = document.getElementById("sqlTableSelect");
-  const res = await fetch("/sql/tables");
-  const tables = await res.json();
-  select.innerHTML = "";
-  for (const name of tables) {
-    const opt = document.createElement("option");
-    opt.value = name;
-    opt.textContent = name;
-    select.appendChild(opt);
-  }
+function loadTables() {
+  fetch("/sqlvw/tables")
+    .then(res => res.json())
+    .then(tables => {
+      tableSelect.innerHTML = "";
+      tables.forEach(t => {
+        const opt = document.createElement("option");
+        opt.value = t;
+        opt.textContent = t;
+        tableSelect.appendChild(opt);
+      });
+    });
 }
 
-async function deleteSelectedTable() {
-  const table = document.getElementById("sqlTableSelect").value;
-  if (!table || !confirm(`Delete table '${table}'?`)) return;
-  await fetch(`/sql/delete?table=${table}`, { method: "POST" });
-  await refreshTableList();
-  document.getElementById("sqlResult").innerHTML = "<p>Table deleted.</p>";
+function loadVersion() {
+  fetch("/version")
+    .then(res => res.json())
+    .then(v => {
+      const val = v["sql"] || {};
+      const html = `J: ${val.js?.datetime || '-'} ${val.js?.message || ''}<br>` +
+                   `B: ${val.py?.datetime || '-'} ${val.py?.message || ''}<br>` +
+                   `H: ${val.html?.datetime || '-'} ${val.html?.message || ''}`;
+      document.getElementById("version").innerHTML = html;
+    })
+    .catch(() => {
+      document.getElementById("version").innerText = "Version: unknown";
+    });
 }
-
-async function createStandardTable() {
-  const name = document.getElementById("newTableName").value.trim();
-  const type = document.querySelector("input[name='tableType']:checked").value;
-  if (!name) return alert("Enter table name");
-
-  const res = await fetch("/sql/create", {
-    method: "POST",
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, type })
-  });
-  const result = await res.text();
-  await refreshTableList();
-  document.getElementById("sqlResult").innerHTML = `<pre>${result}</pre>`;
-}
-
-document.getElementById("sqlRunButton").addEventListener("click", runSqlQuery);
-document.getElementById("deleteTableButton").addEventListener("click", deleteSelectedTable);
-document.getElementById("createTableButton").addEventListener("click", createStandardTable);
 
 window.addEventListener("DOMContentLoaded", () => {
-  refreshTableList();
+  tableSelect = document.getElementById("tableSelect");
+  sqlEditor = document.getElementById("sqlEditor");
+  resultBox = document.getElementById("resultBox");
+  tableInput = document.getElementById("labelTableName");
+  tickRadio = document.getElementById("tickBasedRadio");
+  areaRadio = document.getElementById("areaBasedRadio");
+
+  document.getElementById("runButton").addEventListener("click", runSql);
+  document.getElementById("createButton").addEventListener("click", createLabelTable);
+
+  loadTables();
+  loadVersion();
 });
