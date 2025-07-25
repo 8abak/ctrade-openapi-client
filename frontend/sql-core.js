@@ -1,4 +1,4 @@
-// ✅ FINAL sql-core.js with working run + table creation + version
+// ✅ FINAL sql-core.js with working run + table creation + version + fixed result rendering
 
 let tableSelect, sqlEditor, resultBox, tableInput, tickRadio, areaRadio;
 
@@ -19,6 +19,7 @@ function runSql() {
             <thead><tr>${headers.map(h => `<th>${h}</th>`).join("")}</tr></thead>
             <tbody>${rows}</tbody>
           </table>`;
+        resultBox.scrollIntoView({ behavior: 'smooth', block: 'start' });
       } else {
         resultBox.innerHTML = `<p>${data.message || "Success."}</p>`;
       }
@@ -38,7 +39,10 @@ function createLabelTable() {
     body: JSON.stringify({ table, mode })
   })
     .then(res => res.json())
-    .then(d => alert(d.message || JSON.stringify(d)))
+    .then(d => {
+      alert(d.message || JSON.stringify(d));
+      loadTables();
+    })
     .catch(e => alert("Error creating table"));
 }
 
@@ -81,6 +85,9 @@ window.addEventListener("DOMContentLoaded", () => {
 
   document.getElementById("runButton").addEventListener("click", runSql);
   document.getElementById("createButton").addEventListener("click", createLabelTable);
+  tableSelect.addEventListener("change", () => {
+    sqlEditor.value = `SELECT * FROM ${tableSelect.value} ORDER BY timestamp DESC LIMIT 100`;
+  });
 
   loadTables();
   loadVersion();
