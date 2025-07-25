@@ -109,6 +109,7 @@ function updateZSeries() {
 }
 
 async function loadLabelCheckboxes() {
+  labelSeries = [];
   const container = document.getElementById("labelCheckboxes");
   const selector = document.getElementById("labelTableSelect");
   const tables = await fetch("/available").then(r => r.json());
