@@ -231,9 +231,9 @@ def assign_labels(payload: dict = Body(...)):
         with engine.begin() as conn:
             for tickid in ids:
                 if note:
-                    conn.execute(text(f"INSERT INTO {table} (tickId, content) VALUES (:id, :note) ON CONFLICT DO NOTHING"), {"id": tickid, "note": note})
+                    conn.execute(text(f"INSERT INTO {table} (tickid, content) VALUES (:id, :note) ON CONFLICT DO NOTHING"), {"id": tickid, "note": note})
                 else:
-                    conn.execute(text(f"INSERT INTO {table} (tickId) VALUES (:id) ON CONFLICT DO NOTHING"), {"id": tickid})
+                    conn.execute(text(f"INSERT INTO {table} (tickid) VALUES (:id) ON CONFLICT DO NOTHING"), {"id": tickid})
         return {"status": "success", "inserted": len(ids)}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
