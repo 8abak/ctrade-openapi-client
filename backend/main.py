@@ -55,14 +55,11 @@ def get_ticks(offset: int = 0, limit: int = 2000):
         """), {"offset": offset, "limit": limit})
         return [dict(r._mapping) for r in rows]
 
-from backend.wsmanager import pushTick
-
 @app.post("/tickstream/push")
 async def receive_tick(tick: Tick):
     print(f"📨 Received tick: {tick}", flush=True)
     await pushTick(tick.model_dump())
     return {"status": "ok"}
-
 
 @app.get("/ticks/latest", response_model=List[Tick])
 def get_latest_ticks(after: str = Query(...)):
@@ -172,6 +169,55 @@ def run_sql_query(query: str = Query(...)):
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
 
+@app.post("/sqlvw/delete")
+def drop_table(payload: dict = Body(...)):
+    table = payload.get("table")
+    if not table:
+        return JSONResponse(status_code=400, content={"error": "Missing table name"})
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(f"DROP TABLE IF EXISTS {table}"))
+        return {"message": f"Table {table} deleted."}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+@app.post("/sqlvw/create")
+def create_standard_table(payload: dict = Body(...)):
+    table = payload.get("table")
+    mode = payload.get("mode")
+    if not table or not mode:
+        return JSONResponse(status_code=400, content={"error": "Missing table or mode"})
+    try:
+        with engine.begin() as conn:
+            if mode == "tick":
+                conn.execute(text(f"""
+                    CREATE TABLE IF NOT EXISTS {table} (
+                        id SERIAL PRIMARY KEY,
+                        tickId INTEGER,
+                        content TEXT,
+                        modelVersion TEXT,
+                        confidenceScore REAL
+                    )
+                """))
+            elif mode == "area":
+                conn.execute(text(f"""
+                    CREATE TABLE IF NOT EXISTS {table} (
+                        id SERIAL PRIMARY KEY,
+                        startTime TIMESTAMP,
+                        endTime TIMESTAMP,
+                        minPrice REAL,
+                        maxPrice REAL,
+                        content TEXT,
+                        modelVersion TEXT,
+                        confidenceScore REAL
+                    )
+                """))
+            else:
+                return JSONResponse(status_code=400, content={"error": "Invalid mode"})
+        return {"message": f"Table {table} created as {mode}."}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
 @app.post("/labels/assign")
 def assign_labels(payload: dict = Body(...)):
     table = payload.get("table")
@@ -185,9 +231,9 @@ def assign_labels(payload: dict = Body(...)):
         with engine.begin() as conn:
             for tickid in ids:
                 if note:
-                    conn.execute(text(f"INSERT INTO {table} (tickid, note) VALUES (:id, :note) ON CONFLICT DO NOTHING"), {"id": tickid, "note": note})
+                    conn.execute(text(f"INSERT INTO {table} (tickId, content) VALUES (:id, :note) ON CONFLICT DO NOTHING"), {"id": tickid, "note": note})
                 else:
-                    conn.execute(text(f"INSERT INTO {table} (tickid) VALUES (:id) ON CONFLICT DO NOTHING"), {"id": tickid})
+                    conn.execute(text(f"INSERT INTO {table} (tickId) VALUES (:id) ON CONFLICT DO NOTHING"), {"id": tickid})
         return {"status": "success", "inserted": len(ids)}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
