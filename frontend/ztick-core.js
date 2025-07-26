@@ -9,30 +9,26 @@ function initializeChart() {
   chart.setOption({
     backgroundColor: "#111",
     tooltip: {
-      trigger: 'axis',
+      trigger: 'item',
       backgroundColor: '#222',
       borderColor: '#555',
       borderWidth: 1,
       textStyle: { color: '#fff', fontSize: 13 },
       formatter: (params) => {
-        const p = params[0];
-        const date = new Date(p.value[0]);
+        const date = new Date(params.value[0]);
         const timeStr = date.toLocaleTimeString('en-AU', {
-          hour: '2-digit',
-          minute: '2-digit',
-          second: '2-digit',
-          hour12: false
+          hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
         });
         const dateStr = date.toLocaleDateString('en-AU', {
-          day: '2-digit',
-          month: '2-digit',
-          year: 'numeric'
+          day: '2-digit', month: '2-digit', year: 'numeric'
         });
+        const id = params.value[2];
+        const price = params.value[1]?.toFixed(2);
         return `<div style="padding: 8px;">
           <strong>${timeStr}</strong><br>
           <span style="color: #ccc;">${dateStr}</span><br>
-          Price: <strong style="color: #3fa9f5;">${p.value[1]?.toFixed(2)}</strong><br>
-          ID: <span style="color:#aaa;">${p.value[2]}</span>
+          Price: <strong style="color: #3fa9f5;">${price}</strong><br>
+          ID: <span style="color:#aaa;">${id}</span>
         </div>`;
       }
     },
@@ -115,7 +111,7 @@ function updateZSeries() {
      symbolSize: 1, 
      itemStyle: { color: '#f5a623' }, 
      data: dataAsk,
-     dimention: ['timestamp', 'price', 'id', 'spread'],
+     dimensions: ['timestamp', 'price', 'id', 'spread'],
      encode: {x:0, y:1, tooltip: [0,1,2]}
   });
   if (mid) base.push({
