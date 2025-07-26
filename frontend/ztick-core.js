@@ -17,11 +17,17 @@ function initializeChart() {
       formatter: (params) => {
         const p = params[0];
         const date = new Date(p.value[0]);
-        date.setMinutes(date.getMinutes() + 600); // adjust for timezone if needed
-        const timeStr = date.toLocaleTimeString('en-au', {
-          hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true
-        }).toLowerCase();
-        const dateStr = date.toLocaleDateString('en-AU');
+        const timeStr = date.toLocaleTimeString('en-AU', {
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          hour12: false
+        });
+        const dateStr = date.toLocaleDateString('en-AU', {
+          day: '2-digit',
+          month: '2-digit',
+          year: 'numeric'
+        });
         return `<div style="padding: 8px;">
           <strong>${timeStr}</strong><br>
           <span style="color: #ccc;">${dateStr}</span><br>
