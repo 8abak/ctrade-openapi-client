@@ -92,6 +92,7 @@ async function loadZTickChart() {
   chart.setOption({ series: [] });
   lastChecked = "";
   updateZSeries();
+  await loadLabelCheckboxes();
 }
 
 
@@ -251,7 +252,7 @@ window.addEventListener("DOMContentLoaded", () => {
   initializeChart();
   setDefaultTimeRange();
   loadVersion();
-  loadLabelCheckboxes();
+  //loadLabelCheckboxes();
   ["askCheckbox", "midCheckbox", "bidCheckbox"].forEach(id => {
     document.getElementById(id).addEventListener("change", updateZSeries);
   });
