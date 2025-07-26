@@ -9,26 +9,26 @@ function initializeChart() {
   chart.setOption({
     backgroundColor: "#111",
     tooltip: {
-      trigger: 'item',
+      trigger: 'axis',
+      axisPointer: { type: 'cross' },
       backgroundColor: '#222',
       borderColor: '#555',
       borderWidth: 1,
       textStyle: { color: '#fff', fontSize: 13 },
       formatter: (params) => {
-        const date = new Date(params.value[0]);
+        const p = params[0];
+        const date = new Date(p.value[0]);
         const timeStr = date.toLocaleTimeString('en-AU', {
           hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
         });
         const dateStr = date.toLocaleDateString('en-AU', {
           day: '2-digit', month: '2-digit', year: 'numeric'
         });
-        const id = params.value[2];
-        const price = params.value[1]?.toFixed(2);
         return `<div style="padding: 8px;">
           <strong>${timeStr}</strong><br>
           <span style="color: #ccc;">${dateStr}</span><br>
-          Price: <strong style="color: #3fa9f5;">${price}</strong><br>
-          ID: <span style="color:#aaa;">${id}</span>
+          Price: <strong style="color: #3fa9f5;">${p.value[1]?.toFixed(2)}</strong><br>
+          ID: <span style="color:#aaa;">${p.value[2]}</span>
         </div>`;
       }
     },
@@ -161,17 +161,24 @@ async function loadLabelCheckboxes() {
     const data = await fetch(`/labels/${name}`).then(r => r.json()).catch(() => []);
     const points = data.map(row => {
       const match = dataMid.find(p => Number(p[2]) === Number(row.tickid));
-      return match ? [match[0], match[1], row.tickid] : null;
+      return match ? [match[0], match[1], row.tickid, row.content] : null;
     }).filter(Boolean);
+    console.log(`${name} matched`, points.map(p => p[2]));
     labelSeries.push({
       name,
       type: 'scatter',
-      symbolSize: 6,
-      itemStyle: { color: '#e91e63' },
+      symbolSize: 8,
+      itemStyle: {
+        color: '#ffa500',
+        borderColor: '#fff',
+        borderWidth: 1,
+        shadowBlur: 10,
+        shadowColor: 'rgba(255, 165, 0, 0.8)'
+      },
       data: points,
       tooltip: {
         formatter: (param) => {
-          return `ID: ${param.value[2]}<br>Label: ${name}`;
+          return `ID: ${param.value[2]}<br>Label: ${name}<br>Content: ${param.value[3]}`;
         }
       }
     });
