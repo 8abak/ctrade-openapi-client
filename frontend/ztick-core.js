@@ -164,10 +164,21 @@ async function loadLabelCheckboxes() {
     selector.insertAdjacentHTML('beforeend', `<option value="${name}">${name}</option>`);
     const data = await fetch(`/labels/${name}`).then(r => r.json()).catch(() => []);
     const points = data.map(row => {
-      const match = dataMid.find(p => p[2] === row.tickid);
-      return match ? [match[0], 1, row.tickid] : null;
+      const match = dataMid.find(p => Number(p[2]) === Number(row.tickid));
+      return match ? [match[0], match[1], row.tickid] : null;
     }).filter(Boolean);
-    labelSeries.push({ name, type: 'scatter', symbolSize: 6, itemStyle: { color: '#e91e63' }, data: points });
+    labelSeries.push({
+      name,
+      type: 'scatter',
+      symbolSize: 6,
+      itemStyle: { color: '#e91e63' },
+      data: points,
+      tooltip: {
+        formatter: (param) => {
+          return `ID: ${param.value[2]}<br>Label: ${name}`;
+        }
+      }
+    });
   }
 }
 
