@@ -158,6 +158,19 @@ def get_all_table_names():
         """))
         return [row[0] for row in rows]
 
+@app.get("/ticks/between-ids", response_model=List[Tick])
+def get_ticks_between_ids(start: int, end: int):
+    with engine.connect() as conn:
+        query = text("""
+            SELECT id, timestamp, bid, ask, mid
+            FROM ticks
+            WHERE id BETWEEN :start AND :end
+            ORDER BY id ASC
+        """)
+        result = conn.execute(query, {"start": start, "end": end})
+        ticks = [dict(row._mapping) for row in result]
+    return ticks
+
 @app.get("/sqlvw/query")
 def run_sql_query(query: str = Query(...)):
     try:

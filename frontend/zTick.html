@@ -57,14 +57,21 @@
       <h3>ZTick View</h3>
 
       <div class="section">
-        <label for="startTime">Start Time</label>
-        <input type="text" id="startTime" placeholder="dd/mm/yyyy hh:mm">
+        <label>ST:</label>
+        <div style="display: flex; gap: 6px;">
+          <input type="text" id="startTime" placeholder="YYYY-MM-DDTHH:mm" style="flex: 2;">
+          <input type="text" id="startId" placeholder="ID" style="flex: 1;">
+        </div>
       </div>
 
       <div class="section">
-        <label for="endTime">End Time</label>
-        <input type="text" id="endTime" placeholder="dd/mm/yyyy hh:mm">
+        <label>ET:</label>
+        <div style="display: flex; gap: 6px;">
+          <input type="text" id="endTime" placeholder="YYYY-MM-DDTHH:mm" style="flex: 2;">
+          <input type="text" id="endId" placeholder="ID" style="flex: 1;">
+        </div>
       </div>
+
 
       <button onclick="loadZTickChart()">Load Chart</button>
 

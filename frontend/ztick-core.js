@@ -67,9 +67,25 @@ function setDefaultTimeRange() {
 }
 
 async function loadZTickChart() {
-  const start = parseDatetime("startTime");
-  const end = parseDatetime("endTime");
-  const res = await fetch(`/ticks/range?start=${start.toISOString()}&end=${end.toISOString()}`);
+  const startId = document.getElementById("startId").value.trim();
+  const endId = document.getElementById("endId").value.trim();
+  const startTime = document.getElementById("startTime").value.trim();
+  const endTime = document.getElementById("endTime").value.trim();
+
+  let url;
+
+  if (startId && endId) {
+    url = `/ticks/between-ids?start=${startId}&end=${endId}`;
+  } else if (startTime && endTime) {
+    const start = new Date(startTime);
+    const end = new Date(endTime);
+    url = `/ticks/range?start=${start.toISOString()}&end=${end.toISOString()}`;
+  } else {
+    alert("Please fill either both times or both IDs.");
+    return;
+  }
+
+  const res = await fetch(url);
   const ticks = await res.json();
   const parseTime = ts => Date.parse(ts);
   dataMid = ticks.map(t => [parseTime(t.timestamp), t.mid, t.id, ((t.ask - t.bid) / 2).toFixed(2)]);
@@ -81,6 +97,7 @@ async function loadZTickChart() {
   lastChecked = "";
   updateZSeries();
 }
+
 
 function updateZSeries() {
   const mid = document.getElementById('midCheckbox').checked;
