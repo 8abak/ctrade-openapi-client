@@ -8,7 +8,28 @@ function initializeChart() {
   chart = echarts.init(document.getElementById("main"));
   chart.setOption({
     backgroundColor: "#111",
-    tooltip: { show: false },
+    tooltip: {
+      trigger: 'axis',
+      backgroundColor: '#222',
+      borderColor: '#555',
+      borderWidth: 1,
+      textStyle: { color: '#fff', fontSize: 13 },
+      formatter: (params) => {
+        const p = params[0];
+        const date = new Date(p.value[0]);
+        date.setMinutes(date.getMinutes() + 600); // adjust for timezone if needed
+        const timeStr = date.toLocaleTimeString('en-au', {
+          hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true
+        }).toLowerCase();
+        const dateStr = date.toLocaleDateString('en-AU');
+        return `<div style="padding: 8px;">
+          <strong>${timeStr}</strong><br>
+          <span style="color: #ccc;">${dateStr}</span><br>
+          Price: <strong style="color: #3fa9f5;">${p.value[1]?.toFixed(2)}</strong><br>
+          ID: <span style="color:#aaa;">${p.value[2]}</span>
+        </div>`;
+      }
+    },
     xAxis: { type: 'time', axisLabel: { color: '#ccc' }, splitLine: { lineStyle: { color: '#333' } } },
     yAxis: { type: 'value', scale: true, axisLabel: { color: '#ccc' }, splitLine: { lineStyle: { color: '#333' } } },
     dataZoom: [
@@ -65,9 +86,33 @@ function updateZSeries() {
   lastChecked = state;
 
   const base = [];
-  if (ask) base.push({ name: 'Ask', type: 'scatter', symbolSize: 1, itemStyle: { color: '#f5a623' }, data: dataAsk });
-  if (mid) base.push({ name: 'Mid', type: 'scatter', symbolSize: 1, itemStyle: { color: '#00bcd4' }, data: dataMid });
-  if (bid) base.push({ name: 'Bid', type: 'scatter', symbolSize: 1, itemStyle: { color: '#4caf50' }, data: dataBid });
+  if (ask) base.push({
+     name: 'Ask',
+     type: 'scatter', 
+     symbolSize: 1, 
+     itemStyle: { color: '#f5a623' }, 
+     data: dataAsk,
+     dimention: ['timestamp', 'price', 'id', 'spread'],
+     encode: {x:0, y:1, tooltip: [0,1,2]}
+  });
+  if (mid) base.push({
+     name: 'Mid', 
+     type: 'scatter', 
+     symbolSize: 1, 
+     itemStyle: { color: '#00bcd4' }, 
+     data: dataMid,
+     dimention: ['timestamp', 'price', 'id', 'spread'],
+     encode: {x:0, y:1, tooltip: [0,1,2]}
+  });
+  if (bid) base.push({
+     name: 'Bid', 
+     type: 'scatter', 
+     symbolSize: 1, 
+     itemStyle: { color: '#4caf50' }, 
+     data: dataBid,
+     dimention: ['timestamp', 'price', 'id', 'spread'],
+     encode: {x:0, y:1, tooltip: [0,1,2]}
+  });
 
   const extras = labelSeries.filter(s => checked.includes(s.name));
 
