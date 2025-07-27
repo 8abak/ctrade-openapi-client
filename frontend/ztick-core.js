@@ -130,6 +130,8 @@ function updateZigzagWidth(name, width) {
 }
 
 window.loadZTickChart = async function loadZTickChart() {
+  if (!chart) await initializeChart();
+
   const startId = document.getElementById("startId").value.trim();
   const endId = document.getElementById("endId").value.trim();
   const startTime = document.getElementById("startTime").value.trim();
