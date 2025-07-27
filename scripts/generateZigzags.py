@@ -82,18 +82,38 @@ def run_for_date(date_str):
     df = pd.DataFrame(rows, columns=["tickid", "timestamp", "mid"])
     df = df.sort_values("timestamp").reset_index(drop=True)
 
-    levelName = "zAbs1.0"
-    threshold = 1.0
-    pivots = zigzag_engine(df, threshold)
-    for p in pivots:
-        p["level"] = levelName
+    # ATR estimate from past 14 bars
+    atr_val = np.abs(df["mid"].diff()).rolling(14).mean().iloc[-1]
 
-    if pivots:
-        pivot_df = pd.DataFrame(pivots)
+    configs = [
+        ("zAtr0.5", atr_val * 0.5),
+        ("zAtr1.0", atr_val * 1.0),
+        ("zAtr2.0", atr_val * 2.0),
+        ("zAbs0.5", 0.5),
+        ("zAbs1.0", 1.0),
+        ("zAbs3.0", 3.0),
+        ("zAbs10.0", 10.0),
+        ("zPct0.1", df["mid"].iloc[-1] * 0.001),
+        ("zPct0.3", df["mid"].iloc[-1] * 0.003),
+        ("zPct0.5", df["mid"].iloc[-1] * 0.005),
+        ("zPct1.0", df["mid"].iloc[-1] * 0.01),
+        ("zPct5.0", df["mid"].iloc[-1] * 0.05),
+        ("zPct10.0", df["mid"].iloc[-1] * 0.10),
+    ]
+
+    all_pivots = []
+    for levelName, threshold in configs:
+        pivots = zigzag_engine(df, threshold)
+        for p in pivots:
+            p["level"] = levelName
+        all_pivots.extend(pivots)
+
+    if all_pivots:
+        pivot_df = pd.DataFrame(all_pivots)
         with engine.begin() as conn:
             conn.execute(text("DELETE FROM zigzag_pivots WHERE timestamp >= :start AND timestamp < :end"), {"start": start, "end": end})
             pivot_df.to_sql("zigzag_pivots", engine, index=False, if_exists="append")
-            print(f"Inserted {len(pivot_df)} zAbs1.0 pivots for {date_str}")
+            print(f"Inserted {len(pivot_df)} total pivots for {date_str} across all levels")
     else:
         print("No pivots generated.")
 
