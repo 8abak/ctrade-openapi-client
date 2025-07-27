@@ -4,51 +4,58 @@ let chart;
 let dataMid = [], dataAsk = [], dataBid = [], labelSeries = [], selectedTickIds = [], customHighlightIds = [];
 let lastChecked = "";
 
-function initializeChart() {
-  chart = echarts.init(document.getElementById("main"));
-  chart.setOption({
-    backgroundColor: "#111",
-    tooltip: {
-      trigger: 'axis',
-      axisPointer: { type: 'cross' },
-      backgroundColor: '#222',
-      borderColor: '#555',
-      borderWidth: 1,
-      textStyle: { color: '#fff', fontSize: 13 },
-      formatter: (params) => {
-        const p = params[0];
-        const date = new Date(p.value[0]);
-        const timeStr = date.toLocaleTimeString('en-AU', {
-          hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
-        });
-        const dateStr = date.toLocaleDateString('en-AU', {
-          day: '2-digit', month: '2-digit', year: 'numeric'
-        });
-        return `<div style="padding: 8px;">
-          <strong>${timeStr}</strong><br>
-          <span style="color: #ccc;">${dateStr}</span><br>
-          Price: <strong style="color: #3fa9f5;">${p.value[1]?.toFixed(2)}</strong><br>
-          ID: <span style="color:#aaa;">${p.value[2]}</span>
-        </div>`;
-      }
-    },
-    xAxis: { type: 'time', axisLabel: { color: '#ccc' }, splitLine: { lineStyle: { color: '#333' } } },
-    yAxis: { type: 'value', scale: true, axisLabel: { color: '#ccc' }, splitLine: { lineStyle: { color: '#333' } } },
-    dataZoom: [
-      { type: 'inside' },
-      { type: 'slider', height: 40, bottom: 0 }
-    ],
-    series: []
-  });
+async function initializeChart() {
+  return new Promise((resolve) => {
+    setTimeout(() => {
+      chart = echarts.init(document.getElementById("main"));
+      chart.setOption({
+        backgroundColor: "#111",
+        tooltip: {
+          trigger: 'axis',
+          axisPointer: { type: 'cross' },
+          backgroundColor: '#222',
+          borderColor: '#555',
+          borderWidth: 1,
+          textStyle: { color: '#fff', fontSize: 13 },
+          formatter: (params) => {
+            const p = params[0];
+            const date = new Date(p.value[0]);
+            const timeStr = date.toLocaleTimeString('en-AU', {
+              hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+            });
+            const dateStr = date.toLocaleDateString('en-AU', {
+              day: '2-digit', month: '2-digit', year: 'numeric'
+            });
+            return `<div style="padding: 8px;">
+              <strong>${timeStr}</strong><br>
+              <span style="color: #ccc;">${dateStr}</span><br>
+              Price: <strong style="color: #3fa9f5;">${p.value[1]?.toFixed(2)}</strong><br>
+              ID: <span style="color:#aaa;">${p.value[2]}</span>
+            </div>`;
+          }
+        },
+        xAxis: { type: 'time', axisLabel: { color: '#ccc' }, splitLine: { lineStyle: { color: '#333' } } },
+        yAxis: { type: 'value', scale: true, axisLabel: { color: '#ccc' }, splitLine: { lineStyle: { color: '#333' } } },
+        dataZoom: [
+          { type: 'inside' },
+          { type: 'slider', height: 40, bottom: 0 }
+        ],
+        series: []
+      });
 
-  chart.on("click", function (params) {
-    const id = params?.value?.[2];
-    if (!id) return;
-    selectedTickIds = [id];
-    document.getElementById("selectedIdsText").textContent = id;
-    updateZSeries();
+      chart.on("click", function (params) {
+        const id = params?.value?.[2];
+        if (!id) return;
+        selectedTickIds = [id];
+        document.getElementById("selectedIdsText").textContent = id;
+        updateZSeries();
+      });
+
+      resolve();  // Now we can await it
+    }, 100);  // slight delay ensures DOM is fully rendered
   });
 }
+
 
 function parseDatetime(inputId) {
   const val = document.getElementById(inputId).value;
@@ -354,16 +361,16 @@ function updateZigzagWidth(name, width) {
 }
 
 // Initialization
-window.addEventListener("DOMContentLoaded", () => {
-  initializeChart();
+window.addEventListener("DOMContentLoaded", async () => {
+  await initializeChart();  // 🧠 wait for it
   setDefaultTimeRange();
   loadVersion();
-  loadZigzagSettings();
   ["askCheckbox", "midCheckbox", "bidCheckbox"].forEach(id => {
     document.getElementById(id).addEventListener("change", updateZSeries);
   });
   document.getElementById("customTickIds").addEventListener("input", parseExtraTickIds);
 });
+
 
   loadVersion();
   //loadLabelCheckboxes();
