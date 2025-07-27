@@ -1,8 +1,9 @@
-// ✅ FINAL ztick-core.js with reload + label glow support
+// ✅ FINAL ztick-core.js with zigzag control UI and dropdown enhancements
 
 let chart;
-let dataMid = [], dataAsk = [], dataBid = [], labelSeries = [], selectedTickIds = [], customHighlightIds = [];
+let dataMid = [], dataAsk = [], dataBid = [], labelSeries = [], zigzagSeries = [], selectedTickIds = [], customHighlightIds = [];
 let lastChecked = "";
+let zigzagConfig = {}; // Store zigzag style info
 
 async function initializeChart() {
   return new Promise((resolve) => {
@@ -48,18 +49,13 @@ async function initializeChart() {
         if (!id) return;
         selectedTickIds = [id];
         document.getElementById("selectedIdsText").textContent = id;
+        document.getElementById("labelControls").style.display = "block";
         updateZSeries();
       });
 
-      resolve();  // Now we can await it
-    }, 100);  // slight delay ensures DOM is fully rendered
+      resolve();
+    }, 100);
   });
-}
-
-
-function parseDatetime(inputId) {
-  const val = document.getElementById(inputId).value;
-  return new Date(val);
 }
 
 function setDefaultTimeRange() {
@@ -76,7 +72,6 @@ async function loadZTickChart() {
   const endTime = document.getElementById("endTime").value.trim();
 
   let url;
-
   if (startId && endId) {
     url = `/ticks/between-ids?start=${startId}&end=${endId}`;
   } else if (startTime && endTime) {
@@ -98,10 +93,10 @@ async function loadZTickChart() {
   customHighlightIds = [];
   chart.setOption({ series: [] });
   lastChecked = "";
-  updateZSeries();
   await loadLabelCheckboxes();
+  await loadZigzagSettings();
+  updateZSeries();
 }
-
 
 function updateZSeries() {
   const mid = document.getElementById('midCheckbox').checked;
@@ -113,33 +108,9 @@ function updateZSeries() {
   lastChecked = state;
 
   const base = [];
-  if (ask) base.push({
-     name: 'Ask',
-     type: 'scatter', 
-     symbolSize: 1, 
-     itemStyle: { color: '#f5a623' }, 
-     data: dataAsk,
-     dimensions: ['timestamp', 'price', 'id', 'spread'],
-     encode: {x:0, y:1, tooltip: [0,1,2]}
-  });
-  if (mid) base.push({
-     name: 'Mid', 
-     type: 'scatter', 
-     symbolSize: 1, 
-     itemStyle: { color: '#00bcd4' }, 
-     data: dataMid,
-     dimentions: ['timestamp', 'price', 'id', 'spread'],
-     encode: {x:0, y:1, tooltip: [0,1,2]}
-  });
-  if (bid) base.push({
-     name: 'Bid', 
-     type: 'scatter', 
-     symbolSize: 1, 
-     itemStyle: { color: '#4caf50' }, 
-     data: dataBid,
-     dimentions: ['timestamp', 'price', 'id', 'spread'],
-     encode: {x:0, y:1, tooltip: [0,1,2]}
-  });
+  if (ask) base.push({ name: 'Ask', type: 'scatter', symbolSize: 1, itemStyle: { color: '#f5a623' }, data: dataAsk, dimensions: ['timestamp', 'price', 'id', 'spread'], encode: {x:0, y:1, tooltip: [0,1,2]} });
+  if (mid) base.push({ name: 'Mid', type: 'scatter', symbolSize: 1, itemStyle: { color: '#00bcd4' }, data: dataMid, dimensions: ['timestamp', 'price', 'id', 'spread'], encode: {x:0, y:1, tooltip: [0,1,2]} });
+  if (bid) base.push({ name: 'Bid', type: 'scatter', symbolSize: 1, itemStyle: { color: '#4caf50' }, data: dataBid, dimensions: ['timestamp', 'price', 'id', 'spread'], encode: {x:0, y:1, tooltip: [0,1,2]} });
 
   const extras = labelSeries.filter(s => checked.includes(s.name));
 
@@ -147,50 +118,66 @@ function updateZSeries() {
     const points = dataMid.filter(d => selectedTickIds.includes(d[2]));
     extras.push({ name: 'Selected', type: 'scatter', symbolSize: 7, itemStyle: { color: '#ff0', borderColor: '#fff', borderWidth: 1 }, data: points });
   }
-
   if (customHighlightIds.length) {
     const points = dataMid.filter(d => customHighlightIds.includes(d[2]));
     extras.push({ name: 'Extra', type: 'scatter', symbolSize: 6, itemStyle: { color: '#0ff', borderColor: '#fff', borderWidth: 1 }, data: points });
   }
 
-  chart.setOption({ series: [...base, ...extras] }, { replaceMerge: ['series'], lazyUpdate: true });
+  const zigLines = zigzagSeries.map(z => {
+    const conf = zigzagConfig[z.name];
+    if (!conf?.visible) return null;
+    return {
+      ...z,
+      lineStyle: { width: conf.thickness, color: conf.color },
+      itemStyle: { color: conf.color }
+    };
+  }).filter(Boolean);
+
+  chart.setOption({ series: [...base, ...zigLines, ...extras] }, { replaceMerge: ['series'], lazyUpdate: true });
 }
 
-async function loadLabelCheckboxes() {
-  labelSeries = [];
-  const container = document.getElementById("labelCheckboxes");
-  const selector = document.getElementById("labelTableSelect");
-  const tables = await fetch("/available").then(r => r.json());
+async function loadZigzagSettings() {
+  const container = document.getElementById("zigzagSettingsContainer");
+  const levels = await fetch("/available").then(r => r.json());
+  const zigOnly = levels.filter(l => l.startsWith("z"));
+  zigzagSeries = [];
   container.innerHTML = "";
-  selector.innerHTML = "";
-  for (const name of tables) {
-    container.insertAdjacentHTML('beforeend', `<label><input type="checkbox" class="labelCheckbox" value="${name}" onchange="updateZSeries()"> ${name}</label><br>`);
-    selector.insertAdjacentHTML('beforeend', `<option value="${name}">${name}</option>`);
-    const data = await fetch(`/labels/${name}`).then(r => r.json()).catch(() => []);
-    const points = data.map(row => {
-      const match = dataMid.find(p => Number(p[2]) === Number(row.tickid));
-      return match ? [match[0], match[1], row.tickid, row.content] : null;
+
+  for (const name of zigOnly) {
+    const color = "#" + Math.floor(Math.random()*16777215).toString(16).padStart(6, '0');
+    zigzagConfig[name] = { color, thickness: 1.5, visible: false };
+
+    const row = document.createElement("div");
+    row.className = "zigzag-control";
+    row.innerHTML = `
+      <label><input type="checkbox" onchange="toggleZigzagLevel('${name}')"> ${name}</label><br>
+      <input type="color" value="${color}" onchange="updateZigzagColor('${name}', this.value)">
+      <input type="range" min="1" max="5" step="0.5" value="1.5" onchange="updateZigzagWidth('${name}', this.value)">
+    `;
+    container.appendChild(row);
+
+    const rows = await fetch(`/labels/${name}`).then(r => r.json()).catch(() => []);
+    const points = rows.map(r => {
+      const match = dataMid.find(d => d[2] === r.tickid);
+      return match ? [match[0], match[1], r.tickid] : null;
     }).filter(Boolean);
-    console.log(`${name} matched`, points.map(p => p[2]));
-    labelSeries.push({
-      name,
-      type: 'scatter',
-      symbolSize: 8,
-      itemStyle: {
-        color: '#ffa500',
-        borderColor: '#fff',
-        borderWidth: 1,
-        shadowBlur: 10,
-        shadowColor: 'rgba(255, 165, 0, 0.8)'
-      },
-      data: points,
-      tooltip: {
-        formatter: (param) => {
-          return `ID: ${param.value[2]}<br>Label: ${name}<br>Content: ${param.value[3]}`;
-        }
-      }
-    });
+    zigzagSeries.push({ name, type: 'line', data: points, showSymbol: false });
   }
+}
+
+function toggleZigzagLevel(name) {
+  zigzagConfig[name].visible = !zigzagConfig[name].visible;
+  updateZSeries();
+}
+
+function updateZigzagColor(name, color) {
+  zigzagConfig[name].color = color;
+  updateZSeries();
+}
+
+function updateZigzagWidth(name, width) {
+  zigzagConfig[name].thickness = parseFloat(width);
+  updateZSeries();
 }
 
 function parseExtraTickIds() {
@@ -208,29 +195,25 @@ function parseExtraTickIds() {
   updateZSeries();
 }
 
-async function submitLabel() {
+function submitLabel() {
   const table = document.getElementById("labelTableSelect").value;
   const note = document.getElementById("labelNote").value;
   parseExtraTickIds();
   const idsToSubmit = [...selectedTickIds, ...customHighlightIds];
   if (!table || idsToSubmit.length === 0) return;
   const payload = { table, ids: idsToSubmit, note };
-  console.log("Submitting labels:", JSON.stringify(payload));
-  await fetch("/labels/assign", {
+  fetch("/labels/assign", {
     method: "POST",
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)
-  });
-  alert("Labels submitted");
+  }).then(() => alert("Labels submitted"));
 }
 
 function exportSelectedTicks() {
   const selected = dataMid.filter(d => selectedTickIds.includes(d[2]));
-  if (selected.length === 0) return;
+  if (!selected.length) return;
   const csv = ["timestamp,mid,id,spread"];
-  selected.forEach(r => {
-    csv.push(`${new Date(r[0]).toISOString()},${r[1]},${r[2]},${r[3]}`);
-  });
+  selected.forEach(r => csv.push(`${new Date(r[0]).toISOString()},${r[1]},${r[2]},${r[3]}`));
   const blob = new Blob([csv.join("\n")], { type: "text/csv" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -240,122 +223,53 @@ function exportSelectedTicks() {
   URL.revokeObjectURL(url);
 }
 
-function loadVersion() {
-  fetch("/version")
-    .then(res => res.json())
-    .then(v => {
-      const val = v["ztick"] || {};
-      const html = `J: ${val.js?.datetime || '-'} ${val.js?.message || ''}<br>` +
-                   `B: ${val.py?.datetime || '-'} ${val.py?.message || ''}<br>` +
-                   `H: ${val.html?.datetime || '-'} ${val.html?.message || ''}`;
-      document.getElementById("version").innerHTML = html;
-    })
-    .catch(() => {
-      document.getElementById("version").innerText = "Version: unknown";
-    });
-}
-
-window.addEventListener("DOMContentLoaded", () => {
-  initializeChart();
-  setDefaultTimeRange();// ✅ FINAL ztick-core.js with zigzag dropdown + customization support
-
-let chart;
-let dataMid = [], dataAsk = [], dataBid = [], labelSeries = [], zigzagSeries = [], selectedTickIds = [], customHighlightIds = [];
-let lastChecked = "";
-let zigzagConfig = {}; // Store level -> { color, thickness, visible }
-
-function updateZSeries() {
-  const mid = document.getElementById('midCheckbox').checked;
-  const ask = document.getElementById('askCheckbox').checked;
-  const bid = document.getElementById('bidCheckbox').checked;
-  const checked = Array.from(document.querySelectorAll(".labelCheckbox:checked")).map(e => e.value).join(",");
-  const state = `${mid}${ask}${bid}:${checked}:${selectedTickIds.join(',')}:${customHighlightIds.join(',')}`;
-  if (state === lastChecked) return;
-  lastChecked = state;
-
-  const base = [];
-  if (ask) base.push({ name: 'Ask', type: 'scatter', symbolSize: 1, itemStyle: { color: '#f5a623' }, data: dataAsk, dimensions: ['timestamp', 'price', 'id', 'spread'], encode: {x:0, y:1, tooltip: [0,1,2]} });
-  if (mid) base.push({ name: 'Mid', type: 'scatter', symbolSize: 1, itemStyle: { color: '#00bcd4' }, data: dataMid, dimensions: ['timestamp', 'price', 'id', 'spread'], encode: {x:0, y:1, tooltip: [0,1,2]} });
-  if (bid) base.push({ name: 'Bid', type: 'scatter', symbolSize: 1, itemStyle: { color: '#4caf50' }, data: dataBid, dimensions: ['timestamp', 'price', 'id', 'spread'], encode: {x:0, y:1, tooltip: [0,1,2]} });
-
-  const extras = labelSeries.filter(s => checked.includes(s.name));
-  if (selectedTickIds.length) {
-    const points = dataMid.filter(d => selectedTickIds.includes(d[2]));
-    extras.push({ name: 'Selected', type: 'scatter', symbolSize: 7, itemStyle: { color: '#ff0', borderColor: '#fff', borderWidth: 1 }, data: points });
-  }
-  if (customHighlightIds.length) {
-    const points = dataMid.filter(d => customHighlightIds.includes(d[2]));
-    extras.push({ name: 'Extra', type: 'scatter', symbolSize: 6, itemStyle: { color: '#0ff', borderColor: '#fff', borderWidth: 1 }, data: points });
-  }
-
-  const zigLines = zigzagSeries.filter(z => zigzagConfig[z.name]?.visible);
-  chart.setOption({ series: [...base, ...zigLines, ...extras] }, { replaceMerge: ['series'], lazyUpdate: true });
-}
-
-async function loadZigzagSettings() {
-  const container = document.getElementById("zigzagSettingsContainer");
-  const levels = await fetch("/labels/available").then(r => r.json());
-  const zigOnly = levels.filter(l => l.startsWith("z"));
-  zigzagSeries = [];
+async function loadLabelCheckboxes() {
+  labelSeries = [];
+  const container = document.getElementById("labelCheckboxes");
+  const selector = document.getElementById("labelTableSelect");
+  const tables = await fetch("/available").then(r => r.json());
   container.innerHTML = "";
-
-  for (const name of zigOnly) {
-    const color = "#" + Math.floor(Math.random()*16777215).toString(16).padStart(6, '0');
-    zigzagConfig[name] = { color, thickness: 1.5, visible: false };
-
-    const row = document.createElement("div");
-    row.className = "zigzag-control";
-    row.innerHTML = `
-      <label><input type="checkbox" data-level="${name}" onchange="toggleZigzagLevel('${name}')"> ${name}</label><br>
-      <input type="color" value="${color}" onchange="updateZigzagColor('${name}', this.value)">
-      <input type="range" min="1" max="5" step="0.5" value="1.5" onchange="updateZigzagWidth('${name}', this.value)">
-    `;
-    container.appendChild(row);
-
-    const rows = await fetch(`/labels/${name}`).then(r => r.json()).catch(() => []);
-    const points = rows.map(r => {
-      const match = dataMid.find(d => d[2] === r.tickid);
-      return match ? [match[0], match[1], r.tickid] : null;
+  selector.innerHTML = "";
+  for (const name of tables) {
+    container.insertAdjacentHTML('beforeend', `<label><input type="checkbox" class="labelCheckbox" value="${name}" onchange="updateZSeries()"> ${name}</label><br>`);
+    selector.insertAdjacentHTML('beforeend', `<option value="${name}">${name}</option>`);
+    const data = await fetch(`/labels/${name}`).then(r => r.json()).catch(() => []);
+    const points = data.map(row => {
+      const match = dataMid.find(p => Number(p[2]) === Number(row.tickid));
+      return match ? [match[0], match[1], row.tickid, row.content] : null;
     }).filter(Boolean);
-    zigzagSeries.push({ name, type: 'line', data: points, showSymbol: false });
+    labelSeries.push({
+      name,
+      type: 'scatter',
+      symbolSize: 8,
+      itemStyle: {
+        color: '#ffa500', borderColor: '#fff', borderWidth: 1,
+        shadowBlur: 10, shadowColor: 'rgba(255,165,0,0.8)'
+      },
+      data: points,
+      tooltip: {
+        formatter: (param) => `ID: ${param.value[2]}<br>Label: ${name}<br>Content: ${param.value[3]}`
+      }
+    });
   }
 }
 
-function toggleZigzagLevel(name) {
-  zigzagConfig[name].visible = !zigzagConfig[name].visible;
-  const series = zigzagSeries.find(s => s.name === name);
-  if (series) {
-    series.itemStyle = { color: zigzagConfig[name].color };
-    series.lineStyle = { width: zigzagConfig[name].thickness };
-  }
-  updateZSeries();
+function loadVersion() {
+  fetch("/version").then(res => res.json()).then(v => {
+    const val = v["ztick"] || {};
+    const html = `J: ${val.js?.datetime || '-'} ${val.js?.message || ''}<br>` +
+                 `B: ${val.py?.datetime || '-'} ${val.py?.message || ''}<br>` +
+                 `H: ${val.html?.datetime || '-'} ${val.html?.message || ''}`;
+    document.getElementById("version").innerHTML = html;
+  }).catch(() => {
+    document.getElementById("version").innerText = "Version: unknown";
+  });
 }
 
-function updateZigzagColor(name, color) {
-  zigzagConfig[name].color = color;
-  toggleZigzagLevel(name); // retrigger update
-}
-
-function updateZigzagWidth(name, width) {
-  zigzagConfig[name].thickness = parseFloat(width);
-  toggleZigzagLevel(name);
-}
-
-// Initialization
 window.addEventListener("DOMContentLoaded", async () => {
-  await initializeChart();  // 🧠 wait for it
+  await initializeChart();
   setDefaultTimeRange();
   loadVersion();
-  loadZigzagSettings();
-  ["askCheckbox", "midCheckbox", "bidCheckbox"].forEach(id => {
-    document.getElementById(id).addEventListener("change", updateZSeries);
-  });
-  document.getElementById("customTickIds").addEventListener("input", parseExtraTickIds);
-});
-
-
-  loadVersion();
-  //loadLabelCheckboxes();
   ["askCheckbox", "midCheckbox", "bidCheckbox"].forEach(id => {
     document.getElementById(id).addEventListener("change", updateZSeries);
   });
