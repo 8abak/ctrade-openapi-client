@@ -128,7 +128,7 @@ function updateZSeries() {
      symbolSize: 1, 
      itemStyle: { color: '#00bcd4' }, 
      data: dataMid,
-     dimention: ['timestamp', 'price', 'id', 'spread'],
+     dimentions: ['timestamp', 'price', 'id', 'spread'],
      encode: {x:0, y:1, tooltip: [0,1,2]}
   });
   if (bid) base.push({
@@ -137,7 +137,7 @@ function updateZSeries() {
      symbolSize: 1, 
      itemStyle: { color: '#4caf50' }, 
      data: dataBid,
-     dimention: ['timestamp', 'price', 'id', 'spread'],
+     dimentions: ['timestamp', 'price', 'id', 'spread'],
      encode: {x:0, y:1, tooltip: [0,1,2]}
   });
 
@@ -264,25 +264,6 @@ let dataMid = [], dataAsk = [], dataBid = [], labelSeries = [], zigzagSeries = [
 let lastChecked = "";
 let zigzagConfig = {}; // Store level -> { color, thickness, visible }
 
-function initializeChart() {
-  chart = echarts.init(document.getElementById("main"));
-  chart.setOption({
-    backgroundColor: "#111",
-    tooltip: { /* unchanged */ },
-    xAxis: { type: 'time', axisLabel: { color: '#ccc' }, splitLine: { lineStyle: { color: '#333' } } },
-    yAxis: { type: 'value', scale: true, axisLabel: { color: '#ccc' }, splitLine: { lineStyle: { color: '#333' } } },
-    dataZoom: [ { type: 'inside' }, { type: 'slider', height: 40, bottom: 0 } ],
-    series: []
-  });
-  chart.on("click", function (params) {
-    const id = params?.value?.[2];
-    if (!id) return;
-    selectedTickIds = [id];
-    document.getElementById("selectedIdsText").textContent = id;
-    updateZSeries();
-  });
-}
-
 function updateZSeries() {
   const mid = document.getElementById('midCheckbox').checked;
   const ask = document.getElementById('askCheckbox').checked;
@@ -365,6 +346,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   await initializeChart();  // 🧠 wait for it
   setDefaultTimeRange();
   loadVersion();
+  loadZigzagSettings();
   ["askCheckbox", "midCheckbox", "bidCheckbox"].forEach(id => {
     document.getElementById(id).addEventListener("change", updateZSeries);
   });
