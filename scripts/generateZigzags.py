@@ -8,56 +8,59 @@ import argparse
 DATABASE_URL = "postgresql+psycopg2://babak:babak33044@localhost:5432/trading"
 engine = create_engine(DATABASE_URL)
 
-# ---- ZIGZAG ENGINE (Correct High/Low Snap) ----
+# ---- ZIGZAG ENGINE (Correct First Extreme After Reversal) ----
 def zigzag_engine(df, threshold):
     pivots = []
-    last_pivot_idx = 0
-    last_pivot_price = df["mid"].iloc[0]
-    direction = None
+    i = 0
+    n = len(df)
 
-    for i in range(1, len(df)):
-        price = df["mid"].iloc[i]
-        price_change = price - last_pivot_price
+    # Find the first pivot: either first high or low that moved at least $threshold from the starting point
+    while i < n:
+        start_price = df["mid"].iloc[i]
+        j = i + 1
+        while j < n and abs(df["mid"].iloc[j] - start_price) < threshold:
+            j += 1
+        if j >= n:
+            return pivots
+        direction = "up" if df["mid"].iloc[j] > start_price else "dn"
+        range_df = df.iloc[i:j+1]
+        pivot_idx = range_df["mid"].idxmin() if direction == "up" else range_df["mid"].idxmax()
+        pivots.append({
+            "tickid": int(df["tickid"].loc[pivot_idx]),
+            "timestamp": df["timestamp"].loc[pivot_idx],
+            "price": df["mid"].loc[pivot_idx],
+            "direction": direction
+        })
+        i = df.index.get_loc(pivot_idx)
+        break
 
-        if direction is None:
-            if abs(price_change) >= threshold:
-                direction = "up" if price_change > 0 else "dn"
-                pivot_idx = df["mid"].iloc[:i+1].idxmin() if direction == "up" else df["mid"].iloc[:i+1].idxmax()
+    # Alternate pivots after that
+    while i < n:
+        last_dir = pivots[-1]["direction"]
+        last_price = pivots[-1]["price"]
+        j = i + 1
+        while j < n:
+            price = df["mid"].iloc[j]
+            move = price - last_price if last_dir == "dn" else last_price - price
+            if move >= threshold:
+                range_df = df.iloc[i:j+1]
+                if last_dir == "dn":
+                    pivot_idx = range_df["mid"].idxmax()
+                    direction = "up"
+                else:
+                    pivot_idx = range_df["mid"].idxmin()
+                    direction = "dn"
                 pivots.append({
-                    "tickid": int(df["tickid"].iloc[pivot_idx]),
-                    "timestamp": df["timestamp"].iloc[pivot_idx],
-                    "price": df["mid"].iloc[pivot_idx],
+                    "tickid": int(df["tickid"].loc[pivot_idx]),
+                    "timestamp": df["timestamp"].loc[pivot_idx],
+                    "price": df["mid"].loc[pivot_idx],
                     "direction": direction
                 })
-                last_pivot_idx = pivot_idx
-                last_pivot_price = df["mid"].iloc[pivot_idx]
+                i = df.index.get_loc(pivot_idx)
+                break
+            j += 1
         else:
-            if direction == "up":
-                highest = df["mid"].iloc[last_pivot_idx:i+1].idxmax()
-                max_move = df["mid"].iloc[highest] - last_pivot_price
-                if max_move >= threshold:
-                    pivots.append({
-                        "tickid": int(df["tickid"].iloc[highest]),
-                        "timestamp": df["timestamp"].iloc[highest],
-                        "price": df["mid"].iloc[highest],
-                        "direction": "up"
-                    })
-                    last_pivot_idx = highest
-                    last_pivot_price = df["mid"].iloc[highest]
-                    direction = "dn"
-            else:
-                lowest = df["mid"].iloc[last_pivot_idx:i+1].idxmin()
-                max_move = last_pivot_price - df["mid"].iloc[lowest]
-                if max_move >= threshold:
-                    pivots.append({
-                        "tickid": int(df["tickid"].iloc[lowest]),
-                        "timestamp": df["timestamp"].iloc[lowest],
-                        "price": df["mid"].iloc[lowest],
-                        "direction": "dn"
-                    })
-                    last_pivot_idx = lowest
-                    last_pivot_price = df["mid"].iloc[lowest]
-                    direction = "up"
+            break
 
     return pivots
 
