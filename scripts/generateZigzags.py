@@ -67,6 +67,8 @@ def run_for_date(date_str):
         return
 
     df = pd.DataFrame(rows, columns=["tickid", "timestamp", "mid"])
+    df = df.sort_values("timestamp").reset_index(drop=True)
+
     atr_val = calculate_atr(df["mid"])
 
     configs = [
