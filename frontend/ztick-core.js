@@ -1,4 +1,4 @@
-// ✅ FINAL ztick-core.js with zigzag level control (per table entry)
+// ✅ FINAL ztick-core.js with zigzag level control (per table entry + proper level detection)
 
 let chart;
 let dataMid = [], dataAsk = [], dataBid = [], labelSeries = [], zigzagSeries = [], selectedTickIds = [], customHighlightIds = [];
@@ -94,12 +94,12 @@ function updateZSeries() {
 async function loadZigzagSettings() {
   const container = document.getElementById("zigzagSettingsContainer");
   const allData = await fetch(`/labels/zigzag_pivots`).then(r => r.json());
-  const levels = [...new Set(allData.map(r => r.content))];
+  const levels = [...new Set(allData.map(r => r.level))];
   zigzagConfig = {}; container.innerHTML = "";
 
   for (const level of levels) {
     const color = "#" + Math.floor(Math.random()*16777215).toString(16).padStart(6, '0');
-    const filteredPoints = allData.filter(r => r.content === level).map(r => {
+    const filteredPoints = allData.filter(r => r.level === level).map(r => {
       const match = dataMid.find(d => d[2] === r.tickid);
       return match ? [match[0], match[1], r.tickid] : null;
     }).filter(Boolean);
