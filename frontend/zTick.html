@@ -48,18 +48,15 @@
 
       <div id="labelCheckboxes" class="section checkbox-row"></div>
 
-      <details id="labelControls" style="display:none;" class="section">
-        <summary>Selected Tick Labeling</summary>
-        <div style="margin-top: 6px;">
-          <strong>Selected Tick:</strong> <span id="selectedIdsText">None</span><br><br>
-          <label for="labelTableSelect">Label Table:</label>
-          <select id="labelTableSelect"></select>
-          <input type="text" id="customTickIds" placeholder="Extra Tick IDs (e.g., 53212,53214-53220)">
-          <textarea id="labelNote" rows="2" placeholder="Optional label note..."></textarea>
-          <button onclick="submitLabel()">Submit Labels</button>
-          <button onclick="exportSelectedTicks()">Export CSV</button>
-        </div>
-      </details>
+      <!-- ✅ This was missing -->
+      <div class="section" id="labelControls">
+        <strong>Selected Tick:</strong> <span id="selectedIdsText">None</span>
+        <select id="labelTableSelect"></select>
+        <input type="text" id="customTickIds" placeholder="Extra Tick IDs (e.g., 53212,53214-53220)">
+        <textarea id="labelNote" rows="2" placeholder="Optional label note..."></textarea>
+        <button onclick="submitLabel()">Submit Labels</button>
+        <button onclick="exportSelectedTicks()">Export CSV</button>
+      </div>
     </div>
 
     <div id="version" style="font-size: 11px; color: #777; text-align: left;"></div>
