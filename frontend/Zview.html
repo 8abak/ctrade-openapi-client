@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Zigzag View</title>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5"></script>
+  <style>
+    html, body {
+      margin: 0; padding: 0; height: 100%; background: #111; color: #ccc;
+      font-family: sans-serif; display: flex; flex-direction: row;
+    }
+    #sidebar {
+      width: 280px; padding: 16px; background: #1a1a1a; overflow-y: auto;
+      border-right: 1px solid #333;
+    }
+    #main {
+      flex: 1;
+    }
+    .zigzag-control {
+      margin-bottom: 12px;
+      border-bottom: 1px solid #333;
+      padding-bottom: 8px;
+    }
+    .zigzag-control input[type="color"] {
+      margin-left: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div id="sidebar">
+    <h2>Zigzag Levels</h2>
+    <div id="zigzagControls"></div>
+  </div>
+  <div id="main"></div>
+
+  <script src="zview-core.js"></script>
+</body>
+</html>
