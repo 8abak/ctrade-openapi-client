@@ -37,7 +37,7 @@ def store_zig(tick, label):
     with psycopg2.connect(**DB_CONFIG) as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO zigzag_pivots (tick_id, timestamp, mid, label)
+                INSERT INTO zigzag_pivots (tickid, timestamp, mid, label)
                 VALUES (%s, %s, %s, %s)
             """, (tick['id'], tick['timestamp'], tick['mid'], label))
             print(f"📌 Stored {label.upper()} at tick {tick['id']}, price={tick['mid']}")
@@ -77,7 +77,7 @@ class Manager:
                 print(f"🔥 BZ tick {next_tick['id']} confirmed. Triggering data gatherer + trainer.")
                 gatherer.process_zig({
                     'label': 'bz',
-                    'tick_id': next_tick['id'],
+                    'tickid': next_tick['id'],
                     'timestamp': str(next_tick['timestamp'])
                 })
                 trainer.train()
