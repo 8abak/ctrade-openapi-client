@@ -1,7 +1,7 @@
 import time
-from . import Crawler as crawler
-from . import Gatherer as gatherer
-from . import Trainer as trainer
+from ml.crawler import crawler
+from ml.gatherer import gatherer
+from ml.trainer import trainer
 
 class Manager:
     def __init__(self, mode='bootstrap', limit=30):
