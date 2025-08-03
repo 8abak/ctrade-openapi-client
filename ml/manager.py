@@ -1,5 +1,5 @@
 import time
-from cTrader.ml import crawler, gatherer, trainer
+import Crawler,Gatherer,Trainer
 
 class Manager:
     def __init__(self, mode='bootstrap', limit=30):
@@ -18,7 +18,7 @@ class Manager:
 
     def handle_bootstrap_cycle(self):
         # Try to get the next zig from the crawler
-        zig = crawler.next_zig()
+        zig = Crawler.next_zig()
         if not zig:
             print("⏳ No new zigzag found. Waiting...")
             return
@@ -29,8 +29,8 @@ class Manager:
         elif zig['label'] == 'bz':
             print(f"🔥 BZ tick {zig['end_tick_id']} confirmed. Triggering data gatherer + trainer.")
             self.sz_buffer.append(zig)
-            gatherer.process_zig(zig)
-            trainer.train()
+            Gatherer.process_zig(zig)
+            Trainer.train()
             self.sz_buffer = []  # reset after training
             self.bz_counter += 1
 
