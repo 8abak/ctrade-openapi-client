@@ -99,6 +99,10 @@ def run_next(label='sz'):
         else:
             current_id = new_ticks[-1]['id']
 
+def next_zig():
+    # your implementation here
+    return {"label": "sz", "end_tick_id": 12345}  # placeholder return
+
 
 if __name__ == "__main__":
     run_next('sz')
