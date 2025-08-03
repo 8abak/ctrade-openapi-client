@@ -2,7 +2,7 @@ import time
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from datetime import datetime
-from cTrader.ml import gatherer, trainer
+from . import gatherer, trainer
 
 DB_CONFIG = {
     'dbname': 'trading',
