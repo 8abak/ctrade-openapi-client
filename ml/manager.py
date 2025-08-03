@@ -1,5 +1,7 @@
 import time
-from ml import Crawler,Gatherer,Trainer
+from . import Crawler as crawler
+from . import Gatherer as gatherer
+from . import Trainer as trainer
 
 class Manager:
     def __init__(self, mode='bootstrap', limit=30):
@@ -18,7 +20,7 @@ class Manager:
 
     def handle_bootstrap_cycle(self):
         # Try to get the next zig from the crawler
-        zig = Crawler.next_zig()
+        zig = crawler.next_zig()
         if not zig:
             print("⏳ No new zigzag found. Waiting...")
             return
@@ -29,8 +31,8 @@ class Manager:
         elif zig['label'] == 'bz':
             print(f"🔥 BZ tick {zig['end_tick_id']} confirmed. Triggering data gatherer + trainer.")
             self.sz_buffer.append(zig)
-            Gatherer.process_zig(zig)
-            Trainer.train()
+            gatherer.process_zig(zig)
+            trainer.train()
             self.sz_buffer = []  # reset after training
             self.bz_counter += 1
 
