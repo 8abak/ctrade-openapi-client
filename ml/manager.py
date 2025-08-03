@@ -1,5 +1,5 @@
 import time
-import Crawler,Gatherer,Trainer
+from ml import Crawler,Gatherer,Trainer
 
 class Manager:
     def __init__(self, mode='bootstrap', limit=30):
