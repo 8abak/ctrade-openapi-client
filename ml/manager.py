@@ -37,9 +37,9 @@ def store_zig(tick, level, direction):
     with psycopg2.connect(**DB_CONFIG) as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO zigzag_pivots (tickid, timestamp, mid, level, direction)
-                VALUES (%s, %s, %s, %s, %s)
-            """, (tick['id'], tick['timestamp'], tick['mid'], level, direction))
+                INSERT INTO zigzag_pivots (tickid, timestamp, price, direction, level, mid)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (tick['id'], tick['timestamp'], tick['mid'], direction, level, tick['mid']))
             print(f"📌 Stored {level.upper()} at tick {tick['id']} with direction {direction}, price={tick['mid']}")
 
 class Manager:
