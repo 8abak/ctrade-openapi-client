@@ -2,7 +2,7 @@ import time
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from datetime import datetime
-from . import gatherer, trainer
+from cTrader.ml import gatherer, trainer
 
 DB_CONFIG = {
     'dbname': 'trading',
@@ -33,14 +33,14 @@ def get_next_tick(current_id):
             """, (current_id,))
             return cur.fetchone()
 
-def store_zig(tick, label):
+def store_zig(tick, level, direction):
     with psycopg2.connect(**DB_CONFIG) as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO zigzag_pivots (tickid, timestamp, mid, label)
-                VALUES (%s, %s, %s, %s)
-            """, (tick['id'], tick['timestamp'], tick['mid'], label))
-            print(f"📌 Stored {label.upper()} at tick {tick['id']}, price={tick['mid']}")
+                INSERT INTO zigzag_pivots (tickid, timestamp, mid, level, direction)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (tick['id'], tick['timestamp'], tick['mid'], level, direction))
+            print(f"📌 Stored {level.upper()} at tick {tick['id']} with direction {direction}, price={tick['mid']}")
 
 class Manager:
     def __init__(self, mode='bootstrap', limit=30):
@@ -48,8 +48,8 @@ class Manager:
         self.limit = limit
         self.bz_counter = 0
         self.prev_tick = get_tick(1)
-        store_zig(self.prev_tick, 'sz')
-        store_zig(self.prev_tick, 'bz')
+        store_zig(self.prev_tick, 'sz', 'up')
+        store_zig(self.prev_tick, 'bz', 'up')
 
     def run(self):
         print(f"📌 Starting manager in mode: {self.mode}, target BZs: {self.limit}")
@@ -65,19 +65,20 @@ class Manager:
             return
 
         delta = next_tick['mid'] - self.prev_tick['mid']
-        label = None
+        direction = 'up' if delta > 0 else 'dn'
+        level = None
         if abs(delta) >= ZIG_THRESHOLD_BZ:
-            label = 'bz'
+            level = 'bz'
         elif abs(delta) >= ZIG_THRESHOLD_SZ:
-            label = 'sz'
+            level = 'sz'
 
-        if label:
-            store_zig(next_tick, label)
-            if label == 'bz':
+        if level:
+            store_zig(next_tick, level, direction)
+            if level == 'bz':
                 print(f"🔥 BZ tick {next_tick['id']} confirmed. Triggering data gatherer + trainer.")
                 gatherer.process_zig({
                     'label': 'bz',
-                    'tickid': next_tick['id'],
+                    'tick_id': next_tick['id'],
                     'timestamp': str(next_tick['timestamp'])
                 })
                 trainer.train()
@@ -86,5 +87,5 @@ class Manager:
         self.prev_tick = next_tick
 
 if __name__ == '__main__':
-    mgr = Manager(mode='bootstrap', limit=3)
+    mgr = Manager(mode='bootstrap', limit=30)
     mgr.run()
