@@ -2,7 +2,7 @@ import time
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from datetime import datetime
-from ml import gatherer, trainer
+from cTrader.ml import gatherer, trainer
 
 DB_CONFIG = {
     'dbname': 'trading',
@@ -15,6 +15,7 @@ DB_CONFIG = {
 ZIG_THRESHOLD_SZ = 0.5
 ZIG_THRESHOLD_BZ = 3.0
 
+
 def get_tick(start_id):
     with psycopg2.connect(**DB_CONFIG, cursor_factory=RealDictCursor) as conn:
         with conn.cursor() as cur:
@@ -23,6 +24,7 @@ def get_tick(start_id):
                 WHERE id = %s
             """, (start_id,))
             return cur.fetchone()
+
 
 def get_next_tick(current_id):
     with psycopg2.connect(**DB_CONFIG, cursor_factory=RealDictCursor) as conn:
@@ -33,14 +35,16 @@ def get_next_tick(current_id):
             """, (current_id,))
             return cur.fetchone()
 
+
 def store_zig(tick, level, direction):
     with psycopg2.connect(**DB_CONFIG) as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO zigzag_pivots (tickid, timestamp, price, direction, level, mid)
+                INSERT INTO zigzag_pivots (tickid, timestamp, mid, level, direction, price)
                 VALUES (%s, %s, %s, %s, %s, %s)
-            """, (tick['id'], tick['timestamp'], tick['mid'], direction, level, tick['mid']))
+            """, (tick['id'], tick['timestamp'], tick['mid'], level, direction, tick['mid']))
             print(f"📌 Stored {level.upper()} at tick {tick['id']} with direction {direction}, price={tick['mid']}")
+
 
 class Manager:
     def __init__(self, mode='bootstrap', limit=30):
@@ -48,6 +52,8 @@ class Manager:
         self.limit = limit
         self.bz_counter = 0
         self.prev_tick = get_tick(1)
+        self.trend = None
+        self.extreme_tick = self.prev_tick
         store_zig(self.prev_tick, 'sz', 'up')
         store_zig(self.prev_tick, 'bz', 'up')
 
@@ -64,27 +70,58 @@ class Manager:
             print("⏳ No more ticks available.")
             return
 
-        delta = next_tick['mid'] - self.prev_tick['mid']
-        direction = 'up' if delta > 0 else 'dn'
-        level = None
-        if abs(delta) >= ZIG_THRESHOLD_BZ:
-            level = 'bz'
-        elif abs(delta) >= ZIG_THRESHOLD_SZ:
-            level = 'sz'
+        next_price = next_tick['mid']
+        extreme_price = self.extreme_tick['mid']
 
-        if level:
-            store_zig(next_tick, level, direction)
-            if level == 'bz':
-                print(f"🔥 BZ tick {next_tick['id']} confirmed. Triggering data gatherer + trainer.")
-                gatherer.process_zig({
-                    'label': 'bz',
-                    'tick_id': next_tick['id'],
-                    'timestamp': str(next_tick['timestamp'])
-                })
-                trainer.train()
-                self.bz_counter += 1
+        if self.trend == 'up':
+            if next_price > extreme_price:
+                self.extreme_tick = next_tick
+            elif extreme_price - next_price >= ZIG_THRESHOLD_SZ:
+                delta = extreme_price - self.prev_tick['mid']
+                level = 'bz' if delta >= ZIG_THRESHOLD_BZ else 'sz'
+                store_zig(self.extreme_tick, level, 'up')
+                if level == 'bz':
+                    gatherer.process_zig({
+                        'label': 'bz',
+                        'tick_id': self.extreme_tick['id'],
+                        'timestamp': str(self.extreme_tick['timestamp'])
+                    })
+                    trainer.train()
+                    self.bz_counter += 1
+                self.prev_tick = self.extreme_tick
+                self.extreme_tick = next_tick
+                self.trend = 'dn'
+
+        elif self.trend == 'dn':
+            if next_price < extreme_price:
+                self.extreme_tick = next_tick
+            elif next_price - extreme_price >= ZIG_THRESHOLD_SZ:
+                delta = self.prev_tick['mid'] - extreme_price
+                level = 'bz' if delta >= ZIG_THRESHOLD_BZ else 'sz'
+                store_zig(self.extreme_tick, level, 'dn')
+                if level == 'bz':
+                    gatherer.process_zig({
+                        'label': 'bz',
+                        'tick_id': self.extreme_tick['id'],
+                        'timestamp': str(self.extreme_tick['timestamp'])
+                    })
+                    trainer.train()
+                    self.bz_counter += 1
+                self.prev_tick = self.extreme_tick
+                self.extreme_tick = next_tick
+                self.trend = 'up'
+
+        else:
+            # First decision
+            if next_price > self.prev_tick['mid']:
+                self.trend = 'up'
+                self.extreme_tick = next_tick
+            elif next_price < self.prev_tick['mid']:
+                self.trend = 'dn'
+                self.extreme_tick = next_tick
 
         self.prev_tick = next_tick
+
 
 if __name__ == '__main__':
     mgr = Manager(mode='bootstrap', limit=30)
