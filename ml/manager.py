@@ -54,6 +54,7 @@ class Manager:
         self.prev_tick = get_tick(1)
         self.trend = None
         self.extreme_tick = self.prev_tick
+        self.last_bz_tick = self.prev_tick  # 🔁 track last BZ point
         store_zig(self.prev_tick, 'sz', 'up')
         store_zig(self.prev_tick, 'bz', 'up')
 
@@ -77,10 +78,11 @@ class Manager:
             if next_price > extreme_price:
                 self.extreme_tick = next_tick
             elif extreme_price - next_price >= ZIG_THRESHOLD_SZ:
-                delta = extreme_price - self.prev_tick['mid']
+                delta = self.extreme_tick['mid'] - self.last_bz_tick['mid']  # 🧠 delta from last BZ
                 level = 'bz' if delta >= ZIG_THRESHOLD_BZ else 'sz'
                 store_zig(self.extreme_tick, level, 'up')
                 if level == 'bz':
+                    self.last_bz_tick = self.extreme_tick
                     gatherer.process_zig({
                         'label': 'bz',
                         'tick_id': self.extreme_tick['id'],
@@ -96,10 +98,11 @@ class Manager:
             if next_price < extreme_price:
                 self.extreme_tick = next_tick
             elif next_price - extreme_price >= ZIG_THRESHOLD_SZ:
-                delta = self.prev_tick['mid'] - extreme_price
+                delta = self.last_bz_tick['mid'] - self.extreme_tick['mid']  # 🧠 delta from last BZ
                 level = 'bz' if delta >= ZIG_THRESHOLD_BZ else 'sz'
                 store_zig(self.extreme_tick, level, 'dn')
                 if level == 'bz':
+                    self.last_bz_tick = self.extreme_tick
                     gatherer.process_zig({
                         'label': 'bz',
                         'tick_id': self.extreme_tick['id'],
@@ -112,7 +115,6 @@ class Manager:
                 self.trend = 'up'
 
         else:
-            # First decision
             if next_price > self.prev_tick['mid']:
                 self.trend = 'up'
                 self.extreme_tick = next_tick
