@@ -112,7 +112,8 @@ class Manager:
                     })
                     trainer.train()
                     self.bz_counter += 1
-                self.prev_tick = self.extreme_tick
+                # ✅ Always move forward
+                self.prev_tick = next_tick
                 self.extreme_tick = next_tick
                 self.trend = 'dn'
 
@@ -127,16 +128,18 @@ class Manager:
                     self.last_bz_tick = self.extreme_tick
                     gatherer.process_zig({
                         'label': 'bz',
-                        'tick_id': self.extreme_tick['id'],
+                        'end_tick_id': self.extreme_tick['id'],
                         'timestamp': str(self.extreme_tick['timestamp'])
                     })
                     trainer.train()
                     self.bz_counter += 1
-                self.prev_tick = self.extreme_tick
+                # ✅ Always move forward
+                self.prev_tick = next_tick
                 self.extreme_tick = next_tick
                 self.trend = 'up'
 
         else:
+            # First decision of the trend
             if next_price > self.prev_tick['mid']:
                 self.trend = 'up'
                 self.extreme_tick = next_tick
@@ -144,7 +147,9 @@ class Manager:
                 self.trend = 'dn'
                 self.extreme_tick = next_tick
 
+        # ✅ In all cases, move prev_tick forward
         self.prev_tick = next_tick
+
 
 
 if __name__ == '__main__':
