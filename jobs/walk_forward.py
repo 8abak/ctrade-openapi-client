@@ -1,191 +1,157 @@
 # jobs/walk_forward.py
-import os
-import sys
-import argparse
-from datetime import datetime, timedelta
-from typing import Optional
+from __future__ import annotations
 
+import argparse
+import logging
+from datetime import datetime, timedelta
+from typing import Optional, Tuple
+
+import os
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
-DEFAULT_DB_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql+psycopg2://babak:babak33044@localhost:5432/trading"
-)
+LOG_FMT = "[%(asctime)s] %(levelname)s %(message)s"
+logging.basicConfig(level=logging.INFO, format=LOG_FMT)
+log = logging.getLogger("walk_forward")
 
-# ---------- DB setup ----------
+# --------- DB helpers ---------
 
-DDL_PREDICTIONS_SMALL = """
-CREATE TABLE IF NOT EXISTS predictions_small (
-    id           BIGSERIAL PRIMARY KEY,
-    timestamp    TIMESTAMPTZ NOT NULL,
-    tickid       BIGINT       NOT NULL,
-    direction    SMALLINT     NOT NULL,  -- -1 down, 0 flat, +1 up
-    confidence   REAL         NOT NULL DEFAULT 0,
-    model_tag    TEXT         NOT NULL DEFAULT 'v0',
-    created_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_predictions_small_ts   ON predictions_small (timestamp);
-CREATE INDEX IF NOT EXISTS idx_predictions_small_tick ON predictions_small (tickid);
-"""
+def get_engine() -> Engine:
+    url = os.getenv(
+        "DATABASE_URL",
+        "postgresql+psycopg2://babak:babak33044@localhost:5432/trading",
+    )
+    return create_engine(url, future=True)
 
-DDL_PREDICTIONS_BIG = """
-CREATE TABLE IF NOT EXISTS predictions_big (
-    id           BIGSERIAL PRIMARY KEY,
-    timestamp    TIMESTAMPTZ NOT NULL,
-    tickid       BIGINT       NOT NULL,
-    direction    SMALLINT     NOT NULL,  -- -1 down, 0 flat, +1 up
-    confidence   REAL         NOT NULL DEFAULT 0,
-    model_tag    TEXT         NOT NULL DEFAULT 'v0',
-    created_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_predictions_big_ts   ON predictions_big (timestamp);
-CREATE INDEX IF NOT EXISTS idx_predictions_big_tick ON predictions_big (tickid);
-"""
+def ensure_prediction_tables(engine: Engine) -> None:
+    """Create predictions_small and predictions_big if they don't exist (Postgres)."""
+    ddl = """
+    CREATE TABLE IF NOT EXISTS predictions_small (
+        id           BIGSERIAL PRIMARY KEY,
+        tickid       BIGINT NOT NULL REFERENCES ticks(id) ON DELETE CASCADE,
+        timestamp    TIMESTAMPTZ NOT NULL,
+        model        TEXT NOT NULL,
+        proba_up     DOUBLE PRECISION,
+        proba_down   DOUBLE PRECISION,
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_predictions_small_tickid ON predictions_small(tickid);
+    CREATE INDEX IF NOT EXISTS idx_predictions_small_ts ON predictions_small(timestamp);
 
-def get_engine(db_url: str = DEFAULT_DB_URL) -> Engine:
-    return create_engine(db_url, future=True)
-
-def ensure_tables(engine: Engine) -> None:
+    CREATE TABLE IF NOT EXISTS predictions_big (
+        id           BIGSERIAL PRIMARY KEY,
+        tickid       BIGINT NOT NULL REFERENCES ticks(id) ON DELETE CASCADE,
+        timestamp    TIMESTAMPTZ NOT NULL,
+        model        TEXT NOT NULL,
+        proba_up     DOUBLE PRECISION,
+        proba_down   DOUBLE PRECISION,
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_predictions_big_tickid ON predictions_big(tickid);
+    CREATE INDEX IF NOT EXISTS idx_predictions_big_ts ON predictions_big(timestamp);
+    """
     with engine.begin() as conn:
-        conn.exec_driver_sql(DDL_PREDICTIONS_SMALL)
-        conn.exec_driver_sql(DDL_PREDICTIONS_BIG)
+        for stmt in ddl.strip().split(";"):
+            s = stmt.strip()
+            if s:
+                conn.execute(text(s))
+    log.info("Ensured predictions_small & predictions_big exist.")
 
-# ---------- helpers ----------
+# --------- your ML hooks (stubbed) ---------
 
-def parse_yyyy_mm_dd(s: str) -> datetime:
-    return datetime.strptime(s, "%Y-%m-%d")
-
-def day_bounds_utc(day: datetime):
-    start = datetime(day.year, day.month, day.day)
-    end = start + timedelta(days=1)
-    return start, end
-
-# ---------- core steps (stubs to be upgraded with your detectors) ----------
-
-def train_one_day(engine: Engine, day: datetime) -> None:
+def train_for_day(day_start: datetime, day_end: datetime) -> None:
     """
-    Placeholder for training on a single day.
-    In our flow this will:
-      - pull ticks of `day`
-      - (optionally) build features + labels from your trends tables
-      - fit/update model(s)
+    Plug your training code here (load features for [day_start, day_end), fit model, save).
     """
-    start, end = day_bounds_utc(day)
-    # No-op for now: just log.
+    log.info("Training on window %s -> %s", day_start.isoformat(), day_end.isoformat())
+
+def predict_for_day(engine: Engine, day_start: datetime, day_end: datetime) -> None:
+    """
+    Plug your predict code here. Below is just a placeholder that writes one row
+    per table so you can verify the job ran end-to-end.
+    """
+    # Get any tick in window (purely as a demo)
     with engine.begin() as conn:
-        conn.execute(
-            text("SELECT 1")  # keeps the transaction happy; real training happens in code
-        )
-
-def predict_next_day(engine: Engine, train_day: datetime, model_tag: str = "v0") -> None:
-    """
-    Placeholder for inference on the *next* day after `train_day`.
-    For now, inserts a dumb baseline (direction=0, confidence=0) so you can
-    see the pipeline writing rows and wire up the UI.
-    We'll replace this with the real SciPy find_peaks based detectors shortly.
-    """
-    predict_day = train_day + timedelta(days=1)
-    start, end = day_bounds_utc(predict_day)
-
-    # Fetch tick ids & timestamps for the prediction day
-    with engine.begin() as conn:
-        rows = conn.execute(
+        row = conn.execute(
             text("""
-                SELECT id AS tickid, timestamp
+                SELECT id, timestamp
                 FROM ticks
                 WHERE timestamp >= :start AND timestamp < :end
                 ORDER BY timestamp ASC
+                LIMIT 1
             """),
-            {"start": start, "end": end}
-        ).fetchall()
+            {"start": day_start, "end": day_end},
+        ).fetchone()
 
-        if not rows:
-            print(f"[predict] No ticks found for {predict_day.date()}, skipping.")
+        if not row:
+            log.warning("No ticks found in %s -> %s; skipping write.", day_start, day_end)
             return
 
-        # Trivial “flat” predictions so the pipeline runs end-to-end.
-        # Replace this block with your real small/big detectors.
-        small_payload = [
-            {
-                "tickid": r.tickid,
-                "timestamp": r.timestamp,
-                "direction": 0,
-                "confidence": 0.0,
-                "model_tag": model_tag,
-            }
-            for r in rows
-        ]
-        big_payload = [
-            {
-                "tickid": r.tickid,
-                "timestamp": r.timestamp,
-                "direction": 0,
-                "confidence": 0.0,
-                "model_tag": model_tag,
-            }
-            for r in rows
-        ]
+        tickid, ts = int(row[0]), row[1]
+        payload = {
+            "tickid": tickid,
+            "timestamp": ts,
+            "model": "demo_v1",
+            "proba_up": 0.5,
+            "proba_down": 0.5,
+        }
 
-        # Insert in chunks to keep memory/statement size sane
-        def batched(iterable, n=2000):
-            for i in range(0, len(iterable), n):
-                yield iterable[i:i+n]
+        conn.execute(
+            text("""
+                INSERT INTO predictions_small (tickid, timestamp, model, proba_up, proba_down)
+                VALUES (:tickid, :timestamp, :model, :proba_up, :proba_down)
+                ON CONFLICT (tickid) DO NOTHING
+            """),
+            payload,
+        )
+        conn.execute(
+            text("""
+                INSERT INTO predictions_big (tickid, timestamp, model, proba_up, proba_down)
+                VALUES (:tickid, :timestamp, :model, :proba_up, :proba_down)
+                ON CONFLICT (tickid) DO NOTHING
+            """),
+            payload,
+        )
+    log.info("Wrote demo predictions for %s", ts.isoformat())
 
-        for batch in batched(small_payload):
-            conn.execute(
-                text("""
-                    INSERT INTO predictions_small (timestamp, tickid, direction, confidence, model_tag)
-                    VALUES (:timestamp, :tickid, :direction, :confidence, :model_tag)
-                """),
-                batch
-            )
+# --------- main runner ---------
 
-        for batch in batched(big_payload):
-            conn.execute(
-                text("""
-                    INSERT INTO predictions_big (timestamp, tickid, direction, confidence, model_tag)
-                    VALUES (:timestamp, :tickid, :direction, :confidence, :model_tag)
-                """),
-                batch
-            )
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Walk-forward training/prediction loop (Py3.9)")
+    p.add_argument("--start", type=str, default=None,
+                   help="Start date (YYYY-MM-DD). Defaults to latest tick day.")
+    p.add_argument("--days", type=int, default=1, help="Number of days to run.")
+    return p.parse_args()
 
-    print(f"[predict] Wrote baseline predictions for {predict_day.date()} "
-          f"({len(rows)} ticks) to predictions_small/big.")
+def resolve_start(engine: Engine, start_str: Optional[str]) -> datetime:
+    if start_str:
+        return datetime.strptime(start_str, "%Y-%m-%d")
+    # Fallback: detect latest tick date
+    with engine.connect() as conn:
+        row = conn.execute(text("SELECT MAX(timestamp) FROM ticks")).fetchone()
+        if row and row[0]:
+            dt = row[0]
+            return datetime(dt.year, dt.month, dt.day)
+    # If no ticks, default to today
+    today = datetime.utcnow()
+    return datetime(today.year, today.month, today.day)
 
-# ---------- runner ----------
-
-def run(days: int = 1, start: Optional[str] = None, model_tag: str = "v0") -> None:
-    """
-    Walk-forward loop:
-      Day D: train on D
-      Day D+1: write predictions for D+1
-    Repeat for `days`.
-    """
-    if start is None:
-        print("ERROR: --start YYYY-MM-DD is required.", file=sys.stderr)
-        sys.exit(2)
-
-    start_day = parse_yyyy_mm_dd(start)
+def run(days: int = 1, start: Optional[str] = None) -> None:
     engine = get_engine()
-    ensure_tables(engine)
+    ensure_prediction_tables(engine)
 
+    day0 = resolve_start(engine, start)
     for i in range(days):
-        day_i = start_day + timedelta(days=i)
-        print(f"\n=== Walk-forward step {i+1}/{days} | train on {day_i.date()} ===")
-        train_one_day(engine, day_i)
-        predict_next_day(engine, day_i, model_tag=model_tag)
+        day_start = day0 + timedelta(days=i)
+        day_end = day_start + timedelta(days=1)
 
-# ---------- CLI ----------
+        log.info("=== Day %s (%s -> %s) ===", i + 1, day_start.date(), day_end.date())
+        train_for_day(day_start, day_end)
+        predict_for_day(engine, day_start, day_end)
 
-def main():
-    parser = argparse.ArgumentParser(description="Day-by-day walk-forward trainer/predictor.")
-    parser.add_argument("--start", required=True, help="YYYY-MM-DD (UTC)")
-    parser.add_argument("--days", type=int, default=1, help="How many steps to run")
-    parser.add_argument("--model-tag", default="v0", help="Tag stored with predictions")
-
-    args = parser.parse_args()
-    run(days=args.days, start=args.start, model_tag=args.model_tag)
+def main() -> None:
+    args = parse_args()
+    run(days=args.days, start=args.start)
 
 if __name__ == "__main__":
     main()
