@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import create_engine, text
+from fastapi import HTTPException
 
 # ----- App & CORS -----
 app = FastAPI()
@@ -49,16 +50,19 @@ def get_ticks(offset: int = 0, limit: int = 2000):
     return list(rows)
 
 @app.get("/ticks/latest", response_model=List[Tick])
-def get_latest_ticks(after: str = Query(..., description="UTC ISO timestamp")):
+def get_latest_ticks(after: str = Query(..., description="UTC timestamp in ISO format")):
     with engine.connect() as conn:
-        rows = conn.execute(text("""
+        query = text("""
             SELECT id, timestamp, bid, ask, mid
             FROM ticks
             WHERE timestamp > :after
             ORDER BY timestamp ASC
             LIMIT 1000
-        """), {"after": after}).mappings().all()
-    return list(rows)
+        """)
+        result = conn.execute(query, {"after": after})
+        ticks = [dict(row._mapping) for row in result]
+    return ticks
+
 
 @app.get("/ticks/recent", response_model=List[Tick])
 def get_recent_ticks(limit: int = Query(2200, le=5000)):
@@ -159,6 +163,27 @@ def trends_range(start: str, end: str, scale: Optional[int] = None):
     with engine.connect() as conn:
         rows = conn.execute(text(q), params).mappings().all()
     return list(rows)
+
+@app.get("/labels/{name}")
+def get_labels_for_table(name: str):
+    # only allow names that appear in /labels/available
+    with engine.connect() as conn:
+        avail_query = text("""
+            SELECT table_name
+            FROM information_schema.columns
+            WHERE column_name ILIKE 'tickid'
+              AND table_schema = 'public'
+        """)
+        tables = {row[0] for row in conn.execute(avail_query)}
+    if name not in tables:
+        raise HTTPException(status_code=400, detail="Unknown label table")
+
+    with engine.connect() as conn:
+        # SELECT only tickid; frontend expects r.tickid
+        result = conn.execute(text(f'SELECT tickid FROM "{name}" ORDER BY tickid ASC'))
+        rows = [dict(row._mapping) for row in result]
+    return rows
+
 
 @app.get("/trends/day")
 def trends_day(day: str, scale: Optional[int] = None):

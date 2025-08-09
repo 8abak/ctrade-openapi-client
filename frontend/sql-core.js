@@ -86,7 +86,7 @@ window.addEventListener("DOMContentLoaded", () => {
   document.getElementById("runButton").addEventListener("click", runSql);
   document.getElementById("createButton").addEventListener("click", createLabelTable);
   tableSelect.addEventListener("change", () => {
-    sqlEditor.value = `SELECT * FROM ${tableSelect.value} ORDER BY tickid DESC LIMIT 100`;
+    sqlEditor.value = `SELECT * FROM ${tableSelect.value} ORDER BY id DESC LIMIT 100`;
   });
 
   loadTables();

@@ -3,6 +3,7 @@ import argparse
 from datetime import datetime, timedelta
 from sqlalchemy import create_engine, text
 import os
+from typing import Optional
 
 # ---------- CONFIG ----------
 DB_URL = os.getenv(
@@ -14,7 +15,7 @@ DB_URL = os.getenv(
 engine = create_engine(DB_URL)
 
 
-def run(days=1, start=None, model="both"):
+def run(days: int = 1, start: Optional[str] = None, model: str = "both"):
     """
     Run walk-forward predictions for a range of days.
     :param days: Number of days to process
@@ -50,6 +51,17 @@ def run(days=1, start=None, model="both"):
 
         if model in ("big", "both"):
             process_predictions(ticks, "predictions_big")
+
+
+        if __name__ == "__main__":
+            parser = argparse.ArgumentParser()
+            parser.add_argument("--days", type=int, default=1, help="Number of days to process")
+            parser.add_argument("--start", type=str, help="Start date (YYYY-MM-DD)")
+            parser.add_argument("--model", choices=["both", "bz", "sz"], default="both")
+            args = parser.parse_args()
+
+
+            run(days=args.days, start=args.start, model=args.model)
 
 
 def process_predictions(ticks, table_name):
