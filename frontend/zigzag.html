@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>ZigZag Trends</title>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+  <style>
+    body{background:#0b0b0b;color:#ddd;font:14px sans-serif;margin:0}
+    #chart{height:90vh;width:100vw}
+    .toolbar{padding:8px}
+    input,select{background:#111;color:#ddd;border:1px solid #333;padding:4px}
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    Day: <input id="day" type="date">
+    Level:
+    <select id="level">
+      <option>micro</option>
+      <option selected>medium</option>
+      <option>maxi</option>
+    </select>
+    <button onclick="load()">Load</button>
+  </div>
+  <div id="chart"></div>
+
+<script>
+const chart = echarts.init(document.getElementById('chart'));
+async function load(){
+  const day = document.getElementById('day').value;
+  const level = document.getElementById('level').value;
+  const res = await fetch(`/api/zigzag?day=${day}&level=${level}`);
+  const {segments, points} = await res.json();
+
+  // Build zigzag polyline
+  const zz = [];
+  segments.forEach(s=>{
+    zz.push([s.start_ts, s.start_price]);
+    zz.push([s.end_ts  , s.end_price  ]);
+  });
+
+  chart.setOption({
+    backgroundColor:'#0b0b0b',
+    tooltip:{trigger:'axis'},
+    xAxis:{type:'time'},
+    yAxis:{type:'value', scale:true},
+    series:[
+      {type:'line', name:'ZigZag', data:zz, showSymbol:false, lineStyle:{width:2}},
+      {type:'scatter', name:'Turns', data:points.map(p=>[p.ts,p.price]),
+       symbolSize:8}
+    ]
+  });
+}
+document.getElementById('day').value = new Date().toISOString().slice(0,10);
+</script>
+</body>
+</html>
