@@ -2,7 +2,8 @@
 import argparse
 import os
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Sequence
+from sqlalchemy import text
 
 from sqlalchemy import create_engine, text
 
@@ -15,27 +16,39 @@ DB_URL = os.getenv(
 engine = create_engine(DB_URL)
 
 
-def process_predictions(ticks, table_name: str) -> None:
-    """Dummy prediction logic — replace with your actual model call."""
+def process_predictions(ticks: Sequence, table_name: str) -> None:
+    """Insert predictions with tick context columns to satisfy NOT NULL constraints."""
     print(f"Generating predictions for {len(ticks)} ticks into {table_name}")
-    results = []
-    for tick in ticks:
-        tick_id = tick.id
-        pred_value = 1 if tick.mid > 0 else 0  # dummy logic
-        results.append((tick_id, pred_value))
 
-    # Insert into the table
+    payload = []
+    for t in ticks:
+        # TODO: replace with real model logic
+        pred = 1 if (t.mid or 0) >= 0 else 0
+        payload.append({
+            "tickid": t.id,
+            "timestamp": t.timestamp,
+            "bid": t.bid,
+            "ask": t.ask,
+            "mid": t.mid,
+            "prediction": pred,
+        })
+
+    # Upsert by tickid so reruns don't crash / duplicate
+    sql = f"""
+        INSERT INTO {table_name} (tickid, timestamp, bid, ask, mid, prediction)
+        VALUES (:tickid, :timestamp, :bid, :ask, :mid, :prediction)
+        ON CONFLICT (tickid) DO UPDATE
+        SET timestamp = EXCLUDED.timestamp,
+            bid       = EXCLUDED.bid,
+            ask       = EXCLUDED.ask,
+            mid       = EXCLUDED.mid,
+            prediction= EXCLUDED.prediction
+    """
+
     with engine.begin() as conn:
-        conn.execute(
-            text(
-                f"""
-                INSERT INTO {table_name} (tickid, prediction)
-                VALUES (:tickid, :prediction)
-                """
-            ),
-            [{"tickid": tid, "prediction": pred} for tid, pred in results],
-        )
-    print(f"Inserted {len(results)} rows into {table_name}")
+        conn.execute(text(sql), payload)
+
+    print(f"Upserted {len(payload)} rows into {table_name}")
 
 
 def run(days: int = 1, start: Optional[str] = None, model: str = "both") -> None:
