@@ -14,6 +14,23 @@ DB = dict(dbname="trading", user="babak", password="babak33044", host="localhost
 MODELS_DIR = "./models"
 os.makedirs(MODELS_DIR, exist_ok=True)
 
+def main():
+    # replace start_day line with the block below
+    start_env = os.getenv("START_DATE")  # "YYYY-MM-DD"
+    start_day = (datetime.strptime(start_env, "%Y-%m-%d").date() if start_env
+                 else datetime(2025,6,17, tzinfo=AEST).date())
+    max_days = int(os.getenv("MAX_DAYS") or "999999")
+
+    today = datetime.now(tz=AEST).date()
+    with db() as conn:
+        params = load_params(conn)
+        cur_day = start_day
+        processed = 0
+        while cur_day < today and processed < max_days:
+            # ... keep the loop body exactly as you have it ...
+            processed += 1
+            cur_day += timedelta(days=1)
+
 def db():
     return psycopg2.connect(**DB)
 
