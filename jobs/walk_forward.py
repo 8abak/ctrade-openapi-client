@@ -16,33 +16,32 @@ DB_URL = os.getenv(
 engine = create_engine(DB_URL)
 
 
-def process_predictions(ticks: Sequence, table_name: str) -> None:
-    """Insert predictions with tick context columns to satisfy NOT NULL constraints."""
+def process_predictions(ticks, table_name: str, model_name: str) -> None:
     print(f"Generating predictions for {len(ticks)} ticks into {table_name}")
 
     payload = []
     for t in ticks:
-        # TODO: replace with real model logic
         pred = 1 if (t.mid or 0) >= 0 else 0
         payload.append({
             "tickid": t.id,
             "timestamp": t.timestamp,
-            "bid": t.bid,
-            "ask": t.ask,
-            "mid": t.mid,
+            "model": model_name,
+            "proba_up": None,       # or your probability value
+            "proba_down": None,     # or your probability value
             "prediction": pred,
         })
 
-    # Upsert by tickid so reruns don't crash / duplicate
     sql = f"""
-        INSERT INTO {table_name} (tickid, timestamp, bid, ask, mid, prediction)
-        VALUES (:tickid, :timestamp, :bid, :ask, :mid, :prediction)
+        INSERT INTO {table_name}
+            (tickid, timestamp, model, proba_up, proba_down, prediction)
+        VALUES
+            (:tickid, :timestamp, :model, :proba_up, :proba_down, :prediction)
         ON CONFLICT (tickid) DO UPDATE
         SET timestamp = EXCLUDED.timestamp,
-            bid       = EXCLUDED.bid,
-            ask       = EXCLUDED.ask,
-            mid       = EXCLUDED.mid,
-            prediction= EXCLUDED.prediction
+            model = EXCLUDED.model,
+            proba_up = EXCLUDED.proba_up,
+            proba_down = EXCLUDED.proba_down,
+            prediction = EXCLUDED.prediction
     """
 
     with engine.begin() as conn:
@@ -90,9 +89,9 @@ def run(days: int = 1, start: Optional[str] = None, model: str = "both") -> None
 
         # Run predictions
         if model in ("sz", "both"):
-            process_predictions(ticks, "predictions_small")
+            process_predictions(ticks, "predictions_small", "sz")
         if model in ("bz", "both"):
-            process_predictions(ticks, "predictions_big")
+            process_predictions(ticks, "predictions_big", "bz")
 
 
 if __name__ == "__main__":
