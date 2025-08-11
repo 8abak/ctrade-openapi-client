@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, time
 from psycopg2.extras import execute_values
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.dummy import DummyClassifier
 import pickle
 
 AEST = pytz.FixedOffset(600)  # +10:00
@@ -219,25 +220,49 @@ def main():
             # Train & predict next day
             for lvl in ("micro","medium","maxi"):
                 mdl_dir, mdl_mag, p_dir, p_mag = fit_or_load(lvl)
-                if lvl in labels:
-                    y_dir = np.array([labels[lvl]["dir"]]*(len(X)))
-                    y_mag = np.array([labels[lvl]["mag"]]*(len(X)))
-                    mdl_dir.fit(X, (y_dir>0).astype(int))
+
+                if lvl in labels and len(X) > 0:
+                    y_dir_bin = (np.array([labels[lvl]["dir"]] * len(X)) > 0).astype(int)
+                    y_mag = np.array([labels[lvl]["mag"]] * len(X))
+
+                    unique = np.unique(y_dir_bin)
+                    if unique.size >= 2:
+                        # normal training
+                        mdl_dir.fit(X, y_dir_bin)
+                    else:
+                        # single-class day
+                        single = int(unique[0])
+                        # if we don't have a pre-trained model yet, use a DummyClassifier
+                        if not os.path.exists(p_dir):
+                            mdl_dir = DummyClassifier(strategy="constant", constant=single)
+                        # fit (DummyClassifier accepts single class)
+                        mdl_dir.fit(X, y_dir_bin)
+
+                    # magnitude model can always fit
                     mdl_mag.fit(X, y_mag)
-                    pickle.dump(mdl_dir, open(p_dir,"wb"))
-                    pickle.dump(mdl_mag, open(p_mag,"wb"))
+
+                    # persist
+                    pickle.dump(mdl_dir, open(p_dir, "wb"))
+                    pickle.dump(mdl_mag, open(p_mag, "wb"))
 
                 # Use last 5 minutes as "current state" to issue a next-day prediction
+                if len(X) == 0:
+                    continue
                 X_last = X[-300:] if len(X) >= 300 else X
-                p_dir1 = mdl_dir.predict_proba(X_last).mean(axis=0)
-                p_up = float(p_dir1[1])
-                pred_dir = 1 if p_up>=0.5 else -1
+                # direction prob (DummyClassifier exposes predict_proba; Logistic too)
+                try:
+                    p_dir1 = mdl_dir.predict_proba(X_last).mean(axis=0)
+                    p_up = float(p_dir1[1])
+                except Exception:
+                    # very old sklearn without proba on Dummy? fall back:
+                    p_up = float(mdl_dir.predict(X_last).mean())
+                pred_dir = 1 if p_up >= 0.5 else -1
                 pred_mag = float(mdl_mag.predict(X_last).mean())
 
                 with conn.cursor() as cur:
                     cur.execute("""
-                      INSERT INTO predictions(run_id, level, predicted_dir, predicted_mag)
-                      VALUES (%s,%s,%s,%s)
+                    INSERT INTO predictions(run_id, level, predicted_dir, predicted_mag)
+                    VALUES (%s,%s,%s,%s)
                     """, (run_id, lvl, pred_dir, pred_mag))
                 conn.commit()
 
