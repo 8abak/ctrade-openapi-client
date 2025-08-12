@@ -2,56 +2,179 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>ZigZag Trends</title>
+  <title>ZigZag Explorer</title>
   <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
   <style>
-    body{background:#0b0b0b;color:#ddd;font:14px sans-serif;margin:0}
-    #chart{height:90vh;width:100vw}
-    .toolbar{padding:8px}
-    input,select{background:#111;color:#ddd;border:1px solid #333;padding:4px}
+    body{background:#0b0b0b;color:#ddd;font:14px/1.4 system-ui, sans-serif;margin:0}
+    .toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px;border-bottom:1px solid #222}
+    input,select,button,label{background:#111;color:#ddd;border:1px solid #333;padding:6px;border-radius:6px}
+    button{cursor:pointer}
+    #chart{height:88vh;width:100vw}
+    .muted{opacity:.7}
   </style>
 </head>
 <body>
   <div class="toolbar">
-    Day: <input id="day" type="date">
-    Level:
-    <select id="level">
-      <option>micro</option>
-      <option selected>medium</option>
-      <option>maxi</option>
-    </select>
-    <button onclick="load()">Load</button>
+    <strong>Mode:</strong>
+    <label><input type="radio" name="mode" value="date" checked> By Date</label>
+    <label><input type="radio" name="mode" value="id"> By Start ID</label>
+
+    <span id="dateControls">
+      Day: <input id="day" type="date">
+    </span>
+
+    <span id="idControls" style="display:none">
+      Start ID: <input id="startId" type="number" min="1" step="1" placeholder="e.g. 6800000">
+      Span (min): <input id="spanMin" type="number" min="1" step="1" value="60">
+    </span>
+
+    <span class="muted">Levels:</span>
+    <label><input type="checkbox" id="lvMicro"  checked> Micro</label>
+    <label><input type="checkbox" id="lvMedium" checked> Medium</label>
+    <label><input type="checkbox" id="lvMaxi"   checked> Maxi</label>
+
+    <button id="btnLoad">Load</button>
+    <button id="btnMore">Load More →</button>
+    <span id="status" class="muted"></span>
   </div>
+
   <div id="chart"></div>
 
 <script>
 const chart = echarts.init(document.getElementById('chart'));
-async function load(){
-  const day = document.getElementById('day').value;
-  const level = document.getElementById('level').value;
-  const res = await fetch(`/api/zigzag?day=${day}&level=${level}`);
-  const {segments, points} = await res.json();
+let cursorTs = null; // server-provided cursor for paging
+let lastQuery = null; // remembers the last request (so "Load More" continues)
+const seriesIds = {micro:'zz-micro', medium:'zz-medium', maxi:'zz-maxi',
+                   microPts:'pt-micro', mediumPts:'pt-medium', maxiPts:'pt-maxi'};
 
-  // Build zigzag polyline
-  const zz = [];
-  segments.forEach(s=>{
-    zz.push([s.start_ts, s.start_price]);
-    zz.push([s.end_ts  , s.end_price  ]);
-  });
-
-  chart.setOption({
-    backgroundColor:'#0b0b0b',
-    tooltip:{trigger:'axis'},
-    xAxis:{type:'time'},
-    yAxis:{type:'value', scale:true},
-    series:[
-      {type:'line', name:'ZigZag', data:zz, showSymbol:false, lineStyle:{width:2}},
-      {type:'scatter', name:'Turns', data:points.map(p=>[p.ts,p.price]),
-       symbolSize:8}
-    ]
-  });
+function levelString(){
+  const lvls = [];
+  if (document.getElementById('lvMicro').checked)  lvls.push('micro');
+  if (document.getElementById('lvMedium').checked) lvls.push('medium');
+  if (document.getElementById('lvMaxi').checked)   lvls.push('maxi');
+  return lvls.join(',');
 }
+
+function mode(){ return [...document.querySelectorAll('input[name="mode"]')].find(x=>x.checked).value; }
+
+function buildUrl(isMore=false){
+  const lv = levelString() || 'micro,medium,maxi';
+  const base = '/api/zigzag';
+  const m = mode();
+  const u = new URL(base, window.location.origin);
+  u.searchParams.set('levels', lv);
+  u.searchParams.set('limit', '2000');
+  if (m === 'date'){
+    u.searchParams.set('mode','date');
+    u.searchParams.set('day', document.getElementById('day').value);
+    if (isMore && cursorTs) u.searchParams.set('cursor_ts', cursorTs);
+  } else {
+    u.searchParams.set('mode','id');
+    u.searchParams.set('start_id', document.getElementById('startId').value);
+    u.searchParams.set('span_minutes', document.getElementById('spanMin').value || '60');
+    if (isMore && cursorTs) u.searchParams.set('cursor_ts', cursorTs);
+  }
+  return u.toString();
+}
+
+function ensureSeries(){
+  const opt = chart.getOption() || {};
+  const have = new Set((opt.series||[]).map(s=>s.id));
+  const newSeries = [];
+  const addLine = (id,name)=>{ if(!have.has(id)) newSeries.push({id, name, type:'line', showSymbol:false, data:[], lineStyle:{width:2}}); };
+  const addPts  = (id,name)=>{ if(!have.has(id)) newSeries.push({id, name, type:'scatter', data:[], symbolSize:6}); };
+
+  addLine(seriesIds.micro,   'Micro');
+  addLine(seriesIds.medium,  'Medium');
+  addLine(seriesIds.maxi,    'Maxi');
+  addPts(seriesIds.microPts, 'Micro Turns');
+  addPts(seriesIds.mediumPts,'Medium Turns');
+  addPts(seriesIds.maxiPts,  'Maxi Turns');
+
+  if (newSeries.length){
+    chart.setOption({series:newSeries}, false, true);
+  }
+}
+
+function appendData(payload){
+  // Capture current x-range to preserve zoom
+  const before = chart.getOption();
+  const xAxis = (before.xAxis && before.xAxis[0]) ? before.xAxis[0] : {};
+  const lockMin = xAxis.min, lockMax = xAxis.max;
+
+  ensureSeries();
+
+  const updates = [];
+  const segs = payload.segments || {};
+  const pts  = payload.points   || {};
+
+  function segToPairs(arr){
+    const out = [];
+    arr.forEach(s=>{
+      out.push([s.start_ts, s.start_price]);
+      out.push([s.end_ts,   s.end_price]);
+    });
+    return out;
+  }
+
+  if (segs.micro)  updates.push({id:seriesIds.micro,   data: segToPairs(segs.micro)});
+  if (segs.medium) updates.push({id:seriesIds.medium,  data: segToPairs(segs.medium)});
+  if (segs.maxi)   updates.push({id:seriesIds.maxi,    data: segToPairs(segs.maxi)});
+
+  if (pts.micro)   updates.push({id:seriesIds.microPts,  data: pts.micro.map(p=>[p.ts,p.price])});
+  if (pts.medium)  updates.push({id:seriesIds.mediumPts, data: pts.medium.map(p=>[p.ts,p.price])});
+  if (pts.maxi)    updates.push({id:seriesIds.maxiPts,   data: pts.maxi.map(p=>[p.ts,p.price])});
+
+  // Merge by appending (we just set full data arrays—we could optimize to concat, but this is fine for now)
+  const opt = {xAxis:[{type:'time', min: lockMin, max: lockMax}], yAxis:[{type:'value', scale:true}], series:[]};
+  updates.forEach(u=> opt.series.push({id:u.id, data:(u.data||[])}));
+  chart.setOption(opt, false, true);
+
+  cursorTs = (payload.meta && payload.meta.cursor_ts) ? payload.meta.cursor_ts : null;
+}
+
+async function runLoad(isMore=false){
+  try{
+    document.getElementById('status').textContent = isMore ? 'Loading more…' : 'Loading…';
+    const url = buildUrl(isMore);
+    lastQuery = url; // remember for next time
+    const res = await fetch(url);
+    if (!res.ok){
+      document.getElementById('status').textContent = `Error ${res.status}`;
+      return;
+    }
+    const data = await res.json();
+    appendData(data);
+    document.getElementById('status').textContent = cursorTs ? 'Ready (more available)' : 'Ready';
+  }catch(e){
+    console.error(e);
+    document.getElementById('status').textContent = 'Error';
+  }
+}
+
+function onModeChange(){
+  const m = mode();
+  document.getElementById('dateControls').style.display = (m==='date') ? '' : 'none';
+  document.getElementById('idControls').style.display   = (m==='id') ? '' : 'none';
+}
+
+document.getElementById('btnLoad').addEventListener('click', ()=>{ cursorTs=null; runLoad(false); });
+document.getElementById('btnMore').addEventListener('click', ()=> runLoad(true));
+document.querySelectorAll('input[name="mode"]').forEach(r=> r.addEventListener('change', onModeChange));
+
+// Defaults
 document.getElementById('day').value = new Date().toISOString().slice(0,10);
+onModeChange();
+
+// Initial chart option
+chart.setOption({
+  backgroundColor:'#0b0b0b',
+  tooltip:{trigger:'axis'},
+  xAxis:{type:'time'},
+  yAxis:{type:'value', scale:true},
+  legend:{textStyle:{color:'#ddd'}},
+  series:[]
+});
 </script>
 </body>
 </html>

@@ -3,6 +3,7 @@
 import os
 from datetime import datetime, timedelta, date
 from typing import List, Optional
+from typing import Dict, Any
 
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,6 +11,7 @@ from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import create_engine, text
+from sqlalchemy import text as sqtxt
 from fastapi import HTTPException
 
 # ----- App & CORS -----
@@ -205,3 +207,104 @@ def movements_page():
     if os.path.exists(file_path):
         return FileResponse(file_path)
     return {"message": "movements.html not found. Put it under ./public/"}
+
+
+#fetch zigzag
+LEVEL_TABLE: Dict[str, str] = {
+    "micro": "micro_trends",
+    "medium": "medium_trends",
+    "maxi": "maxi_trends",
+}
+
+def q_all(sql: str, params: Dict[str, Any]):
+    with engine.connect() as conn:
+        return [dict(r._mapping) for r in conn.execute(sqtxt(sql), params)]
+
+@app.get("/api/zigzag")
+def zigzag(
+    mode: str = Query("date", regex="^(date|id)$"),
+    levels: str = "micro,medium,maxi",
+    day: str | None = None,
+    start_id: int | None = None,
+    span_minutes: int = 60,
+    cursor_ts: str | None = None,
+    limit: int = 2000,
+):
+    lvls = [l for l in levels.split(",") if l in LEVEL_TABLE]
+    if not lvls:
+        lvls = ["micro", "medium", "maxi"]
+
+    if mode == "date":
+        if not day:
+            return {"error": "missing day"}, 400
+        where_more = "AND start_ts > :cursor_ts" if cursor_ts else ""
+        params_more = {"day": day, "cursor_ts": cursor_ts, "limit": limit}
+        segs, pts = {}, {}
+        max_ts = None
+        for lvl in lvls:
+            tbl = LEVEL_TABLE[lvl]
+            segs[lvl] = q_all(
+                f"""
+                SELECT start_ts, end_ts, start_price, end_price
+                FROM {tbl}
+                WHERE run_day = :day {where_more}
+                ORDER BY start_ts
+                LIMIT :limit
+                """,
+                params_more,
+            )
+            pts[lvl] = q_all(
+                """
+                SELECT ts, price, kind
+                FROM zigzag_points
+                WHERE level = :lvl AND run_day = :day
+                ORDER BY ts
+                """,
+                {"lvl": lvl, "day": day},
+            )
+            if segs[lvl]:
+                t = segs[lvl][-1]["end_ts"]
+                max_ts = t if (max_ts is None or t > max_ts) else max_ts
+        return {"segments": segs, "points": pts, "meta": {"cursor_ts": max_ts}}
+
+    # mode == 'id'
+    if not start_id:
+        return {"error": "missing start_id"}, 400
+
+    # find start_ts for this tick id
+    row = q_all("SELECT timestamp FROM ticks WHERE id = :tid", {"tid": start_id})
+    if not row:
+        return {"error": "start_id not found"}, 404
+    start_ts = row[0]["timestamp"]
+    from datetime import timedelta
+    end_ts = start_ts + timedelta(minutes=span_minutes)
+
+    where_more = "AND start_ts > :cursor_ts" if cursor_ts else ""
+    segs, pts = {}, {}
+    max_ts = None
+    for lvl in lvls:
+        tbl = LEVEL_TABLE[lvl]
+        segs[lvl] = q_all(
+            f"""
+            SELECT start_ts, end_ts, start_price, end_price
+            FROM {tbl}
+            WHERE start_ts >= :a AND start_ts < :b {where_more}
+            ORDER BY start_ts
+            LIMIT :limit
+            """,
+            {"a": start_ts, "b": end_ts, "cursor_ts": cursor_ts, "limit": limit},
+        )
+        pts[lvl] = q_all(
+            """
+            SELECT ts, price, kind
+            FROM zigzag_points
+            WHERE level = :lvl AND ts >= :a AND ts < :b
+            ORDER BY ts
+            """,
+            {"lvl": lvl, "a": start_ts, "b": end_ts},
+        )
+        if segs[lvl]:
+            t = segs[lvl][-1]["end_ts"]
+            max_ts = t if (max_ts is None or t > max_ts) else max_ts
+
+    return {"segments": segs, "points": pts, "meta": {"cursor_ts": max_ts}}
