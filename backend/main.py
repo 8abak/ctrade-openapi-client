@@ -93,6 +93,35 @@ def get_ticks_before(tickid: int, limit: int = 2000):
         """), {"tickid": tickid, "limit": limit}).mappings().all()
     return list(reversed(rows))
 
+# ----- Ticks Upsert -----
+@app.get("/ticks/lastid")
+def get_lastid():
+    # last tick id + timestamp for frontend bootstrapping
+    with engine.connect() as conn:
+        row = conn.execute(text("""
+            SELECT id, timestamp
+            FROM ticks
+            ORDER BY id DESC
+            LIMIT 1
+        """)).mappings().first()
+        if not row:
+            raise HTTPException(status_code=404, detail="No ticks")
+        return {"lastId": row["id"], "timestamp": row["timestamp"]}
+
+@app.get("/ticks/range", response_model=List[Tick])
+def ticks_range(start: str, end: str, limit: int = 200000):
+    # ISO8601 strings accepted, returned sorted ascending
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT id, timestamp, bid, ask, mid
+            FROM ticks
+            WHERE timestamp >= :start AND timestamp <= :end
+            ORDER BY timestamp ASC
+            LIMIT :limit
+        """), {"start": start, "end": end, "limit": limit}).mappings().all()
+        return list(rows)
+
+
 # ----- SQL Viewer helpers (unchanged) -----
 @app.get("/sqlvw/tables")
 def get_all_table_names():
