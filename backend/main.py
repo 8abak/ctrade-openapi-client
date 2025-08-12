@@ -309,4 +309,4 @@ def zigzag(
 
     return {"segments": segs, "points": pts, "meta": {"cursor_ts": max_ts}}
 
-    
+
