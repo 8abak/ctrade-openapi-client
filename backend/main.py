@@ -2,7 +2,7 @@
 
 import os
 from datetime import datetime, timedelta, date
-from typing import List, Optional
+from typing import List, Optional, Set
 from typing import Dict, Any
 
 from fastapi import FastAPI, Query
@@ -224,10 +224,10 @@ def q_all(sql: str, params: Dict[str, Any]):
 def zigzag(
     mode: str = Query("date", regex="^(date|id)$"),
     levels: str = "micro,medium,maxi",
-    day: str | None = None,
-    start_id: int | None = None,
+    day: Optional[str] = None,
+    start_id: Optional[int] = None,
     span_minutes: int = 60,
-    cursor_ts: str | None = None,
+    cursor_ts: Optional[str] = None,
     limit: int = 2000,
 ):
     lvls = [l for l in levels.split(",") if l in LEVEL_TABLE]
