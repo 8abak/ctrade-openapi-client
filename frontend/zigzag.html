@@ -1,180 +1,224 @@
-<!DOCTYPE html>
-<html>
+<!doctype html>
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <title>ZigZag Explorer</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="stylesheet" href="style.css" />
   <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
   <style>
-    body{background:#0b0b0b;color:#ddd;font:14px/1.4 system-ui, sans-serif;margin:0}
-    .toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px;border-bottom:1px solid #222}
-    input,select,button,label{background:#111;color:#ddd;border:1px solid #333;padding:6px;border-radius:6px}
-    button{cursor:pointer}
-    #chart{height:88vh;width:100vw}
-    .muted{opacity:.7}
+    /* tiny page-specific bits (rest comes from style.css) */
+    .row { display:flex; align-items:center; gap:.5rem; margin:.35rem 0; }
+    .chip { padding:.15rem .5rem; border:1px solid #444; border-radius:.4rem; }
+    .err { color:#ff6b6b; font-family:monospace; margin-top:.5rem; }
   </style>
 </head>
 <body>
-  <div class="toolbar">
-    <strong>Mode:</strong>
-    <label><input type="radio" name="mode" value="date" checked> By Date</label>
-    <label><input type="radio" name="mode" value="id"> By Start ID</label>
+  <div id="container">
+    <aside id="sidebar">
+      <h2>ZigZag Explorer</h2>
 
-    <span id="dateControls">
-      Day: <input id="day" type="date">
-    </span>
+      <div class="row">
+        <label>Mode:</label>
+        <label class="chip"><input type="radio" name="mode" value="date" checked> By Date</label>
+        <label class="chip"><input type="radio" name="mode" value="id"> By Start ID</label>
+      </div>
 
-    <span id="idControls" style="display:none">
-      Start ID: <input id="startId" type="number" min="1" step="1" placeholder="e.g. 6800000">
-      Span (min): <input id="spanMin" type="number" min="1" step="1" value="60">
-    </span>
+      <div id="byDate">
+        <div class="row">
+          <label for="day">Day:</label>
+          <input id="day" type="date" />
+        </div>
+      </div>
 
-    <span class="muted">Levels:</span>
-    <label><input type="checkbox" id="lvMicro"  checked> Micro</label>
-    <label><input type="checkbox" id="lvMedium" checked> Medium</label>
-    <label><input type="checkbox" id="lvMaxi"   checked> Maxi</label>
+      <div id="byId" style="display:none">
+        <div class="row">
+          <label for="startId">Start ID:</label>
+          <input id="startId" type="number" placeholder="e.g. 233000" />
+        </div>
+        <div class="row">
+          <label for="span">Span (min):</label>
+          <input id="span" type="number" value="60" />
+        </div>
+      </div>
 
-    <button id="btnLoad">Load</button>
-    <button id="btnMore">Load More →</button>
-    <span id="status" class="muted"></span>
+      <div class="row">
+        <label>Levels:</label>
+        <label class="chip"><input type="checkbox" class="lvl" value="micro" checked> Micro</label>
+        <label class="chip"><input type="checkbox" class="lvl" value="medium" checked> Medium</label>
+        <label class="chip"><input type="checkbox" class="lvl" value="maxi" checked> Maxi</label>
+      </div>
+
+      <div class="row">
+        <button id="loadBtn">Load</button>
+        <button id="moreBtn">Load More →</button>
+      </div>
+
+      <div id="msg" class="err"></div>
+      <div id="version"></div>
+    </aside>
+
+    <main id="main"></main>
   </div>
 
-  <div id="chart"></div>
-
-<script>
-const chart = echarts.init(document.getElementById('chart'));
-let cursorTs = null; // server-provided cursor for paging
-let lastQuery = null; // remembers the last request (so "Load More" continues)
-const seriesIds = {micro:'zz-micro', medium:'zz-medium', maxi:'zz-maxi',
-                   microPts:'pt-micro', mediumPts:'pt-medium', maxiPts:'pt-maxi'};
-
-function levelString(){
-  const lvls = [];
-  if (document.getElementById('lvMicro').checked)  lvls.push('micro');
-  if (document.getElementById('lvMedium').checked) lvls.push('medium');
-  if (document.getElementById('lvMaxi').checked)   lvls.push('maxi');
-  return lvls.join(',');
-}
-
-function mode(){ return [...document.querySelectorAll('input[name="mode"]')].find(x=>x.checked).value; }
-
-function buildUrl(isMore=false){
-  const lv = levelString() || 'micro,medium,maxi';
-  const base = '/api/zigzag';
-  const m = mode();
-  const u = new URL(base, window.location.origin);
-  u.searchParams.set('levels', lv);
-  u.searchParams.set('limit', '2000');
-  if (m === 'date'){
-    u.searchParams.set('mode','date');
-    u.searchParams.set('day', document.getElementById('day').value);
-    if (isMore && cursorTs) u.searchParams.set('cursor_ts', cursorTs);
-  } else {
-    u.searchParams.set('mode','id');
-    u.searchParams.set('start_id', document.getElementById('startId').value);
-    u.searchParams.set('span_minutes', document.getElementById('spanMin').value || '60');
-    if (isMore && cursorTs) u.searchParams.set('cursor_ts', cursorTs);
-  }
-  return u.toString();
-}
-
-function ensureSeries(){
-  const opt = chart.getOption() || {};
-  const have = new Set((opt.series||[]).map(s=>s.id));
-  const newSeries = [];
-  const addLine = (id,name)=>{ if(!have.has(id)) newSeries.push({id, name, type:'line', showSymbol:false, data:[], lineStyle:{width:2}}); };
-  const addPts  = (id,name)=>{ if(!have.has(id)) newSeries.push({id, name, type:'scatter', data:[], symbolSize:6}); };
-
-  addLine(seriesIds.micro,   'Micro');
-  addLine(seriesIds.medium,  'Medium');
-  addLine(seriesIds.maxi,    'Maxi');
-  addPts(seriesIds.microPts, 'Micro Turns');
-  addPts(seriesIds.mediumPts,'Medium Turns');
-  addPts(seriesIds.maxiPts,  'Maxi Turns');
-
-  if (newSeries.length){
-    chart.setOption({series:newSeries}, false, true);
-  }
-}
-
-function appendData(payload){
-  // Capture current x-range to preserve zoom
-  const before = chart.getOption();
-  const xAxis = (before.xAxis && before.xAxis[0]) ? before.xAxis[0] : {};
-  const lockMin = xAxis.min, lockMax = xAxis.max;
-
-  ensureSeries();
-
-  const updates = [];
-  const segs = payload.segments || {};
-  const pts  = payload.points   || {};
-
-  function segToPairs(arr){
-    const out = [];
-    arr.forEach(s=>{
-      out.push([s.start_ts, s.start_price]);
-      out.push([s.end_ts,   s.end_price]);
+  <script>
+    // --- UI toggle
+    document.querySelectorAll('input[name="mode"]').forEach(r=>{
+      r.addEventListener('change', ()=>{
+        const byDate = document.getElementById('byDate');
+        const byId   = document.getElementById('byId');
+        if (document.querySelector('input[name="mode"]:checked').value === 'date') {
+          byDate.style.display = ''; byId.style.display = 'none';
+        } else { byDate.style.display = 'none'; byId.style.display = ''; }
+      });
     });
-    return out;
-  }
 
-  if (segs.micro)  updates.push({id:seriesIds.micro,   data: segToPairs(segs.micro)});
-  if (segs.medium) updates.push({id:seriesIds.medium,  data: segToPairs(segs.medium)});
-  if (segs.maxi)   updates.push({id:seriesIds.maxi,    data: segToPairs(segs.maxi)});
+    // --- chart
+    let chart = echarts.init(document.getElementById('main'));
+    const COLORS = { micro:'#4dd0e1', medium:'#ffd54f', maxi:'#ff8a65' };
+    let lastCursorTs = null; // for Load More
 
-  if (pts.micro)   updates.push({id:seriesIds.microPts,  data: pts.micro.map(p=>[p.ts,p.price])});
-  if (pts.medium)  updates.push({id:seriesIds.mediumPts, data: pts.medium.map(p=>[p.ts,p.price])});
-  if (pts.maxi)    updates.push({id:seriesIds.maxiPts,   data: pts.maxi.map(p=>[p.ts,p.price])});
+    chart.setOption({
+      backgroundColor: '#111',
+      tooltip: {
+        trigger: 'item',
+        axisPointer: { type: 'cross' },
+        backgroundColor: '#222',
+        borderColor: '#555',
+        borderWidth: 1,
+        textStyle: { color: '#fff', fontSize: 12 },
+        formatter: (p) => {
+          const d = new Date(p.value[0]);
+          const t = d.toLocaleTimeString('en-AU', { hour12:false });
+          const ds = d.toLocaleDateString('en-AU');
+          const price = p.value[1];
+          const extra = (p.seriesType==='scatter')
+            ? `\nKind: ${p.data[2]}`
+            : '';
+          return `${p.seriesName}\n${ds} ${t}\nPrice: ${price}${extra}`;
+        }
+      },
+      xAxis: { type:'time', axisLabel:{color:'#ccc'}, splitLine:{lineStyle:{color:'#333'}} },
+      yAxis: { type:'value', scale:true, axisLabel:{color:'#ccc'}, splitLine:{lineStyle:{color:'#333'}} },
+      dataZoom: [{type:'inside'}, {type:'slider', height:40, bottom:0}],
+      series: []
+    });
 
-  // Merge by appending (we just set full data arrays—we could optimize to concat, but this is fine for now)
-  const opt = {xAxis:[{type:'time', min: lockMin, max: lockMax}], yAxis:[{type:'value', scale:true}], series:[]};
-  updates.forEach(u=> opt.series.push({id:u.id, data:(u.data||[])}));
-  chart.setOption(opt, false, true);
-
-  cursorTs = (payload.meta && payload.meta.cursor_ts) ? payload.meta.cursor_ts : null;
-}
-
-async function runLoad(isMore=false){
-  try{
-    document.getElementById('status').textContent = isMore ? 'Loading more…' : 'Loading…';
-    const url = buildUrl(isMore);
-    lastQuery = url; // remember for next time
-    const res = await fetch(url);
-    if (!res.ok){
-      document.getElementById('status').textContent = `Error ${res.status}`;
-      return;
+    function segsToPolyline(segments) {
+      // convert [{start_ts,end_ts,start_price,end_price},...] to
+      // [ [ts,price], [ts,price], [null,null], ... ] so lines break between segments
+      const out = [];
+      for (const s of segments) {
+        out.push([Date.parse(s.start_ts), s.start_price]);
+        out.push([Date.parse(s.end_ts),   s.end_price]);
+        out.push([null, null]); // gap
+      }
+      return out;
     }
-    const data = await res.json();
-    appendData(data);
-    document.getElementById('status').textContent = cursorTs ? 'Ready (more available)' : 'Ready';
-  }catch(e){
-    console.error(e);
-    document.getElementById('status').textContent = 'Error';
-  }
-}
 
-function onModeChange(){
-  const m = mode();
-  document.getElementById('dateControls').style.display = (m==='date') ? '' : 'none';
-  document.getElementById('idControls').style.display   = (m==='id') ? '' : 'none';
-}
+    function pointsToScatter(points) {
+      // [{ts,price,kind},...] -> [[ts,price,kind],...]
+      return points.map(p => [Date.parse(p.ts), p.price, p.kind]);
+    }
 
-document.getElementById('btnLoad').addEventListener('click', ()=>{ cursorTs=null; runLoad(false); });
-document.getElementById('btnMore').addEventListener('click', ()=> runLoad(true));
-document.querySelectorAll('input[name="mode"]').forEach(r=> r.addEventListener('change', onModeChange));
+    function currentLevels() {
+      return Array.from(document.querySelectorAll('.lvl:checked')).map(x=>x.value);
+    }
 
-// Defaults
-document.getElementById('day').value = new Date().toISOString().slice(0,10);
-onModeChange();
+    async function fetchZigzag({append=false}={}) {
+      const msg = document.getElementById('msg'); msg.textContent = '';
+      const levels = currentLevels().join(',');
+      if (!levels) { msg.textContent = 'Select at least one level.'; return; }
 
-// Initial chart option
-chart.setOption({
-  backgroundColor:'#0b0b0b',
-  tooltip:{trigger:'axis'},
-  xAxis:{type:'time'},
-  yAxis:{type:'value', scale:true},
-  legend:{textStyle:{color:'#ddd'}},
-  series:[]
-});
-</script>
+      const mode = document.querySelector('input[name="mode"]:checked').value;
+      const params = new URLSearchParams({ levels, limit: '2000', mode });
+
+      if (mode === 'date') {
+        const dayInput = document.getElementById('day').value;
+        if (!dayInput) { msg.textContent = 'Pick a day.'; return; }
+        // normalize to YYYY-MM-DD for backend
+        const isoDay = new Date(dayInput).toISOString().slice(0,10);
+        params.set('day', isoDay);
+        if (append && lastCursorTs) params.set('cursor_ts', lastCursorTs);
+      } else {
+        const id = document.getElementById('startId').value.trim();
+        const span = document.getElementById('span').value.trim() || '60';
+        if (!id) { msg.textContent = 'Enter Start ID.'; return; }
+        params.set('start_id', id); params.set('span_minutes', span);
+        if (append && lastCursorTs) params.set('cursor_ts', lastCursorTs);
+      }
+
+      const url = `/api/zigzag?${params.toString()}`;
+      const res = await fetch(url);
+      if (!res.ok) {
+        msg.textContent = `Error ${res.status}`;
+        return;
+      }
+      const payload = await res.json();
+      lastCursorTs = payload?.meta?.cursor_ts || null;
+
+      // Build/append series per level
+      const series = chart.getOption().series || [];
+      const seriesIndexByName = Object.fromEntries(series.map((s,i)=>[s.name,i]));
+
+      for (const lvl of ['micro','medium','maxi']) {
+        if (!levels.includes(lvl)) continue;
+
+        const segs = payload.segments?.[lvl] || [];
+        const pts  = payload.points?.[lvl]   || [];
+
+        // line series (broken lines via null gaps)
+        const lineName = `${lvl} segments`;
+        const lineData = segsToPolyline(segs);
+        if (seriesIndexByName[lineName] == null) {
+          series.push({
+            name: lineName,
+            type: 'line',
+            showSymbol: false,
+            connectNulls: false,
+            lineStyle: { width: 2, color: COLORS[lvl] },
+            itemStyle: { color: COLORS[lvl] },
+            data: lineData
+          });
+        } else if (append) {
+          // append new chunk
+          series[seriesIndexByName[lineName]].data.push(...lineData);
+        } else {
+          series[seriesIndexByName[lineName]].data = lineData;
+        }
+
+        // point series (peaks/troughs)
+        const ptName = `${lvl} points`;
+        const ptData = pointsToScatter(pts);
+        if (seriesIndexByName[ptName] == null) {
+          series.push({
+            name: ptName,
+            type: 'scatter',
+            symbolSize: 6,
+            itemStyle: { color: COLORS[lvl] },
+            data: ptData
+          });
+        } else if (append) {
+          series[seriesIndexByName[ptName]].data.push(...ptData);
+        } else {
+          series[seriesIndexByName[ptName]].data = ptData;
+        }
+      }
+
+      chart.setOption({ series }, { replaceMerge:['series'] });
+    }
+
+    document.getElementById('loadBtn').addEventListener('click', ()=>{ lastCursorTs=null; fetchZigzag({append:false}); });
+    document.getElementById('moreBtn').addEventListener('click', ()=> fetchZigzag({append:true}) );
+
+    // default day = first available from zigzag_points? fallback to today
+    (async function bootstrap(){
+      try {
+        const v = await fetch('/version').then(r=>r.json()).catch(()=>null);
+        if (v) document.getElementById('version').textContent = v.version || '';
+      } catch {}
+      const d = new Date(); document.getElementById('day').value = d.toISOString().slice(0,10);
+    })();
+  </script>
 </body>
 </html>
