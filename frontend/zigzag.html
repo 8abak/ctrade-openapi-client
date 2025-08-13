@@ -148,7 +148,7 @@
         if (append && lastCursorTs) params.set('cursor_ts', lastCursorTs);
       }
 
-      const url = `/api/zigzag?${params.toString()}`;
+      const url = `/zigzag?${params.toString()}`;
       const res = await fetch(url);
       if (!res.ok) {
         msg.textContent = `Error ${res.status}`;
