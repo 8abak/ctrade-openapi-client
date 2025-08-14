@@ -1,48 +1,77 @@
 #!/usr/bin/env python3
+"""
+Compute zigzag pivots (micro/medium/maxi) and store results.
+
+- micro: computed from ticks
+- medium: computed from micro pivots (same algorithm)
+- maxi: computed from medium pivots (same algorithm)
+
+Tables used:
+  ticks(id, timestamp, ..., mid)
+  zigzag_points(level, tick_id, ts, price, kind, run_day)
+  micro_trends / medium_trends / maxi_trends:
+     (id, start_tick_id, end_tick_id, start_ts, end_ts,
+      start_price, end_price, high_price, low_price,
+      direction, range_abs GENERATED ALWAYS, duration_s, num_ticks, run_day)
+
+IMPORTANT: we NEVER insert into range_abs (generated column).
+"""
+
 import argparse
+import os
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from typing import List, Tuple, Optional
+from datetime import datetime, timedelta
+from typing import List, Optional, Tuple
 
 import psycopg2
 import psycopg2.extras as pgx
 
-# -------------------------
-# CONFIG: keep it simple
-# -------------------------
-PG_DB = "trading"
-PG_USER = "babak"
-PG_PASS = "babak33044"
-PG_HOST = "localhost"
-PG_PORT = 5432
+try:
+    # Python 3.9+
+    from zoneinfo import ZoneInfo
+    SYD = ZoneInfo("Australia/Sydney")
+except Exception:
+    # Fallback: +10:00 fixed (no DST). Only used if zoneinfo unavailable.
+    from datetime import timezone
+    SYD = timezone(timedelta(hours=10))
 
-TICKS_TABLE = "ticks"              # columns: id, timestamp (timestamptz), mid (float), ...
-POINTS_TABLE = "zigzag_points"     # columns: id, level, tick_id, ts, price, kind, run_day
-TREND_TABLES = {                   # columns used below must exist
-    "micro":  "micro_trends",
-    "medium": "medium_trends",
-    "maxi":   "maxi_trends",
-}
 
-# If your DB not in AEST but timestamps are stored with +10:00 tzinfo (as shown), this is fine
-AEST = timezone(timedelta(hours=10))
+# --------------------------- DB Helpers -------------------------------------
+
+def open_conn():
+    """Open a PostgreSQL connection.
+
+    If DATABASE_URL is present, use it; otherwise use your simple credentials.
+    """
+    url = os.getenv("DATABASE_URL")
+    if url:
+        return psycopg2.connect(url)
+
+    return psycopg2.connect(
+        dbname="trading",
+        user="babak",
+        password="babak33044",
+        host="localhost",
+        port=5432,
+    )
+
+
+# --------------------------- Data Classes -----------------------------------
 
 @dataclass
-class Item:
-    """One stream element for zigzag algorithm."""
+class Tick:
+    id: int
+    ts: datetime
+    price: float
+
+
+@dataclass
+class Pivot:
     tick_id: int
     ts: datetime
     price: float
-    # idx is only used for micro to count ticks cheaply; optional for others
-    idx: Optional[int] = None
+    kind: str  # "peak" or "trough"
 
-@dataclass
-class ZigPoint:
-    level: str
-    tick_id: int
-    ts: datetime
-    price: float
-    kind: str      # "peak" or "trough"
 
 @dataclass
 class Segment:
@@ -52,237 +81,259 @@ class Segment:
     end_ts: datetime
     start_price: float
     end_price: float
-    direction: int     # +1 up, -1 down
-    range_abs: float
-    duration_s: int
-    num_ticks: int     # for medium/maxi we compute via COUNT(*)
+    high_price: Optional[float]
+    low_price: Optional[float]
+    direction: int  # +1 up, -1 down
+    duration_s: Optional[int]
+    num_ticks: Optional[int]
     run_day: str
 
 
-def connect():
-    return psycopg2.connect(
-        dbname=PG_DB, user=PG_USER, password=PG_PASS,
-        host=PG_HOST, port=PG_PORT
-    )
+# --------------------------- Core ZigZag Logic ------------------------------
+
+def _zigzag_from_events(
+    events: List[Tuple[int, datetime, float]],
+    threshold: float
+) -> List[Pivot]:
+    """
+    events: list of (tick_id, ts, price) in time order.
+    Implements the exact rules you listed.
+
+    Returns committed pivots (candidate is only committed on an opposite break).
+    """
+    pivots: List[Pivot] = []
+    if not events:
+        return pivots
+
+    # Anchor (the very first tick)
+    anchor_id, anchor_ts, anchor_price = events[0]
+
+    cand_dir: Optional[int] = None
+    cand_id: Optional[int] = None
+    cand_ts: Optional[datetime] = None
+    cand_price: Optional[float] = None
+
+    for (tid, ts, px) in events[1:]:
+        if cand_dir is None:
+            # Wait until first exceed from anchor
+            delta = px - anchor_price
+            if abs(delta) >= threshold:
+                cand_dir = 1 if delta > 0 else -1
+                cand_id, cand_ts, cand_price = tid, ts, px
+            continue
+
+        # If moving in the same direction as candidate, extend to new extreme
+        if cand_dir == 1:
+            if px >= cand_price:
+                cand_id, cand_ts, cand_price = tid, ts, px
+            # Opposite break? (down from candidate)
+            elif (cand_price - px) >= threshold:
+                pivots.append(Pivot(cand_id, cand_ts, cand_price, "peak"))
+                # new candidate becomes the breaking tick, and direction flips
+                cand_dir = -1
+                cand_id, cand_ts, cand_price = tid, ts, px
+                # Move the anchor to the committed pivot (per your rule 1-7)
+                anchor_id, anchor_ts, anchor_price = cand_id, cand_ts, cand_price
+        else:  # cand_dir == -1
+            if px <= cand_price:
+                cand_id, cand_ts, cand_price = tid, ts, px
+            elif (px - cand_price) >= threshold:
+                pivots.append(Pivot(cand_id, cand_ts, cand_price, "trough"))
+                cand_dir = 1
+                cand_id, cand_ts, cand_price = tid, ts, px
+                anchor_id, anchor_ts, anchor_price = cand_id, cand_ts, cand_price
+
+    # NOTE: classic zigzag does not commit the last candidate without reversal.
+    # If you want to *also* store last candidate as a softer point, you could
+    # uncomment below – but you said commit on reversal, so we keep it off.
+    # if cand_dir is not None and cand_id is not None:
+    #     kind = "peak" if cand_dir == 1 else "trough"
+    #     pivots.append(Pivot(cand_id, cand_ts, cand_price, kind))
+
+    return pivots
 
 
-def fetch_ticks(cur, start_ts: datetime, end_ts: datetime) -> List[Item]:
+def pivots_from_ticks(cur, start_ts: datetime, end_ts: datetime, threshold: float) -> List[Pivot]:
+    """Build micro pivots from ticks (uses mid; falls back to (bid+ask)/2)."""
     cur.execute(
-        f"""
-        SELECT id, "timestamp", mid
-        FROM {TICKS_TABLE}
+        """
+        SELECT id, "timestamp", 
+               COALESCE(mid, (bid + ask)/2.0) AS price
+        FROM ticks
         WHERE "timestamp" >= %s AND "timestamp" < %s
         ORDER BY id
         """,
         (start_ts, end_ts),
     )
     rows = cur.fetchall()
-    items = [Item(tick_id=r[0], ts=r[1], price=float(r[2]), idx=i) for i, r in enumerate(rows)]
-    return items
+    events = [(r[0], r[1], float(r[2])) for r in rows]
+    return _zigzag_from_events(events, threshold)
 
 
-def zigzag_from_stream(items: List[Item], threshold: float, level: str) -> List[ZigPoint]:
+def pivots_from_pivots(base_pivots: List[Pivot], threshold: float) -> List[Pivot]:
+    """Build med/max pivots from the previous level’s pivots."""
+    events = [(p.tick_id, p.ts, p.price) for p in base_pivots]
+    return _zigzag_from_events(events, threshold)
+
+
+# --------------------------- Segment Builders -------------------------------
+
+def compute_segment_stats(cur, a_tick: int, b_tick: int) -> Tuple[Optional[int], Optional[float], Optional[float]]:
     """
-    Implements:
-      - wait until |price - base| >= threshold to set a candidate (direction ±1)
-      - update candidate while moving further in same direction
-      - on reversal exceeding threshold, emit previous candidate as a point (peak/trough)
-    Does NOT emit the trailing unfinished candidate.
+    Count ticks and compute high/low between two tick IDs inclusive of end.
     """
-    out: List[ZigPoint] = []
-    if not items:
-        return out
+    if a_tick is None or b_tick is None:
+        return None, None, None
 
-    base = items[0]          # reference point for threshold check
-    direction = 0            # +1 up, -1 down, 0 uninitialized
-    candidate: Optional[Item] = None
-
-    for it in items[1:]:
-        delta = it.price - base.price
-        if direction == 0:
-            if delta >= threshold:
-                direction = +1
-                candidate = it
-            elif delta <= -threshold:
-                direction = -1
-                candidate = it
-            else:
-                continue
-        else:
-            if direction == +1:
-                # still rising? keep best peak
-                if it.price >= candidate.price:
-                    candidate = it
-                # reversal big enough?
-                elif (candidate.price - it.price) >= threshold:
-                    # emit previous candidate as peak
-                    out.append(ZigPoint(level, candidate.tick_id, candidate.ts, candidate.price, "peak"))
-                    base = candidate
-                    direction = -1
-                    candidate = it
-            else:  # direction == -1
-                if it.price <= candidate.price:
-                    candidate = it
-                elif (it.price - candidate.price) >= threshold:
-                    out.append(ZigPoint(level, candidate.tick_id, candidate.ts, candidate.price, "trough"))
-                    base = candidate
-                    direction = +1
-                    candidate = it
-
-    # trailing candidate is not confirmed; do not emit
-    return out
+    lo = min(a_tick, b_tick)
+    hi = max(a_tick, b_tick)
+    cur.execute(
+        """
+        SELECT COUNT(*) AS n,
+               MAX(COALESCE(mid, (bid + ask)/2.0)) AS hi,
+               MIN(COALESCE(mid, (bid + ask)/2.0)) AS lo
+        FROM ticks
+        WHERE id >= %s AND id <= %s
+        """,
+        (lo, hi),
+    )
+    n, hi_px, lo_px = cur.fetchone()
+    return int(n or 0), (float(hi_px) if hi_px is not None else None), (float(lo_px) if lo_px is not None else None)
 
 
-def build_segments(level: str, pts: List[ZigPoint], source: str, cur) -> List[Segment]:
-    """
-    Turn alternating points into trend segments.
-    For micro: num_ticks uses in-memory indexes (fast).
-    For medium/maxi: count ticks from DB between start/end (accurate).
-    """
+def segments_from_pivots(cur, pivots: List[Pivot], run_day: str) -> List[Segment]:
+    """Create adjacent segments from pivots, filling stats from ticks."""
     segs: List[Segment] = []
-    for a, b in zip(pts, pts[1:]):
-        start_tick_id = a.tick_id
-        end_tick_id   = b.tick_id
-        start_ts, end_ts = a.ts, b.ts
-        start_price, end_price = a.price, b.price
-        direction = +1 if end_price > start_price else -1
-        range_abs = abs(end_price - start_price)
-        duration_s = int((end_ts - start_ts).total_seconds())
-
-        if source == "micro":
-            # micro num_ticks: use tick_id index proxy from the source list
-            # (we don't have idx in ZigPoint; so count via DB for consistency)
-            cur.execute(
-                f'SELECT COUNT(*) FROM {TICKS_TABLE} WHERE "timestamp" >= %s AND "timestamp" <= %s',
-                (start_ts, end_ts)
+    for i in range(len(pivots) - 1):
+        a = pivots[i]
+        b = pivots[i + 1]
+        direction = 1 if b.price >= a.price else -1
+        duration_s = int((b.ts - a.ts).total_seconds())
+        num_ticks, hi_px, lo_px = compute_segment_stats(cur, a.tick_id, b.tick_id)
+        segs.append(
+            Segment(
+                start_tick_id=a.tick_id,
+                end_tick_id=b.tick_id,
+                start_ts=a.ts,
+                end_ts=b.ts,
+                start_price=a.price,
+                end_price=b.price,
+                high_price=hi_px,
+                low_price=lo_px,
+                direction=direction,
+                duration_s=duration_s,
+                num_ticks=num_ticks,
+                run_day=run_day,
             )
-            num_ticks = cur.fetchone()[0]
-        else:
-            # always COUNT(*) for medium/maxi
-            cur.execute(
-                f'SELECT COUNT(*) FROM {TICKS_TABLE} WHERE "timestamp" >= %s AND "timestamp" <= %s',
-                (start_ts, end_ts)
-            )
-            num_ticks = cur.fetchone()[0]
-
-        segs.append(Segment(
-            start_tick_id, end_tick_id, start_ts, end_ts,
-            start_price, end_price, direction, range_abs, duration_s,
-            num_ticks, run_day=start_ts.date().isoformat()
-        ))
+        )
     return segs
 
 
-def insert_points(cur, level: str, run_day: str, pts: List[ZigPoint]):
-    if not pts:
-        return
-    payload = [
-        (level, p.tick_id, p.ts, p.price, p.kind, run_day)
+# --------------------------- DB Writers -------------------------------------
+
+# points (note: tick_id is required and NOT NULL)
+def insert_points(cur, level, run_day, pts):
+    # pts: list of dicts with keys: tick_id, ts, price, kind
+    sql = """
+        INSERT INTO zigzag_points (level, tick_id, ts, price, kind, run_day)
+        VALUES %s
+        ON CONFLICT DO NOTHING
+    """
+    rows = [
+        (level, p["tick_id"], p["ts"], p["price"], p["kind"], run_day)
         for p in pts
     ]
-    pgx.execute_values(
-        cur,
-        f"""
-        INSERT INTO {POINTS_TABLE} (level, tick_id, ts, price, kind, run_day)
+    pgx.execute_values(cur, sql, rows, page_size=500)
+
+
+# segments (NO range_abs!)
+def insert_segments(cur, table_name, run_day, segs):
+    """
+    segs: list of dicts with keys:
+      start_tick_id, end_tick_id, start_ts, end_ts,
+      start_price, end_price, high_price, low_price,
+      direction, duration_s, num_ticks
+    """
+    sql = f"""
+        INSERT INTO {table_name} (
+            start_tick_id, end_tick_id,
+            start_ts, end_ts,
+            start_price, end_price, high_price, low_price,
+            direction, duration_s, num_ticks, run_day
+        )
         VALUES %s
-        """,
-        payload,
-        template="(%s,%s,%s,%s,%s,%s)"
-    )
-
-
-def insert_segments(cur, level: str, segs: List[Segment]):
-    if not segs:
-        return
-    tbl = TREND_TABLES[level]
-    payload = [
-        (s.start_tick_id, s.end_tick_id, s.start_ts, s.end_ts,
-         s.start_price, s.end_price, s.direction, s.range_abs,
-         s.duration_s, s.num_ticks, s.run_day)
+        ON CONFLICT DO NOTHING
+    """
+    rows = [
+        (
+            s["start_tick_id"], s["end_tick_id"],
+            s["start_ts"], s["end_ts"],
+            s["start_price"], s["end_price"], s["high_price"], s["low_price"],
+            s["direction"], s["duration_s"], s["num_ticks"], run_day
+        )
         for s in segs
     ]
-    pgx.execute_values(
-        cur,
-        f"""
-        INSERT INTO {tbl}
-            (start_tick_id, end_tick_id, start_ts, end_ts,
-             start_price, end_price, direction, range_abs,
-             duration_s, num_ticks, run_day)
-        VALUES %s
-        """,
-        payload,
-        template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
-    )
+    pgx.execute_values(cur, sql, rows, page_size=500)
 
 
-def delete_existing_for_day(cur, run_day: str):
-    # points
-    cur.execute(f"DELETE FROM {POINTS_TABLE} WHERE run_day = %s", (run_day,))
-    # segments
-    for lvl, tbl in TREND_TABLES.items():
-        cur.execute(f"DELETE FROM {tbl} WHERE run_day = %s", (run_day,))
+# --------------------------- Orchestration ----------------------------------
+
+def day_window_local(day_str: str) -> Tuple[datetime, datetime]:
+    """Return local 08:00 -> next-day 07:00 (Australia/Sydney)."""
+    y, m, d = map(int, day_str.split("-"))
+    start = datetime(y, m, d, 8, 0, 0, tzinfo=SYD)
+    end = start + timedelta(hours=23, minutes=0) + timedelta(hours=23)  # wrong
+    # Correction: we want 8:00 -> next-day 7:00 (i.e., +23 hours)
+    end = start + timedelta(hours=23)
+    return start, end
 
 
-def main():
-    ap = argparse.ArgumentParser(description="Compute micro/medium/maxi zigzags for a run day.")
-    ap.add_argument("--day", required=True, help="YYYY-MM-DD (day rolls 08:00 → next day 07:00, UTC+10)")
-    ap.add_argument("--micro", type=float, required=True, help="micro threshold (absolute)")
-    ap.add_argument("--medium", type=float, required=True, help="medium threshold (absolute)")
-    ap.add_argument("--maxi", type=float, required=True, help="maxi threshold (absolute)")
-    args = ap.parse_args()
+def run_for_day(day: str, micro_thr: float, med_thr: float, maxi_thr: float) -> None:
+    start_ts, end_ts = day_window_local(day)
+    print(f"[zig] {day}  window {start_ts.isoformat()} -> {end_ts.isoformat()}  "
+          f"(thr micro={micro_thr}, med={med_thr}, maxi={maxi_thr})")
 
-    day = datetime.strptime(args.day, "%Y-%m-%d").replace(tzinfo=AEST)
-    start = day.replace(hour=8, minute=0, second=0, microsecond=0)
-    end   = start + timedelta(hours=23)
-    run_day = args.day
-
-    print(f"[zig] {run_day}  window {start.isoformat()} -> {end.isoformat()}  "
-          f"(thr micro={args.micro}, med={args.medium}, maxi={args.maxi})")
-
-    con = connect()
-    con.autocommit = False
+    conn = open_conn()
+    conn.autocommit = False
     try:
-        cur = con.cursor()
+        with conn.cursor() as cur:
+            # MICRO
+            micro_pts = pivots_from_ticks(cur, start_ts, end_ts, micro_thr)
+            insert_points(cur, "micro", day, micro_pts)
+            micro_segs = segments_from_pivots(cur, micro_pts, day)
+            insert_segments(cur, "micro", micro_segs)
 
-        # clean old rows for this day
-        delete_existing_for_day(cur, run_day)
+            # MEDIUM from micro
+            med_pts = pivots_from_pivots(micro_pts, med_thr)
+            insert_points(cur, "medium", day, med_pts)
+            med_segs = segments_from_pivots(cur, med_pts, day)
+            insert_segments(cur, "medium", med_segs)
 
-        # 1) micro from ticks
-        tick_items = fetch_ticks(cur, start, end)
-        if not tick_items:
-            print("No ticks for this window.")
-            con.commit()
-            return
+            # MAXI from medium
+            maxi_pts = pivots_from_pivots(med_pts, maxi_thr)
+            insert_points(cur, "maxi", day, maxi_pts)
+            maxi_segs = segments_from_pivots(cur, maxi_pts, day)
+            insert_segments(cur, "maxi", maxi_segs)
 
-        micro_pts = zigzag_from_stream(tick_items, args.micro, "micro")
-        micro_segs = build_segments("micro", micro_pts, "micro", cur)
-        insert_points(cur, "micro", run_day, micro_pts)
-        insert_segments(cur, "micro", micro_segs)
-        print(f"micro: {len(micro_pts)} points, {len(micro_segs)} segments")
-
-        # 2) medium from micro points (use their tick_id/ts/price as stream)
-        micro_stream = [Item(p.tick_id, p.ts, p.price) for p in micro_pts]
-        medium_pts = zigzag_from_stream(micro_stream, args.medium, "medium")
-        medium_segs = build_segments("medium", medium_pts, "medium", cur)
-        insert_points(cur, "medium", run_day, medium_pts)
-        insert_segments(cur, "medium", medium_segs)
-        print(f"medium: {len(medium_pts)} points, {len(medium_segs)} segments")
-
-        # 3) maxi from medium points
-        medium_stream = [Item(p.tick_id, p.ts, p.price) for p in medium_pts]
-        maxi_pts = zigzag_from_stream(medium_stream, args.maxi, "maxi")
-        maxi_segs = build_segments("maxi", maxi_pts, "maxi", cur)
-        insert_points(cur, "maxi", run_day, maxi_pts)
-        insert_segments(cur, "maxi", maxi_segs)
-        print(f"maxi: {len(maxi_pts)} points, {len(maxi_segs)} segments")
-
-        con.commit()
-        print("Done.")
-    except Exception as e:
-        con.rollback()
+        conn.commit()
+    except Exception:
+        conn.rollback()
         raise
     finally:
-        con.close()
+        conn.close()
+
+
+# --------------------------- CLI --------------------------------------------
+
+def main():
+    ap = argparse.ArgumentParser(description="Compute/store zigzag pivots and segments for a day.")
+    ap.add_argument("--day", required=True, help="YYYY-MM-DD (local Australia/Sydney trading day)")
+    ap.add_argument("--micro", type=float, required=True, help="Micro threshold")
+    ap.add_argument("--medium", type=float, required=True, help="Medium threshold")
+    ap.add_argument("--maxi", type=float, required=True, help="Maxi threshold")
+    args = ap.parse_args()
+
+    run_for_day(args.day, args.micro, args.medium, args.maxi)
 
 
 if __name__ == "__main__":
