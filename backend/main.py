@@ -302,7 +302,10 @@ def _zigzag_impl(
 
             segs[lvl] = q_all(
                 f"""
-                SELECT start_ts, end_ts, start_price, end_price
+                SELECT id, start_tick_id, end_tick_id,
+                    start_ts, end_ts, 
+                    start_price, end_price,
+                    direction, range_abs, duration_s, num_ticks
                 FROM {tbl}
                 WHERE run_day = :day {where_more}
                 ORDER BY start_ts
@@ -313,7 +316,7 @@ def _zigzag_impl(
 
             pts[lvl] = q_all(
                 """
-                SELECT ts, price, kind
+                SELECT tick_id, ts, price, kind
                 FROM zigzag_points
                 WHERE level = :lvl AND run_day = :day
                 ORDER BY ts
@@ -377,8 +380,6 @@ def _zigzag_impl(
 
 # Serve at root path to avoid nginx /api rewrite needs
 @app.get("/zigzag")
-# keep the old path for safety; delete the next line if you want it gone:
-@app.get("/api/zigzag")
 def zigzag(
     mode: str = Query("date", regex="^(date|id)$"),
     levels: str = "micro,medium,maxi",
