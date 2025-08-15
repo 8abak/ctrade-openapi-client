@@ -4,48 +4,26 @@
   <meta charset="utf-8" />
   <title>ZigZag Explorer</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-
-  <!-- Your shared styles -->
   <link rel="stylesheet" href="style.css" />
-
-  <!-- ECharts -->
   <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
-
   <style>
-    /* Light touch UI refinements on top of style.css */
-    body { background:#0f1115; color:#c9d1d9; }
-    .page {
-      display:grid;
-      grid-template-columns: 260px 1fr;
-      gap: 0;
-      height: 100vh;
-    }
-    .side {
-      padding: 14px 14px 0 14px;
-      border-right: 1px solid #1f232b;
-      overflow:auto;
-    }
-    .side h1 { font-size:20px; margin: 8px 0 12px; }
-    .row { margin: 10px 0; }
-    .row label { margin-right: 10px; }
-    .btn { background:#1677ff; border:0; color:#fff; padding:6px 10px; border-radius:6px; cursor:pointer; }
-    .btn.secondary { background:#2d333b; }
-    .btn:disabled { opacity:.5; cursor:not-allowed; }
-    .note { color:#8b949e; font-size:12px; margin-top:8px; }
-    .small { font-size:12px; color:#9aa4b2; }
-    #chart { height: calc(100vh - 0px); }
-    .kv { display:flex; justify-content:space-between; font-size:12px; padding:3px 0; border-bottom:1px dashed #1f232b }
-    .kv span:first-child { color:#9aa4b2; }
-    .badge { display:inline-block; padding:2px 6px; border-radius:10px; background:#1f232b; font-size:12px; margin-left:6px; }
-    .legend-dots { display:flex; gap:10px; margin-top:6px; }
-    .dot { width:10px; height:10px; border-radius:50%; display:inline-block; margin-right:6px; }
+    body{background:#0f1115;color:#c9d1d9}
+    .page{display:grid;grid-template-columns:260px 1fr;height:100vh}
+    .side{padding:14px;border-right:1px solid #1f232b;overflow:auto}
+    .row{margin:10px 0}.small{font-size:12px;color:#9aa4b2}
+    .btn{background:#1677ff;border:0;color:#fff;padding:6px 10px;border-radius:6px;cursor:pointer}
+    .btn.secondary{background:#2d333b}.btn:disabled{opacity:.5}
+    #chart{height:calc(100vh - 0px)}
+    .kv{display:flex;justify-content:space-between;font-size:12px;padding:3px 0;border-bottom:1px dashed #1f232b}
+    .badge{display:inline-block;padding:2px 6px;border-radius:10px;background:#1f232b;font-size:12px;margin-left:6px}
+    .legend-dots{display:flex;gap:10px;margin-top:6px}
+    .dot{width:10px;height:10px;border-radius:50%;display:inline-block;margin-right:6px}
   </style>
 </head>
-
 <body>
 <div class="page">
   <aside class="side">
-    <h1>ZigZag Explorer</h1>
+    <h1 style="margin:8px 0 12px">ZigZag Explorer</h1>
 
     <div class="row">
       <div class="small">Mode:</div>
@@ -55,14 +33,14 @@
 
     <div class="row" id="dayRow">
       <div class="small">Day:</div>
-      <input id="day" type="date" />
+      <input id="day" type="date"/>
     </div>
 
-    <div class="row" id="idRow" style="display:none;">
+    <div class="row" id="idRow" style="display:none">
       <div class="small">Start tick id:</div>
-      <input id="startId" type="number" placeholder="e.g. 690000" style="width:140px;" />
-      <div class="small" style="margin-top:6px;">Span (minutes):</div>
-      <input id="spanMin" type="number" value="60" style="width:80px;" />
+      <input id="startId" type="number" style="width:140px"/>
+      <div class="small" style="margin-top:6px">Span (minutes):</div>
+      <input id="spanMin" type="number" value="60" style="width:80px"/>
     </div>
 
     <div class="row">
@@ -82,12 +60,12 @@
       <button id="moreBtn" class="btn secondary" disabled>Load More →</button>
     </div>
 
-    <div class="note" id="status">Ready.</div>
+    <div class="small" id="status">Ready.</div>
 
     <div class="row">
       <div class="small">Selected segment</div>
       <div id="selNone" class="small">Click a line or point…</div>
-      <div id="selBox" style="display:none;">
+      <div id="selBox" style="display:none">
         <div class="kv"><span>Level</span> <span id="sLevel"></span></div>
         <div class="kv"><span>Start</span> <span id="sStart"></span></div>
         <div class="kv"><span>End</span> <span id="sEnd"></span></div>
@@ -97,304 +75,235 @@
       </div>
     </div>
 
-    <div class="row small">
-      Version <span class="badge" id="ver">…</span>
-    </div>
+    <div class="row small">Version <span class="badge" id="ver">…</span></div>
   </aside>
 
-  <main>
-    <div id="chart"></div>
-  </main>
+  <main><div id="chart"></div></main>
 </div>
 
 <script>
 /* ---------- helpers ---------- */
-const $ = sel => document.querySelector(sel);
-function fmtTs(iso){ try{ return new Date(iso).toLocaleString(); }catch(e){ return iso; } }
-function fmtNum(n){ return (Math.round(n*100)/100).toLocaleString(); }
-function pad2(n){ return String(n).padStart(2,'0'); }
-
-function todayAU() {
-  const d = new Date();
-  // default the date input to yesterday AU if before 08:00 local (optional)
-  return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`;
-}
+const $ = s => document.querySelector(s);
+function fmtTs(iso){ try{return new Date(iso).toLocaleString()}catch(e){return iso} }
+function fmtNum(n){ return (Math.round(n*100)/100).toLocaleString() }
+function pad2(n){ return String(n).padStart(2,'0') }
+function todayISO(){ const d=new Date(); return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}` }
 
 /* ---------- state ---------- */
 const state = {
-  mode: 'date',
-  day: todayAU(),
-  startId: null,
-  spanMin: 60,
-  levels: new Set(['micro','medium']),
-  // fetched data
-  segments: { micro:[], medium:[], maxi:[] },
-  // points used to draw lines (and for scatter)
-  pointStore: { micro:[], medium:[], maxi:[] },
-  seen: { micro:new Set(), medium:new Set(), maxi:new Set() }, // dedupe by ts
-  cursor: null, // server meta.cursor_ts
-  loadedOnce: false
+  mode:'date', day: todayISO(), startId:null, spanMin:60,
+  levels:new Set(['micro','medium']),
+  segments:{micro:[],medium:[],maxi:[]},
+  pointStore:{micro:[],medium:[],maxi:[]},
+  seen:{micro:new Set(),medium:new Set(),maxi:new Set()},
+  cursor:null,
 };
 
-/* ---------- UI init ---------- */
 $('#day').value = state.day;
-
-document.querySelectorAll('input[name="mode"]').forEach(r=>{
-  r.addEventListener('change', e=>{
-    state.mode = e.target.value;
-    $('#dayRow').style.display = state.mode === 'date' ? '' : 'none';
-    $('#idRow').style.display = state.mode === 'id' ? '' : 'none';
-  });
-});
-
-document.querySelectorAll('.lvl').forEach(cb=>{
-  cb.addEventListener('change', ()=>{
-    if (cb.checked) state.levels.add(cb.value);
-    else state.levels.delete(cb.value);
-    applyLegendSelection();
-  });
-});
-
-$('#loadBtn').addEventListener('click', ()=>load(true));
-$('#moreBtn').addEventListener('click', ()=>load(false));
+document.querySelectorAll('input[name="mode"]').forEach(r=>r.addEventListener('change',e=>{
+  state.mode=e.target.value;
+  $('#dayRow').style.display = state.mode==='date'?'':'none';
+  $('#idRow').style.display  = state.mode==='id'?'':'none';
+}));
+document.querySelectorAll('.lvl').forEach(cb=>cb.addEventListener('change',()=>{
+  cb.checked?state.levels.add(cb.value):state.levels.delete(cb.value);
+  applyLegendSelection();
+}));
 
 /* ---------- chart ---------- */
-const chart = echarts.init(document.getElementById('chart'), null, { useDirtyRect:true });
-
-const SERIES_INDEX = {
-  microLine: 0,
-  mediumLine: 1,
-  maxiLine: 2,
-  microDots: 3,
-  mediumDots: 4,
-  maxiDots: 5
-};
+const chart = echarts.init(document.getElementById('chart'), null, {useDirtyRect:true});
+const SERIES_INDEX = { microLine:0, mediumLine:1, maxiLine:2, microDots:3, mediumDots:4, maxiDots:5 };
 
 chart.setOption({
-  backgroundColor:'#0f1115',
-  animation:false,
-  grid: { left: 40, right: 20, top: 20, bottom: 60 },
-  tooltip: {
-    trigger:'axis',
-    axisPointer: { type:'cross' },
-    textStyle: { fontSize:12 }
-  },
-  legend: { top:0, textStyle:{ color:'#c9d1d9' } },
-  xAxis: { type:'time', axisLine:{ lineStyle:{ color:'#334155' } }, axisLabel:{ color:'#9aa4b2' } },
-  yAxis: { type:'value', scale:true, axisLine:{ lineStyle:{ color:'#334155' } }, axisLabel:{ color:'#9aa4b2' }, splitLine:{ lineStyle:{ color:'#1f232b' } } },
-  dataZoom: [
-    { type:'inside', filterMode:'filter' },
-    { type:'slider', height:18, bottom:28, borderColor:'#1f232b', textStyle:{ color:'#8b949e' }, brushSelect:true, filterMode:'filter' }
+  backgroundColor:'#0f1115', animation:false,
+  grid:{left:40,right:20,top:16,bottom:60},
+  tooltip:{trigger:'axis',axisPointer:{type:'cross'},textStyle:{fontSize:12}},
+  legend:{top:0,textStyle:{color:'#c9d1d9'}},
+  xAxis:{type:'time',axisLine:{lineStyle:{color:'#334155'}},axisLabel:{color:'#9aa4b2'}},
+  yAxis:{type:'value',scale:true,axisLine:{lineStyle:{color:'#334155'}},
+         axisLabel:{color:'#9aa4b2'},splitLine:{lineStyle:{color:'#1f232b'}}},
+  dataZoom:[
+    {type:'inside',filterMode:'filter'},
+    {type:'slider',height:18,bottom:28,borderColor:'#1f232b',textStyle:{color:'#8b949e'},filterMode:'filter'}
   ],
-  series: [
-    // Micro / Medium / Maxi lines from points
-    { name:'Micro',  type:'line', data:[], showSymbol:false, connectNulls:false, sampling:'lttb', clip:true,
-      lineStyle:{ width:1.2, color:'#00b7ff', opacity:.95 } },
-    { name:'Medium', type:'line', data:[], showSymbol:false, connectNulls:false, sampling:'lttb', clip:true,
-      lineStyle:{ width:1.6, color:'#ff6b6b', opacity:.9 } },
-    { name:'Maxi',   type:'line', data:[], showSymbol:false, connectNulls:false, sampling:'lttb', clip:true,
-      lineStyle:{ width:2.0, color:'#7c4dff', opacity:.9 } },
-
-    // points (small dots)
-    { name:'Micro pts',  type:'scatter', data:[], symbolSize:3.2, itemStyle:{ color:'#ffd54d' } },
-    { name:'Medium pts', type:'scatter', data:[], symbolSize:3.8, itemStyle:{ color:'#ff9f43' } },
-    { name:'Maxi pts',   type:'scatter', data:[], symbolSize:4.4, itemStyle:{ color:'#a78bfa' } },
+  series:[
+    {name:'Micro', type:'line', data:[], showSymbol:false, connectNulls:false, sampling:'lttb', clip:true,
+     lineStyle:{width:0.8,color:'#00b7ff',opacity:.95}, zlevel:1},
+    {name:'Medium', type:'line', data:[], showSymbol:false, connectNulls:false, sampling:'lttb', clip:true,
+     lineStyle:{width:1.1,color:'#ff6b6b',opacity:.9}, zlevel:1},
+    {name:'Maxi', type:'line', data:[], showSymbol:false, connectNulls:false, sampling:'lttb', clip:true,
+     lineStyle:{width:1.4,color:'#7c4dff',opacity:.9}, zlevel:1},
+    {name:'Micro pts', type:'scatter', data:[], symbolSize:2.6, itemStyle:{color:'#ffd54d'}, zlevel:2},
+    {name:'Medium pts', type:'scatter', data:[], symbolSize:3.0, itemStyle:{color:'#ff9f43'}, zlevel:2},
+    {name:'Maxi pts', type:'scatter', data:[], symbolSize:3.4, itemStyle:{color:'#a78bfa'}, zlevel:2},
   ]
 });
 
-/* Click -> show details */
+/* Click → segment details */
 chart.on('click', params=>{
-  // Pick the closest segment for the same level by x (time)
-  const lvl = (params.seriesName||'').toLowerCase().includes('micro') ? 'micro'
-            : (params.seriesName||'').toLowerCase().includes('medium') ? 'medium'
-            : (params.seriesName||'').toLowerCase().includes('maxi') ? 'maxi'
-            : null;
-  if (!lvl) return;
-
+  const name=(params.seriesName||'').toLowerCase();
+  const lvl = name.includes('micro')?'micro':name.includes('medium')?'medium':name.includes('maxi')?'maxi':null;
+  if(!lvl) return;
   const ts = new Date(params.value[0] ?? params.data[0]).toISOString();
   const seg = nearestSegment(lvl, ts);
-  if (!seg) {
-    $('#selNone').style.display = '';
-    $('#selBox').style.display = 'none';
-    return;
-  }
-  const dSec = (new Date(seg.end_ts) - new Date(seg.start_ts))/1000;
-  const dP = (seg.end_price - seg.start_price);
-  $('#sLevel').textContent = lvl;
-  $('#sStart').textContent = fmtTs(seg.start_ts);
-  $('#sEnd').textContent   = fmtTs(seg.end_ts);
-  $('#sDeltaP').textContent = `${dP>=0?'+':''}${fmtNum(dP)}`;
-  $('#sDeltaT').textContent = `${Math.floor(dSec/60)}m ${Math.round(dSec%60)}s`;
-  $('#sTicks').textContent  = (seg.num_ticks != null ? seg.num_ticks : 'n/a');
-  $('#selNone').style.display = 'none';
-  $('#selBox').style.display  = '';
+  if(!seg){ $('#selNone').style.display=''; $('#selBox').style.display='none'; return; }
+  const dSec=(new Date(seg.end_ts)-new Date(seg.start_ts))/1000;
+  const dP=(seg.end_price-seg.start_price);
+  $('#sLevel').textContent=lvl;
+  $('#sStart').textContent=fmtTs(seg.start_ts);
+  $('#sEnd').textContent=fmtTs(seg.end_ts);
+  $('#sDeltaP').textContent=`${dP>=0?'+':''}${fmtNum(dP)}`;
+  $('#sDeltaT').textContent=`${Math.floor(dSec/60)}m ${Math.round(dSec%60)}s`;
+  $('#sTicks').textContent=(seg.num_ticks!=null?seg.num_ticks:'n/a');
+  $('#selNone').style.display='none'; $('#selBox').style.display='';
 });
-
 function nearestSegment(level, isoTs){
-  const arr = state.segments[level];
-  if (!arr || !arr.length) return null;
-  const t = new Date(isoTs).getTime();
-  let best=null, bestd=Infinity;
-  for (const s of arr){
-    const mid = (new Date(s.start_ts).getTime() + new Date(s.end_ts).getTime())/2;
-    const d = Math.abs(mid - t);
-    if (d < bestd){ bestd=d; best=s; }
-  }
+  const arr=state.segments[level]; if(!arr.length) return null;
+  const t=new Date(isoTs).getTime(); let best=null,bestd=Infinity;
+  for(const s of arr){ const mid=(+new Date(s.start_ts)+ +new Date(s.end_ts))/2; const d=Math.abs(mid-t); if(d<bestd){bestd=d;best=s;} }
   return best;
 }
 
-/* ---------- data building ---------- */
-const GAP_MS = 30 * 60 * 1000; // break line if gap > 30 mins
+/* ---------- stable building from points ---------- */
+const GAP_MS = 30*60*1000; // break line across >30 min gaps
 
-function rebuildPathFromPoints(level){
+function stableSortAndClean(points){
+  // numeric sort + drop non-increasing timestamps
+  const arr = points.slice().sort((a,b)=> new Date(a.ts).getTime() - new Date(b.ts).getTime());
+  const out = [];
+  let lastT = -Infinity, lastKey = '';
+  for(const p of arr){
+    const t = new Date(p.ts).getTime();
+    if (t < lastT) continue;            // drop out-of-order
+    const key = p.ts+'|'+p.price;       // tolerate equal ts with different price by treating as distinct only if price differs
+    if (t===lastT && key===lastKey) continue; // exact dup
+    out.push({ts:p.ts,price:p.price});
+    lastT=t; lastKey=key;
+  }
+  return out;
+}
+
+function rebuildPath(level){
   const iLine = SERIES_INDEX[level+'Line'];
   const iDots = SERIES_INDEX[level+'Dots'];
-  const pts = state.pointStore[level].slice().sort((a,b)=> a.ts.localeCompare(b.ts));
 
-  const line = [];
-  let prev = null;
-  for (const p of pts){
-    if (prev && (new Date(p.ts)-new Date(prev.ts) > GAP_MS)){
-      line.push([prev.ts, null]); // break
+  const pts = stableSortAndClean(state.pointStore[level]);
+  const line=[], dots=[];
+  let prev=null;
+  for(const p of pts){
+    const t = new Date(p.ts).getTime();
+    if(prev && (t - prev.t) > GAP_MS){
+      // add a hard break
+      line.push([prev.ts, null]);
     }
     line.push([p.ts, p.price]);
-    prev = p;
+    dots.push([p.ts, p.price]);
+    prev = {t, ts:p.ts};
   }
-  const dots = pts.map(p=>[p.ts, p.price]);
 
   const series = chart.getOption().series;
   series[iLine].data = line;
   series[iDots].data = dots;
-  chart.setOption({ series });
+  chart.setOption({series});
 }
 
 function pushPoints(level, points){
-  if (!points || !points.length) return;
-  const seen = state.seen[level];
-  const store = state.pointStore[level];
-  for (const p of points){
-    const key = p.ts; // if same ts can repeat, use `${p.ts}|${p.price}`
-    if (seen.has(key)) continue;
+  if(!points?.length) return;
+  const seen = state.seen[level], store = state.pointStore[level];
+  for(const p of points){
+    const key=p.ts+'|'+p.price; // more robust than ts only
+    if(seen.has(key)) continue;
     seen.add(key);
-    store.push({ ts:p.ts, price:p.price });
+    store.push({ts:p.ts,price:p.price});
   }
-  rebuildPathFromPoints(level);
+  rebuildPath(level);
 }
-
 function pushSegments(level, segs){
-  if (!segs || !segs.length) return;
+  if(!segs?.length) return;
   state.segments[level].push(...segs);
 }
 
 /* ---------- loading ---------- */
+$('#loadBtn').addEventListener('click', ()=>load(true));
+$('#moreBtn').addEventListener('click', ()=>load(false));
+
 async function load(first){
-  if (first){
-    // reset
-    state.segments = { micro:[], medium:[], maxi:[] };
-    state.pointStore = { micro:[], medium:[], maxi:[] };
-    state.seen = { micro:new Set(), medium:new Set(), maxi:new Set() };
-    state.cursor = null;
-    state.loadedOnce = false;
-    // clear chart data
-    const S = chart.getOption().series;
-    for (let i=0;i<S.length;i++) S[i].data = [];
-    chart.setOption({ series: S });
+  if(first){
+    state.segments={micro:[],medium:[],maxi:[]};
+    state.pointStore={micro:[],medium:[],maxi:[]};
+    state.seen={micro:new Set(),medium:new Set(),maxi:new Set()};
+    state.cursor=null;
+    // clear chart series
+    const S=chart.getOption().series; for(let i=0;i<S.length;i++) S[i].data=[];
+    chart.setOption({series:S});
     $('#selNone').style.display=''; $('#selBox').style.display='none';
   }
 
-  // params
   const levels = Array.from(state.levels).join(',');
   const base = '/api/zigzag';
-  const params = new URLSearchParams();
-  params.set('levels', levels);
-  params.set('limit','2000');
+  const params = new URLSearchParams({ levels, limit:'2000' });
 
-  if (state.mode === 'date'){
-    params.set('mode','date');
+  if(state.mode==='date'){
     state.day = $('#day').value || state.day;
-    params.set('day', state.day);
-    if (state.cursor) params.set('cursor_ts', state.cursor);
-  } else {
+    params.set('mode','date'); params.set('day',state.day);
+    if(state.cursor) params.set('cursor_ts', state.cursor);
+  }else{
     params.set('mode','id');
     state.startId = Number($('#startId').value||0);
     state.spanMin = Number($('#spanMin').value||60);
-    if (!state.startId) { setStatus('Missing start id'); return; }
+    if(!state.startId){ setStatus('Missing start id'); return; }
     params.set('start_id', String(state.startId));
     params.set('span_minutes', String(state.spanMin));
-    if (state.cursor) params.set('cursor_ts', state.cursor);
+    if(state.cursor) params.set('cursor_ts', state.cursor);
   }
 
-  const url = `${base}?${params.toString()}`;
-  setStatus('Loading…');
-  $('#loadBtn').disabled = true; $('#moreBtn').disabled = true;
-
+  setStatus('Loading…'); $('#loadBtn').disabled=true; $('#moreBtn').disabled=true;
   try{
-    const r = await fetch(url, { cache:'no-store' });
-    if (!r.ok){
-      setStatus(`Error ${r.status}`);
-      $('#loadBtn').disabled=false;
-      $('#moreBtn').disabled = !state.cursor;
-      return;
-    }
+    const r = await fetch(`${base}?${params.toString()}`, {cache:'no-store'});
+    if(!r.ok){ setStatus(`Error ${r.status}`); return; }
     const payload = await r.json();
 
-    // segments
-    const segs = payload.segments || {};
-    if (segs.micro)  pushSegments('micro',  segs.micro);
-    if (segs.medium) pushSegments('medium', segs.medium);
-    if (segs.maxi)   pushSegments('maxi',   segs.maxi);
+    const segs = payload.segments||{}, pts = payload.points||{};
+    if(segs.micro)  pushSegments('micro',  segs.micro);
+    if(segs.medium) pushSegments('medium', segs.medium);
+    if(segs.maxi)   pushSegments('maxi',   segs.maxi);
 
-    // points → build lines
-    const pts = payload.points || {};
-    if (pts.micro)  pushPoints('micro',  pts.micro);
-    if (pts.medium) pushPoints('medium', pts.medium);
-    if (pts.maxi)   pushPoints('maxi',   pts.maxi);
+    if(pts.micro)  pushPoints('micro',  pts.micro);
+    if(pts.medium) pushPoints('medium', pts.medium);
+    if(pts.maxi)   pushPoints('maxi',   pts.maxi);
 
-    state.cursor = (payload.meta && payload.meta.cursor_ts) || null;
-    state.loadedOnce = true;
-
+    state.cursor = (payload.meta&&payload.meta.cursor_ts)||null;
     setStatus('Loaded');
     $('#moreBtn').disabled = !state.cursor;
-  }catch(err){
-    console.error(err);
-    setStatus('Network error');
+  }catch(e){
+    console.error(e); setStatus('Network error');
   }finally{
     $('#loadBtn').disabled=false;
   }
 }
 
-function setStatus(msg){ $('#status').textContent = msg; }
+function setStatus(m){ $('#status').textContent=m }
 
-/* ---------- legend reflect checkboxes ---------- */
+/* ---------- legend ↔ checkboxes ---------- */
 function applyLegendSelection(){
   const opt = chart.getOption();
-  const selected = {
-    'Micro':  state.levels.has('micro'),
-    'Micro pts':  state.levels.has('micro'),
+  opt.legend[0].selected = {
+    'Micro': state.levels.has('micro'),
+    'Micro pts': state.levels.has('micro'),
     'Medium': state.levels.has('medium'),
     'Medium pts': state.levels.has('medium'),
-    'Maxi':   state.levels.has('maxi'),
-    'Maxi pts':   state.levels.has('maxi'),
+    'Maxi': state.levels.has('maxi'),
+    'Maxi pts': state.levels.has('maxi'),
   };
-  opt.legend[0].selected = selected;
-  chart.setOption({ legend: opt.legend });
+  chart.setOption({legend: opt.legend});
 }
 
 /* ---------- version label ---------- */
-(async function(){
-  try{
-    const r = await fetch('/version');
-    if (r.ok){
-      const j = await r.json();
-      $('#ver').textContent = j.version || '—';
-    }
-  }catch(_){}
-})();
+(async ()=>{ try{ const r=await fetch('/version'); if(r.ok){ const j=await r.json(); $('#ver').textContent=j.version||'—'; } }catch(_){} })();
 
-/* ---------- sensible defaults ---------- */
+/* defaults */
 applyLegendSelection();
 setStatus('Ready. Choose a day and press Load.');
 </script>
-
 </body>
 </html>
