@@ -1,7 +1,7 @@
 # make_dataset.py — builds ml_features_tick, ml_labels_small, ml_labels_big
-# Schema-aware (public/web). Loads zig data by tick-id overlap. Safe if some tables are missing.
-# Usage:
-#   python make_dataset.py --date 2025-06-17
+# Auto-detects column names: start_tick_id/end_tick_id OR start_tickid/end_tickid.
+# Converts micro SEGMENTS -> micro POINTS (using segment start as pivot).
+# Labels only counter-direction micros inside a medium leg.
 
 import os
 import pandas as pd
@@ -9,10 +9,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import create_engine, text
 
 # ---------- CONFIG ----------
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql+psycopg2://babak:babak33044@localhost:5432/trading"
-)
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg2://babak:babak33044@localhost:5432/trading")
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
 MA_FAST, MA_SLOW = 20, 100
@@ -21,7 +18,7 @@ ATR_S, ATR_M = 14, 100
 VWAP_WIN = 200
 SMALL_HORIZON_TICKS = 600
 SESSION_BREAKS = [(0,8,"SYD"), (8,13,"TOK"), (13,21,"LON"), (21,24,"NY")]
-PREF_SCHEMAS = ["public","web"]
+PREF_SCHEMAS = ["public", "web"]
 
 # ---------- DB helpers ----------
 def q(sql, params=None):
@@ -34,26 +31,18 @@ def execmany(sql, rows):
         conn.execute(text(sql), rows)
 
 def find_table(table: str):
-    """Return (schema, qualified_name) for the first matching schema (public/web)."""
-    df = q("""
-      SELECT table_schema, table_name FROM information_schema.tables WHERE table_name = :t
-    """, {"t": table})
+    df = q("""SELECT table_schema, table_name FROM information_schema.tables WHERE table_name=:t""", {"t": table})
     for sch in PREF_SCHEMAS:
-        hit = df[df["table_schema"] == sch]
+        hit = df[df["table_schema"]==sch]
         if not hit.empty:
             return sch, f'{sch}."{table}"'
-    # not found
     return None, None
 
-def table_columns(schema: str, name: str):
+def table_cols(schema: str, name: str) -> set:
     if not schema or not name: return set()
-    df = q("""
-      SELECT column_name
-      FROM information_schema.columns
-      WHERE table_schema = :s AND table_name = :n
-      ORDER BY ordinal_position
-    """, {"s": schema, "n": name})
-    return set(df["column_name"].tolist())
+    return set(q("""SELECT column_name FROM information_schema.columns
+                    WHERE table_schema=:s AND table_name=:n""",
+                 {"s": schema, "n": name})["column_name"].tolist())
 
 def ensure_tables():
     ddl = """
@@ -77,8 +66,7 @@ def ensure_tables():
     """
     with engine.begin() as conn:
         for stmt in ddl.strip().split(";\n"):
-            if stmt.strip():
-                conn.execute(text(stmt))
+            if stmt.strip(): conn.execute(text(stmt))
 
 # ---------- feature utils ----------
 def session_bucket(ts: pd.Timestamp) -> int:
@@ -102,56 +90,53 @@ def add_rolls(df: pd.DataFrame) -> pd.DataFrame:
 
 # ---------- loaders ----------
 def load_ticks(day: str) -> pd.DataFrame:
-    df = q("""
-      SELECT id AS tickid, timestamp, bid, ask, mid
-      FROM ticks
-      WHERE DATE(timestamp)=:d
-      ORDER BY id
-    """, {"d": day})
+    df = q("""SELECT id AS tickid, timestamp, bid, ask, mid
+              FROM ticks WHERE DATE(timestamp)=:d ORDER BY id""", {"d": day})
     print(f"ticks: {len(df)} for {day}")
     return df
+
+def resolve_col(cols: set, *candidates):
+    for c in candidates:
+        if c in cols: return c
+    return None
 
 def load_segments(table_name: str, day_min_id: int, day_max_id: int) -> pd.DataFrame:
     sch, qname = find_table(table_name)
     if not qname:
         print(f"{table_name}: not found in public/web")
         return pd.DataFrame()
-    cols = table_columns(sch, table_name)
+    cols = table_cols(sch, table_name)
 
-    # Segment format
-    if {"id","start_tickid","end_tickid","direction"} <= cols:
+    start_col = resolve_col(cols, "start_tick_id", "start_tickid", "start_id")
+    end_col   = resolve_col(cols, "end_tick_id",   "end_tickid",   "end_id")
+    if start_col and end_col and "direction" in cols:
+        sel_start_ts  = "start_ts"   if "start_ts"   in cols else "NULL::timestamptz AS start_ts"
+        sel_end_ts    = "end_ts"     if "end_ts"     in cols else "NULL::timestamptz AS end_ts"
+        sel_start_pr  = "start_price"if "start_price"in cols else "NULL::double precision AS start_price"
+        sel_end_pr    = "end_price"  if "end_price"  in cols else "NULL::double precision AS end_price"
+
         df = q(f"""
-          SELECT id, start_tickid, end_tickid, direction,
-                 {"start_ts" if "start_ts" in cols else "NULL::timestamptz AS start_ts"},
-                 {"end_ts"   if "end_ts"   in cols else "NULL::timestamptz AS end_ts"},
-                 {"start_price" if "start_price" in cols else "NULL::double precision AS start_price"},
-                 {"end_price"   if "end_price"   in cols else "NULL::double precision AS end_price"}
+          SELECT id,
+                 {start_col} AS start_tickid,
+                 {end_col}   AS end_tickid,
+                 direction,
+                 {sel_start_ts},
+                 {sel_end_ts},
+                 {sel_start_pr},
+                 {sel_end_pr}
           FROM {qname}
-          WHERE end_tickid >= :min_id AND start_tickid <= :max_id
-          ORDER BY start_tickid
+          WHERE {end_col} >= :min_id AND {start_col} <= :max_id
+          ORDER BY {start_col}
         """, {"min_id": day_min_id, "max_id": day_max_id})
         print(f"{table_name}@{sch}: {len(df)} segments (tickid overlap)")
         return df
 
-    # Legacy names
-    if {"id","start_id","end_id","direction"} <= cols:
-        df = q(f"""
-          SELECT id, start_id AS start_tickid, end_id AS end_tickid, direction,
-                 NULL::timestamptz AS start_ts, NULL::timestamptz AS end_ts,
-                 NULL::double precision AS start_price, NULL::double precision AS end_price
-          FROM {qname}
-          WHERE end_id >= :min_id AND start_id <= :max_id
-          ORDER BY start_id
-        """, {"min_id": day_min_id, "max_id": day_max_id})
-        print(f"{table_name}@{sch} (legacy): {len(df)} segments (tickid overlap)")
-        return df
-
-    # Point-like (micro table sometimes)
+    # point-like fallback (rare)
     if {"id","tickid","direction"} <= cols:
+        ts_sel  = "timestamp" if "timestamp" in cols else "NULL::timestamptz AS timestamp"
+        pr_sel  = "price"     if "price"     in cols else "NULL::double precision AS price"
         df = q(f"""
-          SELECT id, tickid, direction,
-                 {"timestamp" if "timestamp" in cols else "NULL::timestamptz AS timestamp"},
-                 {"price" if "price" in cols else "NULL::double precision AS price"}
+          SELECT id, tickid, direction, {ts_sel}, {pr_sel}
           FROM {qname}
           WHERE tickid BETWEEN :min_id AND :max_id
           ORDER BY tickid
@@ -162,41 +147,30 @@ def load_segments(table_name: str, day_min_id: int, day_max_id: int) -> pd.DataF
     print(f"{table_name}@{sch}: unsupported columns {cols} → empty")
     return pd.DataFrame()
 
-def load_points_from_zig(level: str, day_min_id: int, day_max_id: int) -> pd.DataFrame:
-    sch, qname = find_table("zigzag_points")
-    if not qname:
-        print("zigzag_points: not found")
-        return pd.DataFrame()
-    cols = table_columns(sch, "zigzag_points")
-    need = {"id","level","tickid","direction"}
-    if not need <= cols:
-        print("zigzag_points: required columns missing")
-        return pd.DataFrame()
-    df = q(f"""
-      SELECT id, level, tickid, direction,
-             {"timestamp" if "timestamp" in cols else "NULL::timestamptz AS timestamp"},
-             {"price" if "price" in cols else "NULL::double precision AS price"}
-      FROM {qname}
-      WHERE level=:lvl AND tickid BETWEEN :min_id AND :max_id
-      ORDER BY tickid
-    """, {"lvl": level, "min_id": day_min_id, "max_id": day_max_id})
-    print(f"zigzag_points[{level}]@{sch}: {len(df)}")
-    return df
-
-def segments_from_medium_points(pts: pd.DataFrame) -> pd.DataFrame:
-    if pts.empty: return pts
-    pts = pts.sort_values("tickid").copy()
-    pts["next_tickid"] = pts["tickid"].shift(-1)
-    pts["start_tickid"] = pts["tickid"]
-    pts["end_tickid"]   = pts["next_tickid"]
-    pts["start_ts"]     = pts.get("timestamp")
-    pts["end_ts"]       = pts.get("timestamp").shift(-1) if "timestamp" in pts.columns else None
-    pts["start_price"]  = pts.get("price")
-    pts["end_price"]    = pts.get("price").shift(-1) if "price" in pts.columns else None
-    segs = pts.dropna(subset=["end_tickid"]).copy()
-    return segs[["id","start_tickid","end_tickid","direction","start_ts","end_ts","start_price","end_price"]]
+def micro_segments_to_points(micro_segs: pd.DataFrame) -> pd.DataFrame:
+    """Take micro segment starts as micro 'pivot' points."""
+    if micro_segs.empty: return pd.DataFrame(columns=["id","tickid","direction","timestamp","price"])
+    pts = micro_segs.copy()
+    rename = {
+        "start_tickid": "tickid",
+        "start_ts": "timestamp",
+        "start_price": "price"
+    }
+    for k,v in list(rename.items()):
+        if k not in pts.columns:
+            pts[v] = None
+    pts = pts.rename(columns=rename)
+    return pts[["id","tickid","direction","timestamp","price"]]
 
 # ---------- labels ----------
+def _is_up(d):
+    s = str(d).strip().lower()
+    return s in {"up","u","+1","1"} or (s.replace('.','',1).lstrip('-').isdigit() and float(s) > 0)
+
+def _is_dn(d):
+    s = str(d).strip().lower()
+    return s in {"dn","down","d","-1"} or (s.replace('.','',1).lstrip('-').isdigit() and float(s) < 0)
+
 def label_small(day_ticks: pd.DataFrame, micro_pts: pd.DataFrame, medium_segs: pd.DataFrame) -> pd.DataFrame:
     if day_ticks.empty or micro_pts.empty or medium_segs.empty:
         return pd.DataFrame(columns=["tickid","timestamp","s_next_hold","horizon_ticks","day_key"])
@@ -206,38 +180,39 @@ def label_small(day_ticks: pd.DataFrame, micro_pts: pd.DataFrame, medium_segs: p
 
     out = []
     for _, mu in micro_pts.iterrows():
-        if "tickid" not in mu: continue
+        if "tickid" not in mu or pd.isna(mu["tickid"]): continue
         t_id = int(mu["tickid"])
         if t_id not in ticks.index: continue
         ts = ticks.loc[t_id, "timestamp"]
+
         seg = medium_segs[(medium_segs["start_tickid"] <= t_id) & (t_id <= medium_segs["end_tickid"])]
         if seg.empty: continue
         seg = seg.iloc[0]
-        seg_dir = seg["direction"]
-        seg_start = int(seg["start_tickid"]); seg_end = int(seg["end_tickid"])
+        seg_dir = str(seg["direction"]).lower()   # 'up'/'dn'
+        # only consider COUNTER-direction micros
+        if (seg_dir == "up" and not _is_dn(mu["direction"])) or (seg_dir == "dn" and not _is_up(mu["direction"])):
+            continue
 
+        seg_start = int(seg["start_tickid"]); seg_end = int(seg["end_tickid"])
         leg_prices = ticks.loc[seg_start:t_id, "mid"]
         if seg_dir == "dn":
             extreme = float(leg_prices.min())
             forward = ticks.loc[t_id:seg_end]
             break_first = (forward["mid"].min() < extreme - 1e-12)
-            next_idx = medium_segs.index[medium_segs["start_tickid"] == seg_end]
+            # flipped to UP next?
+            nxt_idx = medium_segs.index[medium_segs["start_tickid"] == seg_end]
             flipped = False
-            if len(next_idx) > 0:
-                i = int(next_idx[0])
-                if i < len(medium_segs):
-                    flipped = (medium_segs.iloc[i]["direction"] == "up")
+            if len(nxt_idx) > 0 and int(nxt_idx[0]) < len(medium_segs):
+                flipped = (str(medium_segs.iloc[int(nxt_idx[0])]["direction"]).lower() == "up")
             s_next_hold = 1 if (flipped and not break_first) else 0
-        else:
+        else:  # seg_dir == 'up'
             extreme = float(leg_prices.max())
             forward = ticks.loc[t_id:seg_end]
             break_first = (forward["mid"].max() > extreme + 1e-12)
-            next_idx = medium_segs.index[medium_segs["start_tickid"] == seg_end]
+            nxt_idx = medium_segs.index[medium_segs["start_tickid"] == seg_end]
             flipped = False
-            if len(next_idx) > 0:
-                i = int(next_idx[0])
-                if i < len(medium_segs):
-                    flipped = (medium_segs.iloc[i]["direction"] == "dn")
+            if len(nxt_idx) > 0 and int(nxt_idx[0]) < len(medium_segs):
+                flipped = (str(medium_segs.iloc[int(nxt_idx[0])]["direction"]).lower() == "dn")
             s_next_hold = 1 if (flipped and not break_first) else 0
 
         horizon = int(min(len(ticks.loc[t_id:]), SMALL_HORIZON_TICKS))
@@ -279,8 +254,7 @@ def build_day(day: str):
     print(f"🛠  Building dataset for {day}")
     ensure_tables()
     ticks = load_ticks(day)
-    if ticks.empty:
-        print("No ticks for this day."); return
+    if ticks.empty: print("No ticks for this day."); return
 
     feats = add_rolls(ticks.copy())
     feats["micro_state"] = 0; feats["maxi_state"] = 0
@@ -302,21 +276,30 @@ def build_day(day: str):
     day_min_id = int(feats["tickid"].min())
     day_max_id = int(feats["tickid"].max())
 
-    # Load medium segments (try segment tables, else derive from zigzag_points)
+    # Medium segments
     medium = load_segments("medium_trends", day_min_id, day_max_id)
-    if medium.empty:
-        med_pts = load_points_from_zig("medium", day_min_id, day_max_id)
-        medium = segments_from_medium_points(med_pts)
 
-    # Load micro points (try table, else zigzag_points)
-    micro = load_segments("micro_trends", day_min_id, day_max_id)
-    if micro.empty:
-        micro = load_points_from_zig("micro", day_min_id, day_max_id)
-    if not micro.empty and "timestamp" not in micro.columns:
-        micro = micro.merge(ticks[["tickid","timestamp","mid"]], on="tickid", how="left").rename(columns={"mid":"price"})
+    # Micro: try segment table then convert to points; if empty, fall back to zig points (rare)
+    micro_segs = load_segments("micro_trends", day_min_id, day_max_id)
+    micro_pts = micro_segments_to_points(micro_segs)
+    if micro_pts.empty:
+        # optional: zigzag_points fallback (only if you actually keep them)
+        sch, qname = find_table("zigzag_points")
+        if qname:
+            cols = table_cols(sch, "zigzag_points")
+            if {"id","level","tickid","direction"} <= cols:
+                pts = q(f"""
+                  SELECT id, tickid, direction,
+                         {"timestamp" if "timestamp" in cols else "NULL::timestamptz AS timestamp"},
+                         {"price" if "price" in cols else "NULL::double precision AS price"}
+                  FROM {qname}
+                  WHERE level='micro' AND tickid BETWEEN :min_id AND :max_id
+                  ORDER BY tickid
+                """, {"min_id": day_min_id, "max_id": day_max_id})
+                micro_pts = pts
 
     # Labels
-    small = label_small(ticks, micro, medium)
+    small = label_small(ticks, micro_pts, medium)
     execmany("""
       INSERT INTO ml_labels_small (tickid,timestamp,s_next_hold,horizon_ticks,day_key)
       VALUES (:tickid,:timestamp,:s_next_hold,:horizon_ticks,:day_key)
@@ -352,8 +335,7 @@ def main():
         d1 = datetime.fromisoformat(a.end).date()
         cur = d0
         while cur <= d1:
-            build_day(cur.isoformat())
-            cur += timedelta(days=1)
+            build_day(cur.isoformat()); cur += timedelta(days=1)
         return
     build_day(datetime.utcnow().date().isoformat())
 
