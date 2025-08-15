@@ -202,6 +202,15 @@ def _is_dn(d):
     return s in {"dn","down","d","-1"} or (s.replace('.','',1).lstrip('-').isdigit() and float(s) < 0)
 
 def label_small(day_ticks: pd.DataFrame, micro_pts: pd.DataFrame, medium_segs: pd.DataFrame) -> pd.DataFrame:
+    """
+    Label each micro pivot inside its containing medium leg:
+      s_next_hold = 1  if the next medium segment flips direction BEFORE price breaks
+                        the current leg's extreme (so the micro 'held')
+                  = 0  otherwise (leg breaks/extents first)
+    Notes:
+      - micro_pts should be built from MICRO SEGMENT ENDS (true micro extrema)
+      - no counter-direction filtering; we evaluate every micro end inside the leg
+    """
     if day_ticks.empty or micro_pts.empty or medium_segs.empty:
         return pd.DataFrame(columns=["tickid","timestamp","s_next_hold","horizon_ticks","day_key"])
 
@@ -210,41 +219,75 @@ def label_small(day_ticks: pd.DataFrame, micro_pts: pd.DataFrame, medium_segs: p
 
     out = []
     for _, mu in micro_pts.iterrows():
-        if "tickid" not in mu or pd.isna(mu["tickid"]): continue
+        if "tickid" not in mu or pd.isna(mu["tickid"]):
+            continue
         t_id = int(mu["tickid"])
-        if t_id not in ticks.index: continue
+        if t_id not in ticks.index:
+            continue
+
         ts = ticks.loc[t_id, "timestamp"]
 
-        seg = medium_segs[(medium_segs["start_tickid"] <= t_id) & (t_id <= medium_segs["end_tickid"])]
-        if seg.empty: continue
-        seg = seg.iloc[0]
+        # Find the medium segment containing this micro point
+        mask = (medium_segs["start_tickid"] <= t_id) & (t_id <= medium_segs["end_tickid"])
+        if not mask.any():
+            continue
 
-        seg_start = int(seg["start_tickid"]); seg_end = int(seg["end_tickid"])
-        leg_prices = ticks.loc[seg_start:t_id, "mid"]
-        if seg_dir == "dn":
-            extreme = float(leg_prices.min())
-            forward = ticks.loc[t_id:seg_end]
-            break_first = (forward["mid"].min() < extreme - 1e-12)
-            # flipped to UP next?
-            nxt_idx = medium_segs.index[medium_segs["start_tickid"] == seg_end]
+        seg = medium_segs[mask].iloc[0]
+        seg_dir = str(seg["direction"]).lower()   # <-- ensure seg_dir is defined
+        seg_start = int(seg["start_tickid"])
+        seg_end   = int(seg["end_tickid"])
+        if seg_start > seg_end:  # safety, though medium ids should be increasing
+            seg_start, seg_end = seg_end, seg_start
+
+        # Prices from start of leg up to this micro point
+        if seg_start in ticks.index:
+            leg_slice = ticks.loc[seg_start:t_id, "mid"]
+        else:
+            leg_slice = ticks.loc[:t_id, "mid"]
+        if leg_slice.empty:
+            leg_slice = pd.Series([ticks.loc[t_id, "mid"]])
+
+        # Forward prices from this micro point to end of leg
+        if seg_end in ticks.index:
+            fwd_slice = ticks.loc[t_id:seg_end, "mid"]
+        else:
+            fwd_slice = ticks.loc[t_id:, "mid"]
+
+        if seg_dir.startswith("dn"):
+            # In a down leg, extreme is min so far
+            medium_extreme = float(leg_slice.min())
+            break_first = (not fwd_slice.empty) and (float(fwd_slice.min()) < medium_extreme - 1e-12)
+            # Did next medium start flip UP?
+            next_seg_idx = medium_segs.index[medium_segs["start_tickid"] == seg_end]
             flipped = False
-            if len(nxt_idx) > 0 and int(nxt_idx[0]) < len(medium_segs):
-                flipped = (str(medium_segs.iloc[int(nxt_idx[0])]["direction"]).lower() == "up")
+            if len(next_seg_idx) > 0:
+                i = int(next_seg_idx[0])
+                if i < len(medium_segs):
+                    flipped = str(medium_segs.iloc[i]["direction"]).lower().startswith("up")
             s_next_hold = 1 if (flipped and not break_first) else 0
-        else:  # seg_dir == 'up'
-            extreme = float(leg_prices.max())
-            forward = ticks.loc[t_id:seg_end]
-            break_first = (forward["mid"].max() > extreme + 1e-12)
-            nxt_idx = medium_segs.index[medium_segs["start_tickid"] == seg_end]
+        else:
+            # In an up leg, extreme is max so far
+            medium_extreme = float(leg_slice.max())
+            break_first = (not fwd_slice.empty) and (float(fwd_slice.max()) > medium_extreme + 1e-12)
+            next_seg_idx = medium_segs.index[medium_segs["start_tickid"] == seg_end]
             flipped = False
-            if len(nxt_idx) > 0 and int(nxt_idx[0]) < len(medium_segs):
-                flipped = (str(medium_segs.iloc[int(nxt_idx[0])]["direction"]).lower() == "dn")
+            if len(next_seg_idx) > 0:
+                i = int(next_seg_idx[0])
+                if i < len(medium_segs):
+                    flipped = str(medium_segs.iloc[i]["direction"]).lower().startswith("dn")
             s_next_hold = 1 if (flipped and not break_first) else 0
 
         horizon = int(min(len(ticks.loc[t_id:]), SMALL_HORIZON_TICKS))
-        out.append({"tickid": t_id, "timestamp": ts, "s_next_hold": int(s_next_hold),
-                    "horizon_ticks": horizon, "day_key": pd.to_datetime(ts).date()})
+        out.append({
+            "tickid": t_id,
+            "timestamp": ts,
+            "s_next_hold": int(s_next_hold),
+            "horizon_ticks": horizon,
+            "day_key": pd.to_datetime(ts).date()
+        })
+
     return pd.DataFrame(out)
+
 
 def label_big(medium_segs: pd.DataFrame, day: str) -> pd.DataFrame:
     if medium_segs.empty:
