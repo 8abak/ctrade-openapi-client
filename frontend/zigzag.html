@@ -3,336 +3,398 @@
 <head>
   <meta charset="utf-8" />
   <title>ZigZag Explorer</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <link rel="stylesheet" href="/style.css" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <!-- Your shared styles -->
+  <link rel="stylesheet" href="style.css" />
+
+  <!-- ECharts -->
   <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+
   <style>
-    /* light structural tweaks that play nicely with your dark theme */
-    body { margin:0; display:flex; height:100vh; background:#0e0e11; color:#ddd; }
-    #left { width: 260px; min-width: 240px; background:#141416; padding:14px 12px; overflow:auto; }
-    #main { flex: 1; display:flex; flex-direction:column; }
-    #chart { flex: 1; }
-    .h { font-weight:700; font-size:20px; margin:6px 0 10px; }
-    .row { margin:8px 0; }
-    .row label { opacity:.85; }
-    .btn { background:#1976d2; color:#fff; border:0; padding:8px 12px; border-radius:6px; cursor:pointer; }
-    .btn:disabled { opacity:.5; cursor:not-allowed; }
-    .btn.alt { background:#263238; }
-    .inline { display:inline-flex; gap:8px; align-items:center; }
-    input[type="date"], input[type="number"] {
-      background:#0e0e11; color:#ddd; border:1px solid #2a2a2f; border-radius:6px; padding:6px 8px;
+    /* Light touch UI refinements on top of style.css */
+    body { background:#0f1115; color:#c9d1d9; }
+    .page {
+      display:grid;
+      grid-template-columns: 260px 1fr;
+      gap: 0;
+      height: 100vh;
     }
-    .chip { display:inline-flex; align-items:center; gap:6px; background:#202126; border-radius:999px; padding:4px 8px; margin-right:6px; }
-    #infoBox { margin-top:10px; font-size:12px; line-height:1.35 }
-    #status { margin-top:10px; min-height:18px; font-size:12px; color:#ef5350; white-space:pre-wrap; }
-    .k { opacity:.7; font-size:11px }
-    .muted { opacity:.7 }
-    .divider { height:1px; background:#24242a; margin:10px 0; }
+    .side {
+      padding: 14px 14px 0 14px;
+      border-right: 1px solid #1f232b;
+      overflow:auto;
+    }
+    .side h1 { font-size:20px; margin: 8px 0 12px; }
+    .row { margin: 10px 0; }
+    .row label { margin-right: 10px; }
+    .btn { background:#1677ff; border:0; color:#fff; padding:6px 10px; border-radius:6px; cursor:pointer; }
+    .btn.secondary { background:#2d333b; }
+    .btn:disabled { opacity:.5; cursor:not-allowed; }
+    .note { color:#8b949e; font-size:12px; margin-top:8px; }
+    .small { font-size:12px; color:#9aa4b2; }
+    #chart { height: calc(100vh - 0px); }
+    .kv { display:flex; justify-content:space-between; font-size:12px; padding:3px 0; border-bottom:1px dashed #1f232b }
+    .kv span:first-child { color:#9aa4b2; }
+    .badge { display:inline-block; padding:2px 6px; border-radius:10px; background:#1f232b; font-size:12px; margin-left:6px; }
+    .legend-dots { display:flex; gap:10px; margin-top:6px; }
+    .dot { width:10px; height:10px; border-radius:50%; display:inline-block; margin-right:6px; }
   </style>
 </head>
+
 <body>
-  <aside id="left">
-    <div class="h">ZigZag Explorer</div>
+<div class="page">
+  <aside class="side">
+    <h1>ZigZag Explorer</h1>
 
     <div class="row">
-      <label class="chip"><input type="radio" name="mode" value="date" checked> By Date</label>
-      <label class="chip"><input type="radio" name="mode" value="id"> By Start ID</label>
+      <div class="small">Mode:</div>
+      <label><input type="radio" name="mode" value="date" checked> By Date</label>
+      <label><input type="radio" name="mode" value="id"> By Start ID</label>
     </div>
 
-    <div id="byDate" class="row">
-      <div class="k">Day</div>
+    <div class="row" id="dayRow">
+      <div class="small">Day:</div>
       <input id="day" type="date" />
     </div>
 
-    <div id="byId" class="row" style="display:none">
-      <div class="k">Start tick id</div>
-      <input id="startId" type="number" min="1" step="1" placeholder="e.g. 690000" />
-      <div class="k" style="margin-top:6px">Span (minutes)</div>
-      <input id="spanMin" type="number" min="1" step="1" value="60" />
+    <div class="row" id="idRow" style="display:none;">
+      <div class="small">Start tick id:</div>
+      <input id="startId" type="number" placeholder="e.g. 690000" style="width:140px;" />
+      <div class="small" style="margin-top:6px;">Span (minutes):</div>
+      <input id="spanMin" type="number" value="60" style="width:80px;" />
     </div>
 
     <div class="row">
-      <div class="k" style="margin-bottom:4px">Levels</div>
-      <label class="chip"><input id="lvlMicro"  type="checkbox" checked> Micro</label>
-      <label class="chip"><input id="lvlMedium" type="checkbox" checked> Medium</label>
-      <label class="chip"><input id="lvlMaxi"   type="checkbox"> Maxi</label>
+      <div class="small">Levels:</div>
+      <label><input type="checkbox" class="lvl" value="micro" checked> Micro</label>
+      <label><input type="checkbox" class="lvl" value="medium" checked> Medium</label>
+      <label><input type="checkbox" class="lvl" value="maxi"> Maxi</label>
+      <div class="legend-dots small">
+        <span><i class="dot" style="background:#00b7ff"></i>Micro</span>
+        <span><i class="dot" style="background:#ff6b6b"></i>Medium</span>
+        <span><i class="dot" style="background:#7c4dff"></i>Maxi</span>
+      </div>
     </div>
 
-    <div class="row inline">
+    <div class="row">
       <button id="loadBtn" class="btn">Load</button>
-      <button id="moreBtn" class="btn alt" disabled>Load More →</button>
+      <button id="moreBtn" class="btn secondary" disabled>Load More →</button>
     </div>
 
-    <div id="status"></div>
-    <div class="divider"></div>
-    <div class="k muted">Selected segment</div>
-    <div id="infoBox" class="muted">Click a line to see details…</div>
-    <div class="divider"></div>
-    <div class="k">Version</div>
-    <div id="ver" class="muted">…</div>
+    <div class="note" id="status">Ready.</div>
+
+    <div class="row">
+      <div class="small">Selected segment</div>
+      <div id="selNone" class="small">Click a line or point…</div>
+      <div id="selBox" style="display:none;">
+        <div class="kv"><span>Level</span> <span id="sLevel"></span></div>
+        <div class="kv"><span>Start</span> <span id="sStart"></span></div>
+        <div class="kv"><span>End</span> <span id="sEnd"></span></div>
+        <div class="kv"><span>Δ Price</span> <span id="sDeltaP"></span></div>
+        <div class="kv"><span>Δ Time</span> <span id="sDeltaT"></span></div>
+        <div class="kv"><span>Ticks</span> <span id="sTicks"></span></div>
+      </div>
+    </div>
+
+    <div class="row small">
+      Version <span class="badge" id="ver">…</span>
+    </div>
   </aside>
 
-  <main id="main">
+  <main>
     <div id="chart"></div>
   </main>
+</div>
 
-  <script>
-  // ---------- config ----------
-  const API_BASE = ''; // same-origin
-  const ENDPOINT = API_BASE + '/zigzag'; // <-- no /api
-  const VERSION  = API_BASE + '/version';
+<script>
+/* ---------- helpers ---------- */
+const $ = sel => document.querySelector(sel);
+function fmtTs(iso){ try{ return new Date(iso).toLocaleString(); }catch(e){ return iso; } }
+function fmtNum(n){ return (Math.round(n*100)/100).toLocaleString(); }
+function pad2(n){ return String(n).padStart(2,'0'); }
 
-  // styling
-  const palette = {
-    microLine:  '#00b7ff',
-    microDot:   '#ffd54d',
-    mediumLine: '#ff6b6b',
-    maxiLine:   '#7c4dff',
+function todayAU() {
+  const d = new Date();
+  // default the date input to yesterday AU if before 08:00 local (optional)
+  return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`;
+}
+
+/* ---------- state ---------- */
+const state = {
+  mode: 'date',
+  day: todayAU(),
+  startId: null,
+  spanMin: 60,
+  levels: new Set(['micro','medium']),
+  // fetched data
+  segments: { micro:[], medium:[], maxi:[] },
+  // points used to draw lines (and for scatter)
+  pointStore: { micro:[], medium:[], maxi:[] },
+  seen: { micro:new Set(), medium:new Set(), maxi:new Set() }, // dedupe by ts
+  cursor: null, // server meta.cursor_ts
+  loadedOnce: false
+};
+
+/* ---------- UI init ---------- */
+$('#day').value = state.day;
+
+document.querySelectorAll('input[name="mode"]').forEach(r=>{
+  r.addEventListener('change', e=>{
+    state.mode = e.target.value;
+    $('#dayRow').style.display = state.mode === 'date' ? '' : 'none';
+    $('#idRow').style.display = state.mode === 'id' ? '' : 'none';
+  });
+});
+
+document.querySelectorAll('.lvl').forEach(cb=>{
+  cb.addEventListener('change', ()=>{
+    if (cb.checked) state.levels.add(cb.value);
+    else state.levels.delete(cb.value);
+    applyLegendSelection();
+  });
+});
+
+$('#loadBtn').addEventListener('click', ()=>load(true));
+$('#moreBtn').addEventListener('click', ()=>load(false));
+
+/* ---------- chart ---------- */
+const chart = echarts.init(document.getElementById('chart'), null, { useDirtyRect:true });
+
+const SERIES_INDEX = {
+  microLine: 0,
+  mediumLine: 1,
+  maxiLine: 2,
+  microDots: 3,
+  mediumDots: 4,
+  maxiDots: 5
+};
+
+chart.setOption({
+  backgroundColor:'#0f1115',
+  animation:false,
+  grid: { left: 40, right: 20, top: 20, bottom: 60 },
+  tooltip: {
+    trigger:'axis',
+    axisPointer: { type:'cross' },
+    textStyle: { fontSize:12 }
+  },
+  legend: { top:0, textStyle:{ color:'#c9d1d9' } },
+  xAxis: { type:'time', axisLine:{ lineStyle:{ color:'#334155' } }, axisLabel:{ color:'#9aa4b2' } },
+  yAxis: { type:'value', scale:true, axisLine:{ lineStyle:{ color:'#334155' } }, axisLabel:{ color:'#9aa4b2' }, splitLine:{ lineStyle:{ color:'#1f232b' } } },
+  dataZoom: [
+    { type:'inside', filterMode:'filter' },
+    { type:'slider', height:18, bottom:28, borderColor:'#1f232b', textStyle:{ color:'#8b949e' }, brushSelect:true, filterMode:'filter' }
+  ],
+  series: [
+    // Micro / Medium / Maxi lines from points
+    { name:'Micro',  type:'line', data:[], showSymbol:false, connectNulls:false, sampling:'lttb', clip:true,
+      lineStyle:{ width:1.2, color:'#00b7ff', opacity:.95 } },
+    { name:'Medium', type:'line', data:[], showSymbol:false, connectNulls:false, sampling:'lttb', clip:true,
+      lineStyle:{ width:1.6, color:'#ff6b6b', opacity:.9 } },
+    { name:'Maxi',   type:'line', data:[], showSymbol:false, connectNulls:false, sampling:'lttb', clip:true,
+      lineStyle:{ width:2.0, color:'#7c4dff', opacity:.9 } },
+
+    // points (small dots)
+    { name:'Micro pts',  type:'scatter', data:[], symbolSize:3.2, itemStyle:{ color:'#ffd54d' } },
+    { name:'Medium pts', type:'scatter', data:[], symbolSize:3.8, itemStyle:{ color:'#ff9f43' } },
+    { name:'Maxi pts',   type:'scatter', data:[], symbolSize:4.4, itemStyle:{ color:'#a78bfa' } },
+  ]
+});
+
+/* Click -> show details */
+chart.on('click', params=>{
+  // Pick the closest segment for the same level by x (time)
+  const lvl = (params.seriesName||'').toLowerCase().includes('micro') ? 'micro'
+            : (params.seriesName||'').toLowerCase().includes('medium') ? 'medium'
+            : (params.seriesName||'').toLowerCase().includes('maxi') ? 'maxi'
+            : null;
+  if (!lvl) return;
+
+  const ts = new Date(params.value[0] ?? params.data[0]).toISOString();
+  const seg = nearestSegment(lvl, ts);
+  if (!seg) {
+    $('#selNone').style.display = '';
+    $('#selBox').style.display = 'none';
+    return;
+  }
+  const dSec = (new Date(seg.end_ts) - new Date(seg.start_ts))/1000;
+  const dP = (seg.end_price - seg.start_price);
+  $('#sLevel').textContent = lvl;
+  $('#sStart').textContent = fmtTs(seg.start_ts);
+  $('#sEnd').textContent   = fmtTs(seg.end_ts);
+  $('#sDeltaP').textContent = `${dP>=0?'+':''}${fmtNum(dP)}`;
+  $('#sDeltaT').textContent = `${Math.floor(dSec/60)}m ${Math.round(dSec%60)}s`;
+  $('#sTicks').textContent  = (seg.num_ticks != null ? seg.num_ticks : 'n/a');
+  $('#selNone').style.display = 'none';
+  $('#selBox').style.display  = '';
+});
+
+function nearestSegment(level, isoTs){
+  const arr = state.segments[level];
+  if (!arr || !arr.length) return null;
+  const t = new Date(isoTs).getTime();
+  let best=null, bestd=Infinity;
+  for (const s of arr){
+    const mid = (new Date(s.start_ts).getTime() + new Date(s.end_ts).getTime())/2;
+    const d = Math.abs(mid - t);
+    if (d < bestd){ bestd=d; best=s; }
+  }
+  return best;
+}
+
+/* ---------- data building ---------- */
+const GAP_MS = 30 * 60 * 1000; // break line if gap > 30 mins
+
+function rebuildPathFromPoints(level){
+  const iLine = SERIES_INDEX[level+'Line'];
+  const iDots = SERIES_INDEX[level+'Dots'];
+  const pts = state.pointStore[level].slice().sort((a,b)=> a.ts.localeCompare(b.ts));
+
+  const line = [];
+  let prev = null;
+  for (const p of pts){
+    if (prev && (new Date(p.ts)-new Date(prev.ts) > GAP_MS)){
+      line.push([prev.ts, null]); // break
+    }
+    line.push([p.ts, p.price]);
+    prev = p;
+  }
+  const dots = pts.map(p=>[p.ts, p.price]);
+
+  const series = chart.getOption().series;
+  series[iLine].data = line;
+  series[iDots].data = dots;
+  chart.setOption({ series });
+}
+
+function pushPoints(level, points){
+  if (!points || !points.length) return;
+  const seen = state.seen[level];
+  const store = state.pointStore[level];
+  for (const p of points){
+    const key = p.ts; // if same ts can repeat, use `${p.ts}|${p.price}`
+    if (seen.has(key)) continue;
+    seen.add(key);
+    store.push({ ts:p.ts, price:p.price });
+  }
+  rebuildPathFromPoints(level);
+}
+
+function pushSegments(level, segs){
+  if (!segs || !segs.length) return;
+  state.segments[level].push(...segs);
+}
+
+/* ---------- loading ---------- */
+async function load(first){
+  if (first){
+    // reset
+    state.segments = { micro:[], medium:[], maxi:[] };
+    state.pointStore = { micro:[], medium:[], maxi:[] };
+    state.seen = { micro:new Set(), medium:new Set(), maxi:new Set() };
+    state.cursor = null;
+    state.loadedOnce = false;
+    // clear chart data
+    const S = chart.getOption().series;
+    for (let i=0;i<S.length;i++) S[i].data = [];
+    chart.setOption({ series: S });
+    $('#selNone').style.display=''; $('#selBox').style.display='none';
+  }
+
+  // params
+  const levels = Array.from(state.levels).join(',');
+  const base = '/api/zigzag';
+  const params = new URLSearchParams();
+  params.set('levels', levels);
+  params.set('limit','2000');
+
+  if (state.mode === 'date'){
+    params.set('mode','date');
+    state.day = $('#day').value || state.day;
+    params.set('day', state.day);
+    if (state.cursor) params.set('cursor_ts', state.cursor);
+  } else {
+    params.set('mode','id');
+    state.startId = Number($('#startId').value||0);
+    state.spanMin = Number($('#spanMin').value||60);
+    if (!state.startId) { setStatus('Missing start id'); return; }
+    params.set('start_id', String(state.startId));
+    params.set('span_minutes', String(state.spanMin));
+    if (state.cursor) params.set('cursor_ts', state.cursor);
+  }
+
+  const url = `${base}?${params.toString()}`;
+  setStatus('Loading…');
+  $('#loadBtn').disabled = true; $('#moreBtn').disabled = true;
+
+  try{
+    const r = await fetch(url, { cache:'no-store' });
+    if (!r.ok){
+      setStatus(`Error ${r.status}`);
+      $('#loadBtn').disabled=false;
+      $('#moreBtn').disabled = !state.cursor;
+      return;
+    }
+    const payload = await r.json();
+
+    // segments
+    const segs = payload.segments || {};
+    if (segs.micro)  pushSegments('micro',  segs.micro);
+    if (segs.medium) pushSegments('medium', segs.medium);
+    if (segs.maxi)   pushSegments('maxi',   segs.maxi);
+
+    // points → build lines
+    const pts = payload.points || {};
+    if (pts.micro)  pushPoints('micro',  pts.micro);
+    if (pts.medium) pushPoints('medium', pts.medium);
+    if (pts.maxi)   pushPoints('maxi',   pts.maxi);
+
+    state.cursor = (payload.meta && payload.meta.cursor_ts) || null;
+    state.loadedOnce = true;
+
+    setStatus('Loaded');
+    $('#moreBtn').disabled = !state.cursor;
+  }catch(err){
+    console.error(err);
+    setStatus('Network error');
+  }finally{
+    $('#loadBtn').disabled=false;
+  }
+}
+
+function setStatus(msg){ $('#status').textContent = msg; }
+
+/* ---------- legend reflect checkboxes ---------- */
+function applyLegendSelection(){
+  const opt = chart.getOption();
+  const selected = {
+    'Micro':  state.levels.has('micro'),
+    'Micro pts':  state.levels.has('micro'),
+    'Medium': state.levels.has('medium'),
+    'Medium pts': state.levels.has('medium'),
+    'Maxi':   state.levels.has('maxi'),
+    'Maxi pts':   state.levels.has('maxi'),
   };
-  const widths  = { micro: 1.2, medium: 1.8, maxi: 2.4 };
-  const dotSize = { micro: 3.5, medium: 4.5 };
+  opt.legend[0].selected = selected;
+  chart.setOption({ legend: opt.legend });
+}
 
-  // ---------- state ----------
-  const state = {
-    mode: 'date',
-    cursor_ts: null,
-    levels: ['micro','medium'], // default
-    seriesData: {
-      microLine: [], mediumLine: [], maxiLine: [],
-      microPts:  [], mediumPts:  []
-    },
-    lastEndTs: { micro: null, medium: null, maxi: null },
-    segMeta:   { micro: [], medium: [], maxi: [] }
-  };
-
-  // ---------- helpers ----------
-  const $ = (id) => document.getElementById(id);
-  const qs = (s) => document.querySelector(s);
-
-  function fmtTs(ts) { return new Date(ts).toLocaleString(); }
-  function secs(n)   { return `${(n ?? 0).toLocaleString()} s`; }
-  function ticks(n)  { return (n ?? 0).toLocaleString(); }
-  function price(x)  { return (+x).toFixed(2); }
-  function signed(x) { x = +x; return (x>=0?'+':'') + x.toFixed(2); }
-
-  function getLevels() {
-    const out = [];
-    if ($('lvlMicro').checked)  out.push('micro');
-    if ($('lvlMedium').checked) out.push('medium');
-    if ($('lvlMaxi').checked)   out.push('maxi');
-    return out.length ? out : ['micro','medium','maxi'];
-  }
-
-  function buildUrl(isMore=false) {
-    const levels = getLevels().join(',');
-    const params = new URLSearchParams({ levels, limit: '2000' });
-
-    if (isMore && state.cursor_ts) params.set('cursor_ts', state.cursor_ts);
-
-    if (state.mode === 'date') {
-      const day = $('day').value;
-      params.set('mode','date');
-      params.set('day', day);
-    } else {
-      params.set('mode','id');
-      params.set('start_id', $('startId').value || '');
-      params.set('span_minutes', $('spanMin').value || '60');
+/* ---------- version label ---------- */
+(async function(){
+  try{
+    const r = await fetch('/version');
+    if (r.ok){
+      const j = await r.json();
+      $('#ver').textContent = j.version || '—';
     }
-    return `${ENDPOINT}?${params.toString()}`;
-  }
+  }catch(_){}
+})();
 
-  function setStatus(msg, isError=false) {
-    const el = $('status');
-    el.style.color = isError ? '#ef5350' : '#7aa4ff';
-    el.textContent = msg || '';
-  }
+/* ---------- sensible defaults ---------- */
+applyLegendSelection();
+setStatus('Ready. Choose a day and press Load.');
+</script>
 
-  // ---------- chart ----------
-  const chart = echarts.init($('chart'));
-  chart.setOption({
-    backgroundColor: '#0e0e11',
-    grid: { left: 55, right: 15, top: 25, bottom: 80 },
-    legend: { textStyle: { color:'#bbb' } },
-    tooltip: {
-      trigger: 'axis',
-      axisPointer: { type:'cross' },
-      confine:true,
-      formatter(params) {
-        const p = params && params[0];
-        if (!p) return '';
-        const [ts, pr] = p.value;
-        return `<div style="font-size:12px">
-          <div><b>${fmtTs(ts)}</b></div>
-          <div>Price: <b>${price(pr)}</b></div>
-        </div>`;
-      }
-    },
-    xAxis: { type:'time', axisLabel:{ color:'#aaa' } },
-    yAxis: { type:'value', axisLabel:{ color:'#aaa' }, scale:true },
-    dataZoom: [
-      { type:'inside' },
-      { type:'slider', height:16, bottom:40 }
-    ],
-    series: [
-      // lines (we keep fixed order & names)
-      { name:'Micro',  type:'line', data:[], symbol:'none',
-        lineStyle:{ width:widths.micro, color:palette.microLine, opacity:.9 },
-        emphasis:{ lineStyle:{ width:widths.micro+0.6 } }, animation:false, triggerLineEvent:true },
-      { name:'Medium', type:'line', data:[], symbol:'none',
-        lineStyle:{ width:widths.medium, color:palette.mediumLine, opacity:.85 },
-        emphasis:{ lineStyle:{ width:widths.medium+0.6 } }, animation:false, triggerLineEvent:true },
-      { name:'Maxi',   type:'line', data:[], symbol:'none',
-        lineStyle:{ width:widths.maxi, color:palette.maxiLine, opacity:.8 },
-        emphasis:{ lineStyle:{ width:widths.maxi+0.6 } }, animation:false, triggerLineEvent:true },
-      // dots
-      { name:'Micro pts',  type:'scatter', data:[], symbolSize:dotSize.micro,
-        itemStyle:{ color:palette.microDot, opacity:.95 }, emphasis:{ scale:1.8 } },
-      { name:'Medium pts', type:'scatter', data:[], symbolSize:dotSize.medium,
-        itemStyle:{ color:palette.mediumLine, opacity:.95 }, emphasis:{ scale:1.6 } },
-    ]
-  });
-
-  function pushSegs(level, segs) {
-    // keep meta for clicks; dedupe by requiring start_ts > lastEndTs
-    const meta = state.segMeta[level];
-    const lastEnd = state.lastEndTs[level];
-    const fresh = (segs||[]).filter(s => !lastEnd || s.start_ts > lastEnd);
-    if (fresh.length) state.lastEndTs[level] = fresh[fresh.length-1].end_ts;
-    meta.push(...fresh);
-
-    const pairs = [];
-    fresh.forEach(s => {
-      pairs.push([s.start_ts, s.start_price]);
-      pairs.push([s.end_ts,   s.end_price]);
-    });
-
-    const seriesIndex = level==='micro' ? 0 : level==='medium' ? 1 : 2;
-    const existing = chart.getOption().series[seriesIndex].data || [];
-    chart.setOption({ series: [{}, {}, {}, {}, {}].map((_,i)=> i===seriesIndex ? { data:[...existing, ...pairs] } : {}) });
-  }
-
-  function pushPoints(level, points) {
-    const pairs = (points||[]).map(p => [p.ts, p.price]);
-    const idx = level==='micro' ? 3 : 4;
-    const existing = chart.getOption().series[idx].data || [];
-    chart.setOption({ series: [{}, {}, {}, {}, {}].map((_,i)=> i===idx ? { data:[...existing, ...pairs] } : {}) });
-  }
-
-  chart.on('click', (ev) => {
-    if (ev.seriesType !== 'line') return;
-    const level = ev.seriesName.toLowerCase(); // micro | medium | maxi
-    const idx = Math.floor(ev.dataIndex / 2);
-    const seg = (state.segMeta[level] || [])[idx];
-    if (!seg) return;
-
-    const start = new Date(seg.start_ts);
-    const end   = new Date(seg.end_ts);
-    const durS  = seg.duration_s ?? Math.max(1, Math.round((end - start)/1000));
-    const dP    = (+seg.end_price) - (+seg.start_price);
-
-    $('infoBox').innerHTML = `
-      <div>
-        <div><b>${level}</b> segment</div>
-        <div>${fmtTs(seg.start_ts)} → ${fmtTs(seg.end_ts)}</div>
-        <div>Δt: <b>${secs(durS)}</b> · ticks: <b>${ticks(seg.num_ticks)}</b></div>
-        <div>Δp: <b>${signed(dP)}</b> · range_abs: <b>${price(seg.range_abs ?? Math.abs(dP))}</b></div>
-        <div>Start/End: <b>${price(seg.start_price)}</b> → <b>${price(seg.end_price)}</b></div>
-        <div>High/Low: <b>${price(seg.high_price)}</b> / <b>${price(seg.low_price)}</b></div>
-        <div>Dir: <b>${seg.direction === 1 ? '↑ up' : '↓ down'}</b></div>
-        <div class="muted">ticks ${seg.start_tick_id} → ${seg.end_tick_id}, id ${seg.id}</div>
-      </div>
-    `;
-  });
-
-  function resetChart() {
-    state.cursor_ts = null;
-    state.seriesData = { microLine:[], mediumLine:[], maxiLine:[], microPts:[], mediumPts:[] };
-    state.lastEndTs = { micro:null, medium:null, maxi:null };
-    state.segMeta   = { micro:[], medium:[], maxi:[] };
-    $('infoBox').innerText = 'Click a line to see details…';
-    chart.setOption({
-      series: [
-        { data:[] }, { data:[] }, { data:[] }, { data:[] }, { data:[] }
-      ]
-    });
-  }
-
-  async function fetchPage(isMore=false) {
-    setStatus(isMore ? 'Loading more…' : 'Loading…', false);
-    const url = buildUrl(isMore);
-    try {
-      const res = await fetch(url);
-      if (!res.ok) {
-        const t = await res.text();
-        setStatus(`Error ${res.status}\n${t}`, true);
-        return;
-      }
-      const payload = await res.json();
-      const { segments = {}, points = {}, meta = {} } = payload;
-
-      // push in order so line drawing looks continuous
-      if (segments.micro)  pushSegs('micro',  segments.micro);
-      if (segments.medium) pushSegs('medium', segments.medium);
-      if (segments.maxi)   pushSegs('maxi',   segments.maxi);
-
-      if (points.micro)  pushPoints('micro',  points.micro);
-      if (points.medium) pushPoints('medium', points.medium);
-
-      state.cursor_ts = meta && meta.cursor_ts ? meta.cursor_ts : null;
-      $('moreBtn').disabled = !state.cursor_ts;
-      setStatus(state.cursor_ts ? 'More available' : 'Loaded');
-    } catch (e) {
-      setStatus(String(e), true);
-    }
-  }
-
-  // ---------- UI wiring ----------
-  // default date to yesterday if empty; else keep whatever server gives
-  (function initDateDefault() {
-    const el = $('day');
-    if (!el.value) {
-      const d = new Date();
-      d.setDate(d.getDate()-1);
-      const y = d.getFullYear();
-      const m = String(d.getMonth()+1).padStart(2,'0');
-      const dd = String(d.getDate()).padStart(2,'0');
-      el.value = `${y}-${m}-${dd}`;
-    }
-  })();
-
-  // mode toggle
-  document.querySelectorAll('input[name="mode"]').forEach(r => {
-    r.addEventListener('change', () => {
-      state.mode = r.value;
-      $('byDate').style.display = r.value === 'date' ? '' : 'none';
-      $('byId').style.display   = r.value === 'id'   ? '' : 'none';
-    });
-  });
-
-  $('loadBtn').addEventListener('click', () => {
-    resetChart();
-    state.levels = getLevels();
-    fetchPage(false);
-  });
-
-  $('moreBtn').addEventListener('click', () => {
-    fetchPage(true);
-  });
-
-  // version
-  (async function() {
-    try {
-      const r = await fetch(VERSION);
-      if (r.ok) {
-        const j = await r.json();
-        $('ver').innerText = j.version || JSON.stringify(j);
-      }
-    } catch {}
-  })();
-
-  // first paint: do nothing until the user presses Load (avoids big auto-fetch)
-  setStatus('Ready. Choose a day and press Load.');
-
-  </script>
 </body>
 </html>
