@@ -147,20 +147,50 @@ def load_segments(table_name: str, day_min_id: int, day_max_id: int) -> pd.DataF
     print(f"{table_name}@{sch}: unsupported columns {cols} → empty")
     return pd.DataFrame()
 
-def micro_segments_to_points(micro_segs: pd.DataFrame) -> pd.DataFrame:
-    """Take micro segment starts as micro 'pivot' points."""
-    if micro_segs.empty: return pd.DataFrame(columns=["id","tickid","direction","timestamp","price"])
-    pts = micro_segs.copy()
-    rename = {
-        "start_tickid": "tickid",
-        "start_ts": "timestamp",
-        "start_price": "price"
-    }
-    for k,v in list(rename.items()):
-        if k not in pts.columns:
-            pts[v] = None
-    pts = pts.rename(columns=rename)
+def micro_segments_to_points(micro_segs: pd.DataFrame, mode: str = "end") -> pd.DataFrame:
+    """
+    Convert micro SEGMENTS to micro pivot POINTS.
+    mode: "end" (default), "start", or "both"
+    Returns columns: id, tickid, direction, timestamp, price
+    """
+    if micro_segs.empty:
+        return pd.DataFrame(columns=["id","tickid","direction","timestamp","price"])
+
+    df = micro_segs.copy()
+    cols = set(df.columns)
+
+    def rc(*cands):
+        for c in cands:
+            if c in cols: return c
+        return None
+
+    start_id = rc("start_tick_id", "start_tickid", "start_id")
+    end_id   = rc("end_tick_id",   "end_tickid",   "end_id")
+    start_ts = rc("start_ts")
+    end_ts   = rc("end_ts")
+    start_pr = rc("start_price")
+    end_pr   = rc("end_price")
+
+    def build(which):
+        if which == "start":
+            tick = start_id; ts = start_ts; pr = start_pr
+        else:  # "end"
+            tick = end_id;   ts = end_ts;   pr = end_pr
+        out = pd.DataFrame({
+            "id": df["id"].values,
+            "tickid": df[tick].values if tick in df.columns else None,
+            "direction": df["direction"].values,        # segment direction (kept for reference)
+            "timestamp": df[ts].values if ts and ts in df.columns else None,
+            "price": df[pr].values if pr and pr in df.columns else None,
+        })
+        return out
+
+    pts = build(mode) if mode != "both" else pd.concat([build("start"), build("end")], ignore_index=True)
+    pts = pts.dropna(subset=["tickid"]).copy()
+    pts["tickid"] = pts["tickid"].astype(int)
+    pts = pts.drop_duplicates(subset=["tickid"]).sort_values("tickid").reset_index(drop=True)
     return pts[["id","tickid","direction","timestamp","price"]]
+
 
 # ---------- labels ----------
 def _is_up(d):
@@ -188,10 +218,6 @@ def label_small(day_ticks: pd.DataFrame, micro_pts: pd.DataFrame, medium_segs: p
         seg = medium_segs[(medium_segs["start_tickid"] <= t_id) & (t_id <= medium_segs["end_tickid"])]
         if seg.empty: continue
         seg = seg.iloc[0]
-        seg_dir = str(seg["direction"]).lower()   # 'up'/'dn'
-        # only consider COUNTER-direction micros
-        if (seg_dir == "up" and not _is_dn(mu["direction"])) or (seg_dir == "dn" and not _is_up(mu["direction"])):
-            continue
 
         seg_start = int(seg["start_tickid"]); seg_end = int(seg["end_tickid"])
         leg_prices = ticks.loc[seg_start:t_id, "mid"]
@@ -281,7 +307,7 @@ def build_day(day: str):
 
     # Micro: try segment table then convert to points; if empty, fall back to zig points (rare)
     micro_segs = load_segments("micro_trends", day_min_id, day_max_id)
-    micro_pts = micro_segments_to_points(micro_segs)
+    micro_pts = micro_segments_to_points(micro_segs, mode="end")
     if micro_pts.empty:
         # optional: zigzag_points fallback (only if you actually keep them)
         sch, qname = find_table("zigzag_points")
