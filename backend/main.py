@@ -10,6 +10,12 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import create_engine, text
 from sqlalchemy import text as sqtxt
+from zig_api import router as lview_router
+
+
+# ---------- Config ----------
+app.include_router(lview_router, prefix="/api")
+
 
 # ---------- App & CORS ----------
 app = FastAPI()
