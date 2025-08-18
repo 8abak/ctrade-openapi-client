@@ -12,19 +12,16 @@ from sqlalchemy import create_engine, text
 from sqlalchemy import text as sqtxt
 from zig_api import router as lview_router
 
-
-# ---------- Config ----------
-app.include_router(lview_router, prefix="/api")
-
-
-# ---------- App & CORS ----------
-app = FastAPI()
+# ---------  App & CORS ---------
+app = FastAPI(title="cTrade backend")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],      # tighten later
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(lview_router, prefix="/api")
 
 # ---------- DB ----------
 db_url = os.getenv(
