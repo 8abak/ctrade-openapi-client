@@ -2,7 +2,7 @@
 (function(){
   const urlParams = new URLSearchParams(location.search);
   const START = parseInt(urlParams.get("start") || "1");
-  let OFFSET = 0, LIMIT = 10000; // chunked loading
+  let OFFSET = 0, LIMIT = 10000;            // chunked loading
   const TOTAL = 200000;
   let RUN = null;
 
@@ -10,38 +10,65 @@
   const levelMap = new Map();
   const priceMap = new Map();
 
+  // ---- helpers -------------------------------------------------------------
+  function thin(data, maxKeep = 6000) {
+    // keep at most maxKeep points: adaptive every-N selection
+    if (data.length <= maxKeep) return data;
+    const n = data.length;
+    const step = Math.max(1, Math.floor(n / maxKeep));
+    const out = [];
+    for (let i = 0; i < n; i += step) out.push(data[i]);
+    // ensure last point is present
+    if (out[out.length - 1][0] !== data[n - 1][0]) out.push(data[n - 1]);
+    return out;
+  }
+
   const opt = {
     backgroundColor: '#111',
     title: { text: '200k Review', textStyle:{color:'#ddd'}},
     tooltip: { trigger: 'axis', axisPointer: { type:'cross' }},
     legend: { data: [], textStyle:{color:'#ddd'}},
     grid: { left: 60, right: 60, top: 50, bottom: 60 },
+    animation: false,
     xAxis: { type:'value', name:'tickid', axisLine:{lineStyle:{color:'#888'}}, axisLabel:{color:'#bbb'} },
-    // FIX: let price axis ignore zero; compute min/max from data with a 5% pad
+    // Price axis floats (no zero). Prob axis fixed [0..1].
     yAxis: [
       {
         type:'value',
         name:'price',
-        scale:true, // <— do not force zero into the range
+        scale:true,
         min: (v) => v.min - (v.max - v.min) * 0.05,
         max: (v) => v.max + (v.max - v.min) * 0.05,
         axisLine:{lineStyle:{color:'#888'}},
         axisLabel:{color:'#bbb'}
       },
-      { type:'value', name:'prob', min:0, max:1, position:'right', axisLine:{lineStyle:{color:'#888'}}, axisLabel:{color:'#bbb'} }
+      { type:'value', name:'prob', min:0, max:1, position:'right',
+        axisLine:{lineStyle:{color:'#888'}}, axisLabel:{color:'#bbb'} }
     ],
-    dataZoom: [{type:'inside'},{type:'slider'}],
+    dataZoom: [{type:'inside', filterMode:'filter'},{type:'slider', filterMode:'filter'}],
     series: []
   };
   chart.setOption(opt);
 
+  // common high‑density line settings
+  const HD = {
+    showSymbol: false,
+    smooth: false,                 // avoid spider‑web splines
+    sampling: 'lttb',              // down-sample visually
+    progressive: 4000,
+    progressiveThreshold: 20000,
+    lineStyle: { width: 1, opacity: 0.7 },
+    connectNulls: true,
+    clip: true
+  };
+
   const layers = {
-    raw:      {name:'Raw',        type:'scatter', data:[], yAxisIndex:0, symbolSize: 2},
-    kalman:   {name:'Kalman',     type:'line',    data:[], yAxisIndex:0, smooth:true, showSymbol:false, lineStyle:{width:1}},
+    raw:      {name:'Raw',        type:'scatter', data:[], yAxisIndex:0, symbolSize: 1.5},
+    kalman:   {name:'Kalman',     type:'line',    data:[], yAxisIndex:0, ...HD},
     labelsUp: {name:'Up starts',  type:'scatter', data:[], yAxisIndex:0, symbol: 'triangle', symbolSize: 8},
     labelsDn: {name:'Down starts',type:'scatter', data:[], yAxisIndex:0, symbol: 'triangle', symbolRotate: 180, symbolSize: 8},
-    preds:    {name:'p_up',       type:'line',    data:[], yAxisIndex:1, showSymbol:false, lineStyle:{width:1, opacity:0.8}},
-    cloud:    {name:'S(d) @ $2',  type:'line',    data:[], yAxisIndex:1, showSymbol:false, lineStyle:{width:1}}
+    preds:    {name:'p_up',       type:'line',    data:[], yAxisIndex:1, ...HD},
+    cloud:    {name:'S(d) @ $2',  type:'line',    data:[], yAxisIndex:1, ...HD}
   };
 
   function setLegend() {
@@ -70,22 +97,30 @@
     document.getElementById("rangeInfo").textContent =
       `Train ${START}-${START+100000-1} / Test ${START+100000}-${START+200000-1} | Loaded ${j.range[0]}..${j.range[1]}`;
 
-    const raw = j.ticks.map(r => {
+    // Raw + Kalman
+    let raw = j.ticks.map(r => {
       priceMap.set(r.tickid, r.price);
       return [r.tickid, r.price];
     });
-
-    const kal = j.kalman.map(r => {
+    let kal = j.kalman.map(r => {
       levelMap.set(r.tickid, r.level);
       return [r.tickid, r.level];
     });
 
-    const yAt = (tid) => (levelMap.get(tid) ?? priceMap.get(tid) ?? null);
-    const labsUp = j.labels.filter(x => x.is_segment_start && x.direction===1).map(x => [x.tickid, yAt(x.tickid)]);
-    const labsDn = j.labels.filter(x => x.is_segment_start && x.direction===-1).map(x => [x.tickid, yAt(x.tickid)]);
+    // Thin if chunk is heavy
+    raw = thin(raw, 6000);
+    kal = thin(kal, 6000);
 
-    const preds = j.predictions.map(p => [p.tickid, p.p_up ?? 0]);
-    const cloud = j.predictions.map(p => {
+    // Label markers: anchored to Kalman (fallback to raw)
+    const yAt = (tid) => (levelMap.get(tid) ?? priceMap.get(tid) ?? null);
+    const labsUp = j.labels.filter(x => x.is_segment_start && x.direction===1)
+                           .map(x => [x.tickid, yAt(x.tickid)]);
+    const labsDn = j.labels.filter(x => x.is_segment_start && x.direction===-1)
+                           .map(x => [x.tickid, yAt(x.tickid)]);
+
+    // Probabilities / cloud on right axis
+    let preds = j.predictions.map(p => [p.tickid, p.p_up ?? 0]);
+    let cloud = j.predictions.map(p => {
       let v = 0;
       if (p.s_curve && p.s_curve.length) {
         const at2 = p.s_curve.find(x => Math.abs(x[0]-2.0) < 1e-6);
@@ -93,7 +128,10 @@
       }
       return [p.tickid, v];
     });
+    preds = thin(preds, 6000);
+    cloud = thin(cloud, 6000);
 
+    // append
     layers.raw.data.push(...raw);
     layers.kalman.data.push(...kal);
     layers.labelsUp.data.push(...labsUp);
@@ -109,6 +147,7 @@
     }
   }
 
+  // UI
   document.getElementById("cbRaw").onchange =
   document.getElementById("cbKalman").onchange =
   document.getElementById("cbLabels").onchange =
