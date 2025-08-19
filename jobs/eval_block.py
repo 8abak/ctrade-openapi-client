@@ -47,26 +47,55 @@ def main():
     args = ap.parse_args()
 
     t0 = time.time()
-    # Load model
+    # Load model once
     if args.model == "latest":
         model_id, blob = load_model_blob(algo=args.algo)
     else:
         model_id, blob = load_model_blob(model_id=args.model)
     bundle = joblib.load(io.BytesIO(blob))
     model = bundle["model"]
-    y_inv = bundle.get("y_inv", {0:-1,1:0,2:1})
 
-    # Load data
+    # Data
     X, y_true, tickids, is_start, ts, lvl = _load_XY(args.start, args.end)
     if X.size == 0:
         raise RuntimeError("No test features found.")
 
-    proba = model.predict_proba(X)
-    # Ensure columns are in order [class 0,1,2] => [-1,0,1]
-    p_dn = proba[:,0]; p_neu = proba[:,1]; p_up = proba[:,2]
-    decided = np.argmax(proba, axis=1)  # 0/1/2 -> -1/0/1
-    decided_label = np.vectorize(y_inv.get)(decided)
+    proba = model.predict_proba(X)  # shape (n, k); k in {2,3}
+    classes = getattr(model, "classes_", None)
+    if classes is None:
+        # CalibratedClassifierCV stores underlying estimator in .classes_
+        try:
+            classes = model.classes_
+        except Exception:
+            raise RuntimeError("Model has no classes_ attribute.")
 
+    # classes are from training label space {0,1,2} that map to {-1,0,1} via y_inv
+    # Build robust mapping: fill missing classes with 0 prob
+    # Desired order: [0,1,2] == [-1,0,1]
+    class_to_col = {int(c): i for i, c in enumerate(list(classes))}
+    def get_col(c):
+        return class_to_col.get(c, None)
+
+    # allocate full (n,3)
+    P = np.zeros((proba.shape[0], 3), dtype=float)
+    for target_cls in (0,1,2):
+        col = get_col(target_cls)
+        if col is not None:
+            P[:, target_cls] = proba[:, col]
+        else:
+            P[:, target_cls] = 0.0  # absent class -> 0 prob
+
+    # Normalize defensively (floating errors)
+    s = P.sum(axis=1, keepdims=True)
+    s[s == 0] = 1.0
+    P = P / s
+
+    p_dn = P[:,0]; p_neu = P[:,1]; p_up = P[:,2]
+    decided = np.argmax(P, axis=1)  # in {0,1,2}
+    # For metrics we compare to y_true which is already {0,1,2}
+    decided_label = decided  # keep {0,1,2}; frontend maps if needed
+
+    # Save predictions
     pred_rows = []
     for i, tid in enumerate(tickids):
         pred_rows.append({
@@ -75,23 +104,22 @@ def main():
             "p_up": float(p_up[i]),
             "p_neu": float(p_neu[i]),
             "p_dn": float(p_dn[i]),
-            "s_curve": None,  # set below for starts
-            "decided_label": int(decided_label[i])
+            "s_curve": None,  # attach below optionally
+            "decided_label": int(decided_label[i])  # 0=dn,1=neu,2=up
         })
 
     # Survival curve aggregated over test window for up continuation
     ds, S = survival_curve_up(lvl, step=0.10, maxd=5.0, horizon=10000)
     sc = compact_curve(ds, S)
-    # Only attach s_curve to segment starts for payload size
+    # Attach only at segment starts to keep table small
     for i, row in enumerate(pred_rows):
-        if is_start[i]:  # attach generic curve at starts
+        if is_start[i]:
             row["s_curve"] = sc
 
     upsert_many("predictions", pred_rows)
 
     # Metrics
     f1 = f1_score(y_true, decided, average="macro")
-    # Precision@UpStart: among labeled Up-start ticks, how often we predict Up
     mask_up_start = (is_start) & (y_true == 2)
     if mask_up_start.sum() > 0:
         prec_up = precision_score((y_true[mask_up_start]==2).astype(int), (decided[mask_up_start]==2).astype(int))
