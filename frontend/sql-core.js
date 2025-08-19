@@ -1,4 +1,4 @@
-// frontend/review-core.js  — REPLACE ENTIRE FILE
+// frontend/review-core.js — REPLACE ENTIRE FILE
 (function(){
   const urlParams = new URLSearchParams(location.search);
   const START = parseInt(urlParams.get("start") || "1");
@@ -7,8 +7,8 @@
   let RUN = null;
 
   const chart = echarts.init(document.getElementById("chart"));
-  const levelMap = new Map();   // tickid -> kalman level (for label markers)
-  const priceMap = new Map();   // tickid -> raw price (fallback)
+  const levelMap = new Map();
+  const priceMap = new Map();
 
   const opt = {
     backgroundColor: '#111',
@@ -17,9 +17,17 @@
     legend: { data: [], textStyle:{color:'#ddd'}},
     grid: { left: 60, right: 60, top: 50, bottom: 60 },
     xAxis: { type:'value', name:'tickid', axisLine:{lineStyle:{color:'#888'}}, axisLabel:{color:'#bbb'} },
-    // Dual y-axes: 0 = price (auto min/max), 1 = probabilities/cloud [0..1]
+    // FIX: let price axis ignore zero; compute min/max from data with a 5% pad
     yAxis: [
-      { type:'value', name:'price', min:'dataMin', max:'dataMax', axisLine:{lineStyle:{color:'#888'}}, axisLabel:{color:'#bbb'} },
+      {
+        type:'value',
+        name:'price',
+        scale:true, // <— do not force zero into the range
+        min: (v) => v.min - (v.max - v.min) * 0.05,
+        max: (v) => v.max + (v.max - v.min) * 0.05,
+        axisLine:{lineStyle:{color:'#888'}},
+        axisLabel:{color:'#bbb'}
+      },
       { type:'value', name:'prob', min:0, max:1, position:'right', axisLine:{lineStyle:{color:'#888'}}, axisLabel:{color:'#bbb'} }
     ],
     dataZoom: [{type:'inside'},{type:'slider'}],
@@ -62,7 +70,6 @@
     document.getElementById("rangeInfo").textContent =
       `Train ${START}-${START+100000-1} / Test ${START+100000}-${START+200000-1} | Loaded ${j.range[0]}..${j.range[1]}`;
 
-    // raw + maps for marker Y placement
     const raw = j.ticks.map(r => {
       priceMap.set(r.tickid, r.price);
       return [r.tickid, r.price];
@@ -73,16 +80,10 @@
       return [r.tickid, r.level];
     });
 
-    // label markers at price level (kalman if available, else raw)
     const yAt = (tid) => (levelMap.get(tid) ?? priceMap.get(tid) ?? null);
-    const labsUp = j.labels
-      .filter(x => x.is_segment_start && x.direction===1)
-      .map(x => [x.tickid, yAt(x.tickid)]);
-    const labsDn = j.labels
-      .filter(x => x.is_segment_start && x.direction===-1)
-      .map(x => [x.tickid, yAt(x.tickid)]);
+    const labsUp = j.labels.filter(x => x.is_segment_start && x.direction===1).map(x => [x.tickid, yAt(x.tickid)]);
+    const labsDn = j.labels.filter(x => x.is_segment_start && x.direction===-1).map(x => [x.tickid, yAt(x.tickid)]);
 
-    // probabilities & cloud on right axis [0..1]
     const preds = j.predictions.map(p => [p.tickid, p.p_up ?? 0]);
     const cloud = j.predictions.map(p => {
       let v = 0;
@@ -93,7 +94,6 @@
       return [p.tickid, v];
     });
 
-    // append
     layers.raw.data.push(...raw);
     layers.kalman.data.push(...kal);
     layers.labelsUp.data.push(...labsUp);
@@ -105,12 +105,10 @@
     refreshSeries();
 
     if (offset === 0) {
-      // initial view: first ~8k ticks
       chart.dispatchAction({type:'dataZoom', startValue: START, endValue: START + Math.min(8000, limit)});
     }
   }
 
-  // UI bindings
   document.getElementById("cbRaw").onchange =
   document.getElementById("cbKalman").onchange =
   document.getElementById("cbLabels").onchange =
@@ -149,7 +147,5 @@
   };
 
   window.addEventListener('resize', () => chart.resize());
-
-  // boot
   loadChunk(0, LIMIT);
 })();
