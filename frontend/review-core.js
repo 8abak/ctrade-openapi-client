@@ -35,12 +35,21 @@
   // Append while enforcing strictly increasing X (drop duplicates/out-of-order).
   function appendUniqueSorted(targetArr, newArr){
     if (!newArr || !newArr.length) return;
-    const lastX = targetArr.length ? targetArr[targetArr.length - 1][0] : -Infinity;
-    for (let i=0;i<newArr.length;i++){
-      const x = newArr[i][0];
-      if (x > lastX && Number.isFinite(x)) targetArr.push(newArr[i]);
+    let lastX = targetArr.length ? targetArr[targetArr.length - 1][0] : -Infinity;
+    let prevX = lastX;
+    for (let i = 0; i < newArr.length; i++) {
+      const pt = newArr[i];
+      if (!pt || pt.length < 2) continue;
+      const x = pt[0];
+      if (!Number.isFinite(x)) continue;
+      // enforce strictly increasing vs both the target tail and the previous kept point
+      if (x > lastX && x > prevX) {
+        targetArr.push(pt);
+        prevX = x;               // update as we go through the chunk
+      }
     }
   }
+
 
   const opt = {
     backgroundColor: '#111',
