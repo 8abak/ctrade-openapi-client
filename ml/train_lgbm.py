@@ -1,34 +1,32 @@
-# ml/train_lgbm.py
+# ml/train_lgbm.py  — REPLACE ENTIRE FILE
 import io, json, time, uuid
 import numpy as np
 from typing import Tuple
 from lightgbm import LGBMClassifier
 from sklearn.calibration import CalibratedClassifierCV
 import joblib
+from sqlalchemy import text
 
 from .db import db_conn, save_model_blob
 from .train_sgd import FEATURES
 
 def _load_xy(start: int, end: int) -> Tuple[np.ndarray, np.ndarray]:
-    sql = """
-      SELECT f.tickid, f.{cols}, l.direction, l.is_segment_start
+    sql = f"""
+      SELECT f.tickid, {", ".join("f."+c for c in FEATURES)}, l.direction, l.is_segment_start
       FROM ml_features f
-      JOIN trend_labels l ON l.tickid=f.tickid
+      JOIN trend_labels l ON l.tickid = f.tickid
       WHERE f.tickid BETWEEN :s AND :e
       ORDER BY f.tickid
-    """.format(cols=",".join(FEATURES))
+    """
     with db_conn() as conn:
-        rows = conn.exec_driver_sql(sql, {"s": int(start), "e": int(end)}).fetchall()
+        rows = conn.execute(text(sql), {"s": int(start), "e": int(end)}).fetchall()
     if not rows:
         raise RuntimeError("No training rows found in range.")
-    X = []
-    y = []
+    X, y = [], []
     for row in rows:
         if not row[-1]:
             continue
-        feats = []
-        for v in row[1:1+len(FEATURES)]:
-            feats.append(0.0 if v is None else float(v))
+        feats = [0.0 if v is None else float(v) for v in row[1:1+len(FEATURES)]]
         X.append(feats)
         y.append(int(row[1+len(FEATURES)]))
     X = np.array(X, dtype=float)

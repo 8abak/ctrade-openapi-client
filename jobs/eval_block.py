@@ -1,23 +1,30 @@
-# jobs/eval_block.py
+# jobs/eval_block.py  — REPLACE ENTIRE FILE
 import argparse, json, time, io
 import numpy as np
 import joblib
 from sklearn.metrics import f1_score, precision_score
+from sqlalchemy import text
 
 from ml.db import db_conn, upsert_many, load_model_blob
 from ml.survival import survival_curve_up, compact_curve
 from ml.train_sgd import FEATURES
 
 def _load_XY(start: int, end: int):
-    sql = """
-      SELECT f.tickid, f.{cols}, l.direction, l.is_segment_start, extract(epoch from f.timestamp) as ts, COALESCE(NULLIF(f.level, NULL), 0.0) as lvl
+    sql = f"""
+      SELECT 
+        f.tickid,
+        {", ".join("f."+c for c in FEATURES)},
+        l.direction,
+        l.is_segment_start,
+        EXTRACT(epoch FROM f.timestamp) AS ts,
+        f.level AS lvl
       FROM ml_features f
-      LEFT JOIN trend_labels l ON l.tickid=f.tickid
+      LEFT JOIN trend_labels l ON l.tickid = f.tickid
       WHERE f.tickid BETWEEN :s AND :e
       ORDER BY f.tickid
-    """.format(cols=",".join(FEATURES))
+    """
     with db_conn() as conn:
-        rows = conn.exec_driver_sql(sql, {"s": int(start), "e": int(end)}).fetchall()
+        rows = conn.execute(text(sql), {"s": int(start), "e": int(end)}).fetchall()
     X=[]; y=[]; tickids=[]; is_start=[]; ts=[]; lvl=[]
     for row in rows:
         tickids.append(int(row[0]))
@@ -26,7 +33,7 @@ def _load_XY(start: int, end: int):
         y.append(int(row[1+len(FEATURES)]) if row[1+len(FEATURES)] is not None else 0)
         is_start.append(bool(row[2+len(FEATURES)] if row[2+len(FEATURES)] is not None else False))
         ts.append(float(row[3+len(FEATURES)]))
-        lvl.append(float(row[4+len(FEATURES)]))
+        lvl.append(float(row[4+len(FEATURES)] if row[4+len(FEATURES)] is not None else 0.0))
     y_map = {-1:0,0:1,1:2}
     y_mc = np.vectorize(y_map.get)(np.array(y, dtype=int))
     return np.array(X, dtype=float), y_mc, tickids, np.array(is_start, dtype=bool), np.array(ts, dtype=float), np.array(lvl, dtype=float)
@@ -45,8 +52,9 @@ def main():
         model_id, blob = load_model_blob(algo=args.algo)
     else:
         model_id, blob = load_model_blob(model_id=args.model)
-    model = joblib.load(io.BytesIO(blob))["model"]
-    mapping = joblib.load(io.BytesIO(blob)).get("y_inv", {0:-1,1:0,2:1})
+    bundle = joblib.load(io.BytesIO(blob))
+    model = bundle["model"]
+    y_inv = bundle.get("y_inv", {0:-1,1:0,2:1})
 
     # Load data
     X, y_true, tickids, is_start, ts, lvl = _load_XY(args.start, args.end)
@@ -57,7 +65,7 @@ def main():
     # Ensure columns are in order [class 0,1,2] => [-1,0,1]
     p_dn = proba[:,0]; p_neu = proba[:,1]; p_up = proba[:,2]
     decided = np.argmax(proba, axis=1)  # 0/1/2 -> -1/0/1
-    decided_label = np.vectorize(mapping.get)(decided)
+    decided_label = np.vectorize(y_inv.get)(decided)
 
     pred_rows = []
     for i, tid in enumerate(tickids):
@@ -70,12 +78,13 @@ def main():
             "s_curve": None,  # set below for starts
             "decided_label": int(decided_label[i])
         })
+
     # Survival curve aggregated over test window for up continuation
     ds, S = survival_curve_up(lvl, step=0.10, maxd=5.0, horizon=10000)
     sc = compact_curve(ds, S)
     # Only attach s_curve to segment starts for payload size
     for i, row in enumerate(pred_rows):
-        if is_start[i] and decided_label[i] == 1:  # Up starts by label AND predicted up is not required; still add generic curve
+        if is_start[i]:  # attach generic curve at starts
             row["s_curve"] = sc
 
     upsert_many("predictions", pred_rows)
@@ -89,8 +98,8 @@ def main():
     else:
         prec_up = 0.0
     metrics = {
-        "F1_macro": f1,
-        "Precision_at_UpStart": prec_up,
+        "F1_macro": float(f1),
+        "Precision_at_UpStart": float(prec_up),
         "S_curve_p($2)": float(S[int(2.0/0.10)] if len(S) > int(2.0/0.10) else S[-1]),
         "S_curve_p($3)": float(S[int(3.0/0.10)] if len(S) > int(3.0/0.10) else S[-1]),
         "S_curve_p($5)": float(S[int(5.0/0.10)] if len(S) > int(5.0/0.10) else S[-1]),
