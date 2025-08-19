@@ -2,7 +2,7 @@
 (function(){
   const urlParams = new URLSearchParams(location.search);
   const START = parseInt(urlParams.get("start") || "1");
-  let OFFSET = 0, LIMIT = 10000;            // chunked loading
+  let OFFSET = 0, LIMIT = 10000;
   const TOTAL = 200000;
   let RUN = null;
 
@@ -19,7 +19,6 @@
     if (out[out.length - 1][0] !== data[n - 1][0]) out.push(data[n - 1]);
     return out;
   }
-  // Bin by tick id (equal-width bins), averaging y within each bin
   function binAvg(data, bin = 50) {
     if (!data.length || bin <= 1) return data;
     const out = [];
@@ -28,13 +27,19 @@
       const [x, y] = data[i];
       if (cnt === 0) startX = x;
       sum += (y ?? 0); cnt++;
-      if (cnt === bin) {
-        out.push([startX, sum / cnt]);
-        sum = 0; cnt = 0;
-      }
+      if (cnt === bin) { out.push([startX, sum / cnt]); sum = 0; cnt = 0; }
     }
     if (cnt > 0) out.push([startX, sum / cnt]);
     return out;
+  }
+  // Append while enforcing strictly increasing X (drop duplicates/out-of-order).
+  function appendUniqueSorted(targetArr, newArr){
+    if (!newArr || !newArr.length) return;
+    const lastX = targetArr.length ? targetArr[targetArr.length - 1][0] : -Infinity;
+    for (let i=0;i<newArr.length;i++){
+      const x = newArr[i][0];
+      if (x > lastX && Number.isFinite(x)) targetArr.push(newArr[i]);
+    }
   }
 
   const opt = {
@@ -46,15 +51,9 @@
     animation: false,
     xAxis: { type:'value', name:'tickid', axisLine:{lineStyle:{color:'#888'}}, axisLabel:{color:'#bbb'} },
     yAxis: [
-      {
-        type:'value',
-        name:'price',
-        scale:true,
-        min: (v) => v.min - (v.max - v.min) * 0.05,
-        max: (v) => v.max + (v.max - v.min) * 0.05,
-        axisLine:{lineStyle:{color:'#888'}},
-        axisLabel:{color:'#bbb'}
-      },
+      { type:'value', name:'price', scale:true,
+        min:(v)=>v.min - (v.max-v.min)*0.05, max:(v)=>v.max + (v.max-v.min)*0.05,
+        axisLine:{lineStyle:{color:'#888'}}, axisLabel:{color:'#bbb'} },
       { type:'value', name:'prob', min:0, max:1, position:'right',
         axisLine:{lineStyle:{color:'#888'}}, axisLabel:{color:'#bbb'} }
     ],
@@ -64,22 +63,17 @@
   chart.setOption(opt);
 
   const HD = {
-    showSymbol: false,
-    smooth: false,
-    sampling: 'lttb',
-    progressive: 4000,
-    progressiveThreshold: 20000,
-    lineStyle: { width: 1, opacity: 0.8 },
-    connectNulls: true,
-    clip: true
+    showSymbol:false, smooth:false, sampling:'lttb',
+    progressive:4000, progressiveThreshold:20000,
+    lineStyle:{ width:1, opacity:0.7 }, connectNulls:false, clip:true
   };
 
-  // NOTE: Cloud is OFF by default to keep chart clean; user can toggle it on.
+  // Cloud off by default (toggle with checkbox)
   const layers = {
-    raw:      {name:'Raw',        type:'scatter', data:[], yAxisIndex:0, symbolSize: 1.5},
+    raw:      {name:'Raw',        type:'scatter', data:[], yAxisIndex:0, symbolSize:1.5},
     kalman:   {name:'Kalman',     type:'line',    data:[], yAxisIndex:0, ...HD},
-    labelsUp: {name:'Up starts',  type:'scatter', data:[], yAxisIndex:0, symbol: 'triangle', symbolSize: 8},
-    labelsDn: {name:'Down starts',type:'scatter', data:[], yAxisIndex:0, symbol: 'triangle', symbolRotate: 180, symbolSize: 8},
+    labelsUp: {name:'Up starts',  type:'scatter', data:[], yAxisIndex:0, symbol:'triangle', symbolSize:8},
+    labelsDn: {name:'Down starts',type:'scatter', data:[], yAxisIndex:0, symbol:'triangle', symbolRotate:180, symbolSize:8},
     preds:    {name:'p_up',       type:'line',    data:[], yAxisIndex:1, ...HD},
     cloud:    {name:'S(d) @ $2',  type:'line',    data:[], yAxisIndex:1, ...HD}
   };
@@ -89,11 +83,10 @@
     if (document.getElementById("cbRaw").checked)    wanted.push(layers.raw.name);
     if (document.getElementById("cbKalman").checked) wanted.push(layers.kalman.name);
     if (document.getElementById("cbLabels").checked) { wanted.push(layers.labelsUp.name); wanted.push(layers.labelsDn.name); }
-    if (document.getElementById("cbPreds").checked)  { wanted.push(layers.preds.name); /* cloud opt-in via checkbox below */ }
+    if (document.getElementById("cbPreds").checked)  wanted.push(layers.preds.name);
     if (document.getElementById("cbCloud")?.checked) wanted.push(layers.cloud.name);
     chart.setOption({legend: {data: wanted}});
   }
-
   function refreshSeries() {
     const s = [];
     if (document.getElementById("cbRaw").checked)    s.push(layers.raw);
@@ -112,19 +105,19 @@
     document.getElementById("rangeInfo").textContent =
       `Train ${START}-${START+100000-1} / Test ${START+100000}-${START+200000-1} | Loaded ${j.range[0]}..${j.range[1]}`;
 
-    // Price series
+    // price series
     let raw = j.ticks.map(r => { priceMap.set(r.tickid, r.price); return [r.tickid, r.price]; });
     let kal = j.kalman.map(r => { levelMap.set(r.tickid, r.level); return [r.tickid, r.level]; });
     raw = thin(raw, 6000);
     kal = thin(kal, 6000);
 
-    // Labels at price level (kalman preferred)
+    // labels (anchor at price)
     const yAt = (tid) => (levelMap.get(tid) ?? priceMap.get(tid) ?? null);
     const labsUp = j.labels.filter(x => x.is_segment_start && x.direction===1).map(x => [x.tickid, yAt(x.tickid)]);
     const labsDn = j.labels.filter(x => x.is_segment_start && x.direction===-1).map(x => [x.tickid, yAt(x.tickid)]);
 
-    // Probabilities / cloud: **bin** aggressively to kill spider-web
-    const BIN = 50; // 50-tick bins; adjust to 100 if you still see clutter
+    // probabilities / cloud (bin to avoid clutter)
+    const BIN = 50;
     let preds = binAvg(j.predictions.map(p => [p.tickid, p.p_up ?? 0]), BIN);
     let cloud = binAvg(j.predictions.map(p => {
       let v = 0;
@@ -135,16 +128,16 @@
       return [p.tickid, v];
     }), BIN);
 
-    // append
-    layers.raw.data.push(...raw);
-    layers.kalman.data.push(...(kal));
+    // append **strictly increasing X**
+    appendUniqueSorted(layers.raw.data, raw);
+    appendUniqueSorted(layers.kalman.data, kal);
+    appendUniqueSorted(layers.preds.data, preds);
+    appendUniqueSorted(layers.cloud.data, cloud);
+    // markers are sparse; just append (scatter doesn't draw lines)
     layers.labelsUp.data.push(...labsUp);
     layers.labelsDn.data.push(...labsDn);
-    layers.preds.data.push(...preds);
-    layers.cloud.data.push(...cloud);
 
-    setLegend();
-    refreshSeries();
+    setLegend(); refreshSeries();
 
     if (offset === 0) {
       chart.dispatchAction({type:'dataZoom', startValue: START, endValue: START + Math.min(8000, limit)});
@@ -152,13 +145,11 @@
   }
 
   // UI
-  // Add a hidden checkbox for cloud opt-in if not present
   if (!document.getElementById("cbCloud")) {
     const lbl = document.createElement('label');
     lbl.innerHTML = '<input type="checkbox" id="cbCloud"/> Cloud';
     document.querySelector('.toolbar').insertBefore(lbl, document.getElementById('jumpTick'));
   }
-
   document.getElementById("cbRaw").onchange =
   document.getElementById("cbKalman").onchange =
   document.getElementById("cbLabels").onchange =
@@ -171,7 +162,6 @@
     OFFSET += LIMIT;
     await loadChunk(OFFSET, Math.min(LIMIT, remaining));
   };
-
   document.getElementById("btnJump").onclick = async () => {
     const tid = parseInt(document.getElementById("jumpTick").value || "0");
     if (!tid) return;
@@ -183,7 +173,6 @@
     }
     chart.dispatchAction({type:'dataZoom', startValue: Math.max(START, tid-4000), endValue: tid+4000});
   };
-
   document.getElementById("btnConfirm").onclick = async () => {
     let runId = RUN?.run_id;
     if (!runId) {
