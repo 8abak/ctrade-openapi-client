@@ -11,6 +11,11 @@ from pydantic import BaseModel
 from sqlalchemy import create_engine, text
 from sqlalchemy import text as sqtxt
 from zig_api import router as lview_router
+#MLing imports
+import subprocess, sys, json
+from sqlalchemy import text as _sqltext
+from ml.db import get_engine, latest_prediction, review_slice
+
 
 # ---------  App & CORS ---------
 app = FastAPI(title="cTrade backend")
@@ -401,3 +406,72 @@ def zigzag(
         cursor_ts=cursor_ts,
         limit=limit,
     )
+
+
+
+#MLing routes
+@app.post("/ml/run_step")
+def ml_run_step(start: int = Query(...), block: int = Query(100000), algo: str = Query("sgd")):
+    try:
+        p = subprocess.run(
+            [sys.executable, "-m", "jobs.run_step", "--start", str(start), "--block", str(block), "--algo", algo],
+            capture_output=True, text=True, timeout=3600
+        )
+        if p.returncode != 0:
+            return JSONResponse(status_code=500, content={"error": p.stderr.strip()})
+        out = p.stdout.strip().splitlines()[-1]
+        return json.loads(out)
+    except subprocess.TimeoutExpired:
+        return JSONResponse(status_code=500, content={"error": "run_step timeout"})
+
+@app.get("/ml/review")
+def ml_review(start: int = Query(...),
+              offset: int = Query(0),
+              limit: int = Query(10000)):
+    # 200k window: train+test = [start .. start+199999]
+    total = 200000
+    bundle = review_slice(start, total, offset, limit)
+    # try to attach run_id if exists
+    eng = get_engine()
+    with eng.begin() as conn:
+        rr = conn.execute(_sqltext("""
+            SELECT run_id, confirmed, model_id FROM walk_runs 
+            WHERE train_start=:s AND train_end=:te LIMIT 1
+        """), {"s": start, "te": start+100000-1}).mappings().first()
+        if rr:
+            bundle["run"] = {"run_id": rr["run_id"], "confirmed": rr["confirmed"], "model_id": rr["model_id"]}
+    return bundle
+
+@app.post("/ml/confirm")
+def ml_confirm(run_id: str = Query(...)):
+    p = subprocess.run([sys.executable, "-m", "jobs.confirm_run", "--run_id", run_id],
+                       capture_output=True, text=True, timeout=60)
+    if p.returncode != 0:
+        return JSONResponse(status_code=500, content={"error": p.stderr.strip()})
+    return {"ok": True, "run_id": run_id}
+
+@app.get("/ml/predict/last")
+def ml_predict_last():
+    lp = latest_prediction()
+    return lp or {}
+
+@app.get("/ml/status")
+def ml_status():
+    eng = get_engine()
+    with eng.begin() as conn:
+        rows = conn.execute(_sqltext("""
+            SELECT run_id, train_start, train_end, test_start, test_end, model_id, confirmed, metrics, created_at
+            FROM walk_runs ORDER BY created_at DESC LIMIT 20
+        """)).mappings().all()
+        out = []
+        for r in rows:
+            out.append({
+                "run_id": r["run_id"],
+                "train_range": [r["train_start"], r["train_end"]],
+                "test_range": [r["test_start"], r["test_end"]],
+                "model_id": r["model_id"],
+                "confirmed": r["confirmed"],
+                "metrics": r["metrics"],
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None
+            })
+        return out

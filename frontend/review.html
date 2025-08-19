@@ -1,0 +1,34 @@
+<!-- frontend/review.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>ML Review — 200k Window</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <link rel="stylesheet" href="./style.css"/>
+  <style>
+    .toolbar { display:flex; gap:8px; align-items:center; padding:8px; background:#0e0e0e; color:#eee; border-bottom:1px solid #333; position:sticky; top:0; z-index:10;}
+    .toolbar input, .toolbar button, .toolbar label { font-size:14px; }
+    #chart { width:100%; height: calc(100vh - 60px); }
+    .spacer { flex:1; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5"></script>
+</head>
+<body>
+  <div class="toolbar">
+    <strong>Review 200k</strong>
+    <span id="rangeInfo"></span>
+    <div class="spacer"></div>
+    <label><input type="checkbox" id="cbRaw" checked/> Raw</label>
+    <label><input type="checkbox" id="cbKalman" checked/> Kalman</label>
+    <label><input type="checkbox" id="cbLabels" checked/> Labels</label>
+    <label><input type="checkbox" id="cbPreds" checked/> Predictions/Cloud</label>
+    <input type="number" id="jumpTick" placeholder="Tick ID" style="width:140px"/>
+    <button id="btnJump">Jump</button>
+    <button id="btnMore">Load More</button>
+    <button id="btnConfirm" style="background:#1b8; color:#000; font-weight:600;">Confirm & Continue</button>
+  </div>
+  <div id="chart"></div>
+  <script src="./review-core.js"></script>
+</body>
+</html>
