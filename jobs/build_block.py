@@ -14,18 +14,14 @@ def main():
     args = ap.parse_args()
 
     t0 = time.time()
-    # 1) Kalman (causal, persists to kalman_states)
     n_kal = run_kalman(args.start, args.end)
-
-    # 2) Features (reads kalman_states + raw price; writes ml_features)
     t1 = time.time()
     n_feat = build_features_range(args.start, args.end)
-
-    # 3) Labels (writes trend_labels)
     t2 = time.time()
     n_lab = build_labels_range(args.start, args.end)
+    t3 = time.time()
 
-    out = {
+    print(json.dumps({
         "range": [args.start, args.end],
         "kalman_rows": n_kal,
         "features_rows": n_feat,
@@ -33,11 +29,10 @@ def main():
         "timings_sec": {
             "kalman": round(t1 - t0, 3),
             "features": round(t2 - t1, 3),
-            "labels": round(time.time() - t2, 3),
-            "total": round(time.time() - t0, 3),
-        },
-    }
-    print(json.dumps(out))
+            "labels": round(t3 - t2, 3),
+            "total": round(t3 - t0, 3),
+        }
+    }))
 
 if __name__ == "__main__":
     main()

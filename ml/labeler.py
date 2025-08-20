@@ -1,49 +1,80 @@
-# ml/labeler.py
+# ml/labeler.py  — REPLACE ENTIRE FILE
+import math
 from typing import List, Dict, Any
 
-from .db import upsert_many
+from sqlalchemy import text
 
-def label_trend(features_rows: List[Dict[str, Any]], z_min: float=0.8, kappa_max: float=0.25, K: int=20) -> List[Dict[str, Any]]:
-    rows = sorted(features_rows, key=lambda r: r["tickid"])
+from .db import db_conn, upsert_many
+
+Z_MIN = 0.8
+KAPPA_MAX = 0.25
+K_SEG = 20  # mark first K ticks of each up/down segment
+
+def build_labels_range(start: int, end: int) -> int:
+    """
+    Label ticks in [start..end] using causal zSlope/kappa rules.
+    Writes to trend_labels (UPSERT). Also flags first K ticks of each up/down segment.
+    """
+    with db_conn() as conn:
+        rows = conn.execute(text("""
+            SELECT f.tickid, f.slope, f.vol_ewstd
+            FROM ml_features f
+            WHERE f.tickid BETWEEN :s AND :e
+            ORDER BY f.tickid
+        """), {"s": int(start), "e": int(end)}).mappings().all()
+
+    if not rows:
+        return 0
+
     out = []
-    prev_z = None
-    cur_dir = 0
-    seg_count = 0
-
+    prev_z = 0.0
+    seg_dir = 0   # current segment direction (-1/0/+1)
+    seg_len = 0
     for r in rows:
-        vol = r.get("vol_ewstd") or 0.0
-        slope = r.get("slope") or 0.0
-        z = slope / (vol + 1e-9)
-        kappa = abs(z - (prev_z if prev_z is not None else z))
-        prev_z = z
+        tid = int(r["tickid"])
+        slope = float(r["slope"] if r["slope"] is not None else 0.0)
+        vol = float(r["vol_ewstd"] if r["vol_ewstd"] is not None else 0.0)
+        denom = vol + 1e-9
+        z = slope / denom
+        kappa = abs(z - prev_z)
 
-        if (z >= z_min) and (kappa <= kappa_max):
-            d = 1
-        elif (z <= -z_min) and (kappa <= kappa_max):
-            d = -1
+        # raw direction by thresholds
+        if z >= Z_MIN and kappa <= KAPPA_MAX:
+            direction = 1
+        elif z <= -Z_MIN and kappa <= KAPPA_MAX:
+            direction = -1
         else:
-            d = 0
+            direction = 0
 
+        # segment tracking
         is_start = False
-        if d != 0:
-            if d != cur_dir:
-                cur_dir = d
-                seg_count = 1
+        if direction != 0:
+            if direction != seg_dir:
+                # new segment
+                seg_dir = direction
+                seg_len = 1
                 is_start = True
             else:
-                seg_count += 1
-                is_start = seg_count <= K
+                seg_len += 1
+                if seg_len <= K_SEG:
+                    is_start = True
         else:
-            cur_dir = 0
-            seg_count = 0
+            seg_dir = 0
+            seg_len = 0
 
         out.append({
-            "tickid": r["tickid"],
-            "direction": int(d),
+            "tickid": tid,
+            "direction": int(direction),
             "is_segment_start": bool(is_start),
             "meta": None
         })
-    return out
+        prev_z = z
 
-def persist_labels(rows: List[Dict[str, Any]]) -> int:
-    return upsert_many("trend_labels", rows)
+        if len(out) >= 5000:
+            upsert_many("trend_labels", out, conflict_key="tickid")
+            out.clear()
+
+    if out:
+        upsert_many("trend_labels", out, conflict_key="tickid")
+
+    return len(rows)
