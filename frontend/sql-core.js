@@ -1,4 +1,5 @@
 // sql-core.js — dark UI + left controls + resizable columns + Abort + Force LIMIT
+// Count logic fixed: estimate only for real tables; always replace with exact COUNT(*)
 (() => {
   const $ = (s, el=document) => el.querySelector(s);
 
@@ -23,16 +24,14 @@
   // Backend routes from backend/main.py
   const API = { tables: '/sqlvw/tables', query: '/sqlvw/query' };
 
-  // Abort controller for in-flight requests
   let currentController = null;
 
   // ---------- helpers ----------
   const escapeHTML = s => String(s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;', "'":'&#39;'}[m]));
-  const normalize = payload => (
-    Array.isArray(payload) ? {rows:payload} :
-    (payload?.rows ? {rows:payload.rows} :
-    (payload?.data ? {rows:payload.data} : {rows:[]}))
-  );
+  const normalize   = payload =>
+    Array.isArray(payload) ? {rows:payload}
+    : (payload?.rows ? {rows:payload.rows}
+    : (payload?.data ? {rows:payload.data} : {rows:[]}));
 
   function pickDefaultOrderKey(columns){
     if (!columns) return null;
@@ -87,11 +86,9 @@
     const rows = data.rows;
     const cols = Object.keys(rows[0]);
 
-    // Build colgroup with default widths
     const defaultWidth = Math.max(120, Math.floor(resultWrap.clientWidth / Math.max(cols.length, 1)));
     const colgroup = cols.map(() => `<col style="width:${defaultWidth}px">`).join('');
 
-    // Header with resize handles
     const thead = '<thead><tr>' + cols.map((c,i) =>
       `<th data-col="${i}">
          <div class="th-inner">
@@ -101,21 +98,17 @@
        </th>`
     ).join('') + '</tr></thead>';
 
-    // Body
     const tbody = '<tbody>' + rows.map(r =>
       `<tr>${cols.map(c => `<td>${escapeHTML(r[c] ?? '')}</td>`).join('')}</tr>`
     ).join('') + '</tbody>';
 
     resultDiv.innerHTML = `<table>${colgroup}${thead}${tbody}</table>`;
-
-    // Wire up column resizers
     enableColumnResizing(resultDiv.querySelector('table'));
   }
 
   function enableColumnResizing(table){
     const resizers = table.querySelectorAll('.col-resizer');
     const cols = Array.from(table.querySelectorAll('col'));
-
     let startX = 0, startWidth = 0, targetColIndex = -1;
 
     function onMove(e){
@@ -153,18 +146,41 @@
     return rows.map(r => r.column_name);
   }
 
-  async function fetchEstimateCount(table){
+  // NEW: get relkind + reltuples; only use estimate for real/mat/foreign/partitioned tables
+  async function fetchRelMeta(table){
     const { rows } = await runSQL(
-      `SELECT COALESCE(reltuples::bigint,0) AS estimate
+      `SELECT c.relkind, COALESCE(c.reltuples,0)::bigint AS reltuples
          FROM pg_class c
          JOIN pg_namespace n ON n.oid=c.relnamespace
-        WHERE n.nspname='public' AND c.relname='${table}' AND c.relkind='r'`
+        WHERE n.nspname='public' AND c.relname='${table}'
+        LIMIT 1`
     );
-    return rows?.[0]?.estimate ?? 0;
+    return rows?.[0] || null;
   }
+
   async function fetchExactCount(table){
-    const { rows } = await runSQL(`SELECT COUNT(*) AS n FROM ${table}`);
+    const { rows } = await runSQL(`SELECT COUNT(*)::bigint AS n FROM ${table}`);
     return rows?.[0]?.n ?? 0;
+  }
+
+  async function refreshCountSmart(table){
+    countEl.textContent = '…';
+    try {
+      const meta = await fetchRelMeta(table);
+      if (meta && ['r','m','f','p'].includes(meta.relkind) && Number(meta.reltuples) > 0) {
+        countEl.textContent = `~${meta.reltuples}`; // quick estimate for real tables
+      } else {
+        countEl.textContent = '…'; // for views/unknown, wait for exact
+      }
+    } catch { /* ignore estimate errors */ }
+
+    // Always compute exact in background and replace when ready
+    try {
+      const exact = await fetchExactCount(table);
+      countEl.textContent = `${exact}`;
+    } catch {
+      // leave estimate (or …) if exact fails
+    }
   }
 
   async function describeTable(table){
@@ -196,10 +212,8 @@
     resultDiv.innerHTML = '<div class="muted" style="padding:10px">Ready.</div>';
     const table = tableSelect.value;
 
-    // show estimate quickly then exact
-    countEl.textContent = '…';
-    fetchEstimateCount(table).then(est => { countEl.textContent = `~${est}`; }).catch(()=>{});
-    fetchExactCount(table).then(ex => { countEl.textContent = `${ex}`; }).catch(()=>{});
+    // Count (estimate for real tables, then exact)
+    refreshCountSmart(table);
 
     const cols = await fetchColumns(table);
     const key  = pickDefaultOrderKey(cols);
@@ -257,7 +271,6 @@
     setQueryTemplate(table, key);
   });
 
-  // Abort current fetch (prevents locking UI; DB keeps running until timeout server-side)
   abortBtn.addEventListener('click', () => {
     if (currentController) { try { currentController.abort(); } catch {} }
   });
