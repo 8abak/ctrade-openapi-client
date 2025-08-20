@@ -15,6 +15,7 @@ from zig_api import router as lview_router
 import subprocess, sys, json
 from sqlalchemy import text as _sqltext
 from ml.db import get_engine, latest_prediction, review_slice
+from fastapi import Body
 
 
 # ---------  App & CORS ---------
@@ -71,6 +72,16 @@ def get_ticks(offset: int = 0, limit: int = 2000):
         ).mappings().all()
     return list(rows)
 
+@app.post("/api/sql")
+def sql_post(sql: str = Body(..., embed=True)):
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(text(sql))
+            if result.returns_rows:
+                return {"rows": [dict(r._mapping) for r in result]}
+            return {"message": "Query executed successfully."}
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
 
 @app.get("/ticks/latest", response_model=List[Tick])
 def get_latest_ticks(after: str = Query(..., description="UTC timestamp in ISO format")):
