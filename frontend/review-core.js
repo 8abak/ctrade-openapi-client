@@ -1,210 +1,276 @@
-// frontend/review-core.js — REPLACE ENTIRE FILE
-(function(){
-  const urlParams = new URLSearchParams(location.search);
-  const START = parseInt(urlParams.get("start") || "1");
+// review-core.js — split-pane ML Review with fixed zoom on "Load more" and left-pinned Jump
+(() => {
+  const $  = (s, el=document) => el.querySelector(s);
+  const $$ = (s, el=document) => Array.from(el.querySelectorAll(s));
 
-  // NEW: lighter initial paint + moderate increments afterwards
-  const INITIAL_LIMIT = 2000;   // first load
-  const CHUNK_LIMIT   = 5000;   // "Load More" increments
-  let OFFSET = 0;
-  let LIMIT = INITIAL_LIMIT;
-  const TOTAL = 200000;
-  let RUN = null;
+  // UI refs
+  const startInput = $('#startInput');
+  const limitInput = $('#limitInput');
+  const btnLoad    = $('#btnLoad');
+  const btnMore    = $('#btnMore');
+  const jumpInput  = $('#jumpInput');
+  const btnJump    = $('#btnJump');
 
-  const chart = echarts.init(document.getElementById("chart"));
-  const levelMap = new Map();
-  const priceMap = new Map();
+  const chkRaw     = $('#chkRaw');
+  const chkKalman  = $('#chkKalman');
+  const chkProb    = $('#chkProb');
+  const chkLabels  = $('#chkLabels');
+  const btnConfirm = $('#btnConfirm');
 
-  // ---- helpers -------------------------------------------------------------
-  function thin(data, maxKeep = 4000) { // more aggressive than before
-    if (data.length <= maxKeep) return data;
-    const n = data.length, step = Math.max(1, Math.floor(n / maxKeep));
-    const out = [];
-    for (let i = 0; i < n; i += step) out.push(data[i]);
-    if (out[out.length - 1][0] !== data[n - 1][0]) out.push(data[n - 1]);
-    return out;
+  const titleText  = $('#titleText');
+  const rangeInfo  = $('#rangeInfo');
+  const kLoaded    = $('#kLoaded');
+  const kRun       = $('#kRun');
+  const kTrain     = $('#kTrain');
+  const kTest      = $('#kTest');
+
+  const chartEl    = document.getElementById('chart');
+
+  // State
+  const state = {
+    start: 1,         // training start
+    offset: 0,        // current offset within [1..200000]
+    limit:  5000,     // chunk size
+    leftAnchor: null, // x0 of current viewport
+    viewWidth: null,  // x1-x0 of current viewport
+    traces: { raw:true, kalman:true, prob:false, labels:false },
+    data:   { x:[], raw:[], kalman:[], prob:[], labels:[] },
+    run: null,        // {run_id, confirmed, model_id}
+  };
+
+  // -------------- helpers --------------
+  const api = {
+    review: (start, offset, limit) =>
+      `/ml/review?start=${start}&offset=${offset}&limit=${limit}`,
+    confirm: (runId) => `/ml/confirm?run_id=${encodeURIComponent(runId)}`
+  };
+
+  async function getJSON(url) {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+    return r.json();
   }
-  function binAvg(data, bin = 200) { // NEW: strong binning to kill “web”
-    if (!data.length || bin <= 1) return data;
-    const out = [];
-    let sum = 0, cnt = 0, startX = data[0][0];
-    for (let i = 0; i < data.length; i++) {
-      const [x, y] = data[i];
-      if (cnt === 0) startX = x;
-      sum += (y ?? 0); cnt++;
-      if (cnt === bin) { out.push([startX, sum / cnt]); sum = 0; cnt = 0; }
+
+  function pick(val, ...keys) {
+    for (const k of keys) if (k in val) return val[k];
+    return undefined;
+  }
+
+  // The review bundle can vary; extract series defensively.
+  function parseBundle(bundle) {
+    // x-axis = local tick ids (1..200000 within this window)
+    // Try common container keys
+    const rawArr    = bundle.ticks || bundle.raw || bundle.ml_ticks || [];
+    const kalArr    = bundle.kalman || bundle.kalman_states || [];
+    const predArr   = bundle.predictions || bundle.preds || [];
+    const labelsArr = bundle.labels || bundle.trend_labels || [];
+
+    const X = [];
+    const RAW = [];
+    const KAL = [];
+    const PROB = [];
+    const LABS = [];
+
+    // Raw mid/price
+    for (const r of rawArr) {
+      const x = pick(r, 'tickid', 'id', 'x');
+      const p = pick(r, 'mid', 'price', 'p', 'y');
+      if (x != null && p != null) { X.push(x); RAW.push(p); }
     }
-    if (cnt > 0) out.push([startX, sum / cnt]);
-    return out;
-  }
-  // STRICTLY increasing X append (prevents zig‑zags)
-  function appendUniqueSorted(targetArr, newArr){
-    if (!newArr || !newArr.length) return;
-    let lastX = targetArr.length ? targetArr[targetArr.length - 1][0] : -Infinity;
-    for (let i = 0; i < newArr.length; i++) {
-      const pt = newArr[i];
-      if (!pt || pt.length < 2) continue;
-      const x = pt[0];
-      if (!Number.isFinite(x)) continue;
-      if (x > lastX) { targetArr.push(pt); lastX = x; }
+
+    // Kalman level/price
+    const xK=[], yK=[];
+    for (const k of kalArr) {
+      const x = pick(k, 'tickid', 'id', 'x');
+      const v = pick(k, 'level', 'price', 'y');
+      if (x != null && v != null) { xK.push(x); yK.push(v); }
     }
+
+    // Probability p_up
+    const xP=[], yP=[];
+    for (const p of predArr) {
+      const x = pick(p, 'tickid', 'id', 'x');
+      const pu = pick(p, 'p_up', 'prob', 'p');
+      if (x != null && pu != null) { xP.push(x); yP.push(pu); }
+    }
+
+    // Labels (just points at x; use y from RAW/KAL if exists)
+    for (const l of labelsArr) {
+      const x = pick(l, 'tickid', 'id', 'x');
+      if (x != null) LABS.push(x);
+    }
+
+    return {
+      x: X.length ? X : xK.length ? xK : xP, // prefer raw X
+      raw: RAW,
+      kalman: { x: xK, y: yK },
+      prob:   { x: xP, y: yP },
+      labels: LABS
+    };
   }
 
-  const opt = {
-    backgroundColor: '#111',
-    title: { text: '200k Review', textStyle:{color:'#ddd'}},
-    // Lighter tooltip & axis pointer to reduce RAF work
-    tooltip: { trigger: 'axis', axisPointer: { type:'cross', animation:false }, transitionDuration: 0, confine: true },
-    legend: { data: [], textStyle:{color:'#ddd'}},
-    grid: { left: 60, right: 60, top: 50, bottom: 60 },
-    animation: false,
-    xAxis: { type:'value', name:'tickid', axisLine:{lineStyle:{color:'#888'}}, axisLabel:{color:'#bbb'} },
-    yAxis: [
-      {
-        type:'value',
-        name:'price',
-        scale:true,
-        min: (v) => v.min - (v.max - v.min) * 0.05,
-        max: (v) => v.max + (v.max - v.min) * 0.05,
-        axisLine:{lineStyle:{color:'#888'}},
-        axisLabel:{color:'#bbb'}
-      },
-      { type:'value', name:'prob', min:0, max:1, position:'right',
-        axisLine:{lineStyle:{color:'#888'}}, axisLabel:{color:'#bbb'} }
-    ],
-    dataZoom: [
-      {type:'inside', filterMode:'filter', throttle: 50},
-      {type:'slider', filterMode:'filter', throttle: 50}
-    ],
-    series: []
-  };
-  chart.setOption(opt);
-
-  const HD = {
-    showSymbol:false, smooth:false, sampling:'lttb',
-    progressive:4000, progressiveThreshold:20000,
-    lineStyle:{ width:1, opacity:0.7 }, connectNulls:false, clip:true
-  };
-
-  // Cloud opt‑in (kept off by default)
-  const layers = {
-    raw:      {name:'Raw',        type:'scatter', data:[], yAxisIndex:0, symbolSize:1.5, large:true, largeThreshold:1500},
-    kalman:   {name:'Kalman',     type:'line',    data:[], yAxisIndex:0, ...HD},
-    labelsUp: {name:'Up starts',  type:'scatter', data:[], yAxisIndex:0, symbol:'triangle', symbolSize:8},
-    labelsDn: {name:'Down starts',type:'scatter', data:[], yAxisIndex:0, symbol:'triangle', symbolRotate:180, symbolSize:8},
-    preds:    {name:'p_up',       type:'line',    data:[], yAxisIndex:1, ...HD},
-    cloud:    {name:'S(d) @ $2',  type:'line',    data:[], yAxisIndex:1, ...HD}
-  };
-
-  function setLegend() {
-    const wanted = [];
-    if (document.getElementById("cbRaw").checked)    wanted.push(layers.raw.name);
-    if (document.getElementById("cbKalman").checked) wanted.push(layers.kalman.name);
-    if (document.getElementById("cbLabels").checked) { wanted.push(layers.labelsUp.name); wanted.push(layers.labelsDn.name); }
-    if (document.getElementById("cbPreds").checked)  wanted.push(layers.preds.name);
-    if (document.getElementById("cbCloud")?.checked) wanted.push(layers.cloud.name);
-    chart.setOption({legend: {data: wanted}}, false, true);
-  }
-  function refreshSeries() {
-    const s = [];
-    if (document.getElementById("cbRaw").checked)    s.push(layers.raw);
-    if (document.getElementById("cbKalman").checked) s.push(layers.kalman);
-    if (document.getElementById("cbLabels").checked) { s.push(layers.labelsUp); s.push(layers.labelsDn); }
-    if (document.getElementById("cbPreds").checked)  s.push(layers.preds);
-    if (document.getElementById("cbCloud")?.checked) s.push(layers.cloud);
-    chart.setOption({series: s}, false, true); // lazyUpdate to avoid blocking frame
+  function appendData(dst, src) {
+    // assumes non-overlapping increasing x
+    dst.x.push(...src.x);
+    dst.raw.push(...src.raw);
+    dst.kalman.x.push(...src.kalman.x);
+    dst.kalman.y.push(...src.kalman.y);
+    dst.prob.x.push(...src.prob.x);
+    dst.prob.y.push(...src.prob.y);
+    dst.labels.push(...src.labels);
   }
 
-  async function loadChunk(offset, limit) {
-    const res = await fetch(`/ml/review?start=${START}&offset=${offset}&limit=${limit}`);
-    const j = await res.json();
-    if (j.run) RUN = j.run;
+  // -------------- chart --------------
+  function drawChart() {
+    const d = state.data;
+    const traces = [];
 
-    document.getElementById("rangeInfo").textContent =
-      `Train ${START}-${START+100000-1} / Test ${START+100000}-${START+200000-1} | Loaded ${j.range[0]}..${j.range[1]}`;
+    if (state.traces.raw && d.x.length) {
+      traces.push({
+        type:'scattergl', mode:'markers',
+        name:'Raw', x:d.x, y:d.raw,
+        marker:{ size:3 },
+        hovertemplate:'tick %{x}<br>raw %{y:.5f}<extra></extra>'
+      });
+    }
+    if (state.traces.kalman && d.kalman.x.length) {
+      traces.push({
+        type:'scattergl', mode:'lines',
+        name:'Kalman', x:d.kalman.x, y:d.kalman.y,
+        line:{ width:2 },
+        hovertemplate:'tick %{x}<br>kalman %{y:.5f}<extra></extra>'
+      });
+    }
+    if (state.traces.prob && d.prob.x.length) {
+      traces.push({
+        type:'scattergl', mode:'lines',
+        name:'p_up', x:d.prob.x, y:d.prob.y,
+        yaxis:'y2', line:{ width:1 },
+        hovertemplate:'tick %{x}<br>p_up %{y:.3f}<extra></extra>'
+      });
+    }
 
-    // Price series
-    let raw = j.ticks.map(r => { priceMap.set(r.tickid, r.price); return [r.tickid, r.price]; });
-    let kal = j.kalman.map(r => { levelMap.set(r.tickid, r.level); return [r.tickid, r.level]; });
-    raw = thin(raw, 3000);   // tighter thin for initial feel
-    kal = thin(kal, 3000);
+    // Layout
+    const layout = {
+      dragmode:'pan',
+      margin:{l:60,r:60,t:10,b:30},
+      paper_bgcolor:'#0d0f12',
+      plot_bgcolor:'#0d0f12',
+      font:{color:'#e6e6e6'},
+      xaxis:{ showgrid:true, gridcolor:'#1f2633', title:'tick' },
+      yaxis:{ showgrid:true, gridcolor:'#1f2633', title:'price' },
+      yaxis2:{ overlaying:'y', side:'right', rangemode:'tozero', title:'prob' }
+    };
 
-    // Labels anchored to price
-    const yAt = (tid) => (levelMap.get(tid) ?? priceMap.get(tid) ?? null);
-    const labsUp = j.labels.filter(x => x.is_segment_start && x.direction===1).map(x => [x.tickid, yAt(x.tickid)]);
-    const labsDn = j.labels.filter(x => x.is_segment_start && x.direction===-1).map(x => [x.tickid, yAt(x.tickid)]);
+    // Preserve zoom if we have it
+    if (state.leftAnchor != null && state.viewWidth != null) {
+      layout.xaxis.range = [state.leftAnchor, state.leftAnchor + state.viewWidth];
+    }
 
-    // Probabilities / cloud — bin hard to keep ~few hundred points per chunk
-    let preds = binAvg(j.predictions.map(p => [p.tickid, p.p_up ?? 0]), 200);
-    let cloud = binAvg(j.predictions.map(p => {
-      let v = 0;
-      if (p.s_curve && p.s_curve.length) {
-        const at2 = p.s_curve.find(x => Math.abs(x[0]-2.0) < 1e-6);
-        v = at2 ? at2[1] : 0;
+    Plotly.newPlot(chartEl, traces, layout, {displayModeBar:false, responsive:true});
+
+    chartEl.on('plotly_relayout', ev => {
+      const r0 = ev['xaxis.range[0]'], r1 = ev['xaxis.range[1]'];
+      if (typeof r0 === 'number' && typeof r1 === 'number') {
+        state.leftAnchor = r0;
+        state.viewWidth  = Math.max(1, r1 - r0);
       }
-      return [p.tickid, v];
-    }), 200);
+    });
 
-    // Append strictly increasing X
-    appendUniqueSorted(layers.raw.data, raw);
-    appendUniqueSorted(layers.kalman.data, kal);
-    appendUniqueSorted(layers.preds.data, preds);
-    appendUniqueSorted(layers.cloud.data, cloud);
-    layers.labelsUp.data.push(...labsUp);
-    layers.labelsDn.data.push(...labsDn);
-
-    setLegend(); refreshSeries();
-
-    if (offset === 0) {
-      chart.dispatchAction({type:'dataZoom', startValue: START, endValue: START + Math.min(2000, limit)});
+    // Header info
+    if (d.x.length) {
+      const first = d.x[0];
+      const last  = d.x[d.x.length - 1];
+      rangeInfo.textContent = `Loaded ${first}…${last}`;
+      kLoaded.textContent = `${first}…${last}`;
+    } else {
+      rangeInfo.textContent = '–';
+      kLoaded.textContent = '–';
     }
   }
 
-  // UI
-  if (!document.getElementById("cbCloud")) {
-    const lbl = document.createElement('label');
-    lbl.innerHTML = '<input type="checkbox" id="cbCloud"/> Cloud';
-    document.querySelector('.toolbar').insertBefore(lbl, document.getElementById('jumpTick'));
+  // -------------- load/jump/more --------------
+  async function doLoad({ reset=false } = {}) {
+    state.start = parseInt(startInput.value, 10) || 1;
+    state.limit = Math.min(Math.max(parseInt(limitInput.value || '5000', 10), 100), 20000);
+
+    if (reset) {
+      state.offset = 0;
+      state.data   = { x:[], raw:[], kalman:{x:[],y:[]}, prob:{x:[],y:[]}, labels:[] };
+      state.leftAnchor = null; state.viewWidth = null;
+    }
+
+    const url = api.review(state.start, state.offset, state.limit);
+    const bundle = await getJSON(url);
+
+    // Attach run info if present
+    state.run = bundle.run || null;
+    if (state.run) {
+      kRun.textContent   = `${state.run.run_id}${state.run.confirmed ? ' ✓' : ''}`;
+      kTrain.textContent = `${state.start}…${state.start + 100000 - 1}`;
+      kTest.textContent  = `${state.start + 100000}…${state.start + 200000 - 1}`;
+    } else {
+      kRun.textContent = '–'; kTrain.textContent = '–'; kTest.textContent = '–';
+    }
+
+    // Parse and append
+    const parsed = parseBundle(bundle);
+    if (state.data.x.length === 0) {
+      state.data = { x:[], raw:[], kalman:{x:[],y:[]}, prob:{x:[],y:[]}, labels:[] };
+    }
+    appendData(state.data, parsed);
+
+    // If no zoom yet, set a sensible window
+    if (state.leftAnchor == null && parsed.x.length) {
+      const x0 = parsed.x[0];
+      const width = Math.max(500, Math.round(state.limit * 0.9));
+      state.leftAnchor = x0;
+      state.viewWidth  = width;
+    }
+
+    drawChart();
   }
-  document.getElementById("cbRaw").onchange =
-  document.getElementById("cbKalman").onchange =
-  document.getElementById("cbLabels").onchange =
-  document.getElementById("cbPreds").onchange =
-  document.getElementById("cbCloud").onchange = () => { setLegend(); refreshSeries(); };
 
-  document.getElementById("btnMore").onclick = async () => {
-    const remaining = TOTAL - (OFFSET + LIMIT);
-    if (remaining <= 0) return;
-    OFFSET += LIMIT;
-    LIMIT = CHUNK_LIMIT; // after first page, use larger increments
-    await loadChunk(OFFSET, Math.min(LIMIT, remaining));
-  };
+  async function doMore() {
+    // Keep current zoom: leftAnchor/viewWidth stay as-is
+    state.offset += state.limit;
+    await doLoad({ reset:false });
+  }
 
-  document.getElementById("btnJump").onclick = async () => {
-    const tid = parseInt(document.getElementById("jumpTick").value || "0");
-    if (!tid) return;
-    const rel = tid - START;
-    const needOffset = Math.floor(rel / LIMIT) * LIMIT;
-    if (needOffset >= 0 && needOffset < TOTAL && needOffset !== OFFSET) {
-      await loadChunk(needOffset, LIMIT);
-      OFFSET = needOffset;
+  async function doJump() {
+    const j = Math.max(1, parseInt(jumpInput.value, 10) || 1);
+    state.offset = Math.max(0, j - 1);  // left pin
+    // Reset data but preserve desired leftAnchor = jump id
+    state.data = { x:[], raw:[], kalman:{x:[],y:[]}, prob:{x:[],y:[]}, labels:[] };
+    state.leftAnchor = j;
+    // Keep current viewWidth if set; otherwise compute after load
+    await doLoad({ reset:false });
+  }
+
+  // -------------- confirm --------------
+  async function doConfirm() {
+    if (!state.run?.run_id) return;
+    try {
+      const r = await fetch(api.confirm(state.run.run_id), { method:'POST' });
+      if (!r.ok) throw new Error(await r.text());
+      kRun.textContent = `${state.run.run_id} ✓`;
+    } catch (e) {
+      alert('Confirm failed: ' + (e.message || e));
     }
-    chart.dispatchAction({type:'dataZoom', startValue: Math.max(START, tid-1000), endValue: tid+1000});
-  };
+  }
 
-  document.getElementById("btnConfirm").onclick = async () => {
-    let runId = RUN?.run_id;
-    if (!runId) {
-      const status = await (await fetch('/ml/status')).json();
-      runId = status?.[0]?.run_id;
-    }
-    if (!runId) { alert("No run found to confirm."); return; }
-    const res = await fetch(`/ml/confirm?run_id=${encodeURIComponent(runId)}`, {method:'POST'});
-    const j = await res.json();
-    if (j.ok) alert(`Confirmed ${runId}. Launch the next step when ready.`);
-    else alert(`Confirm failed: ${JSON.stringify(j)}`);
-  };
+  // -------------- wire UI --------------
+  btnLoad.addEventListener('click', () => doLoad({ reset:true }).catch(console.error));
+  btnMore.addEventListener('click', () => doMore().catch(console.error));
+  btnJump.addEventListener('click', () => doJump().catch(console.error));
+  btnConfirm.addEventListener('click', () => doConfirm().catch(console.error));
 
-  window.addEventListener('resize', () => chart.resize());
-  loadChunk(0, LIMIT);
+  chkRaw   .addEventListener('change', () => { state.traces.raw    = chkRaw.checked;   drawChart(); });
+  chkKalman.addEventListener('change', () => { state.traces.kalman = chkKalman.checked;drawChart(); });
+  chkProb  .addEventListener('change', () => { state.traces.prob   = chkProb.checked;  drawChart(); });
+  chkLabels.addEventListener('change', () => { state.traces.labels = chkLabels.checked;drawChart(); });
+
+  // -------------- first render --------------
+  // Autoload initial view
+  doLoad({ reset:true }).catch(err => { console.error(err); });
 })();

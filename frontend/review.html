@@ -1,34 +1,135 @@
-<!-- frontend/review.html -->
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>ML Review — 200k Window</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <link rel="stylesheet" href="./style.css"/>
   <style>
-    .toolbar { display:flex; gap:8px; align-items:center; padding:8px; background:#0e0e0e; color:#eee; border-bottom:1px solid #333; position:sticky; top:0; z-index:10;}
-    .toolbar input, .toolbar button, .toolbar label { font-size:14px; }
-    #chart { width:100%; height: calc(100vh - 60px); }
-    .spacer { flex:1; }
+    :root { --bg:#0d0f12; --panel:#151922; --text:#e6e6e6; --sub:#9aa4b2; --accent:#35a0ff; --ok:#52d273; --warn:#ffc857; --err:#ff6b6b; }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{
+      margin:0;background:var(--bg);color:var(--text);
+      font:14px/1.5 ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica Neue, Arial;
+    }
+    a{color:var(--accent);text-decoration:none}
+
+    /* Layout */
+    .layout{
+      display:grid;grid-template-columns:320px 1fr;gap:12px;height:100vh;overflow:hidden;
+    }
+    .col{padding:12px;overflow:hidden}
+    .left{background:var(--panel);border-right:1px solid #1f2633;overflow:auto}
+    .right{display:flex;flex-direction:column;gap:12px;overflow:hidden}
+
+    .menu a{margin-right:10px}
+
+    /* Cards & controls */
+    .card{background:#0f131b;border:1px solid #253044;border-radius:10px;padding:10px}
+    .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    label{color:var(--sub)}
+    select,input,textarea,button{background:#0f131b;color:var(--text);border:1px solid #253044;border-radius:8px}
+    input,select{height:36px;padding:0 10px}
+    button{height:36px;padding:0 12px;cursor:pointer}
+    button.primary{background:var(--accent);border-color:var(--accent);color:#061018}
+    button.ghost{background:transparent}
+    button.warn{background:var(--warn);border-color:var(--warn);color:#061018}
+    button.ok{background:var(--ok);border-color:var(--ok);color:#061018}
+    .switch{display:flex;align-items:center;gap:8px}
+    .pill{display:inline-flex;align-items:center;gap:6px;border:1px solid #2a3447;padding:6px 8px;border-radius:8px}
+
+    /* KPIs */
+    .kpi{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+    .kpi .item{background:#0f131b;border:1px solid #253044;border-radius:8px;padding:6px 8px}
+    .kpi .item .label{color:var(--sub);font-size:12px}
+
+    /* Right: editor + chart */
+    #queryCard{display:flex;flex-direction:column;gap:8px}
+    #chart{flex:1;min-height:0}
+    #chartCard{flex:1;min-height:0;display:flex;flex-direction:column}
+    #chartHeader{display:flex;gap:8px;align-items:center;justify-content:space-between}
+    #rangeInfo{color:var(--sub)}
+
+    /* Small inputs */
+    .num{width:120px}
   </style>
-  <script src="https://cdn.jsdelivr.net/npm/echarts@5"></script>
+  <!-- Plotly for WebGL charting (scattergl) -->
+  <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
 </head>
 <body>
-  <div class="toolbar">
-    <strong>Review 200k</strong>
-    <span id="rangeInfo"></span>
-    <div class="spacer"></div>
-    <label><input type="checkbox" id="cbRaw" checked/> Raw</label>
-    <label><input type="checkbox" id="cbKalman" checked/> Kalman</label>
-    <label><input type="checkbox" id="cbLabels" checked/> Labels</label>
-    <label><input type="checkbox" id="cbPreds" checked/> Predictions/Cloud</label>
-    <input type="number" id="jumpTick" placeholder="Tick ID" style="width:140px"/>
-    <button id="btnJump">Jump</button>
-    <button id="btnMore">Load More</button>
-    <button id="btnConfirm" style="background:#1b8; color:#000; font-weight:600;">Confirm & Continue</button>
+  <div class="layout">
+    <!-- LEFT: controls -->
+    <aside class="col left">
+      <div class="menu" style="margin-bottom:8px">
+        <a href="/tick.html">Tick View</a>
+        <a href="/ztick.html">ZTick View</a>
+        <a href="/htick.html">HTick View</a>
+        <a href="/sql.html">SQL</a>
+      </div>
+
+      <div class="card">
+        <div class="row">
+          <label for="startInput" style="width:80px">Train start</label>
+          <input id="startInput" class="num" type="number" min="1" value="1" />
+          <label for="limitInput" style="margin-left:8px">Chunk</label>
+          <input id="limitInput" class="num" type="number" min="100" max="20000" value="5000" />
+        </div>
+        <div class="row" style="margin-top:8px">
+          <button id="btnLoad" class="primary">Load</button>
+          <button id="btnMore" class="ghost">Load more →</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="row">
+          <label for="jumpInput" style="width:80px">Jump ID</label>
+          <input id="jumpInput" class="num" type="number" min="1" value="1" />
+          <button id="btnJump" class="ghost">Jump (pin left)</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="row switch">
+          <input id="chkRaw" type="checkbox" checked />
+          <label for="chkRaw">Raw</label>
+        </div>
+        <div class="row switch">
+          <input id="chkKalman" type="checkbox" checked />
+          <label for="chkKalman">Kalman</label>
+        </div>
+        <div class="row switch">
+          <input id="chkProb" type="checkbox" />
+          <label for="chkProb">p_up</label>
+        </div>
+        <div class="row switch">
+          <input id="chkLabels" type="checkbox" />
+          <label for="chkLabels">Labels</label>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <button id="btnConfirm" class="ok" title="Confirm current run if available">Confirm & Continue</button>
+        </div>
+      </div>
+
+      <div class="card kpi">
+        <div class="item"><div class="label">Loaded</div><div id="kLoaded">–</div></div>
+        <div class="item"><div class="label">Run</div><div id="kRun">–</div></div>
+        <div class="item"><div class="label">Train</div><div id="kTrain">–</div></div>
+        <div class="item"><div class="label">Test</div><div id="kTest">–</div></div>
+      </div>
+    </aside>
+
+    <!-- RIGHT: editor + chart -->
+    <main class="col right">
+      <div class="card" id="queryCard">
+        <div id="chartHeader">
+          <div class="pill" id="titleText">ML Review</div>
+          <div id="rangeInfo">–</div>
+        </div>
+        <div id="chart"></div>
+      </div>
+    </main>
   </div>
-  <div id="chart"></div>
-  <script src="./review-core.js"></script>
+
+  <script src="/review-core.js?v=1"></script>
 </body>
 </html>
