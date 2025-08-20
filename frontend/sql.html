@@ -1,49 +1,131 @@
+<!doctype html>
 <html lang="en">
-<!-- LEFT: table picker & info -->
-<div class="card" id="left">
-<div class="grid" style="gap:8px">
-<div class="row">
-<label for="tableSelect">Table</label>
-<select id="tableSelect" style="flex:1"></select>
-<button id="refreshTables" class="ghost" title="Reload tables">↻</button>
-</div>
-<div class="kpi">
-<div class="item"><div class="muted">Count</div><div id="tblCount">—</div></div>
-<div class="item"><div class="muted">Sort key</div><div id="tblSort">—</div></div>
-<div class="item"><div class="muted">Schema</div><div id="tblSchema">public</div></div>
-</div>
-<div class="row">
-<button id="btnDescribe" class="ghost">Describe (columns)</button>
-<button id="btnPreview" class="ghost">Preview 100</button>
-<div class="right muted" id="structureHint"></div>
-</div>
-<div id="structure" class="card" style="padding:0;display:none">
-<table id="structureTable"></table>
-</div>
-</div>
-</div>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SQL Console Admin</title>
+  <style>
+    :root { --bg:#0d0f12; --panel:#151922; --text:#e6e6e6; --sub:#9aa4b2; --accent:#35a0ff; --ok:#52d273; --warn:#ffc857; --err:#ff6b6b; }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{
+      margin:0;background:var(--bg);color:var(--text);
+      font:14px/1.5 ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica Neue, Arial;
+    }
+    a{color:var(--accent);text-decoration:none}
 
+    /* Layout */
+    .layout{
+      display:grid;grid-template-columns:320px 1fr;gap:12px;height:100vh;overflow:hidden;
+    }
+    .col{padding:12px;overflow:hidden}
+    .left{background:var(--panel);border-right:1px solid #1f2633;overflow:auto}
+    .right{display:flex;flex-direction:column;gap:12px;overflow:hidden}
 
-<!-- RIGHT: SQL runner -->
-<div class="card">
-<div class="row" style="margin-bottom:8px">
-<div class="pill">Template:
-<select id="templateSelect">
-<option value="auto">Auto (sorted)</option>
-<option value="count">SELECT COUNT(*)</option>
-<option value="all">SELECT *</option>
-</select>
-</div>
-<button id="run" class="primary">Run</button>
-<div id="status" class="status right muted"></div>
-</div>
-<textarea id="sqlBox"></textarea>
-<div id="result" style="margin-top:10px"></div>
-</div>
-</div>
-</div>
+    /* Cards & controls */
+    .card{background:#0f131b;border:1px solid #253044;border-radius:10px;padding:10px}
+    .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    label{color:var(--sub)}
+    select,input,textarea,button{background:#0f131b;color:var(--text);border:1px solid #253044;border-radius:8px}
+    select,input{height:36px;padding:0 10px}
+    textarea{width:100%;min-height:140px;max-height:30vh;padding:10px;resize:vertical}
+    button{height:36px;padding:0 12px;cursor:pointer}
+    button.primary{background:var(--accent);border-color:var(--accent);color:#061018}
+    button.danger{background:var(--err);border-color:var(--err);color:#fff}
+    .menu a{margin-right:10px}
 
+    /* KPIs */
+    .kpi{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+    .kpi .item{background:#0f131b;border:1px solid #253044;border-radius:8px;padding:6px 8px}
+    .kpi .item .label{color:var(--sub);font-size:12px}
+    .status{color:var(--sub);min-height:18px}
 
-<script src="/sql-core.js"></script>
+    /* Results panel */
+    #resultWrap{flex:1;min-height:0;overflow:auto}
+    .resultCard{background:#0f131b;border:1px solid #253044;border-radius:10px;padding:0;overflow:auto}
+    table{width:100%;border-collapse:separate;border-spacing:0;table-layout:fixed}
+    th,td{border-bottom:1px solid #232a3a;border-right:1px solid #232a3a;padding:6px 8px;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    th:last-child, td:last-child{border-right:none}
+    thead th{position:sticky;top:0;background:#101520;z-index:1}
+    .th-inner{display:flex;align-items:center;justify-content:space-between;gap:8px}
+    .col-resizer{
+      width:6px;flex:0 0 auto;cursor:col-resize;align-self:stretch;opacity:.35;background:transparent;
+    }
+    .col-resizer:hover{background:#233047}
+    .muted{color:var(--sub)}
+
+    /* Structure table */
+    #structure{padding:0;display:none;max-height:30vh;overflow:auto}
+    #structure table{table-layout:auto}
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <!-- LEFT: controls -->
+    <aside class="col left">
+      <div class="menu" style="margin-bottom:8px">
+        <a href="/tick.html">Tick View</a>
+        <a href="/ztick.html">ZTick View</a>
+        <a href="/htick.html">HTick View</a>
+      </div>
+
+      <div class="card">
+        <div class="row">
+          <label for="tableSelect">Table</label>
+          <select id="tableSelect" style="flex:1"></select>
+          <button id="refreshTables" title="Reload">↻</button>
+        </div>
+      </div>
+
+      <div class="card kpi" id="kpis">
+        <div class="item"><div class="label">Count</div><div id="tblCount">—</div></div>
+        <div class="item"><div class="label">Sort key</div><div id="tblSort">—</div></div>
+        <div class="item"><div class="label">Schema</div><div>public</div></div>
+        <div class="item"><div class="label">Status</div><div id="status">Ready.</div></div>
+      </div>
+
+      <div class="card">
+        <div class="row" style="margin-bottom:8px">
+          <button id="btnDescribe">Describe (columns)</button>
+          <button id="btnPreview">Preview</button>
+        </div>
+        <div class="row" style="margin-bottom:8px">
+          <label style="width:110px">Template</label>
+          <select id="templateSelect" style="flex:1">
+            <option value="auto">Auto (sorted)</option>
+            <option value="count">SELECT COUNT(*)</option>
+            <option value="all">SELECT *</option>
+          </select>
+        </div>
+        <div class="row" style="margin-bottom:8px">
+          <label style="width:110px">Preview size</label>
+          <input id="limitInput" type="number" min="1" max="10000" value="100" style="width:120px" />
+        </div>
+        <div class="row" style="margin-bottom:8px">
+          <label><input id="forceLimit" type="checkbox" checked /> Force LIMIT on SELECT</label>
+        </div>
+        <div class="row">
+          <button id="run" class="primary">Run</button>
+          <button id="abort" class="danger" title="Cancel current request">Abort</button>
+        </div>
+      </div>
+
+      <div class="card" id="structure">
+        <table id="structureTable"></table>
+      </div>
+    </aside>
+
+    <!-- RIGHT: SQL + results -->
+    <main class="col right">
+      <div class="card">
+        <textarea id="sqlBox" spellcheck="false"></textarea>
+      </div>
+      <div id="resultWrap" class="resultCard">
+        <div id="result" class="muted" style="padding:10px">No results yet.</div>
+      </div>
+    </main>
+  </div>
+
+  <script src="/sql-core.js?v=3"></script>
 </body>
 </html>
