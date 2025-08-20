@@ -16,7 +16,7 @@ import subprocess, sys, json
 from sqlalchemy import text as _sqltext
 from ml.db import get_engine, latest_prediction, review_slice
 from fastapi import Body
-
+from fastapi import APIRouter
 
 # ---------  App & CORS ---------
 app = FastAPI(title="cTrade backend")
