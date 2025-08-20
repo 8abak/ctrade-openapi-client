@@ -1,37 +1,49 @@
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8" />
-  <title>SQL Console Admin</title>
-  <link rel="stylesheet" href="style.css">
-</head>
-<body>
-  <div id="container">
-    <div id="left">
-      <h3>Menu</h3>
-      <div><a href="index.html">Tick View</a></div>
-      <div><a href="ztick.html">ZTick View</a></div>
-      <div><a href="htick.html">HTick View</a></div>
+<html lang="en">
+<!-- LEFT: table picker & info -->
+<div class="card" id="left">
+<div class="grid" style="gap:8px">
+<div class="row">
+<label for="tableSelect">Table</label>
+<select id="tableSelect" style="flex:1"></select>
+<button id="refreshTables" class="ghost" title="Reload tables">↻</button>
+</div>
+<div class="kpi">
+<div class="item"><div class="muted">Count</div><div id="tblCount">—</div></div>
+<div class="item"><div class="muted">Sort key</div><div id="tblSort">—</div></div>
+<div class="item"><div class="muted">Schema</div><div id="tblSchema">public</div></div>
+</div>
+<div class="row">
+<button id="btnDescribe" class="ghost">Describe (columns)</button>
+<button id="btnPreview" class="ghost">Preview 100</button>
+<div class="right muted" id="structureHint"></div>
+</div>
+<div id="structure" class="card" style="padding:0;display:none">
+<table id="structureTable"></table>
+</div>
+</div>
+</div>
 
-      <h3>SQL Console</h3>
-      <select id="tableSelect"></select><br />
-      <textarea id="sqlEditor" rows="4" cols="40">SELECT * FROM ticks ORDER BY timestamp DESC LIMIT 100</textarea><br />
-      <button id="runButton">Run</button>
 
-      <h3>Create New Label Table</h3>
-      <input id="labelTableName" placeholder="table name"><br />
-      <label><input type="radio" name="tableType" id="tickBasedRadio" checked> Tick-based</label><br />
-      <label><input type="radio" name="tableType" id="areaBasedRadio"> Time/Price-based</label><br />
-      <button id="createButton">Create Table</button>
+<!-- RIGHT: SQL runner -->
+<div class="card">
+<div class="row" style="margin-bottom:8px">
+<div class="pill">Template:
+<select id="templateSelect">
+<option value="auto">Auto (sorted)</option>
+<option value="count">SELECT COUNT(*)</option>
+<option value="all">SELECT *</option>
+</select>
+</div>
+<button id="run" class="primary">Run</button>
+<div id="status" class="status right muted"></div>
+</div>
+<textarea id="sqlBox"></textarea>
+<div id="result" style="margin-top:10px"></div>
+</div>
+</div>
+</div>
 
-      <div id="version"></div>
-    </div>
 
-    <div id="right">
-      <div id="resultBox">Loading...</div>
-    </div>
-  </div>
-
-  <script src="sql-core.js"></script>
+<script src="/sql-core.js"></script>
 </body>
 </html>
