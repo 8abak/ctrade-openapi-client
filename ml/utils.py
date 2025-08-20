@@ -94,6 +94,28 @@ def rolling_r2(y: np.ndarray, window: int=100) -> np.ndarray:
         out[i] = 1.0 - ss_res/ss_tot
     return out
 
+def ewstd(curr_val: float, prev_val: float, prev_std: float, alpha: float = 0.02) -> float:
+    """
+    Exponentially-weighted std *of price changes* (in the same units as price).
+    Causal update: only uses (prev_val, prev_std) and the new observation.
+      - curr_val: current raw price
+      - prev_val: previous raw price
+      - prev_std: previous EW standard deviation estimate (dollars)
+      - alpha:    smoothing factor in (0,1]; higher = more reactive
+    Returns the updated EW standard deviation (>= 0).
+    """
+    if prev_std is None or not math.isfinite(prev_std):
+        prev_std = 0.0
+    if prev_val is None or not math.isfinite(prev_val) or not math.isfinite(curr_val):
+        return prev_std  # ignore bad inputs, keep last estimate
+    diff = float(curr_val) - float(prev_val)
+    prev_var = prev_std * prev_std
+    var = (1.0 - alpha) * prev_var + alpha * (diff * diff)
+    if var < 0.0:
+        var = 0.0
+    return math.sqrt(var)
+
+
 def session_vwap_distance(ticks: np.ndarray, price: np.ndarray) -> np.ndarray:
     """
     Simple 'session VWAP' without volume: cumulative mean since local midnight.
