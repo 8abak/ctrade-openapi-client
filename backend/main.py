@@ -17,6 +17,8 @@ from sqlalchemy import text as _sqltext
 from ml.db import get_engine, latest_prediction, review_slice
 from fastapi import Body
 from fastapi import APIRouter
+from sqlalchemy.exc import ProgrammingError
+
 
 # ---------  App & CORS ---------
 app = FastAPI(title="cTrade backend")
@@ -195,6 +197,32 @@ def get_label_tables():
             WHERE column_name ILIKE 'tickid' AND table_schema='public'
         """)).all()
     return sorted({r[0] for r in rows})
+
+@app.get("/api/labels/schema")
+def labels_schema():
+    """
+    List tables that have a tickid column, and which columns are "plottable labels":
+    - Exclude: id, tickid, any columns starting with 'ts'
+    """
+    q = text("""
+        SELECT c.table_name, c.column_name
+        FROM information_schema.columns c
+        JOIN information_schema.columns k
+              ON k.table_name = c.table_name
+             AND k.column_name ILIKE 'tickid'
+        WHERE c.table_schema='public'
+        ORDER BY c.table_name, c.ordinal_position
+    """)
+    out = {}
+    with engine.connect() as conn:
+        for tname, cname in conn.execute(q):
+            if tname not in out:
+                out[tname] = {"table": tname, "labels": []}
+            low = cname.lower()
+            if low != "id" and low != "tickid" and not low.startswith("ts"):
+                out[tname]["labels"].append(cname)
+    # only keep tables that actually have label columns
+    return [v for v in out.values() if v["labels"]]
 
 
 # ---------- Version ----------
@@ -436,22 +464,80 @@ def ml_run_step(start: int = Query(...), block: int = Query(100000), algo: str =
         return JSONResponse(status_code=500, content={"error": "run_step timeout"})
 
 @app.get("/ml/review")
-def ml_review(start: int = Query(...),
-              offset: int = Query(0),
-              limit: int = Query(10000)):
-    # 200k window: train+test = [start .. start+199999]
-    total = 200000
-    bundle = review_slice(start, total, offset, limit)
-    # try to attach run_id if exists
-    eng = get_engine()
-    with eng.begin() as conn:
-        rr = conn.execute(_sqltext("""
-            SELECT run_id, confirmed, model_id FROM walk_runs 
-            WHERE train_start=:s AND train_end=:te LIMIT 1
-        """), {"s": start, "te": start+100000-1}).mappings().first()
-        if rr:
-            bundle["run"] = {"run_id": rr["run_id"], "confirmed": rr["confirmed"], "model_id": rr["model_id"]}
+def ml_review(
+    start: int = Query(...),            # training window start tickid
+    offset: int = Query(0, ge=0),
+    limit: int = Query(10000, ge=1, le=50000)
+):
+    """
+    Minimal review slice that depends ONLY on:
+      - ticks(id, timestamp, bid, ask, mid)
+      - kalman_layers(tickid, k1, k1_rts, k2_cv)
+    """
+    total = 200_000
+    a = start
+    b = start + total - 1
+
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT
+              t.id       AS tickid,
+              t.timestamp,
+              COALESCE(t.mid, (t.bid + t.ask)/2.0) AS mid,
+              kl.k1,
+              kl.k1_rts,
+              kl.k2_cv
+            FROM ticks t
+            LEFT JOIN kalman_layers kl ON kl.tickid = t.id
+            WHERE t.id BETWEEN :a AND :b
+            ORDER BY t.id ASC
+            OFFSET :off LIMIT :lim
+        """), {"a": a, "b": b, "off": offset, "lim": limit}).mappings().all()
+
+    # Build series arrays for the frontend
+    ticks = [{"x": r["tickid"], "y": float(r["mid"])} for r in rows if r["mid"] is not None]
+    k1     = [{"x": r["tickid"], "y": float(r["k1"])}     for r in rows if r["k1"] is not None]
+    k1_rts = [{"x": r["tickid"], "y": float(r["k1_rts"])} for r in rows if r["k1_rts"] is not None]
+    k2_cv  = [{"x": r["tickid"], "y": float(r["k2_cv"])}  for r in rows if r["k2_cv"] is not None]
+
+    bundle = {
+        "meta": {
+            "start": a,
+            "end": b,
+            "offset": offset,
+            "limit": limit,
+            "count": len(rows)
+        },
+        "series": {
+            "raw": ticks,
+            "k1": k1,
+            "k1_rts": k1_rts,
+            "k2_cv": k2_cv
+        }
+    }
+
+    # Attach run info only if table still exists (no crash if it doesn't)
+    try:
+        eng = get_engine()
+        with eng.begin() as conn:
+            rr = conn.execute(_sqltext("""
+                SELECT run_id, confirmed, model_id
+                FROM walk_runs
+                WHERE train_start=:s AND train_end=:te
+                LIMIT 1
+            """), {"s": start, "te": start+100000-1}).mappings().first()
+            if rr:
+                bundle["run"] = {
+                    "run_id": rr["run_id"],
+                    "confirmed": rr["confirmed"],
+                    "model_id": rr["model_id"]
+                }
+    except Exception:
+        # table likely dropped — ignore
+        pass
+
     return bundle
+
 
 @app.post("/ml/confirm")
 def ml_confirm(run_id: str = Query(...)):
