@@ -108,38 +108,69 @@ def read_df(conn, sql: str, params: tuple) -> pd.DataFrame:
         cols = [desc.name for desc in cur.description]
         return pd.DataFrame(rows, columns=cols)
 
-# ---------- SWING DETECTION & OUTCOME ----------
+# ---------- REPLACE detect_swings_from_kalman WITH THIS ----------
 @dataclass
 class SwingStart:
     tickid: int
     price: float  # kalman level at start
 
-def detect_swings_from_kalman(kalman_df: pd.DataFrame, reversal_usd: float = 1.0) -> List[SwingStart]:
-    x = kalman_df['tickid'].values
-    y = kalman_df['level'].values
-    if len(x) == 0:
+def detect_swings_from_kalman(kalman_df: pd.DataFrame,
+                              reversal_usd: float = 1.0) -> List[SwingStart]:
+    """
+    State-machine detector: maintain an extreme for the current leg.
+    - In an up leg: update max; reverse if price <= max - reversal_usd -> start a DOWN swing.
+    - In a down leg: update min; reverse if price >= min + reversal_usd -> start an UP swing.
+    Always seed the first tick as a swing start for anchoring.
+    """
+    if kalman_df.empty:
         return []
-    swings: List[SwingStart] = []
-    last_ext = float(y[0])
-    direction = 0  # 0 unknown, +1 up, -1 down
+
+    x = kalman_df['tickid'].to_numpy()
+    y = kalman_df['level'].to_numpy(dtype=float)
+
+    swings: List[SwingStart] = [SwingStart(int(x[0]), float(y[0]))]
+
+    # Start with unknown direction; initialize extreme to first price
+    direction = 0           # 0 unknown, +1 up leg, -1 down leg
+    extreme = y[0]          # current leg extreme (max if up, min if down)
 
     for i in range(1, len(y)):
-        if direction >= 0:
-            if y[i] - last_ext >= 0:
-                last_ext = float(y[i]); direction = +1
-            elif (last_ext - y[i]) >= reversal_usd:
-                swings.append(SwingStart(int(x[i]), float(y[i])))
-                last_ext = float(y[i]); direction = -1
-        if direction <= 0:
-            if (last_ext - y[i]) <= 0:
-                last_ext = float(y[i]); direction = -1 if direction != 0 else -1
-            elif (y[i] - last_ext) >= reversal_usd:
-                swings.append(SwingStart(int(x[i]), float(y[i])))
-                last_ext = float(y[i]); direction = +1
+        p = y[i]
 
-    if not swings or swings[0].tickid != int(x[0]):
-        swings.insert(0, SwingStart(int(x[0]), float(y[0])))
+        if direction == 0:
+            # decide initial leg when we first move by >= reversal_usd
+            if p >= extreme + reversal_usd:
+                direction = +1
+                extreme = p  # new max
+            elif p <= extreme - reversal_usd:
+                direction = -1
+                extreme = p  # new min
+            else:
+                # still undecided, keep tracking the more extreme side
+                extreme = max(extreme, p) if p > extreme else min(extreme, p)
+                continue
+
+        if direction == +1:
+            # Up leg: extend max; look for down reversal
+            if p > extreme:
+                extreme = p
+            elif p <= extreme - reversal_usd:
+                # down reversal -> start new swing here
+                swings.append(SwingStart(int(x[i]), float(p)))
+                direction = -1
+                extreme = p  # start tracking min
+        else:
+            # Down leg: extend min; look for up reversal
+            if p < extreme:
+                extreme = p
+            elif p >= extreme + reversal_usd:
+                # up reversal -> start new swing here
+                swings.append(SwingStart(int(x[i]), float(p)))
+                direction = +1
+                extreme = p  # start tracking max
+
     return swings
+
 
 def resolve_outcome(price_series: pd.Series,
                     start_tick: int,
