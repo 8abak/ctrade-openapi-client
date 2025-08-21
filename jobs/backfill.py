@@ -25,6 +25,8 @@ import argparse
 import numpy as np
 import pandas as pd
 from sqlalchemy import create_engine, text
+from urllib.parse import quote_plus
+from sqlalchemy import create_engine
 
 # ---- Config ----
 PG_DSN = os.environ.get("PG_DSN", "postgresql+psycopg2://postgres@localhost/ctrade")
@@ -32,12 +34,20 @@ REVERSAL_USD = float(os.environ.get("REVERSAL_USD", "1.0"))
 MAX_TICKS = int(os.environ.get("MAX_TICKS", "15000"))
 BATCH_SWINGS = int(os.environ.get("BATCH_SWINGS", "200"))
 BATCH_SLEEP_MS = int(os.environ.get("BATCH_SLEEP_MS", "150"))
+DB_HOST = "127.0.0.1"
+DB_PORT = "5432"
+DB_NAME = "ctrade"
+DB_USER = "postgres"
+DB_PASSWORD = "babak33044"
 
 THRESHOLDS = [2, 3, 4, 5]
 
 # ---- Imports from earlier modules (inline copies to keep this job self-contained) ----
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
+
+PG_DSN = f"postgresql+psycopg2://{DB_USER}:{quote_plus(DB_PASSWORD)}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+
 
 @dataclass
 class SwingStart:
