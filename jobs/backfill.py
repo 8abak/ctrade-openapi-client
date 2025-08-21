@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS move_labels (
   ts_start         TIMESTAMPTZ NOT NULL DEFAULT now(),
   price_start      DOUBLE PRECISION NOT NULL,
   threshold_usd    INTEGER     NOT NULL,
-  dir_guess        CHAR(2),
+  dir_guess        CHAR(2) NOT NULL DEFAULT 'nt',
   p_up             DOUBLE PRECISION,
   run_id           TEXT,
   tickid_resolve   BIGINT,
@@ -79,7 +79,6 @@ CREATE TABLE IF NOT EXISTS predictions (
 
 # ---------- DB UTILS ----------
 def get_conn():
-    # same style as tickCollectorToDB.py
     return psycopg2.connect(
         dbname=DB_NAME,
         user=DB_USER,
@@ -92,10 +91,15 @@ def ensure_tables(conn):
     with conn.cursor() as cur:
         cur.execute(DDL_MOVE_LABELS)
         cur.execute(DDL_PREDICTIONS)
+        # In case an older move_labels exists with NOT NULL but no default for dir_guess,
+        # make it safe by ensuring a default (keeps NOT NULL intact).
+        try:
+            cur.execute("ALTER TABLE move_labels ALTER COLUMN dir_guess SET DEFAULT 'nt';")
+        except Exception:
+            pass
     conn.commit()
 
 def read_df(conn, sql: str, params: tuple) -> pd.DataFrame:
-    # plain psycopg2 -> pandas
     with conn.cursor(cursor_factory=pgx.DictCursor) as cur:
         cur.execute(sql, params)
         rows = cur.fetchall()
@@ -111,10 +115,6 @@ class SwingStart:
     price: float  # kalman level at start
 
 def detect_swings_from_kalman(kalman_df: pd.DataFrame, reversal_usd: float = 1.0) -> List[SwingStart]:
-    """
-    kalman_df columns: ['tickid','level'] sorted by tickid.
-    New swing starts when price reverses by >= reversal_usd from the last extreme.
-    """
     x = kalman_df['tickid'].values
     y = kalman_df['level'].values
     if len(x) == 0:
@@ -146,11 +146,6 @@ def resolve_outcome(price_series: pd.Series,
                     start_price: float,
                     threshold_usd: int,
                     max_ticks: int = 15000) -> Tuple[str, int, float, Optional[int]]:
-    """
-    First-touch rule: from start_price, outcome is 'up' if first hits +T,
-    'dn' if first hits -T, 'nt' if neither within max_ticks.
-    Returns (outcome, time_to_outcome, price_at_resolve, tickid_resolve).
-    """
     up_t = start_price + threshold_usd
     dn_t = start_price - threshold_usd
     future = price_series.loc[start_tick:]
@@ -174,15 +169,10 @@ def resolve_outcome(price_series: pd.Series,
     else:
         return ('nt', int(view.index[-1] - start_tick), float(view.iloc[-1]), None)
 
-# ---------- FEATURES (compact, no leakage) ----------
+# ---------- FEATURES ----------
 def build_event_features(kalman_df: pd.DataFrame,
                          raw_df: pd.DataFrame,
                          start_tickids: List[int]) -> pd.DataFrame:
-    """
-    kalman_df: ['tickid','level']  sorted
-    raw_df:    ['tickid','mid']    sorted  (falls back to kalman as mid if empty)
-    Returns one row per start tick with features and 'tickid' column.
-    """
     k = kalman_df.set_index('tickid').sort_index()
     if 'mid' in raw_df.columns and not raw_df.empty:
         r = raw_df.set_index('tickid').sort_index()
@@ -205,7 +195,7 @@ def build_event_features(kalman_df: pd.DataFrame,
     df.reset_index(inplace=True)
     return df
 
-# ---------- Tiny multinomial logistic (fast, dependency-light) ----------
+# ---------- Tiny multinomial logistic ----------
 class TinyLogit:
     def __init__(self, n_features: int, classes=('dn','nt','up'), lr=0.05, l2=1e-6):
         self.classes = list(classes)
@@ -213,12 +203,10 @@ class TinyLogit:
         self.W = np.zeros((len(self.classes), n_features), dtype=np.float64)
         self.b = np.zeros(len(self.classes), dtype=np.float64)
         self.cls_idx = {c:i for i,c in enumerate(self.classes)}
-
     def _softmax(self, Z):
         Z = Z - Z.max(axis=1, keepdims=True)
         e = np.exp(Z)
         return e / np.clip(e.sum(axis=1, keepdims=True), 1e-12, None)
-
     def partial_fit(self, X: np.ndarray, y_labels: List[str], epochs=5, batch=512):
         y_idx = np.array([self.cls_idx.get(c,1) for c in y_labels], dtype=np.int64)  # default 'nt'
         N = X.shape[0]
@@ -234,7 +222,6 @@ class TinyLogit:
                 gb = G.sum(axis=0)
                 self.W -= self.lr * gW
                 self.b -= self.lr * gb
-
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         logits = X @ self.W.T + self.b
         return self._softmax(logits)
@@ -250,7 +237,6 @@ def fetch_kalman(conn, start: int, end: int) -> pd.DataFrame:
     return read_df(conn, sql, (start, end))
 
 def fetch_raw_mid(conn, start: int, end: int) -> pd.DataFrame:
-    # ticks.id is our tickid, ticks.mid for volatility features
     sql = """
         SELECT id AS tickid, mid
         FROM public.ticks
@@ -264,10 +250,6 @@ def fetch_raw_mid(conn, start: int, end: int) -> pd.DataFrame:
 
 # ---------- BACKFILL (throttled) ----------
 def backfill_labels(conn, kdf: pd.DataFrame) -> Tuple[int,int]:
-    """
-    Detect swings and write outcomes for thresholds. Batched with sleeps.
-    Returns (num_swings, rows_written)
-    """
     swings = detect_swings_from_kalman(kdf, REVERSAL_USD)
     k_series = kdf.set_index('tickid')['level']
 
@@ -278,7 +260,8 @@ def backfill_labels(conn, kdf: pd.DataFrame) -> Tuple[int,int]:
             outc, tto, pres, tres = resolve_outcome(k_series, sw.tickid, sw.price, T, MAX_TICKS)
             rows.append({
                 't0': sw.tickid, 'p0': sw.price, 'T': T,
-                't1': tres, 'p1': pres, 'outc': outc, 'tto': tto
+                't1': tres, 'p1': pres, 'outc': outc, 'tto': tto,
+                'dir': 'nt'  # <-- ensure NOT NULL constraint satisfied
             })
         if len(rows) >= BATCH_SWINGS * len(THRESHOLDS):
             _insert_labels(conn, rows); written += len(rows); rows.clear()
@@ -293,7 +276,8 @@ def _insert_labels(conn, rows: List[dict]):
         (tickid_start, price_start, threshold_usd,
          dir_guess, p_up, tickid_resolve, price_resolve, outcome, time_to_outcome, is_open)
       VALUES
-        (%(t0)s, %(p0)s, %(T)s, NULL, NULL, %(t1)s, %(p1)s, %(outc)s, %(tto)s, FALSE)
+        (%(t0)s, %(p0)s, %(T)s,
+         %(dir)s, NULL, %(t1)s, %(p1)s, %(outc)s, %(tto)s, FALSE)
       ON CONFLICT DO NOTHING
     """
     with conn.cursor() as cur:
@@ -302,7 +286,6 @@ def _insert_labels(conn, rows: List[dict]):
 
 def bootstrap_train_and_predict(conn, kdf: pd.DataFrame, rdf: pd.DataFrame,
                                 start: int, end: int) -> Tuple[int,int]:
-    # resolved (already labeled by backfill_labels)
     sql = """
       SELECT tickid_start, threshold_usd, outcome
       FROM move_labels
