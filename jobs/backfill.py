@@ -1,55 +1,52 @@
-# jobs/backfill.py
+#!/usr/bin/env python3
 """
-Backfill labels & p_up for a tick range (throttled).
+Backfill labels & p_up for a tick range (throttled) using the SAME DB connection
+style as tickCollectorToDB.py (plain psycopg2 -> db 'trading', user 'babak').
+
 - Detect swing starts from Kalman (dollar reversal)
 - First-touch outcomes for thresholds T in {2,3,4,5}
-- Train a tiny multinomial logistic per T (fast)
-- Write p_up at swing starts (and into `predictions` for the Review UI)
+- Tiny multinomial logistic per T (dependency-light) to score p_up at starts
+- Writes into:
+    - move_labels(tickid_start, price_start, threshold_usd, p_up, dir_guess, outcome, ...)
+    - predictions(tickid, p_up, model_id)
 
-ENV (optional overrides):
-  PG_DSN                 e.g. postgresql+psycopg2://user:pass@host:5432/db
-  REVERSAL_USD           default 1.0 (swing start reversal threshold on kalman)
-  MAX_TICKS              default 15000 (timeout for 'nt')
-  BATCH_SWINGS           default 200   (commit every N swing starts)
-  BATCH_SLEEP_MS         default 150   (sleep this many ms between batches)
-
-Usage:
+Run:
   python -m jobs.backfill --start 1 --end 200000
+
+Optional ENV to tweak throttling:
+  REVERSAL_USD   (default 1.0)
+  MAX_TICKS      (default 15000)
+  BATCH_SWINGS   (default 200)
+  BATCH_SLEEP_MS (default 150)
 """
 
 import os
 import time
-import math
 import argparse
-import numpy as np
-import pandas as pd
+import math
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
-from urllib.parse import quote_plus
-from sqlalchemy import create_engine, text
 
-# ------------------ CONFIG (hardcoded DB like tickCollectortoDB.py) ------------------
-DB_HOST = "127.0.0.1"
-DB_PORT = "5432"
-DB_NAME = "ctrade"
-DB_USER = "postgres"
-DB_PASSWORD = "babak33044"  # <— your password here
+import numpy as np
+import pandas as pd
+import psycopg2
+import psycopg2.extras as pgx
 
-# Build DSN with password embedded (URL-escaped). Allow PG_DSN env to override.
-PG_DSN = os.getenv(
-    "PG_DSN",
-    f"postgresql+psycopg2://{DB_USER}:{quote_plus(DB_PASSWORD)}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-)
+# ---------- DB CONFIG: SAME AS tickCollectorToDB.py ----------
+DB_NAME = "trading"
+DB_USER = "babak"
+DB_PASS = "babak33044"
+DB_HOST = "localhost"
+DB_PORT = 5432
 
-# Throttling / labeling defaults (overridable via env)
+# ---------- TUNABLES ----------
 REVERSAL_USD   = float(os.environ.get("REVERSAL_USD", "1.0"))
 MAX_TICKS      = int(os.environ.get("MAX_TICKS", "15000"))
 BATCH_SWINGS   = int(os.environ.get("BATCH_SWINGS", "200"))
 BATCH_SLEEP_MS = int(os.environ.get("BATCH_SLEEP_MS", "150"))
+THRESHOLDS     = [2, 3, 4, 5]
 
-THRESHOLDS = [2, 3, 4, 5]
-
-# ------------------ TABLE DDL ------------------
+# ---------- TABLE DDL ----------
 DDL_MOVE_LABELS = """
 CREATE TABLE IF NOT EXISTS move_labels (
   id               BIGSERIAL PRIMARY KEY,
@@ -81,43 +78,68 @@ CREATE TABLE IF NOT EXISTS predictions (
 );
 """
 
-# ------------------ SWING DETECTION & OUTCOME ------------------
+# ---------- DB UTILS ----------
+def get_conn():
+    # same style as tickCollectorToDB.py
+    return psycopg2.connect(
+        dbname=DB_NAME,
+        user=DB_USER,
+        password=DB_PASS,
+        host=DB_HOST,
+        port=DB_PORT,
+    )
+
+def ensure_tables(conn):
+    with conn.cursor() as cur:
+        cur.execute(DDL_MOVE_LABELS)
+        cur.execute(DDL_PREDICTIONS)
+    conn.commit()
+
+def read_df(conn, sql: str, params: tuple) -> pd.DataFrame:
+    # plain psycopg2 -> pandas
+    with conn.cursor(cursor_factory=pgx.DictCursor) as cur:
+        cur.execute(sql, params)
+        rows = cur.fetchall()
+        if not rows:
+            return pd.DataFrame()
+        cols = [desc.name for desc in cur.description]
+        return pd.DataFrame(rows, columns=cols)
+
+# ---------- SWING DETECTION & OUTCOME ----------
 @dataclass
 class SwingStart:
     tickid: int
     price: float  # kalman level at start
 
-def detect_swings_from_kalman(kalman_df: pd.DataFrame,
-                              reversal_usd: float = 1.0) -> List[SwingStart]:
+def detect_swings_from_kalman(kalman_df: pd.DataFrame, reversal_usd: float = 1.0) -> List[SwingStart]:
     """
-    Detect swing starts on Kalman line via dollar reversal threshold.
-    kalman_df columns: ['tickid','level'] sorted by tickid ascending.
+    kalman_df columns: ['tickid','level'] sorted by tickid.
+    New swing starts when price reverses by >= reversal_usd from the last extreme.
     """
     x = kalman_df['tickid'].values
     y = kalman_df['level'].values
     if len(x) == 0:
         return []
     swings: List[SwingStart] = []
-    last_ext_price = float(y[0])
-    direction = 0  # 0 unknown, +1 up leg, -1 down leg
+    last_ext = float(y[0])
+    direction = 0  # 0 unknown, +1 up, -1 down
 
     for i in range(1, len(y)):
         if direction >= 0:
-            if y[i] - last_ext_price >= 0:
-                last_ext_price = float(y[i]); direction = +1
-            elif (last_ext_price - y[i]) >= reversal_usd:
-                swings.append(SwingStart(tickid=int(x[i]), price=float(y[i])))
-                last_ext_price = float(y[i]); direction = -1
+            if y[i] - last_ext >= 0:
+                last_ext = float(y[i]); direction = +1
+            elif (last_ext - y[i]) >= reversal_usd:
+                swings.append(SwingStart(int(x[i]), float(y[i])))
+                last_ext = float(y[i]); direction = -1
         if direction <= 0:
-            if (last_ext_price - y[i]) <= 0:
-                last_ext_price = float(y[i]); direction = -1 if direction != 0 else -1
-            elif (y[i] - last_ext_price) >= reversal_usd:
-                swings.append(SwingStart(tickid=int(x[i]), price=float(y[i])))
-                last_ext_price = float(y[i]); direction = +1
+            if (last_ext - y[i]) <= 0:
+                last_ext = float(y[i]); direction = -1 if direction != 0 else -1
+            elif (y[i] - last_ext) >= reversal_usd:
+                swings.append(SwingStart(int(x[i]), float(y[i])))
+                last_ext = float(y[i]); direction = +1
 
-    # Ensure first bar is a swing start (optional but useful)
     if not swings or swings[0].tickid != int(x[0]):
-        swings.insert(0, SwingStart(tickid=int(x[0]), price=float(y[0])))
+        swings.insert(0, SwingStart(int(x[0]), float(y[0])))
     return swings
 
 def resolve_outcome(price_series: pd.Series,
@@ -126,18 +148,18 @@ def resolve_outcome(price_series: pd.Series,
                     threshold_usd: int,
                     max_ticks: int = 15000) -> Tuple[str, int, float, Optional[int]]:
     """
-    First-touch outcome from start: 'up' if price first >= start+T, 'dn' if first <= start-T,
-    'nt' if neither within max_ticks. Returns (outcome, time_to_outcome, price_at_resolve, tickid_resolve).
-    price_series must be indexed by tickid ascending (kalman level).
+    First-touch rule: from start_price, outcome is 'up' if first hits +T,
+    'dn' if first hits -T, 'nt' if neither within max_ticks.
+    Returns (outcome, time_to_outcome, price_at_resolve, tickid_resolve).
     """
-    up_target = start_price + threshold_usd
-    dn_target = start_price - threshold_usd
+    up_t = start_price + threshold_usd
+    dn_t = start_price - threshold_usd
     future = price_series.loc[start_tick:]
     if len(future) == 0:
         return ('nt', 0, float(start_price), None)
     view = future.iloc[:max_ticks]
-    touch_up = view[view >= up_target]
-    touch_dn = view[view <= dn_target]
+    touch_up = view[view >= up_t]
+    touch_dn = view[view <= dn_t]
     if not touch_up.empty and not touch_dn.empty:
         t_up = touch_up.index[0]; t_dn = touch_dn.index[0]
         if t_up < t_dn:
@@ -153,22 +175,22 @@ def resolve_outcome(price_series: pd.Series,
     else:
         return ('nt', int(view.index[-1] - start_tick), float(view.iloc[-1]), None)
 
-# ------------------ FEATURES (compact, no leakage) ------------------
+# ---------- FEATURES (compact, no leakage) ----------
 def build_event_features(kalman_df: pd.DataFrame,
                          raw_df: pd.DataFrame,
                          start_tickids: List[int]) -> pd.DataFrame:
     """
-    kalman_df: ['tickid','level']  (sorted)
-    raw_df:    ['tickid','mid']    (sorted) — if missing, falls back to kalman as 'mid'
+    kalman_df: ['tickid','level']  sorted
+    raw_df:    ['tickid','mid']    sorted  (falls back to kalman as mid if empty)
     Returns one row per start tick with features and 'tickid' column.
     """
     k = kalman_df.set_index('tickid').sort_index()
-    if 'mid' in raw_df.columns:
+    if 'mid' in raw_df.columns and not raw_df.empty:
         r = raw_df.set_index('tickid').sort_index()
     else:
         r = k.rename(columns={'level':'mid'})
-    df = pd.DataFrame({'tickid': start_tickids}).set_index('tickid')
 
+    df = pd.DataFrame({'tickid': start_tickids}).set_index('tickid')
     kk = k['level']; rr = r['mid']
 
     for w in (1, 5, 20, 50):
@@ -184,14 +206,14 @@ def build_event_features(kalman_df: pd.DataFrame,
     df.reset_index(inplace=True)
     return df
 
-# ------------------ Tiny multinomial logistic (fast, dependency-light) ------------------
+# ---------- Tiny multinomial logistic (fast, dependency-light) ----------
 class TinyLogit:
     def __init__(self, n_features: int, classes=('dn','nt','up'), lr=0.05, l2=1e-6):
         self.classes = list(classes)
         self.lr = lr; self.l2 = l2
         self.W = np.zeros((len(self.classes), n_features), dtype=np.float64)
         self.b = np.zeros(len(self.classes), dtype=np.float64)
-        self.class_to_idx = {c:i for i,c in enumerate(self.classes)}
+        self.cls_idx = {c:i for i,c in enumerate(self.classes)}
 
     def _softmax(self, Z):
         Z = Z - Z.max(axis=1, keepdims=True)
@@ -199,18 +221,18 @@ class TinyLogit:
         return e / np.clip(e.sum(axis=1, keepdims=True), 1e-12, None)
 
     def partial_fit(self, X: np.ndarray, y_labels: List[str], epochs=5, batch=512):
-        y_idx = np.array([self.class_to_idx.get(c, 1) for c in y_labels], dtype=np.int64)  # default to 'nt'
+        y_idx = np.array([self.cls_idx.get(c,1) for c in y_labels], dtype=np.int64)  # default 'nt'
         N = X.shape[0]
         for _ in range(epochs):
             for s in range(0, N, batch):
                 e = min(N, s+batch)
                 xb = X[s:e]
                 logits = xb @ self.W.T + self.b
-                probs = self._softmax(logits)
-                Y = np.zeros_like(probs); Y[np.arange(e-s), y_idx[s:e]] = 1.0
-                grad = (probs - Y) / max(1, (e - s))
-                gW = grad.T @ xb + self.l2 * self.W
-                gb = grad.sum(axis=0)
+                P = self._softmax(logits)
+                Y = np.zeros_like(P); Y[np.arange(e-s), y_idx[s:e]] = 1.0
+                G = (P - Y) / max(1, (e - s))
+                gW = G.T @ xb + self.l2*self.W
+                gb = G.sum(axis=0)
                 self.W -= self.lr * gW
                 self.b -= self.lr * gb
 
@@ -218,41 +240,31 @@ class TinyLogit:
         logits = X @ self.W.T + self.b
         return self._softmax(logits)
 
-# ------------------ DB helpers ------------------
-def ensure_tables(engine):
-    with engine.begin() as conn:
-        for stmt in filter(None, DDL_MOVE_LABELS.split(";")):
-            s = stmt.strip()
-            if s: conn.execute(text(s))
-        for stmt in filter(None, DDL_PREDICTIONS.split(";")):
-            s = stmt.strip()
-            if s: conn.execute(text(s))
-
-def fetch_kalman(engine, start: int, end: int) -> pd.DataFrame:
-    sql = text("""
+# ---------- DATA FETCH ----------
+def fetch_kalman(conn, start: int, end: int) -> pd.DataFrame:
+    sql = """
         SELECT tickid, level
-        FROM kalman_states
-        WHERE tickid BETWEEN :a AND :b
+        FROM public.kalman_states
+        WHERE tickid BETWEEN %s AND %s
         ORDER BY tickid
-    """)
-    return pd.read_sql(sql, engine, params={'a':start, 'b':end})
+    """
+    return read_df(conn, sql, (start, end))
 
-def fetch_raw_mid(engine, start: int, end: int) -> pd.DataFrame:
-    # If your mid lives elsewhere, adapt this query.
-    sql = text("""
+def fetch_raw_mid(conn, start: int, end: int) -> pd.DataFrame:
+    # ticks.id is our tickid, ticks.mid for volatility features
+    sql = """
         SELECT id AS tickid, mid
-        FROM ticks
-        WHERE id BETWEEN :a AND :b
+        FROM public.ticks
+        WHERE id BETWEEN %s AND %s
         ORDER BY id
-    """)
+    """
     try:
-        return pd.read_sql(sql, engine, params={'a':start, 'b':end})
+        return read_df(conn, sql, (start, end))
     except Exception:
-        # fallback: use empty; features builder will substitute kalman
         return pd.DataFrame(columns=['tickid','mid'])
 
-# ------------------ Backfill (throttled) ------------------
-def backfill_labels(engine, kdf: pd.DataFrame):
+# ---------- BACKFILL (throttled) ----------
+def backfill_labels(conn, kdf: pd.DataFrame) -> Tuple[int,int]:
     """
     Detect swings and write outcomes for thresholds. Batched with sleeps.
     Returns (num_swings, rows_written)
@@ -260,112 +272,114 @@ def backfill_labels(engine, kdf: pd.DataFrame):
     swings = detect_swings_from_kalman(kdf, REVERSAL_USD)
     k_series = kdf.set_index('tickid')['level']
 
-    insert_sql = text("""
+    rows = []
+    written = 0
+    for sw in swings:
+        for T in THRESHOLDS:
+            outc, tto, pres, tres = resolve_outcome(k_series, sw.tickid, sw.price, T, MAX_TICKS)
+            rows.append({
+                't0': sw.tickid, 'p0': sw.price, 'T': T,
+                't1': tres, 'p1': pres, 'outc': outc, 'tto': tto
+            })
+        if len(rows) >= BATCH_SWINGS * len(THRESHOLDS):
+            _insert_labels(conn, rows); written += len(rows); rows.clear()
+            time.sleep(BATCH_SLEEP_MS/1000.0)
+    if rows:
+        _insert_labels(conn, rows); written += len(rows)
+    return len(swings), written
+
+def _insert_labels(conn, rows: List[dict]):
+    sql = """
       INSERT INTO move_labels
         (tickid_start, price_start, threshold_usd,
          dir_guess, p_up, tickid_resolve, price_resolve, outcome, time_to_outcome, is_open)
       VALUES
-        (:t0, :p0, :T, NULL, NULL, :t1, :p1, :outc, :tto, FALSE)
+        (%(t0)s, %(p0)s, %(T)s, NULL, NULL, %(t1)s, %(p1)s, %(outc)s, %(tto)s, FALSE)
       ON CONFLICT DO NOTHING
-    """)
-
-    batch = []
-    written = 0
-    with engine.begin() as conn:
-        for i, sw in enumerate(swings):
-            for T in THRESHOLDS:
-                outc, tto, pres, tres = resolve_outcome(k_series, sw.tickid, sw.price, T, MAX_TICKS)
-                batch.append(dict(t0=sw.tickid, p0=sw.price, T=T,
-                                  t1=tres, p1=pres, outc=outc, tto=tto))
-            if len(batch) >= BATCH_SWINGS * len(THRESHOLDS):
-                conn.execute(insert_sql, batch)
-                written += len(batch)
-                batch.clear()
-                time.sleep(BATCH_SLEEP_MS / 1000.0)
-        if batch:
-            conn.execute(insert_sql, batch)
-            written += len(batch)
-    return len(swings), written
-
-def bootstrap_train_and_predict(engine, kdf: pd.DataFrame, rdf: pd.DataFrame,
-                                start: int, end: int):
     """
-    Train tiny multinomial logistic per T on resolved outcomes; write p_up at starts.
-    Returns (labels_updated, predictions_rows)
-    """
-    all_starts = pd.read_sql(text("""
+    with conn.cursor() as cur:
+        pgx.execute_batch(cur, sql, rows, page_size=500)
+    conn.commit()
+
+def bootstrap_train_and_predict(conn, kdf: pd.DataFrame, rdf: pd.DataFrame,
+                                start: int, end: int) -> Tuple[int,int]:
+    # resolved (already labeled by backfill_labels)
+    sql = """
       SELECT tickid_start, threshold_usd, outcome
       FROM move_labels
-      WHERE tickid_start BETWEEN :a AND :b AND is_open=FALSE
+      WHERE tickid_start BETWEEN %s AND %s AND is_open=FALSE
       ORDER BY tickid_start
-    """), engine, params={'a':start, 'b':end})
-
+    """
+    all_starts = read_df(conn, sql, (start, end))
     if all_starts.empty:
         return 0, 0
 
     feats_all = build_event_features(kdf, rdf, sorted(all_starts['tickid_start'].unique()))
-    X_full = feats_all.set_index('tickid')  # keep tickid index for join
+    X_full = feats_all.set_index('tickid')
 
-    wrote_preds = 0
     updated_labels = 0
+    wrote_preds = 0
 
     for T in THRESHOLDS:
-        part = all_starts[all_starts['threshold_usd'] == T].copy()
-        if part.empty:
-            continue
+        part = all_starts[all_starts['threshold_usd'] == T]
+        if part.empty: continue
+
         Xi = X_full.loc[part['tickid_start'].values].values.astype(np.float64)
         yi = part['outcome'].astype(str).tolist()
 
         model = TinyLogit(n_features=Xi.shape[1], classes=('dn','nt','up'), lr=0.05, l2=1e-6)
         model.partial_fit(Xi, yi, epochs=5, batch=512)
 
-        P = model.predict_proba(Xi)  # columns order ('dn','nt','up')
+        P = model.predict_proba(Xi)   # ('dn','nt','up')
         p_up = P[:, 2]
 
-        rows = []
+        upd_rows = []
         pred_rows = []
         for tick, p in zip(part['tickid_start'].values, p_up):
-            rows.append({'p': float(p), 'dir': 'up' if p >= 0.5 else 'dn',
-                         't': int(tick), 'T': int(T)})
+            upd_rows.append({'p': float(p), 'dir': 'up' if p >= 0.5 else 'dn',
+                             't': int(tick), 'T': int(T)})
             pred_rows.append({'t': int(tick), 'p': float(p), 'm': f"move_{T}"})
 
-        with engine.begin() as conn:
-            conn.execute(text("""
+        with conn.cursor() as cur:
+            pgx.execute_batch(cur, """
               UPDATE move_labels
-              SET p_up=:p, dir_guess=:dir
-              WHERE tickid_start=:t AND threshold_usd=:T
-            """), rows)
-            updated_labels += len(rows)
-
-            conn.execute(text("""
+                 SET p_up=%(p)s, dir_guess=%(dir)s
+               WHERE tickid_start=%(t)s AND threshold_usd=%(T)s
+            """, upd_rows, page_size=500)
+            pgx.execute_batch(cur, """
               INSERT INTO predictions (tickid, p_up, model_id)
-              VALUES (:t, :p, :m)
-              ON CONFLICT (tickid) DO UPDATE SET p_up=EXCLUDED.p_up, model_id=EXCLUDED.model_id
-            """), pred_rows)
-            wrote_preds += len(pred_rows)
+              VALUES (%(t)s, %(p)s, %(m)s)
+              ON CONFLICT (tickid) DO UPDATE
+                SET p_up=EXCLUDED.p_up, model_id=EXCLUDED.model_id
+            """, pred_rows, page_size=500)
+        conn.commit()
 
-        time.sleep(BATCH_SLEEP_MS / 1000.0)
+        updated_labels += len(upd_rows)
+        wrote_preds    += len(pred_rows)
+        time.sleep(BATCH_SLEEP_MS/1000.0)
 
     return updated_labels, wrote_preds
 
-# ------------------ MAIN ------------------
+# ---------- MAIN ----------
 def main(start: int, end: int):
-    # conservative pool to avoid pressure
-    eng = create_engine(PG_DSN, pool_size=2, max_overflow=0)
+    conn = get_conn()
+    try:
+        ensure_tables(conn)
 
-    ensure_tables(eng)
+        kalman = fetch_kalman(conn, start, end)
+        if kalman.empty:
+            print("No kalman rows in range (check public.kalman_states).")
+            return
 
-    kalman = fetch_kalman(eng, start, end)
-    if kalman.empty:
-        print("No kalman rows in range."); return
+        raw = fetch_raw_mid(conn, start, end)  # optional; used for volatility features
 
-    raw = fetch_raw_mid(eng, start, end)  # used for volatility features; falls back if missing
+        n_swings, n_writes = backfill_labels(conn, kalman)
+        print(f"[labels] swings={n_swings}, rows_written={n_writes}")
 
-    n_swings, n_writes = backfill_labels(eng, kalman)
-    print(f"[labels] swings={n_swings}, rows_written={n_writes}")
-
-    n_upd, n_preds = bootstrap_train_and_predict(eng, kalman, raw, start, end)
-    print(f"[predict] labels_updated={n_upd}, predictions_rows={n_preds}")
+        n_upd, n_preds = bootstrap_train_and_predict(conn, kalman, raw, start, end)
+        print(f"[predict] labels_updated={n_upd}, predictions_rows={n_preds}")
+    finally:
+        conn.close()
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
