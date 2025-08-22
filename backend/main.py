@@ -18,7 +18,7 @@ from ml.db import get_engine, latest_prediction, review_slice
 from fastapi import Body
 from fastapi import APIRouter
 from sqlalchemy.exc import ProgrammingError
-
+from fastapi import Query, HTTPException
 
 # ---------  App & CORS ---------
 app = FastAPI(title="cTrade backend")
@@ -538,6 +538,29 @@ def ml_review(
 
     return bundle
 
+@app.get("/api/kalman_layers")
+def api_kalman_layers(
+    start: int = Query(..., ge=1),
+    end:   int = Query(..., ge=1),
+    max_range: int = Query(250_000, ge=1)
+):
+    if end < start:
+        raise HTTPException(status_code=400, detail="end must be >= start")
+    if (end - start + 1) > max_range:
+        raise HTTPException(status_code=413, detail=f"range too large; max={max_range}")
+
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT tickid, k1, k1_rts, k2_cv
+                FROM kalman_layers
+                WHERE tickid BETWEEN :s AND :e
+                ORDER BY tickid
+            """),
+            {"s": start, "e": end},
+        ).mappings().all()
+
+    return list(rows)
 
 @app.post("/ml/confirm")
 def ml_confirm(run_id: str = Query(...)):
