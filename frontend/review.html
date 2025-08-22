@@ -1,85 +1,31 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <title>ML Review</title>
+  <meta charset="utf-8"/>
+  <title>ML Review — Kalman Layers</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <style>
-    body {
-      margin: 0;
-      font-family: sans-serif;
-      background: #111;
-      color: #eee;
-      display: flex;
-      height: 100vh;
-      overflow: hidden;
-    }
-    .sidebar {
-      width: 240px;
-      background: #1a1a1a;
-      padding: 12px;
-      overflow-y: auto;
-      border-right: 1px solid #333;
-    }
-    .sidebar h3 {
-      margin-top: 0;
-      font-size: 15px;
-      color: #aaa;
-    }
-    .sidebar .section {
-      margin-bottom: 16px;
-    }
-    .sidebar input[type=number] {
-      width: 100%;
-      margin-bottom: 6px;
-      padding: 4px;
-    }
-    .sidebar button {
-      width: 100%;
-      padding: 6px;
-      background: #007bff;
-      border: none;
-      color: #fff;
-      cursor: pointer;
-      border-radius: 4px;
-    }
-    .sidebar button:hover {
-      background: #0056b3;
-    }
-    #chart {
-      flex: 1;
-      background: #000;
-    }
-    .label-toggle {
-      margin: 2px 0;
-    }
-    .group-title {
-      font-weight: bold;
-      margin-top: 6px;
-      margin-bottom: 2px;
-      color: #bbb;
-    }
+    html, body { height:100%; margin:0; background:#0b0f1a; color:#e6edf3; font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    #controls { display:flex; gap:.5rem; align-items:center; padding:.75rem 1rem; border-bottom:1px solid #1e2638; position:sticky; top:0; background:#0b0f1a; z-index:5; }
+    #chart { width: 100%; height: calc(100% - 60px); }
+    input, button { background:#131a2a; color:#e6edf3; border:1px solid #26314a; border-radius:8px; padding:.45rem .6rem; }
+    button { cursor:pointer; }
+    button:hover { background:#172134; }
+    .spacer { flex:1; }
   </style>
 </head>
 <body>
-  <div class="sidebar">
-    <h3>ML Review</h3>
-    <div class="section">
-      <label>Train start</label>
-      <input type="number" id="trainStart" value="1" />
-      <label>Chunk</label>
-      <input type="number" id="chunkSize" value="5000" />
-      <button id="btnLoad">Load</button>
-    </div>
-
-    <div class="section">
-      <h4>Labels</h4>
-      <div id="labelsWrap"></div>
-    </div>
+  <div id="controls">
+    <label>Start tick</label><input id="startTick" type="number" value="1" min="1"/>
+    <label>End tick</label><input id="endTick" type="number" value="200000" min="1"/>
+    <button id="loadBtn">Load</button>
+    <div class="spacer"></div>
+    <label>Jump to tick</label><input id="jumpTick" type="number" min="1"/>
+    <button id="jumpBtn">Jump</button>
   </div>
-
   <div id="chart"></div>
 
   <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
-  <script src="review-core.js?v=2"></script>
+  <script src="./review-core.js"></script>
 </body>
 </html>
