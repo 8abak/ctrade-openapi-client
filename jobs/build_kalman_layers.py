@@ -171,30 +171,31 @@ def cv_rts_on_series(obs: np.ndarray, mids_for_scale: np.ndarray) -> np.ndarray:
     x = np.array([z[0], 0.0], float)
     P = np.diag([r, r])
 
-    # forward
+    # ---- forward pass ----
     for i in range(n):
         # predict
         x_pred = F @ x
         P_pred = F @ P @ F.T + Q
-        # update
+
+        # update (use scalar S and flatten K to avoid shape issues)
         y_t = z[i] - (H @ x_pred)[0]
-        S   = H @ P_pred @ H.T + R
-        K   = P_pred @ H.T @ np.linalg.inv(S)
-        x   = x_pred + (K @ np.array([y_t]))[:, 0]
+        S   = float((H @ P_pred @ H.T + R)[0, 0])
+        K   = (P_pred @ H.T) / S          # shape (2,1)
+        x   = x_pred + K.flatten() * y_t  # shape (2,)
         P   = (I - K @ H) @ P_pred
 
         x_f[i], P_f[i] = x, P
         x_p[i], P_p[i] = x_pred, P_pred
 
-    # RTS
+    # ---- RTS smoother ----
     xs = x_f.copy(); Ps = P_f.copy()
-    Finv = np.linalg.inv(F)
     for t in range(n - 2, -1, -1):
         C = P_f[t] @ F.T @ np.linalg.inv(P_p[t + 1])
         xs[t] = x_f[t] + C @ (xs[t + 1] - x_p[t + 1])
         Ps[t] = P_f[t] + C @ (Ps[t + 1] - P_p[t + 1]) @ C.T
 
     return xs[:, 0]
+
 
 # ---------- main ----------
 def main() -> None:
