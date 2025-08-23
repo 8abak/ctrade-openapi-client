@@ -2,35 +2,54 @@
   const chartEl = document.getElementById('chart');
   const chart = echarts.init(chartEl, null, { renderer: 'canvas' });
 
+  // --- API helpers ---
   async function fetchKalman(start, end) {
-    // Adjust to your actual API route if different:
-    const url = `/api/kalman_layers?start=${start}&end=${end}`;
-    const res = await fetch(url);
+    const res = await fetch(`/kalman_layers?start=${start}&end=${end}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return await res.json(); // [{tickid, k1, k1_rts, k2_cv}]
   }
-
-  function toSeriesData(rows, key) {
-    return rows.map(r => [r.tickid, r[key]]);
+  async function fetchTicks(start, end) {
+    const sql = `SELECT id, bid, ask, mid FROM ticks WHERE id BETWEEN ${start} AND ${end} ORDER BY id`;
+    const url = `/sqlvw/query?query=${encodeURIComponent(sql)}`; // uses existing endpoint
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json(); // [{id,bid,ask,mid}]
   }
 
-  function render(rows) {
-    const k1     = toSeriesData(rows, 'k1');      // old straight-edge
-    const k1rts  = toSeriesData(rows, 'k1_rts');  // RTS
-    const kbig   = toSeriesData(rows, 'k2_cv');   // big-move tracker
+  // --- Transforms ---
+  const xy = (rows, xKey, yKey) => rows.map(r => [r[xKey], r[yKey]]);
+  const asXY = (rows, key) => rows.map(r => [r.tickid, r[key]]);
+
+  function render(krows, trows) {
+    const mid = xy(trows, 'id', 'mid');
+    const bid = xy(trows, 'id', 'bid');
+    const ask = xy(trows, 'id', 'ask');
+
+    const k1    = asXY(krows, 'k1');
+    const k1rts = asXY(krows, 'k1_rts');
+    const kbig  = asXY(krows, 'k2_cv');
 
     const option = {
       backgroundColor: '#0b0f1a',
       animation: false,
       textStyle: { color: '#c7d2e1' },
-      grid: { left: 45, right: 20, top: 20, bottom: 60 },
+      legend: {
+        top: 4,
+        textStyle: { color: '#aeb9cc' },
+        selectedMode: 'multiple',
+        selected: {
+          'Mid': true, 'Bid': true, 'Ask': true,
+          'k1 (old Kalman)': true, 'k1_rts (RTS)': true, 'Big-Move': true
+        }
+      },
+      grid: { left: 45, right: 20, top: 28, bottom: 60 },
       tooltip: {
         trigger: 'axis',
         axisPointer: { type: 'line' },
         backgroundColor: '#101826',
         borderColor: '#26314a',
         textStyle: { color: '#dce6f2' },
-        valueFormatter: v => (v != null ? v.toFixed(2) : v)
+        valueFormatter: v => (v != null ? Number(v).toFixed(2) : v)
       },
       xAxis: {
         type: 'value',
@@ -52,31 +71,13 @@
         { type: 'slider', height: 18, bottom: 24, backgroundColor: '#0f1524', borderColor: '#2a3654' }
       ],
       series: [
-        {
-          name: 'k1 (old Kalman)',
-          type: 'line',
-          showSymbol: false,
-          smooth: false,            // straight segments feel
-          lineStyle: { width: 1.5 },
-          data: k1
-        },
-        {
-          name: 'k1_rts (RTS)',
-          type: 'line',
-          showSymbol: false,
-          smooth: true,             // smoothed look
-          lineStyle: { width: 1 },
-          opacity: 0.9,
-          data: k1rts
-        },
-        {
-          name: 'Big-Move',
-          type: 'line',
-          showSymbol: false,
-          smooth: false,
-          lineStyle: { width: 2.2 },
-          data: kbig
-        }
+        { name: 'Mid', type: 'line', showSymbol: false, smooth: false, sampling: 'lttb', large: true, largeThreshold: 10000, lineStyle: { width: 1.1 }, data: mid },
+        { name: 'Bid', type: 'line', showSymbol: false, smooth: false, sampling: 'lttb', large: true, largeThreshold: 10000, lineStyle: { width: 0.8, opacity: 0.7 }, data: bid },
+        { name: 'Ask', type: 'line', showSymbol: false, smooth: false, sampling: 'lttb', large: true, largeThreshold: 10000, lineStyle: { width: 0.8, opacity: 0.7 }, data: ask },
+
+        { name: 'k1 (old Kalman)', type: 'line', showSymbol: false, smooth: false, lineStyle: { width: 1.5 }, data: k1 },
+        { name: 'k1_rts (RTS)',     type: 'line', showSymbol: false, smooth: true,  lineStyle: { width: 1 },   opacity: 0.9, data: k1rts },
+        { name: 'Big-Move',         type: 'line', showSymbol: false, smooth: false, lineStyle: { width: 2.2 }, data: kbig }
       ]
     };
     chart.setOption(option, true);
@@ -85,20 +86,28 @@
   async function loadRange() {
     const start = parseInt(document.getElementById('startTick').value, 10);
     const end   = parseInt(document.getElementById('endTick').value, 10);
-    const rows  = await fetchKalman(start, end);
-    render(rows);
-    // auto zoom to the first ~5k points to avoid overdraw while still seeing detail
-    if (rows.length > 5000) {
-      chart.dispatchAction({
-        type: 'dataZoom',
-        startValue: rows[0].tickid,
-        endValue: rows[0].tickid + 5000
-      });
+    const [krows, trows] = await Promise.all([fetchKalman(start, end), fetchTicks(start, end)]);
+    render(krows, trows);
+
+    if (krows.length > 5000) {
+      chart.dispatchAction({ type: 'dataZoom', startValue: krows[0].tickid, endValue: krows[0].tickid + 5000 });
     }
   }
 
-  document.getElementById('loadBtn').addEventListener('click', loadRange);
+  // toolbar checkboxes -> legend toggle
+  const legendMap = {
+    chkMid: 'Mid', chkBid: 'Bid', chkAsk: 'Ask',
+    chkK1: 'k1 (old Kalman)', chkRTS: 'k1_rts (RTS)', chkBM: 'Big-Move'
+  };
+  for (const id in legendMap) {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('change', () => {
+      const name = legendMap[id];
+      chart.dispatchAction({ type: el.checked ? 'legendSelect' : 'legendUnSelect', name });
+    });
+  }
 
+  document.getElementById('loadBtn').addEventListener('click', () => loadRange().catch(err => console.error(err)));
   document.getElementById('jumpBtn').addEventListener('click', () => {
     const v = parseInt(document.getElementById('jumpTick').value, 10);
     if (!Number.isFinite(v)) return;

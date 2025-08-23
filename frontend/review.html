@@ -17,12 +17,24 @@
 <body>
   <div id="controls">
     <label>Start tick</label><input id="startTick" type="number" value="1" min="1"/>
-    <label>End tick</label><input id="endTick" type="number" value="200000" min="1"/>
+    <label>End tick</label><input id="endTick" type="number" value="100000" min="1"/>
     <button id="loadBtn">Load</button>
+
     <div class="spacer"></div>
+
+    <label><input type="checkbox" id="chkMid" checked> Mid</label>
+    <label><input type="checkbox" id="chkBid" checked> Bid</label>
+    <label><input type="checkbox" id="chkAsk" checked> Ask</label>
+    <label><input type="checkbox" id="chkK1"  checked> k1</label>
+    <label><input type="checkbox" id="chkRTS" checked> k1_rts</label>
+    <label><input type="checkbox" id="chkBM"  checked> Big-Move</label>
+
+    <div class="spacer"></div>
+
     <label>Jump to tick</label><input id="jumpTick" type="number" min="1"/>
     <button id="jumpBtn">Jump</button>
   </div>
+
   <div id="chart"></div>
 
   <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>

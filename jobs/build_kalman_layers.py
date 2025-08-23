@@ -61,6 +61,7 @@ def upsert(engine, ids: np.ndarray, k1: np.ndarray, k1_rts: np.ndarray, k2_cv: n
 
 # -------------------- Old-style Kalman (line-1) --------------------
 # 2-state constant-velocity KF with deadbanded innovation (skip small updates)
+# --- Old-style Kalman (line-1): set R from dy, not y ---
 def kalman_cv_deadband(y: np.ndarray, q_scale: float, r_scale: float, deadband_sig: float,
                        x0: Optional[np.ndarray] = None, P0: Optional[np.ndarray] = None,
                        dt: float = 1.0) -> np.ndarray:
@@ -69,43 +70,32 @@ def kalman_cv_deadband(y: np.ndarray, q_scale: float, r_scale: float, deadband_s
 
     F = np.array([[1.0, dt], [0.0, 1.0]])
     H = np.array([[1.0, 0.0]])
-    I = np.eye(2)
 
-    # robust noise scales from data (like your current file)
     dy = np.diff(y, prepend=y[0])
     mad_dy = np.median(np.abs(dy - np.median(dy))) + 1e-9
-    mad_y  = np.median(np.abs(y  - np.median(y)))  + 1e-9
+
+    # process & measurement noise from dy
     q_pos = (mad_dy ** 2) * q_scale
     q_vel = max(1e-8, q_pos * 0.1)
-    r     = (mad_y  ** 2) * r_scale
+    r     = (mad_dy ** 2) * r_scale            # <<< changed (was from y)
 
     Q = np.diag([q_pos, q_vel])
     R = np.array([[r]])
 
-    if x0 is None:
-        x = np.array([y[0], 0.0], dtype=float)
-    else:
-        x = x0.astype(float)
-    if P0 is None:
-        P = np.eye(2)
-    else:
-        P = P0.astype(float)
+    x = np.array([y[0], 0.0], dtype=float) if x0 is None else x0.astype(float)
+    P = np.eye(2) if P0 is None else P0.astype(float)
 
     out = np.empty(n)
     for i in range(n):
-        # Predict
         x_pred = F @ x
         P_pred = F @ P @ F.T + Q
 
-        # Innovation
         z = y[i]
         innov = z - float((H @ x_pred)[0])
         S = float((H @ P_pred @ H.T + R)[0, 0])
 
-        # Gate small innovations -> skip update (keeps straight segments + crisp corners)
         if abs(innov) < deadband_sig * np.sqrt(S):
-            x = x_pred
-            P = P_pred
+            x, P = x_pred, P_pred
         else:
             K = (P_pred @ H.T) / S
             x = x_pred + (K.flatten() * innov)
@@ -113,6 +103,7 @@ def kalman_cv_deadband(y: np.ndarray, q_scale: float, r_scale: float, deadband_s
 
         out[i] = x[0]
     return out
+
 
 # -------------------- Scalar KF + RTS (line-2, unchanged behaviour) --------------------
 def kalman_pass_scalar(y: np.ndarray, q: float, r: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -146,6 +137,7 @@ def rts_smoother_scalar(x_f, P_f, x_p, P_p) -> np.ndarray:
 
 # -------------------- Big-Move tracker (line-3) --------------------
 # Same CV model, but with *huge* deadband and optional absolute threshold: reacts only to very big moves
+# --- Big-Move tracker (line-3): also derive R from dy (keep absolute gate) ---
 def bigmove_tracker(y: np.ndarray, q_scale: float, r_scale: float, deadband_sig: float, min_abs: float,
                     x0: Optional[np.ndarray] = None, P0: Optional[np.ndarray] = None,
                     dt: float = 1.0) -> np.ndarray:
@@ -157,38 +149,28 @@ def bigmove_tracker(y: np.ndarray, q_scale: float, r_scale: float, deadband_sig:
 
     dy = np.diff(y, prepend=y[0])
     mad_dy = np.median(np.abs(dy - np.median(dy))) + 1e-9
-    mad_y  = np.median(np.abs(y  - np.median(y)))  + 1e-9
+
     q_pos = (mad_dy ** 2) * q_scale
     q_vel = max(1e-8, q_pos * 0.1)
-    r     = (mad_y  ** 2) * r_scale
+    r     = (mad_dy ** 2) * r_scale            # <<< changed
 
     Q = np.diag([q_pos, q_vel])
     R = np.array([[r]])
 
-    if x0 is None:
-        x = np.array([y[0], 0.0], dtype=float)
-    else:
-        x = x0.astype(float)
-    if P0 is None:
-        P = np.eye(2)
-    else:
-        P = P0.astype(float)
+    x = np.array([y[0], 0.0], dtype=float) if x0 is None else x0.astype(float)
+    P = np.eye(2) if P0 is None else P0.astype(float)
 
     out = np.empty(n)
     for i in range(n):
-        # Predict
         x_pred = F @ x
         P_pred = F @ P @ F.T + Q
 
-        # Innovation and gates
         z = y[i]
         innov = z - float((H @ x_pred)[0])
         S = float((H @ P_pred @ H.T + R)[0, 0])
 
-        # Use BOTH a sigma gate and an absolute-dollar gate
         if (abs(innov) < deadband_sig * np.sqrt(S)) and (abs(innov) < min_abs):
-            x = x_pred
-            P = P_pred
+            x, P = x_pred, P_pred
         else:
             K = (P_pred @ H.T) / S
             x = x_pred + (K.flatten() * innov)
@@ -196,6 +178,7 @@ def bigmove_tracker(y: np.ndarray, q_scale: float, r_scale: float, deadband_sig:
 
         out[i] = x[0]
     return out
+
 
 # -------------------- Main --------------------
 def main() -> None:
