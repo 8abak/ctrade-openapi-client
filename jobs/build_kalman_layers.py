@@ -6,7 +6,7 @@ from sqlalchemy import create_engine, text
 
 DB_URL = os.getenv("DATABASE_URL", "postgresql+psycopg2://babak:babak33044@localhost:5432/trading")
 
-# ---------------- DB helpers ----------------
+# ---------- DB ----------
 def fetch_ticks(engine, start_id: int, end_id: int) -> Tuple[np.ndarray, np.ndarray]:
     sql = text("""
         SELECT id, COALESCE(mid, (bid+ask)/2.0) AS mid
@@ -22,7 +22,7 @@ def fetch_ticks(engine, start_id: int, end_id: int) -> Tuple[np.ndarray, np.ndar
 
 def last_saved(engine) -> Optional[int]:
     with engine.begin() as conn:
-        row = conn.execute(text("SELECT tickid FROM kalman_layers ORDER BY tickid DESC LIMIT 1;")).fetchone()
+        row = conn.execute(text("SELECT tickid FROM kalman_layers ORDER BY tickid DESC LIMIT 1")).fetchone()
     return int(row[0]) if row else None
 
 def upsert(engine, ids: np.ndarray, k1: np.ndarray, k1_rts: np.ndarray, k2_cv: np.ndarray) -> None:
@@ -32,166 +32,171 @@ def upsert(engine, ids: np.ndarray, k1: np.ndarray, k1_rts: np.ndarray, k2_cv: n
         INSERT INTO kalman_layers (tickid, k1, k1_rts, k2_cv)
         VALUES (:tickid, :k1, :k1_rts, :k2_cv)
         ON CONFLICT (tickid) DO UPDATE
-        SET k1 = EXCLUDED.k1, k1_rts = EXCLUDED.k1_rts, k2_cv = EXCLUDED.k2_cv;
+        SET k1 = EXCLUDED.k1, k1_rts = EXCLUDED.k1_rts, k2_cv = EXCLUDED.k2_cv
     """)
     with engine.begin() as conn:
         conn.execute(sql, rows)
 
-# ---------------- Robust scales ----------------
-def robust_scales(y: np.ndarray) -> Tuple[float, float]:
+# ---------- Robust scale ----------
+def var_dy(y: np.ndarray) -> float:
     dy = np.diff(y, prepend=y[0])
-    mad_dy = np.median(np.abs(dy - np.median(dy))) + 1e-9
-    mad_y  = np.median(np.abs(y  - np.median(y)))  + 1e-9
-    return mad_dy**2, mad_y**2
+    mad = np.median(np.abs(dy - np.median(dy))) + 1e-12
+    return mad * mad
 
-# ---------------- k1: CV Kalman, predictive straight segments ----------------
-# Emits PRIOR (prediction) each step -> near zero-lag.
-# Updates are gated by sigma deadband; on update we slightly boost gain to snap slope.
-K1_Q_SCALE       = float(os.getenv("K1_Q_SCALE", "1e-3"))  # small -> straighter between turns
-K1_R_SCALE       = float(os.getenv("K1_R_SCALE", "1.0"))   # from dy
-K1_DEADBAND_SIG  = float(os.getenv("K1_DEADBAND_SIG", "0.55"))
-K1_GAIN_MULT     = float(os.getenv("K1_GAIN_MULT", "1.35"))  # >1 boosts update when a turn hits; clamp inside
+# ---------- k1: predictive CV Kalman (straight segments, low lag) ----------
+K1_Q_SCALE      = float(os.getenv("K1_Q_SCALE", "1e-3"))  # smaller = straighter
+K1_R_SCALE      = float(os.getenv("K1_R_SCALE", "1.0"))   # measurement noise from dy
+K1_DEADBAND_SIG = float(os.getenv("K1_DEADBAND_SIG", "0.5"))
+K1_GAIN_MULT    = float(os.getenv("K1_GAIN_MULT", "1.3"))
 
-def kalman_cv_predictive(y: np.ndarray,
-                         q_scale: float, r_scale: float,
-                         deadband_sig: float, gain_mult: float,
-                         dt: float = 1.0) -> np.ndarray:
-    y = np.asarray(y, float)
-    n = len(y)
-    if n == 0:
-        return np.array([], float)
+def cv_kalman_predictive(y: np.ndarray) -> np.ndarray:
+    y = np.asarray(y, float); n = len(y)
+    if n == 0: return np.array([], float)
 
-    var_dy, _ = robust_scales(y)
-    q_pos = max(1e-12, var_dy * q_scale)
-    q_vel = max(1e-12, q_pos * 0.10)
-    r     = max(1e-12, var_dy * r_scale)
+    vd   = var_dy(y)
+    qpos = max(1e-12, vd * K1_Q_SCALE)
+    qvel = max(1e-12, qpos * 0.1)
+    r    = max(1e-12, vd * K1_R_SCALE)
+    sigR = np.sqrt(r)
 
-    F = np.array([[1.0, dt], [0.0, 1.0]])
+    F = np.array([[1.0, 1.0], [0.0, 1.0]])
     H = np.array([[1.0, 0.0]])
-    Q = np.diag([q_pos, q_vel])
+    Q = np.diag([qpos, qvel])
     R = np.array([[r]])
     I = np.eye(2)
 
-    x = np.array([y[0], 0.0], dtype=float)
-    P = np.eye(2)
+    x = np.array([y[0], 0.0], float)
+    # start with small covariance so we don't set a huge gate on tick 1
+    P = np.diag([r, r])
 
     out = np.empty(n, float)
-
     for i in range(n):
-        # Predict (PRIOR) — this is what we PLOT to avoid lag and keep straight segments
+        # PRIOR (plotted)
         x_pred = F @ x
         P_pred = F @ P @ F.T + Q
-        out[i] = x_pred[0]   # <- plot PRIOR => line segments with current slope
+        out[i] = x_pred[0]
 
-        # Innovation & gate
+        # gate on measurement sigma ONLY (not S), so threshold is in real $ units
         z = y[i]
         innov = z - float((H @ x_pred)[0])
-        S = float((H @ P_pred @ H.T + R)[0, 0])
-        if abs(innov) < deadband_sig * np.sqrt(S):
-            # Skip update -> keep slope; next step continues same straight line
+        if abs(innov) < K1_DEADBAND_SIG * sigR:
             x, P = x_pred, P_pred
             continue
 
-        # Do an update, with a slight gain boost to be more "snappy" at regime changes
+        # update with mild gain boost so slope snaps when a turn is real
+        S = float((H @ P_pred @ H.T + R)[0, 0])
         K = (P_pred @ H.T) / S
-        if gain_mult != 1.0:
-            K = np.clip(K * gain_mult, 0.0, 1.0)
+        if K1_GAIN_MULT != 1.0:
+            K = np.clip(K * K1_GAIN_MULT, 0.0, 1.0)
 
         x = x_pred + (K.flatten() * innov)
         P = (I - K @ H) @ P_pred
 
     return out
 
-# ---------------- Big-Move: HH/LL ZigZag (piecewise straight) ----------------
-BM_ABS      = float(os.getenv("BM_ABS", "2.0"))   # absolute $
-BM_SIGMA    = float(os.getenv("BM_SIGMA", "3.0")) # sigma based on MAD(dy)
+# ---------- k2_cv: Big-Move (confirmed ZigZag, extrapolated tail; never zeros) ----------
+BM_ABS   = float(os.getenv("BM_ABS", "2.0"))   # dollars
+BM_SIGMA = float(os.getenv("BM_SIGMA", "3.0")) # sigma on MAD(dy)
 
-def zigzag_bigmove(y: np.ndarray, abs_thr: float, sigma_mult: float) -> np.ndarray:
+def zigzag_confirmed_extrap(y: np.ndarray) -> np.ndarray:
     y = np.asarray(y, float); n = len(y)
-    if n == 0:
-        return np.array([], float)
+    if n == 0: return np.array([], float)
 
-    var_dy, _ = robust_scales(y)
-    thr = max(abs_thr, sigma_mult * np.sqrt(var_dy))
+    thr = max(BM_ABS, BM_SIGMA * np.sqrt(var_dy(y)))
 
-    piv_idx: List[int] = [0]
-    piv_val: List[float] = [y[0]]
-    direction = 0  # 0 unknown, +1 up, -1 down
-    cand_hi = y[0]; i_hi = 0
-    cand_lo = y[0]; i_lo = 0
+    piv_i: List[int] = [0]
+    piv_v: List[float] = [y[0]]
+    direction = 0
+    hi, i_hi = y[0], 0
+    lo, i_lo = y[0], 0
 
     for i in range(1, n):
         p = y[i]
-        if p > cand_hi: cand_hi, i_hi = p, i
-        if p < cand_lo: cand_lo, i_lo = p, i
-
-        if direction >= 0 and (cand_hi - p) >= thr:   # confirm DOWN
-            piv_idx.append(i_hi); piv_val.append(cand_hi)
+        if p > hi: hi, i_hi = p, i
+        if p < lo: lo, i_lo = p, i
+        if direction >= 0 and (hi - p) >= thr:         # confirm DOWN
+            piv_i.append(i_hi); piv_v.append(hi)
             direction = -1
-            cand_lo, i_lo = p, i
-            cand_hi, i_hi = p, i
-            continue
-        if direction <= 0 and (p - cand_lo) >= thr:   # confirm UP
-            piv_idx.append(i_lo); piv_val.append(cand_lo)
+            lo, i_lo = p, i; hi, i_hi = p, i
+        elif direction <= 0 and (p - lo) >= thr:       # confirm UP
+            piv_i.append(i_lo); piv_v.append(lo)
             direction = +1
-            cand_hi, i_hi = p, i
-            cand_lo, i_lo = p, i
-            continue
-
-    last_i = i_hi if direction == +1 else (i_lo if direction == -1 else n - 1)
-    if piv_idx[-1] != last_i:
-        piv_idx.append(last_i); piv_val.append(y[last_i])
+            hi, i_hi = p, i; lo, i_lo = p, i
 
     out = np.empty(n, float)
-    for a in range(len(piv_idx) - 1):
-        i0, i1 = piv_idx[a], piv_idx[a + 1]
-        y0, y1 = piv_val[a], piv_val[a + 1]
-        if i1 == i0:
-            out[i0] = y0
-            continue
+    # draw confirmed segments
+    for a in range(len(piv_i) - 1):
+        i0, i1 = piv_i[a], piv_i[a + 1]
+        y0, y1 = piv_v[a], piv_v[a + 1]
         t = np.linspace(0.0, 1.0, i1 - i0 + 1)
         out[i0:i1 + 1] = y0 + (y1 - y0) * t
-    if piv_idx[0] > 0:
-        out[:piv_idx[0]] = piv_val[0]
+
+    # tail = slope of last confirmed segment
+    last_start = piv_i[-2] if len(piv_i) >= 2 else 0
+    last_end   = piv_i[-1]
+    y0, y1 = y[last_start], y[last_end]
+    denom = max(1, last_end - last_start)
+    m = (y1 - y0) / denom
+    idx = np.arange(last_end, n)
+    out[last_end:] = y1 + m * (idx - last_end)
+
+    # if only one pivot, fill head flat
+    if len(piv_i) == 1:
+        out[:last_end] = y0
     return out
 
-# ---------------- RTS on Big-Move ----------------
-RTS_Q_SCALE = float(os.getenv("RTS_Q_SCALE", "0.5"))
-RTS_R_SCALE = float(os.getenv("RTS_R_SCALE", "0.5"))
+# ---------- k1_rts: CV Kalman + RTS on Big-Move (curved & smoother) ----------
+RTS_QPOS_SCALE = float(os.getenv("RTS_QPOS_SCALE", "0.5"))
+RTS_QVEL_SCALE = float(os.getenv("RTS_QVEL_SCALE", "1.0"))
+RTS_R_SCALE    = float(os.getenv("RTS_R_SCALE", "0.2"))
 
-def kalman_rw_and_rts(obs: np.ndarray, q_scale: float, r_scale: float) -> np.ndarray:
-    """Scalar RW Kalman on obs, then RTS smooth."""
-    y = np.asarray(obs, float)
-    n = len(y)
+def cv_rts_on_series(obs: np.ndarray, mids_for_scale: np.ndarray) -> np.ndarray:
+    z = np.asarray(obs, float); n = len(z)
     if n == 0: return np.array([], float)
 
-    var_dy, _ = robust_scales(y)
-    q = max(1e-12, var_dy * q_scale)
-    r = max(1e-12, var_dy * r_scale)
+    vd = var_dy(mids_for_scale)  # scale from real price noise
+    qpos = max(1e-12, vd * RTS_QPOS_SCALE)
+    qvel = max(1e-12, vd * RTS_QVEL_SCALE)
+    r    = max(1e-12, vd * RTS_R_SCALE)
 
-    x_f = np.empty(n); P_f = np.empty(n)
-    x_p = np.empty(n); P_p = np.empty(n)
+    F = np.array([[1.0, 1.0], [0.0, 1.0]])
+    H = np.array([[1.0, 0.0]])
+    Q = np.diag([qpos, qvel])
+    R = np.array([[r]])
+    I = np.eye(2)
 
-    x = y[0]; P = r
-    for i, z in enumerate(y):
-        x_pred = x
-        P_pred = P + q
-        S = P_pred + r
-        K = P_pred / S
-        x = x_pred + K * (z - x_pred)
-        P = (1.0 - K) * P_pred
-        x_p[i], P_p[i] = x_pred, P_pred
+    x_f = np.empty((n, 2)); P_f = np.empty((n, 2, 2))
+    x_p = np.empty((n, 2)); P_p = np.empty((n, 2, 2))
+
+    x = np.array([z[0], 0.0], float)
+    P = np.diag([r, r])
+
+    # forward
+    for i in range(n):
+        # predict
+        x_pred = F @ x
+        P_pred = F @ P @ F.T + Q
+        # update
+        y_t = z[i] - (H @ x_pred)[0]
+        S   = H @ P_pred @ H.T + R
+        K   = P_pred @ H.T @ np.linalg.inv(S)
+        x   = x_pred + (K @ np.array([y_t]))[:, 0]
+        P   = (I - K @ H) @ P_pred
+
         x_f[i], P_f[i] = x, P
+        x_p[i], P_p[i] = x_pred, P_pred
 
     # RTS
-    xs = np.copy(x_f); Ps = np.copy(P_f)
+    xs = x_f.copy(); Ps = P_f.copy()
+    Finv = np.linalg.inv(F)
     for t in range(n - 2, -1, -1):
-        C = P_f[t] / P_p[t + 1]
-        xs[t] = x_f[t] + C * (xs[t + 1] - x_p[t + 1])
-        Ps[t] = P_f[t] + C * (Ps[t + 1] - P_p[t + 1]) * C
-    return xs
+        C = P_f[t] @ F.T @ np.linalg.inv(P_p[t + 1])
+        xs[t] = x_f[t] + C @ (xs[t + 1] - x_p[t + 1])
+        Ps[t] = P_f[t] + C @ (Ps[t + 1] - P_p[t + 1]) @ C.T
 
-# ---------------- main ----------------
+    return xs[:, 0]
+
+# ---------- main ----------
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--start", type=int, required=True)
@@ -206,14 +211,14 @@ def main() -> None:
     if len(ids) == 0:
         print("Nothing to do."); return
 
-    # k2_cv: Big-Move (piecewise straight)
-    k_big = zigzag_bigmove(mids, BM_ABS, BM_SIGMA)
+    # k2_cv: Big-Move
+    k_big = zigzag_confirmed_extrap(mids)
 
-    # k1: predictive straight segments (CV Kalman, prior output)
-    k1 = kalman_cv_predictive(mids, K1_Q_SCALE, K1_R_SCALE, K1_DEADBAND_SIG, K1_GAIN_MULT)
+    # k1: predictive CV Kalman (now actually updates)
+    k1 = cv_kalman_predictive(mids)
 
-    # k1_rts: RTS **of Big-Move**, not of k1
-    k1_rts = kalman_rw_and_rts(k_big, RTS_Q_SCALE, RTS_R_SCALE)
+    # k1_rts: CV Kalman + RTS on Big-Move (smoother & different)
+    k1_rts = cv_rts_on_series(k_big, mids_for_scale=mids)
 
     upsert(engine, ids, k1, k1_rts, k_big)
     print(f"✔ upserted {len(ids)} rows into kalman_layers ({ids[0]}..{ids[-1]})")
