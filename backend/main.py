@@ -538,7 +538,7 @@ def ml_review(
 
     return bundle
 
-@app.get("/api/kalman_layers")
+@app.get("/kalman_layers")
 def api_kalman_layers(
     start: int = Query(..., ge=1),
     end:   int = Query(..., ge=1),
