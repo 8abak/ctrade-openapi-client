@@ -1,20 +1,31 @@
-/* review-core.js — clean UI + integer-only display
-   - Leaves chart structure intact (same single time/price chart).
-   - Minimal controls: Load range, Run, 4 ML layers + Mid/Bid/Ask toggles.
-   - All prices are rounded to whole dollars on axis, tooltips, and markers.
+/* review-core.js — dark theme + visible Run workflow + integer-only axis
+   - Dark UI enforced (no flashing white).
+   - Run button shows progress, returns counts from backend, and refreshes chart.
+   - If backend is busy/unreachable, shows a clear message (and logs details).
+   - Y-axis, tooltips, and plotted prices are rounded to whole dollars.
 */
 
 (function () {
   // --------------------------- helpers ---------------------------
-  const $ = (sel) => document.querySelector(sel);
+  const $  = (sel) => document.querySelector(sel);
   const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+
+  // integer-only helpers
+  const iround = (v) => (v == null ? v : Math.round(v));
+  const fmtInt = (v) => (v == null ? '' : String(Math.round(v)));
+
+  // hard-enforce dark page early, before chart init
+  function enforceDarkTheme() {
+    document.documentElement.style.colorScheme = 'dark';
+    document.body.classList.add('wf-dark');
+  }
+  enforceDarkTheme();
 
   function ensureEl(idCandidates) {
     for (const id of idCandidates) {
       const el = document.getElementById(id) || document.querySelector(`#${id}`);
       if (el) return el;
     }
-    // fallback chart container
     const el = document.createElement('div');
     el.id = 'chart';
     el.style.cssText = 'height:65vh;min-height:480px;width:100%';
@@ -22,19 +33,32 @@
     return el;
   }
 
-  function fetchJSON(url, opts) {
-    return fetch(url, opts).then((r) => {
-      if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
-      return r.json();
-    });
+  async function fetchJSON(url, opts = {}, timeoutMs = 45000) {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const r = await fetch(url, { ...opts, signal: ctrl.signal });
+      if (!r.ok) {
+        const txt = await r.text().catch(() => '');
+        throw new Error(`${r.status} ${r.statusText} — ${txt}`);
+      }
+      return await r.json();
+    } finally {
+      clearTimeout(t);
+    }
   }
 
-  // integer-only helpers
-  const iround = (v) => (v == null ? v : Math.round(v));
-  const fmtInt = (v) => (v == null ? '' : String(Math.round(v)));
+  // status line
+  function setStatus(html, kind = 'info') {
+    const el = $('#wf-status');
+    if (!el) return;
+    el.innerHTML = html;
+    el.dataset.kind = kind; // css color hook
+  }
 
   // --------------------------- chart boot ---------------------------
   const chartEl = ensureEl(['chart', 'main', 'echart', 'review-chart']);
+  chartEl.classList.add('wf-chart');
   let chart = (window.echarts && window.echarts.getInstanceByDom)
     ? (window.echarts.getInstanceByDom(chartEl) || (window.echarts.init ? window.echarts.init(chartEl) : null))
     : null;
@@ -43,22 +67,30 @@
     chart = window.echarts.init(chartEl);
   }
 
-  // base option (keeps structure)
+  // base option (keep structure; integer-only)
   if (chart && !chart.getOption().series) {
     chart.setOption({
+      backgroundColor: '#0d1117',
       animation: false,
       tooltip: {
         trigger: 'axis',
+        axisPointer: { type: 'cross' },
         valueFormatter: (v) => fmtInt(v),
-        axisPointer: { type: 'cross' }
+        textStyle: { color: '#e6edf3' }
       },
-      xAxis: { type: 'time' },
+      xAxis: {
+        type: 'time',
+        axisLine: { lineStyle: { color: '#30363d' } },
+        axisLabel: { color: '#8b949e' },
+        splitLine: { lineStyle: { color: '#21262d' } }
+      },
       yAxis: {
         type: 'value',
         scale: true,
-        axisLabel: {
-          formatter: (v) => fmtInt(v)
-        }
+        minInterval: 1, // align grid to whole-dollars (safe; keeps scale=true)
+        axisLine: { lineStyle: { color: '#30363d' } },
+        axisLabel: { color: '#8b949e', formatter: (v) => fmtInt(v) },
+        splitLine: { lineStyle: { color: '#21262d' } }
       },
       series: []
     });
@@ -74,22 +106,46 @@
       mid: true,
       bid: false,
       ask: false
-    },
-    range: { start: null, end: null } // optional tick range loader
+    }
   };
 
   // --------------------------- backend glue ---------------------------
   async function runWalkForwardStep() {
     const btn = $('#wf-run');
     if (btn) { btn.disabled = true; btn.textContent = 'Running…'; }
+    setStatus('Working… starting step', 'info');
+
     try {
-      const res = await fetchJSON('/api/walkforward/step', { method: 'POST' });
+      // 1) kick the step
+      const res = await fetchJSON('/api/walkforward/step', { method: 'POST' }, 120000);
+      console.debug('[wf step]', res);
+
+      // 2) summarize returned counts (helps you see if server actually did work)
+      const m = res?.macro_segments ?? {};
+      const e = res?.micro_events ?? {};
+      const o = res?.outcomes ?? {};
+      const p = res?.predictions ?? {};
+      const summary = [
+        `Segments +${m.segments_added ?? 0}`,
+        `Events +${e.events_added ?? 0}`,
+        `Outcomes +${o.outcomes_resolved ?? 0}`,
+        p.trained ? `Preds ${p.written ?? 0} (τ=${(p.threshold ?? 0).toFixed(2)})` : 'Preds —'
+      ].join(' · ');
+      setStatus(summary, 'ok');
+
+      // 3) snapshot (returned inline or fetch fresh)
       const snap = res && res.snapshot ? res.snapshot : await fetchJSON('/api/walkforward/snapshot');
       window.__WF_SNAPSHOT = snap;
+
       renderAll();
-    } catch (e) {
-      console.error(e);
-      alert('Walk-forward step failed: ' + e.message);
+    } catch (err) {
+      console.error('[wf step] error', err);
+      setStatus(`Run failed: ${err.message}`, 'err');
+      // Try to at least show current snapshot so the screen isn’t blank
+      try {
+        window.__WF_SNAPSHOT = await fetchJSON('/api/walkforward/snapshot');
+        renderAll();
+      } catch {}
     } finally {
       if (btn) { btn.disabled = false; btn.textContent = 'Run'; }
     }
@@ -97,19 +153,14 @@
 
   async function refreshSnapshot() {
     try {
+      setStatus('Loading snapshot…', 'info');
       window.__WF_SNAPSHOT = await fetchJSON('/api/walkforward/snapshot');
+      setStatus('Snapshot loaded', 'ok');
       renderAll();
-    } catch (e) { console.error(e); }
-  }
-
-  // optional historical load by tick id (kept intact, but rounded view still applies)
-  async function loadRange() {
-    const s = $('#start-tick'), e = $('#end-tick');
-    if (!s || !e) return;
-    UI.range.start = parseInt(s.value || '1', 10);
-    UI.range.end = parseInt(e.value || '100000', 10);
-    // if your backend has a range endpoint, call it here; otherwise just refresh
-    await refreshSnapshot();
+    } catch (e) {
+      console.error('[snapshot] error', e);
+      setStatus('Cannot load snapshot. Is the backend up? ' + e.message, 'err');
+    }
   }
 
   // --------------------------- renderers ---------------------------
@@ -117,21 +168,21 @@
     return dir === 1 ? `rgba(0,140,0,${alpha})` : `rgba(180,0,0,${alpha})`;
   }
   function colorForEventType(tp) {
-    if (tp === 'pullback_end') return '#1f77b4';
-    if (tp === 'breakout') return '#9467bd';
-    if (tp === 'retest_hold') return '#ff7f0e';
-    return '#777';
+    if (tp === 'pullback_end') return '#58a6ff';
+    if (tp === 'breakout')     return '#a371f7';
+    if (tp === 'retest_hold')  return '#ffa657';
+    return '#c9d1d9';
   }
   function shapeForEventType(tp) {
     if (tp === 'pullback_end') return 'circle';
-    if (tp === 'breakout') return 'triangle';
-    if (tp === 'retest_hold') return 'diamond';
+    if (tp === 'breakout')     return 'triangle';
+    if (tp === 'retest_hold')  return 'diamond';
     return 'rect';
   }
   function outcomeColor(out) {
-    if (out === 'TP') return '#00a000';
-    if (out === 'SL') return '#c00000';
-    return '#888888';
+    if (out === 'TP') return '#2ea043';
+    if (out === 'SL') return '#f85149';
+    return '#8b949e';
   }
 
   function buildMacroMarkAreas(segments) {
@@ -159,15 +210,7 @@
 
     const series = [];
 
-    // --- price streams (kept optional; rounded values) ---
-    if (UI.layers.mid) {
-      // If you have a mid stream in snapshot, wire it here. Otherwise, we skip streaming lines.
-      // This keeps chart structure intact while decluttering the controls.
-    }
-    if (UI.layers.bid) { /* hook if you expose bid series */ }
-    if (UI.layers.ask) { /* hook if you expose ask series */ }
-
-    // --- macro bands ---
+    // Macro bands
     if (UI.layers.macro) {
       series.push({
         name: 'Macro',
@@ -177,7 +220,7 @@
       });
     }
 
-    // --- events (rounded price markers) ---
+    // Events (rounded price markers)
     if (UI.layers.events && evts.length) {
       const pts = evts.map(e => ({
         name: e.event_type,
@@ -191,7 +234,7 @@
       series.push({ name: 'Events', type: 'scatter', symbolSize: 6, data: pts });
     }
 
-    // --- predictions (opacity by p_tp; rounded price) ---
+    // Predictions
     if (UI.layers.predictions && evts.length) {
       const pts = evts.filter(e => byPred.has(e.event_id)).map(e => {
         const p = byPred.get(e.event_id);
@@ -203,8 +246,8 @@
           symbol: 'circle',
           symbolSize: decided ? 9 : 7,
           itemStyle: {
-            color: `rgba(0,0,0,${alpha})`,
-            borderColor: decided ? '#000' : '#666',
+            color: `rgba(230,237,243,${alpha})`,
+            borderColor: decided ? '#e6edf3' : '#8b949e',
             borderWidth: decided ? 1.5 : 1
           },
           tooltip: {
@@ -215,7 +258,7 @@
       series.push({ name: 'Predictions', type: 'scatter', symbolSize: 8, data: pts });
     }
 
-    // --- outcomes (halo; rounded price) ---
+    // Outcomes (halo)
     if (UI.layers.outcomes && evts.length) {
       const pts = evts.filter(e => byOutcome.has(e.event_id)).map(e => {
         const o = byOutcome.get(e.event_id);
@@ -238,11 +281,15 @@
     if (!chart || !window.echarts) return;
     const snap = window.__WF_SNAPSHOT || {};
     const opt = chart.getOption() || {};
+
+    // keep dark grid & integer labels each render
+    opt.backgroundColor = '#0d1117';
     opt.yAxis = opt.yAxis || {};
-    opt.yAxis.axisLabel = opt.yAxis.axisLabel || {};
-    opt.yAxis.axisLabel.formatter = (v) => fmtInt(v);     // integers on axis
+    opt.yAxis.axisLabel = { color: '#8b949e', formatter: (v) => fmtInt(v) };
+    opt.yAxis.minInterval = 1;
     opt.tooltip = opt.tooltip || {};
-    opt.tooltip.valueFormatter = (v) => fmtInt(v);        // integers in crosshair tooltip
+    opt.tooltip.valueFormatter = (v) => fmtInt(v);
+
     opt.series = composeSeries(snap);
     chart.setOption(opt, { notMerge: false, replaceMerge: ['series', 'yAxis', 'tooltip'] });
   }
@@ -252,10 +299,6 @@
     // Run
     const run = $('#wf-run');
     if (run) run.addEventListener('click', runWalkForwardStep);
-
-    // Load range
-    const loadBtn = $('#wf-load');
-    if (loadBtn) loadBtn.addEventListener('click', loadRange);
 
     // Layer toggles
     const map = [
@@ -274,6 +317,7 @@
       el.addEventListener('change', () => { UI.layers[key] = !!el.checked; renderAll(); });
     }
 
+    // initial snapshot (also verifies backend connectivity)
     refreshSnapshot();
   }
 

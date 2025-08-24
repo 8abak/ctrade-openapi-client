@@ -1,25 +1,23 @@
-<!-- Controls: streamlined -->
-<div class="wf-controls" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:.4rem 0;">
-  <label>Start tick <input id="start-tick" type="number" value="1" style="width:110px"></label>
-  <label>End tick <input id="end-tick" type="number" value="100000" style="width:110px"></label>
-  <button id="wf-load" title="Load range">Load</button>
+<!-- Add this small CSS in <head> or before closing </body> -->
+<style>
+  body.wf-dark { background:#0d1117; color:#e6edf3; }
+  .wf-controls { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin:.5rem 0; }
+  .wf-controls input[type="number"],
+  .wf-controls button,
+  .wf-controls label { color:#e6edf3; }
+  .wf-controls input[type="number"] { background:#161b22; border:1px solid #30363d; padding:2px 6px; border-radius:6px; }
+  .wf-controls button { background:#21262d; border:1px solid #30363d; padding:4px 10px; border-radius:6px; cursor:pointer; }
+  .wf-controls button:disabled { opacity:.6; cursor:default; }
+  .wf-status { font: 12px/1.4 ui-sans-serif, system-ui, -apple-system, Segoe UI; color:#8b949e; margin:.25rem 0 .5rem; }
+  .wf-status[data-kind="ok"]  { color:#7ee787; }
+  .wf-status[data-kind="err"] { color:#ffa198; }
+  .wf-chart { background:#0d1117; }
+</style>
 
-  <button id="wf-run" title="Advance one macro leg">Run</button>
-
-  <label><input type="checkbox" id="wf-macro" checked> Macro</label>
-  <label><input type="checkbox" id="wf-events" checked> Events</label>
-  <label><input type="checkbox" id="wf-preds" checked> Predictions</label>
-  <label><input type="checkbox" id="wf-out" checked> Outcomes</label>
-
-  <span style="margin-left:12px;color:#9aa;">| Price streams:</span>
-  <label><input type="checkbox" id="wf-mid" checked> Mid</label>
-  <label><input type="checkbox" id="wf-bid"> Bid</label>
-  <label><input type="checkbox" id="wf-ask"> Ask</label>
+<!-- Controls (keep your existing ones, but add a status line below them) -->
+<div class="wf-controls">
+  <!-- your existing inputs/buttons here -->
+  <!-- e.g. Start tick / End tick / Load / Run / checkboxes ... -->
 </div>
-
-<!-- keep your existing chart container as-is -->
-<div id="chart" style="height:65vh;min-height:480px;width:100%"></div>
-
-<!-- scripts (leave your existing includes if already present) -->
-<script src="/public/echarts.min.js"></script>
-<script src="/frontend/review-core.js"></script>
+<div id="wf-status" class="wf-status">Ready</div>
+<!-- keep your #chart container as-is -->
