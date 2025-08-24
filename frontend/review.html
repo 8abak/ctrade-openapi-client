@@ -1,23 +1,103 @@
-<!-- Add this small CSS in <head> or before closing </body> -->
-<style>
-  body.wf-dark { background:#0d1117; color:#e6edf3; }
-  .wf-controls { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin:.5rem 0; }
-  .wf-controls input[type="number"],
-  .wf-controls button,
-  .wf-controls label { color:#e6edf3; }
-  .wf-controls input[type="number"] { background:#161b22; border:1px solid #30363d; padding:2px 6px; border-radius:6px; }
-  .wf-controls button { background:#21262d; border:1px solid #30363d; padding:4px 10px; border-radius:6px; cursor:pointer; }
-  .wf-controls button:disabled { opacity:.6; cursor:default; }
-  .wf-status { font: 12px/1.4 ui-sans-serif, system-ui, -apple-system, Segoe UI; color:#8b949e; margin:.25rem 0 .5rem; }
-  .wf-status[data-kind="ok"]  { color:#7ee787; }
-  .wf-status[data-kind="err"] { color:#ffa198; }
-  .wf-chart { background:#0d1117; }
-</style>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>ML Review — Kalman Layers</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
 
-<!-- Controls (keep your existing ones, but add a status line below them) -->
-<div class="wf-controls">
-  <!-- your existing inputs/buttons here -->
-  <!-- e.g. Start tick / End tick / Load / Run / checkboxes ... -->
-</div>
-<div id="wf-status" class="wf-status">Ready</div>
-<!-- keep your #chart container as-is -->
+  <!-- Dark theme for the whole page -->
+  <style>
+    :root { color-scheme: dark; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      background: #0d1117;  /* github dark canvas */
+      color: #e6edf3;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+    }
+    .toolbar {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+      padding: 10px 12px;
+      border-bottom: 1px solid #30363d;
+      background: #0d1117;
+      position: sticky;
+      top: 0;
+      z-index: 5;
+    }
+    .toolbar label { color: #e6edf3; }
+    .toolbar input[type="number"],
+    .toolbar input[type="text"] {
+      background: #161b22;
+      color: #e6edf3;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 4px 8px;
+    }
+    .toolbar button {
+      background: #21262d;
+      color: #e6edf3;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 4px 10px;
+      cursor: pointer;
+    }
+    .toolbar button:disabled {
+      opacity: .6;
+      cursor: default;
+    }
+    #status {
+      padding: 6px 12px 4px 12px;
+      color: #8b949e;
+      font-size: 12px;
+      min-height: 18px;
+    }
+    #chart {
+      height: 70vh;
+      min-height: 520px;
+      width: 100%;
+      background: #0d1117;
+    }
+    .spacer { flex: 1 1 auto; }
+    .muted { color: #9aa4b2; }
+  </style>
+</head>
+
+<body>
+  <div class="toolbar">
+    <label>Start tick
+      <input id="startTick" type="number" value="1" style="width:120px" />
+    </label>
+    <label>End tick
+      <input id="endTick" type="number" value="100000" style="width:120px" />
+    </label>
+    <button id="loadBtn">Load</button>
+
+    <button id="runBtn" title="(Reserved for ML pipeline; backend endpoints not enabled on this host)">Run</button>
+
+    <label><input id="chkMid" type="checkbox" checked /> Mid</label>
+    <label><input id="chkBid" type="checkbox" /> Bid</label>
+    <label><input id="chkAsk" type="checkbox" /> Ask</label>
+    <label><input id="chkK1"  type="checkbox" checked /> k1</label>
+    <label><input id="chkRTS" type="checkbox" checked /> k1_rts</label>
+    <label><input id="chkBM"  type="checkbox" checked /> Big‑Move</label>
+
+    <span class="spacer"></span>
+
+    <label class="muted">Jump to tick
+      <input id="jumpTick" type="number" placeholder="tick id" style="width:140px" />
+    </label>
+    <button id="jumpBtn">Jump</button>
+  </div>
+
+  <div id="status">Ready</div>
+  <div id="chart"></div>
+
+  <!-- Load ECharts first -->
+  <script src="/public/echarts.min.js?v=20250824"></script>
+  <!-- App script (cache‑busted) -->
+  <script src="/frontend/review-core.js?v=20250824"></script>
+</body>
+</html>
