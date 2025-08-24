@@ -1,9 +1,10 @@
 # backend/main.py
+
 import os
 from datetime import datetime, timedelta, date
 from typing import List, Optional, Dict, Any
 
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, Query, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -11,41 +12,41 @@ from pydantic import BaseModel
 from sqlalchemy import create_engine, text
 from sqlalchemy import text as sqtxt
 
+# Mounted router you already use under /api
 from zig_api import router as lview_router
 
-# MLing imports
-import subprocess, sys, json
-from sqlalchemy import text as _sqltext
-from ml.db import get_engine, latest_prediction, review_slice
-from fastapi import Body
-from fastapi import APIRouter
-from sqlalchemy.exc import ProgrammingError
-from fastapi import Query, HTTPException
-
-# new learning imports
+# ---- ML/walk-forward modules (added previously) ----
 from label_macro_segments import BuildOrExtendSegments
 from label_micro_events import DetectMicroEventsForLatestClosedSegment
 from compute_outcomes import ResolveOutcomes
 from train_predict import TrainAndPredict
 
-# --------- App & CORS ---------
+# ----------------------------------------------------
+# App & CORS
+# ----------------------------------------------------
 app = FastAPI(title="cTrade backend")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten later
+    allow_origins=["*"],   # tighten later if needed
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# keep your existing mounted router under /api
 app.include_router(lview_router, prefix="/api")
 
-# ---------- DB ----------
+# ----------------------------------------------------
+# DB
+# ----------------------------------------------------
 db_url = os.getenv(
     "DATABASE_URL",
     "postgresql+psycopg2://babak:babak33044@localhost:5432/trading",
 )
 engine = create_engine(db_url)
 
-# ---------- Models ----------
+
+# ----------------------------------------------------
+# Models
+# ----------------------------------------------------
 class Tick(BaseModel):
     id: int
     timestamp: datetime
@@ -53,17 +54,26 @@ class Tick(BaseModel):
     ask: float
     mid: float
 
-# ---------- Small helpers ----------
+
+# ----------------------------------------------------
+# Small helpers
+# ----------------------------------------------------
 def q_all(sql: str, params: Dict[str, Any]):
     with engine.connect() as conn:
         return [dict(r._mapping) for r in conn.execute(sqtxt(sql), params)]
 
-# ---------- Root ----------
+
+# ----------------------------------------------------
+# Root
+# ----------------------------------------------------
 @app.get("/")
 def home():
     return {"message": "API live. Try /ticks/recent, /trends/day, /sqlvw/tables, /version"}
 
-# ---------- Ticks ----------
+
+# ----------------------------------------------------
+# Ticks
+# ----------------------------------------------------
 @app.get("/ticks", response_model=List[Tick])
 def get_ticks(offset: int = 0, limit: int = 2000):
     with engine.connect() as conn:
@@ -78,6 +88,7 @@ def get_ticks(offset: int = 0, limit: int = 2000):
         ).mappings().all()
     return list(rows)
 
+
 @app.post("/api/sql")
 def sql_post(sql: str = Body(..., embed=True)):
     try:
@@ -88,6 +99,7 @@ def sql_post(sql: str = Body(..., embed=True)):
             return {"message": "Query executed successfully."}
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
+
 
 @app.get("/ticks/latest", response_model=List[Tick])
 def get_latest_ticks(after: str = Query(..., description="UTC timestamp in ISO format")):
@@ -103,6 +115,7 @@ def get_latest_ticks(after: str = Query(..., description="UTC timestamp in ISO f
             {"after": after},
         )
     return [dict(row._mapping) for row in result]
+
 
 @app.get("/ticks/recent", response_model=List[Tick])
 def get_recent_ticks(limit: int = Query(2200, le=5000)):
@@ -122,6 +135,7 @@ def get_recent_ticks(limit: int = Query(2200, le=5000)):
         ).mappings().all()
     return list(rows)
 
+
 @app.get("/ticks/before/{tickid}", response_model=List[Tick])
 def get_ticks_before(tickid: int, limit: int = 2000):
     with engine.connect() as conn:
@@ -137,6 +151,7 @@ def get_ticks_before(tickid: int, limit: int = 2000):
         ).mappings().all()
     return list(reversed(rows))
 
+
 @app.get("/ticks/lastid")
 def get_lastid():
     with engine.connect() as conn:
@@ -146,6 +161,7 @@ def get_lastid():
     if not row:
         raise HTTPException(status_code=404, detail="No ticks")
     return {"lastId": row["id"], "timestamp": row["timestamp"]}
+
 
 @app.get("/ticks/range", response_model=List[Tick])
 def ticks_range(start: str, end: str, limit: int = 200000):
@@ -162,7 +178,10 @@ def ticks_range(start: str, end: str, limit: int = 200000):
         ).mappings().all()
     return list(rows)
 
-# ---------- SQL viewer helpers ----------
+
+# ----------------------------------------------------
+# SQL viewer helpers
+# ----------------------------------------------------
 @app.get("/sqlvw/tables")
 def get_all_table_names():
     with engine.connect() as conn:
@@ -172,6 +191,7 @@ def get_all_table_names():
             WHERE table_schema='public' AND table_type='BASE TABLE'
         """)).all()
     return [r[0] for r in rows]
+
 
 @app.get("/sqlvw/query")
 def run_sql_query(query: str = Query(...)):
@@ -185,6 +205,7 @@ def run_sql_query(query: str = Query(...)):
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
 
+
 # Labels discovery (kept at /api/* because frontend pages use it)
 @app.get("/api/labels/available")
 def get_label_tables():
@@ -195,6 +216,7 @@ def get_label_tables():
             WHERE column_name ILIKE 'tickid' AND table_schema='public'
         """)).all()
     return sorted({r[0] for r in rows})
+
 
 @app.get("/api/labels/schema")
 def labels_schema():
@@ -210,7 +232,7 @@ def labels_schema():
         WHERE c.table_schema='public'
         ORDER BY c.table_name, c.ordinal_position
     """)
-    out = {}
+    out: Dict[str, Dict[str, Any]] = {}
     with engine.connect() as conn:
         for tname, cname in conn.execute(q):
             if tname not in out:
@@ -221,49 +243,35 @@ def labels_schema():
     # only keep tables that actually have label columns
     return [v for v in out.values() if v["labels"]]
 
-# ---------- Version ----------
+
+# ----------------------------------------------------
+# Version
+# ----------------------------------------------------
 @app.get("/version")
 def get_version():
     return {"version": "2025.08.08.walk-forward.001"}
 
-# === WALKFORWARD: step ===
-@app.post("/walkforward/step")
-def walkforward_step():
-    """
-    One-click step:
-      1) Extend/close macro ($6) segment(s) if a pivot is confirmed.
-      2) Seed micro events in the latest CLOSED segment (idempotent).
-      3) Resolve outcomes for events with enough forward data (60 min).
-      4) Train on resolved history; predict on latest segment's events.
-      5) Return a compact snapshot for front-end layers.
-    """
-    try:
-        msum = BuildOrExtendSegments()
-        esum = DetectMicroEventsForLatestClosedSegment()
-        osum = ResolveOutcomes()
-        psum = TrainAndPredict()
 
-        snap = walkforward_snapshot()
-        return {
-            "macro_segments": msum,
-            "micro_events": esum,
-            "outcomes": osum,
-            "predictions": psum,
-            "snapshot": snap
-        }
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
+# ----------------------------------------------------
+# Walk-forward endpoints
+#   IMPORTANT: expose them at BOTH root and /api/* so nginx does not need changes.
+# ----------------------------------------------------
+def _do_walkforward_step() -> Dict[str, Any]:
+    msum = BuildOrExtendSegments()
+    esum = DetectMicroEventsForLatestClosedSegment()
+    osum = ResolveOutcomes()
+    psum = TrainAndPredict()
+    snap = _do_walkforward_snapshot()
+    return {
+        "macro_segments": msum,
+        "micro_events": esum,
+        "outcomes": osum,
+        "predictions": psum,
+        "snapshot": snap,
+    }
 
-# === WALKFORWARD: snapshot ===
-@app.get("/walkforward/snapshot")
-def walkforward_snapshot():
-    """
-    Return latest data blobs required by review page:
-    - macro bands (recent 40)
-    - micro events (from recent 5 segments)
-    - predictions (latest model per event if multiple)
-    - outcomes for those events
-    """
+
+def _do_walkforward_snapshot() -> Dict[str, Any]:
     with engine.connect() as conn:
         segs = [dict(r._mapping) for r in conn.execute(text("""
             SELECT segment_id, start_ts, end_ts, direction, confidence,
@@ -273,9 +281,8 @@ def walkforward_snapshot():
             LIMIT 40
         """))]
 
-        # which segments to show micro events for
         seg_ids = [s["segment_id"] for s in segs[:5]] if segs else []
-        events = []
+        events: List[Dict[str, Any]] = []
         if seg_ids:
             events = [dict(r._mapping) for r in conn.execute(text("""
                 SELECT e.event_id, e.segment_id, e.tick_id, e.event_type, e.features,
@@ -286,8 +293,7 @@ def walkforward_snapshot():
                 ORDER BY e.event_id
             """), {"seg_ids": seg_ids})]
 
-        # outcomes
-        outcomes = []
+        outcomes: List[Dict[str, Any]] = []
         if events:
             eids = [e["event_id"] for e in events]
             outcomes = [dict(r._mapping) for r in conn.execute(text("""
@@ -297,8 +303,7 @@ def walkforward_snapshot():
                 WHERE event_id = ANY(:eids)
             """), {"eids": eids})]
 
-        # predictions: pick the latest per event_id
-        preds = []
+        preds: List[Dict[str, Any]] = []
         if events:
             preds = [dict(r._mapping) for r in conn.execute(text("""
                 SELECT DISTINCT ON (event_id)
@@ -312,10 +317,47 @@ def walkforward_snapshot():
             "segments": segs,
             "events": events,
             "outcomes": outcomes,
-            "predictions": preds
+            "predictions": preds,
         }
 
-# ---------- Trends (unchanged) ----------
+
+# Root paths
+@app.post("/walkforward/step")
+def walkforward_step_root():
+    try:
+        return _do_walkforward_step()
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/walkforward/snapshot")
+def walkforward_snapshot_root():
+    try:
+        return _do_walkforward_snapshot()
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+# /api/* mirrors (kept for compatibility)
+@app.post("/api/walkforward/step")
+def walkforward_step_api():
+    try:
+        return _do_walkforward_step()
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/api/walkforward/snapshot")
+def walkforward_snapshot_api():
+    try:
+        return _do_walkforward_snapshot()
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+# ----------------------------------------------------
+# Trends (unchanged)
+# ----------------------------------------------------
 @app.get("/trends/recent")
 def trends_recent(limit: int = 200):
     with engine.connect() as conn:
@@ -331,6 +373,7 @@ def trends_recent(limit: int = 200):
             {"limit": limit},
         ).mappings().all()
     return list(rows)
+
 
 @app.get("/trends/range")
 def trends_range(start: str, end: str, scale: Optional[int] = None):
@@ -349,6 +392,7 @@ def trends_range(start: str, end: str, scale: Optional[int] = None):
     with engine.connect() as conn:
         rows = conn.execute(text(q), params).mappings().all()
     return list(rows)
+
 
 @app.get("/labels/{name}")
 def get_labels_for_table(name: str):
@@ -369,6 +413,7 @@ def get_labels_for_table(name: str):
         rows = conn.execute(text(f'SELECT tickid FROM "{name}" ORDER BY tickid ASC'))
         return [dict(row._mapping) for row in rows]
 
+
 @app.get("/trends/day")
 def trends_day(day: str, scale: Optional[int] = None):
     d = date.fromisoformat(day)  # YYYY-MM-DD
@@ -376,10 +421,14 @@ def trends_day(day: str, scale: Optional[int] = None):
     b = f"{(d + timedelta(days=1)).isoformat()}T00:00:00Z"
     return trends_range(a, b, scale)
 
-# ---------- Static: movements visual ----------
+
+# ----------------------------------------------------
+# Static: movements visual
+# ----------------------------------------------------
 public_dir = os.path.join(os.path.dirname(__file__), "..", "public")
 if os.path.isdir(public_dir):
     app.mount("/public", StaticFiles(directory=public_dir, html=True), name="public")
+
 
 @app.get("/movements")
 def movements_page():
