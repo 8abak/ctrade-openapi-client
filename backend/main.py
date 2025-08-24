@@ -1,6 +1,7 @@
 # backend/main.py
 
 import os
+import traceback
 from datetime import datetime, timedelta, date
 from typing import List, Optional, Dict, Any
 
@@ -15,7 +16,7 @@ from sqlalchemy import text as sqtxt
 # Your existing router under /api
 from zig_api import router as lview_router
 
-# === FIX: use relative imports (we run as package `backend`) ===
+# Relative imports (we run as package `backend`)
 from .label_macro_segments import BuildOrExtendSegments
 from .label_micro_events import DetectMicroEventsForLatestClosedSegment
 from .compute_outcomes import ResolveOutcomes
@@ -159,8 +160,8 @@ def ticks_range(start: str, end: str, limit: int = 200000):
             text("""
                 SELECT id, timestamp, bid, ask, mid
                 FROM ticks
-                WHERE timestamp >= :start AND timestamp <= :end
-                ORDER BY timestamp ASC
+                WHERE id BETWEEN :start AND :end
+                ORDER BY id ASC
                 LIMIT :limit
             """),
             {"start": start, "end": end, "limit": limit},
@@ -228,24 +229,50 @@ def labels_schema():
 # ----------------------------------------------------
 @app.get("/version")
 def get_version():
-    return {"version": "2025.08.24.walk-forward.bootstrap"}
+    return {"version": "2025.08.24.walk-forward.ui2"}
 
 # ----------------------------------------------------
-# Walk-forward internals
+# Walk-forward internals + journal
 # ----------------------------------------------------
 def _do_walkforward_step() -> Dict[str, Any]:
-    msum = BuildOrExtendSegments()
-    esum = DetectMicroEventsForLatestClosedSegment()
-    osum = ResolveOutcomes()
-    psum = TrainAndPredict()
-    snap = _do_walkforward_snapshot()
-    return {
-        "macro_segments": msum,
-        "micro_events": esum,
-        "outcomes": osum,
-        "predictions": psum,
-        "snapshot": snap,
-    }
+    journal: List[str] = []
+    try:
+        journal.append("Build/extend macro segments…")
+        msum = BuildOrExtendSegments()
+        journal.append(f"macro: {msum}")
+
+        journal.append("Detect micro events for latest closed segment…")
+        esum = DetectMicroEventsForLatestClosedSegment()
+        journal.append(f"micro: {esum}")
+
+        journal.append("Resolve outcomes for eligible events…")
+        osum = ResolveOutcomes()
+        journal.append(f"outcomes: {osum}")
+
+        journal.append("Train & predict…")
+        psum = TrainAndPredict()
+        journal.append(f"predict: {psum}")
+
+        journal.append("Snapshot…")
+        snap = _do_walkforward_snapshot()
+
+        return {
+            "ok": True,
+            "message": "Working",
+            "macro_segments": msum,
+            "micro_events": esum,
+            "outcomes": osum,
+            "predictions": psum,
+            "snapshot": snap,
+            "journal": journal,
+        }
+    except Exception as e:
+        journal.append("ERROR during walk-forward step")
+        journal.append(traceback.format_exc())
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "error": str(e), "journal": journal},
+        )
 
 def _do_walkforward_snapshot() -> Dict[str, Any]:
     with engine.connect() as conn:
@@ -254,10 +281,10 @@ def _do_walkforward_snapshot() -> Dict[str, Any]:
                    start_price, end_price, start_tick_id, end_tick_id
             FROM macro_segments
             ORDER BY end_ts DESC
-            LIMIT 40
+            LIMIT 200
         """))]
 
-        seg_ids = [s["segment_id"] for s in segs[:5]] if segs else []
+        seg_ids = [s["segment_id"] for s in segs] if segs else []
         events: List[Dict[str, Any]] = []
         if seg_ids:
             events = [dict(r._mapping) for r in conn.execute(text("""
@@ -289,15 +316,17 @@ def _do_walkforward_snapshot() -> Dict[str, Any]:
                 ORDER BY event_id, predicted_at DESC
             """), {"eids": [e["event_id"] for e in events]})]
 
-        return {"segments": segs, "events": events, "outcomes": outcomes, "predictions": preds}
+        return {
+            "segments": segs,
+            "events": events,
+            "outcomes": outcomes,
+            "predictions": preds,
+        }
 
 # Root paths
 @app.post("/walkforward/step")
 def walkforward_step_root():
-    try:
-        return _do_walkforward_step()
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
+    return _do_walkforward_step()
 
 @app.get("/walkforward/snapshot")
 def walkforward_snapshot_root():
@@ -309,10 +338,7 @@ def walkforward_snapshot_root():
 # /api mirrors (optional)
 @app.post("/api/walkforward/step")
 def walkforward_step_api():
-    try:
-        return _do_walkforward_step()
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
+    return _do_walkforward_step()
 
 @app.get("/api/walkforward/snapshot")
 def walkforward_snapshot_api():

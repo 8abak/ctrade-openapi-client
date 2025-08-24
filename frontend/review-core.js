@@ -1,151 +1,340 @@
-// frontend/review-core.js — dark + integer-only; Run calls /walkforward/*
+// frontend/review-core.js — Walk-Forward UI with journal + integer-only display
 
 (function () {
   const $ = (sel) => document.querySelector(sel);
 
+  // integer helpers
   const iRound = (v) => (v == null ? v : Math.round(Number(v)));
   const asInt  = (v) => (v == null ? '' : String(iRound(v)));
 
+  // window size for Jump (± window on each side)
+  const JUMP_WINDOW = 6000;
+
   function setStatus(text, kind = 'info') {
-    const el = $('#status'); if (!el) return;
+    const el = $('#status');
+    if (!el) return;
     el.textContent = text;
     el.style.color = kind === 'ok' ? '#7ee787' : kind === 'err' ? '#ffa198' : '#8b949e';
   }
 
-  // existing data sources
-  async function fetchKalman(start, end) {
-    const res = await fetch(`/kalman_layers?start=${start}&end=${end}`);
-    if (!res.ok) throw new Error(`kalman_layers: HTTP ${res.status}`);
-    return await res.json();
+  function log(msg) {
+    const j = $('#journal');
+    if (!j) return;
+    const ts = new Date().toISOString().replace('T',' ').replace('Z','');
+    j.textContent += `[${ts}] ${msg}\n`;
+    j.scrollTop = j.scrollHeight;
   }
-  async function fetchTicks(start, end) {
-    const sql = `SELECT id, bid, ask, mid FROM ticks WHERE id BETWEEN ${start} AND ${end} ORDER BY id`;
+
+  // ----- data -----
+  async function fetchTicksRange(startId, endId) {
+    const sql = `SELECT id, bid, ask, mid FROM ticks WHERE id BETWEEN ${startId} AND ${endId} ORDER BY id`;
     const url = `/sqlvw/query?query=${encodeURIComponent(sql)}`;
     const res = await fetch(url);
-    if (!res.ok) throw new Error(`sqlvw: HTTP ${res.status}`);
+    if (!res.ok) throw new Error(`ticks range: HTTP ${res.status}`);
     return await res.json();
   }
 
-  // walk-forward endpoints (root; nginx already proxies "/" to backend)
-  async function wfStep() { const r = await fetch('/walkforward/step', { method: 'POST' }); if (!r.ok) throw new Error(`step: ${r.status}`); return r.json(); }
-  async function wfSnap() { const r = await fetch('/walkforward/snapshot'); if (!r.ok) throw new Error(`snapshot: ${r.status}`); return r.json(); }
+  async function fetchKalman(startId, endId) {
+    // Keep legacy layer available for reference; harmless if endpoint returns empty
+    const res = await fetch(`/kalman_layers?start=${startId}&end=${endId}`);
+    if (!res.ok) return [];
+    try { return await res.json(); } catch { return []; }
+  }
 
+  async function wfStep()   { return fetch('/walkforward/step',   { method: 'POST' }).then(r => r.json()); }
+  async function wfSnap()   { return fetch('/walkforward/snapshot').then(r => r.json()); }
+
+  // ----- transforms -----
+  const xy   = (rows, xKey, yKey) => rows.map(r => [r[xKey], iRound(r[yKey])]);
+
+  // ----- chart -----
   const chart = echarts.init($('#chart'), null, { renderer: 'canvas' });
 
-  const xy   = (rows, xKey, yKey) => rows.map(r => [r[xKey], iRound(r[yKey])]);
-  const asXY = (rows, key)        => rows.map(r => [r.tickid, iRound(r[key])]);
-
-  function render(krows, trows) {
-    const mid  = xy(trows, 'id', 'mid');
-    const bid  = xy(trows, 'id', 'bid');
-    const ask  = xy(trows, 'id', 'ask');
-    const k1   = asXY(krows, 'k1');
-    const k1r  = asXY(krows, 'k1_rts');
-    const kbig = asXY(krows, 'k2_cv');
-
-    const option = {
+  function baseOption() {
+    return {
       backgroundColor: '#0d1117',
       animation: false,
       textStyle: { color: '#c9d1d9' },
       legend: {
-        top: 6, textStyle: { color: '#aeb9cc' },
+        top: 6,
+        textStyle: { color: '#aeb9cc' },
         selectedMode: 'multiple',
-        selected: { 'Mid': true, 'Bid': false, 'Ask': false, 'k1 (old Kalman)': true, 'k1_rts (RTS)': true, 'Big-Move': true }
       },
       grid: { left: 48, right: 20, top: 32, bottom: 64 },
       tooltip: {
-        trigger: 'axis', axisPointer: { type: 'cross' },
-        backgroundColor: '#101826', borderColor: '#26314a', textStyle: { color: '#dce6f2' },
+        trigger: 'axis',
+        axisPointer: { type: 'cross' },
+        backgroundColor: '#101826',
+        borderColor: '#26314a',
+        textStyle: { color: '#dce6f2' },
         valueFormatter: (v) => asInt(v)
       },
       xAxis: {
-        type: 'value', name: 'tick',
-        nameTextStyle: { color: '#8b949e' }, axisLabel: { color: '#8b949e' }, axisLine: { lineStyle: { color: '#30363d' } },
+        type: 'value',
+        name: 'tick',
+        nameTextStyle: { color: '#8b949e' },
+        axisLabel: { color: '#8b949e' },
+        axisLine:  { lineStyle: { color: '#30363d' } },
         splitLine: { show: true, lineStyle: { color: '#21262d', type: 'dashed' } }
       },
       yAxis: {
-        type: 'value', scale: true, minInterval: 1,
+        type: 'value',
+        scale: true,
+        minInterval: 1,
         axisLabel: { color: '#8b949e', formatter: (v) => asInt(v) },
-        axisLine: { lineStyle: { color: '#30363d' } }, splitLine: { show: true, lineStyle: { color: '#21262d' } }
+        axisLine:  { lineStyle: { color: '#30363d' } },
+        splitLine: { show: true, lineStyle: { color: '#21262d' } }
       },
       dataZoom: [
         { type: 'inside', throttle: 50 },
         { type: 'slider', height: 18, bottom: 26, backgroundColor: '#0f1524', borderColor: '#2a3654' }
       ],
-      series: [
-        { name: 'Mid', type: 'line', showSymbol: false, sampling: 'lttb', large: true, largeThreshold: 10000, lineStyle: { width: 1.2 }, data: mid },
-        { name: 'Bid', type: 'line', showSymbol: false, sampling: 'lttb', large: true, largeThreshold: 10000, lineStyle: { width: 0.9, opacity: 0.7 }, data: bid },
-        { name: 'Ask', type: 'line', showSymbol: false, sampling: 'lttb', large: true, largeThreshold: 10000, lineStyle: { width: 0.9, opacity: 0.7 }, data: ask },
-        { name: 'k1 (old Kalman)', type: 'line', showSymbol: false, lineStyle: { width: 1.5 }, data: k1 },
-        { name: 'k1_rts (RTS)',    type: 'line', showSymbol: false, smooth: true,  lineStyle: { width: 1.1 }, opacity: 0.95, data: k1r },
-        { name: 'Big-Move',        type: 'line', showSymbol: false, lineStyle: { width: 2.2 }, data: kbig }
-      ]
+      series: []
     };
-
-    chart.setOption(option, true);
   }
 
-  async function loadRange() {
-    const start = parseInt($('#startTick').value || '1', 10);
-    const end   = parseInt($('#endTick').value || '100000', 10);
-    try {
-      setStatus('Loading data…');
-      const [krows, trows] = await Promise.all([fetchKalman(start, end), fetchTicks(start, end)]);
-      render(krows, trows);
-      setStatus(`Loaded: ticks ${trows.length}, layers ${krows.length}`, 'ok');
-      if (krows && krows.length > 5000) {
-        const first = krows[0].tickid;
-        chart.dispatchAction({ type: 'dataZoom', startValue: first, endValue: first + 5000 });
-      }
-    } catch (err) {
-      console.error(err);
-      setStatus(`Failed to load data: ${err.message || err}`, 'err');
-      chart.setOption({ title: { text: 'Failed to load data', left: 'center', top: 'middle', textStyle: { color: '#ee8888' } } });
+  function seriesForPrice(ticks) {
+    const mid = xy(ticks, 'id', 'mid');
+    const bid = xy(ticks, 'id', 'bid');
+    const ask = xy(ticks, 'id', 'ask');
+    return [
+      { name: 'Mid', type: 'line', showSymbol: false, sampling: 'lttb', large: true, largeThreshold: 10000, lineStyle: { width: 1.2 }, data: mid },
+      { name: 'Bid', type: 'line', showSymbol: false, sampling: 'lttb', large: true, largeThreshold: 10000, lineStyle: { width: 0.9, opacity: 0.7 }, data: bid },
+      { name: 'Ask', type: 'line', showSymbol: false, sampling: 'lttb', large: true, largeThreshold: 10000, lineStyle: { width: 0.9, opacity: 0.7 }, data: ask },
+    ];
+  }
+
+  function markAreasForMacro(segments, startId, endId) {
+    // filter to current window
+    const segs = segments.filter(s => s.end_tick_id >= startId && s.start_tick_id <= endId);
+    if (!segs.length) return [];
+    const data = segs.map(s => {
+      const dir = s.direction > 0 ? 1 : -1;
+      const color = dir > 0 ? 'rgba(0,160,100,' + (0.10 + 0.20 * (s.confidence ?? 0.5)) + ')'
+                            : 'rgba(200,50,60,' + (0.10 + 0.20 * (s.confidence ?? 0.5)) + ')';
+      return [{
+        xAxis: Math.max(s.start_tick_id, startId),
+        yAxis: 'min',
+        itemStyle: { color }
+      }, {
+        xAxis: Math.min(s.end_tick_id, endId),
+        yAxis: 'max'
+      }];
+    });
+    return [{
+      name: 'Macro',
+      type: 'line',
+      data: [],
+      markArea: { silent: true, itemStyle: { opacity: 1 }, data }
+    }];
+  }
+
+  function seriesForEvents(events, startId, endId) {
+    const evs = events.filter(e => e.tick_id >= startId && e.tick_id <= endId);
+    if (!evs.length) return [];
+
+    const mapSymbol = (t) => t === 'pullback_end' ? 'triangle' : t === 'breakout' ? 'diamond' : 'circle';
+    const mapColor  = (t) => t === 'pullback_end' ? '#58a6ff' : t === 'breakout' ? '#f2cc60' : '#b981f5';
+
+    const data = evs.map(e => ({
+      value: [e.tick_id, iRound(e.event_price)],
+      name: e.event_type,
+      symbol: mapSymbol(e.event_type),
+      itemStyle: { color: mapColor(e.event_type) }
+    }));
+
+    return [{
+      name: 'Events',
+      type: 'scatter',
+      symbolSize: 9,
+      data
+    }];
+  }
+
+  function seriesForPreds(preds, events, startId, endId) {
+    if (!preds?.length || !events?.length) return [];
+    const evById = new Map(events.map(e => [e.event_id, e]));
+    const rows = [];
+    for (const p of preds) {
+      const e = evById.get(p.event_id);
+      if (!e) continue;
+      if (e.tick_id < startId || e.tick_id > endId) continue;
+      rows.push({
+        value: [e.tick_id, iRound(e.event_price)],
+        p_tp: p.p_tp ?? null,
+        threshold: p.threshold ?? null,
+        model_version: p.model_version ?? '',
+        decided: !!p.decided,
+        predicted_at: p.predicted_at
+      });
+    }
+    if (!rows.length) return [];
+    return [{
+      name: 'Predictions',
+      type: 'scatter',
+      symbol: 'circle',
+      symbolSize: 8,
+      encode: { x: 0, y: 1 },
+      itemStyle: {
+        color: (params) => {
+          const p = params.data.p_tp ?? 0;
+          // greenish from 0.5..1, bluish lower; alpha by confidence
+          const a = 0.25 + 0.45 * Math.max(0, Math.min(1, p));
+          const g = Math.round(120 + 120 * p);
+          const r = Math.round(60 * (1 - p));
+          return `rgba(${r},${g},120,${a})`;
+        }
+      },
+      tooltip: {
+        formatter: (params) => {
+          const d = params.data;
+          const parts = [
+            `<b>Prediction</b>`,
+            `tick: ${asInt(d.value[0])}`,
+            `price: ${asInt(d.value[1])}`,
+            `p_tp: ${(d.p_tp ?? 0).toFixed(3)}`,
+            `τ: ${(d.threshold ?? 0).toFixed(3)}`,
+            `model: ${d.model_version || '-'}`,
+            `decided: ${d.decided ? 'yes' : 'no'}`,
+            `at: ${d.predicted_at || ''}`
+          ];
+          return parts.join('<br/>');
+        }
+      },
+      data: rows
+    }];
+  }
+
+  function seriesForOutcomes(outcomes, events, startId, endId) {
+    if (!outcomes?.length || !events?.length) return [];
+    const evById = new Map(events.map(e => [e.event_id, e]));
+    const rows = [];
+    for (const o of outcomes) {
+      const e = evById.get(o.event_id);
+      if (!e) continue;
+      if (e.tick_id < startId || e.tick_id > endId) continue;
+      const col = o.outcome === 'TP' ? '#2ea043' : o.outcome === 'SL' ? '#f85149' : '#8b949e';
+      rows.push({
+        value: [e.tick_id, iRound(e.event_price)],
+        itemStyle: { color: col, borderColor: col }
+      });
+    }
+    if (!rows.length) return [];
+    return [{
+      name: 'Outcomes',
+      type: 'effectScatter',
+      rippleEffect: { brushType: 'stroke', scale: 2.2 },
+      symbolSize: 11,
+      showEffectOn: 'render',
+      data: rows
+    }];
+  }
+
+  async function renderWindow(startId, endId) {
+    setStatus('Loading data…');
+    log(`Load window [${startId}, ${endId}]`);
+
+    const [ticks, kalman, snap] = await Promise.all([
+      fetchTicksRange(startId, endId),
+      fetchKalman(startId, endId), // ok if empty
+      wfSnap().catch(() => ({segments:[],events:[],predictions:[],outcomes:[]})),
+    ]);
+
+    const opt = baseOption();
+    opt.series = [
+      ...seriesForPrice(ticks),
+      ...markAreasForMacro(snap.segments || [], startId, endId),
+      ...seriesForEvents(snap.events || [], startId, endId),
+      ...seriesForPreds(snap.predictions || [], snap.events || [], startId, endId),
+      ...seriesForOutcomes(snap.outcomes || [], snap.events || [], startId, endId),
+    ];
+
+    // Initial legend visibility from checkboxes
+    const sel = {};
+    sel['Mid'] = $('#chkMid').checked;
+    sel['Bid'] = $('#chkBid').checked;
+    sel['Ask'] = $('#chkAsk').checked;
+    sel['Macro'] = $('#chkMacro').checked;
+    sel['Events'] = $('#chkEvents').checked;
+    sel['Predictions'] = $('#chkPreds').checked;
+    sel['Outcomes'] = $('#chkOutcomes').checked;
+    opt.legend.selected = sel;
+
+    chart.setOption(opt, true);
+
+    setStatus(`Loaded ${ticks.length} ticks`, 'ok');
+  }
+
+  // ----- UI wiring -----
+  function applyLegendFromToggles() {
+    const map = {
+      chkMid: 'Mid', chkBid: 'Bid', chkAsk: 'Ask',
+      chkMacro: 'Macro', chkEvents: 'Events', chkPreds: 'Predictions', chkOutcomes: 'Outcomes'
+    };
+    for (const id in map) {
+      const el = $('#' + id);
+      if (!el) continue;
+      const name = map[id];
+      chart.dispatchAction({ type: el.checked ? 'legendSelect' : 'legendUnSelect', name });
     }
   }
 
-  const legendMap = {
-    chkMid: 'Mid', chkBid: 'Bid', chkAsk: 'Ask',
-    chkK1: 'k1 (old Kalman)', chkRTS: 'k1_rts (RTS)', chkBM: 'Big-Move'
-  };
-  for (const id in legendMap) {
-    const el = $('#' + id);
-    if (el) el.addEventListener('change', () => {
-      const name = legendMap[id];
-      chart.dispatchAction({ type: el.checked ? 'legendSelect' : 'legendUnSelect', name });
-    });
-  }
-
-  $('#loadBtn').addEventListener('click', () => loadRange().catch(console.error));
-  $('#jumpBtn').addEventListener('click', () => {
-    const v = parseInt($('#jumpTick').value || '', 10);
-    if (!Number.isFinite(v)) return;
-    chart.dispatchAction({ type: 'dataZoom', startValue: v - 2000, endValue: v + 2000 });
+  $('#loadBtn').addEventListener('click', async () => {
+    const s = parseInt($('#startTick').value || '1', 10);
+    const e = parseInt($('#endTick').value || (s + 12000), 10);
+    try { await renderWindow(s, e); applyLegendFromToggles(); }
+    catch (err) { console.error(err); setStatus('Load failed: ' + (err.message || err), 'err'); log('Load failed: ' + err); }
   });
 
+  $('#jumpBtn').addEventListener('click', async () => {
+    const t = parseInt($('#jumpTick').value || '1', 10);
+    const s = Math.max(1, t - JUMP_WINDOW);
+    const e = t + JUMP_WINDOW;
+    $('#startTick').value = s;
+    $('#endTick').value = e;
+    try { await renderWindow(s, e); applyLegendFromToggles(); }
+    catch (err) { console.error(err); setStatus('Jump failed: ' + (err.message || err), 'err'); log('Jump failed: ' + err); }
+  });
+
+  $('#jumpTick').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') $('#jumpBtn').click(); });
+
+  // toggles → legend
+  ['chkMid','chkBid','chkAsk','chkMacro','chkEvents','chkPreds','chkOutcomes'].forEach(id => {
+    const el = $('#' + id);
+    if (el) el.addEventListener('change', () => {
+      chart.dispatchAction({ type: el.checked ? 'legendSelect' : 'legendUnSelect', name: el.nextSibling.textContent.trim() || el.id.replace('chk','') });
+      applyLegendFromToggles();
+    });
+  });
+
+  // Run → call step and show journal
   $('#runBtn').addEventListener('click', async () => {
-    const btn = $('#runBtn'); btn.disabled = true; btn.textContent = 'Running…';
-    setStatus('Working…', 'info');
+    const btn = $('#runBtn');
+    btn.disabled = true; btn.textContent = 'Running…';
+    setStatus('Working…'); log('Run: start');
     try {
       const res = await wfStep();
-      const m = res?.macro_segments ?? {};
-      const e = res?.micro_events ?? {};
-      const o = res?.outcomes ?? {};
-      const p = res?.predictions ?? {};
-      const summary = [
-        `Segments +${m.segments_added ?? 0}`,
-        `Events +${e.events_added ?? 0}`,
-        `Outcomes +${o.outcomes_resolved ?? 0}`,
-        p.trained ? `Preds ${p.written ?? 0} (τ=${(p.threshold ?? 0).toFixed(2)})` : 'Preds —'
-      ].join(' · ');
-      setStatus(summary, 'ok');
+      if (res?.journal) res.journal.forEach(line => log(line));
+      if (res?.ok === false) {
+        setStatus('Error: ' + (res.error || 'unknown'), 'err');
+        log('Run error: ' + (res.error || 'unknown'));
+      } else {
+        setStatus(res?.message || 'Working', 'ok');
+        log('Run: done');
+      }
+      // Refresh current window if inputs set
+      const s = parseInt($('#startTick').value || '1', 10);
+      const e = parseInt($('#endTick').value || (s + 12000), 10);
+      await renderWindow(s, e);
+      applyLegendFromToggles();
     } catch (err) {
-      console.error(err);
       setStatus('Run failed: ' + (err.message || err), 'err');
+      log('Run failed: ' + err);
     } finally {
       btn.disabled = false; btn.textContent = 'Run';
     }
   });
 
-  loadRange().catch(console.error);
+  // Initial hint
+  setStatus('Ready — use Jump or Load to fetch a window.');
 })();

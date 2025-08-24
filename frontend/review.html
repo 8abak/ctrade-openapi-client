@@ -2,23 +2,37 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>ML Review — Kalman Layers</title>
+  <title>ML Review — Walk-Forward</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root { color-scheme: dark; }
     html, body { height: 100%; }
-    body { margin: 0; background: #0d1117; color: #e6edf3;
-           font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; }
-    .toolbar { display:flex; gap:12px; align-items:center; flex-wrap:wrap; padding:10px 12px;
-               border-bottom:1px solid #30363d; background:#0d1117; position:sticky; top:0; z-index:5; }
-    .toolbar label { color:#e6edf3; }
-    .toolbar input[type="number"], .toolbar input[type="text"] { background:#161b22; color:#e6edf3;
-        border:1px solid #30363d; border-radius:6px; padding:4px 8px; }
-    .toolbar button { background:#21262d; color:#e6edf3; border:1px solid #30363d; border-radius:6px; padding:4px 10px; cursor:pointer; }
-    .toolbar button:disabled { opacity:.6; cursor:default; }
-    #status { padding:6px 12px 4px 12px; color:#8b949e; font-size:12px; min-height:18px; }
-    #chart { height:70vh; min-height:520px; width:100%; background:#0d1117; }
-    .spacer { flex:1 1 auto; } .muted { color:#9aa4b2; }
+    body {
+      margin: 0;
+      background: #0d1117;
+      color: #e6edf3;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+    }
+    .toolbar {
+      display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+      padding: 10px 12px; border-bottom: 1px solid #30363d; background: #0d1117; position: sticky; top: 0; z-index: 5;
+    }
+    .toolbar label { color: #e6edf3; }
+    .toolbar input[type="number"], .toolbar input[type="text"] {
+      background: #161b22; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: 4px 8px;
+    }
+    .toolbar button {
+      background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: 4px 10px; cursor: pointer;
+    }
+    .toolbar button:disabled { opacity: .6; cursor: default; }
+    #status { padding: 6px 12px 4px 12px; color: #8b949e; font-size: 12px; min-height: 18px; }
+    #journal {
+      margin: 0 12px 6px 12px; background: #0f1420; border: 1px solid #222b3d; border-radius: 8px;
+      padding: 8px 10px; max-height: 160px; overflow: auto; font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; color: #a5b4c3;
+    }
+    #chart  { height: 68vh; min-height: 520px; width: 100%; background: #0d1117; }
+    .spacer { flex: 1 1 auto; }
+    .muted  { color: #9aa4b2; }
   </style>
 </head>
 <body>
@@ -29,22 +43,27 @@
 
     <button id="runBtn" title="Run walk-forward step">Run</button>
 
+    <label><input id="chkMacro" type="checkbox" checked /> Macro</label>
+    <label><input id="chkEvents" type="checkbox" checked /> Events</label>
+    <label><input id="chkPreds" type="checkbox" checked /> Predictions</label>
+    <label><input id="chkOutcomes" type="checkbox" checked /> Outcomes</label>
+
+    <span style="width:16px"></span>
+    <span class="muted">Price streams:</span>
     <label><input id="chkMid" type="checkbox" checked /> Mid</label>
     <label><input id="chkBid" type="checkbox" /> Bid</label>
     <label><input id="chkAsk" type="checkbox" /> Ask</label>
-    <label><input id="chkK1"  type="checkbox" checked /> k1</label>
-    <label><input id="chkRTS" type="checkbox" checked /> k1_rts</label>
-    <label><input id="chkBM"  type="checkbox" checked /> Big-Move</label>
 
     <span class="spacer"></span>
-    <label class="muted">Jump to tick <input id="jumpTick" type="number" placeholder="tick id" style="width:140px" /></label>
+    <label class="muted">Jump to tick <input id="jumpTick" type="number" value="1" style="width:140px" /></label>
     <button id="jumpBtn">Jump</button>
   </div>
 
   <div id="status">Ready</div>
+  <pre id="journal"></pre>
   <div id="chart"></div>
 
-  <script src="/public/echarts.min.js?v=20250824"></script>
-  <script src="/frontend/review-core.js?v=20250824"></script>
+  <script src="/public/echarts.min.js?v=20250825"></script>
+  <script src="/frontend/review-core.js?v=20250825"></script>
 </body>
 </html>
