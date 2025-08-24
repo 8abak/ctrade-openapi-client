@@ -12,15 +12,14 @@ from pydantic import BaseModel
 from sqlalchemy import create_engine, text
 from sqlalchemy import text as sqtxt
 
-# Mounted router you already use under /api
+# Your existing router under /api
 from zig_api import router as lview_router
 
-# ---- Walk-forward modules (added) ----
-from label_macro_segments import BuildOrExtendSegments
-from label_micro_events import DetectMicroEventsForLatestClosedSegment
-from compute_outcomes import ResolveOutcomes
-from train_predict import TrainAndPredict
-
+# === FIX: use relative imports (we run as package `backend`) ===
+from .label_macro_segments import BuildOrExtendSegments
+from .label_micro_events import DetectMicroEventsForLatestClosedSegment
+from .compute_outcomes import ResolveOutcomes
+from .train_predict import TrainAndPredict
 
 # ----------------------------------------------------
 # App & CORS
@@ -32,9 +31,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-# keep your existing mounted router under /api
 app.include_router(lview_router, prefix="/api")
-
 
 # ----------------------------------------------------
 # DB
@@ -44,7 +41,6 @@ db_url = os.getenv(
     "postgresql+psycopg2://babak:babak33044@localhost:5432/trading",
 )
 engine = create_engine(db_url)
-
 
 # ----------------------------------------------------
 # Models
@@ -56,7 +52,6 @@ class Tick(BaseModel):
     ask: float
     mid: float
 
-
 # ----------------------------------------------------
 # Helpers
 # ----------------------------------------------------
@@ -64,14 +59,12 @@ def q_all(sql: str, params: Dict[str, Any]):
     with engine.connect() as conn:
         return [dict(r._mapping) for r in conn.execute(sqtxt(sql), params)]
 
-
 # ----------------------------------------------------
 # Root
 # ----------------------------------------------------
 @app.get("/")
 def home():
     return {"message": "API live. Try /ticks/recent, /trends/day, /sqlvw/tables, /version"}
-
 
 # ----------------------------------------------------
 # Ticks
@@ -90,7 +83,6 @@ def get_ticks(offset: int = 0, limit: int = 2000):
         ).mappings().all()
     return list(rows)
 
-
 @app.post("/api/sql")
 def sql_post(sql: str = Body(..., embed=True)):
     try:
@@ -101,7 +93,6 @@ def sql_post(sql: str = Body(..., embed=True)):
             return {"message": "Query executed successfully."}
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
-
 
 @app.get("/ticks/latest", response_model=List[Tick])
 def get_latest_ticks(after: str = Query(..., description="UTC timestamp in ISO format")):
@@ -117,7 +108,6 @@ def get_latest_ticks(after: str = Query(..., description="UTC timestamp in ISO f
             {"after": after},
         )
     return [dict(row._mapping) for row in result]
-
 
 @app.get("/ticks/recent", response_model=List[Tick])
 def get_recent_ticks(limit: int = Query(2200, le=5000)):
@@ -137,7 +127,6 @@ def get_recent_ticks(limit: int = Query(2200, le=5000)):
         ).mappings().all()
     return list(rows)
 
-
 @app.get("/ticks/before/{tickid}", response_model=List[Tick])
 def get_ticks_before(tickid: int, limit: int = 2000):
     with engine.connect() as conn:
@@ -153,7 +142,6 @@ def get_ticks_before(tickid: int, limit: int = 2000):
         ).mappings().all()
     return list(reversed(rows))
 
-
 @app.get("/ticks/lastid")
 def get_lastid():
     with engine.connect() as conn:
@@ -163,7 +151,6 @@ def get_lastid():
     if not row:
         raise HTTPException(status_code=404, detail="No ticks")
     return {"lastId": row["id"], "timestamp": row["timestamp"]}
-
 
 @app.get("/ticks/range", response_model=List[Tick])
 def ticks_range(start: str, end: str, limit: int = 200000):
@@ -180,7 +167,6 @@ def ticks_range(start: str, end: str, limit: int = 200000):
         ).mappings().all()
     return list(rows)
 
-
 # ----------------------------------------------------
 # SQL viewer helpers
 # ----------------------------------------------------
@@ -194,7 +180,6 @@ def get_all_table_names():
         """)).all()
     return [r[0] for r in rows]
 
-
 @app.get("/sqlvw/query")
 def run_sql_query(query: str = Query(...)):
     try:
@@ -207,8 +192,7 @@ def run_sql_query(query: str = Query(...)):
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
 
-
-# Labels discovery (kept at /api/* because frontend pages use it)
+# Labels discovery (kept under /api/*)
 @app.get("/api/labels/available")
 def get_label_tables():
     with engine.connect() as conn:
@@ -219,13 +203,8 @@ def get_label_tables():
         """)).all()
     return sorted({r[0] for r in rows})
 
-
 @app.get("/api/labels/schema")
 def labels_schema():
-    """
-    List tables that have a tickid column, and which columns are "plottable labels":
-    - Exclude: id, tickid, any columns starting with 'ts'
-    """
     q = text("""
         SELECT c.table_name, c.column_name
         FROM information_schema.columns c
@@ -242,17 +221,14 @@ def labels_schema():
             low = cname.lower()
             if low != "id" and low != "tickid" and not low.startswith("ts"):
                 out[tname]["labels"].append(cname)
-    # only keep tables that actually have label columns
     return [v for v in out.values() if v["labels"]]
-
 
 # ----------------------------------------------------
 # Version
 # ----------------------------------------------------
 @app.get("/version")
 def get_version():
-    return {"version": "2025.08.24.walk-forward.002"}
-
+    return {"version": "2025.08.24.walk-forward.bootstrap"}
 
 # ----------------------------------------------------
 # Walk-forward internals
@@ -270,7 +246,6 @@ def _do_walkforward_step() -> Dict[str, Any]:
         "predictions": psum,
         "snapshot": snap,
     }
-
 
 def _do_walkforward_snapshot() -> Dict[str, Any]:
     with engine.connect() as conn:
@@ -314,17 +289,8 @@ def _do_walkforward_snapshot() -> Dict[str, Any]:
                 ORDER BY event_id, predicted_at DESC
             """), {"eids": [e["event_id"] for e in events]})]
 
-        return {
-            "segments": segs,
-            "events": events,
-            "outcomes": outcomes,
-            "predictions": preds,
-        }
+        return {"segments": segs, "events": events, "outcomes": outcomes, "predictions": preds}
 
-
-# ----------------------------------------------------
-# Walk-forward endpoints — expose under three prefixes so nginx works without edits
-# ----------------------------------------------------
 # Root paths
 @app.post("/walkforward/step")
 def walkforward_step_root():
@@ -340,7 +306,7 @@ def walkforward_snapshot_root():
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-# /api/* mirrors
+# /api mirrors (optional)
 @app.post("/api/walkforward/step")
 def walkforward_step_api():
     try:
@@ -354,22 +320,6 @@ def walkforward_snapshot_api():
         return _do_walkforward_snapshot()
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
-
-# /sqlvw/* mirrors (this prefix is already proxied on your host)
-@app.post("/sqlvw/walkforward/step")
-def walkforward_step_sqlvw():
-    try:
-        return _do_walkforward_step()
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
-
-@app.get("/sqlvw/walkforward/snapshot")
-def walkforward_snapshot_sqlvw():
-    try:
-        return _do_walkforward_snapshot()
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
-
 
 # ----------------------------------------------------
 # Trends (unchanged)
@@ -390,7 +340,6 @@ def trends_recent(limit: int = 200):
         ).mappings().all()
     return list(rows)
 
-
 @app.get("/trends/range")
 def trends_range(start: str, end: str, scale: Optional[int] = None):
     q = """
@@ -409,10 +358,8 @@ def trends_range(start: str, end: str, scale: Optional[int] = None):
         rows = conn.execute(text(q), params).mappings().all()
     return list(rows)
 
-
 @app.get("/labels/{name}")
 def get_labels_for_table(name: str):
-    # only allow names that appear in /labels/available
     with engine.connect() as conn:
         tables = {
             row[0]
@@ -429,17 +376,15 @@ def get_labels_for_table(name: str):
         rows = conn.execute(text(f'SELECT tickid FROM "{name}" ORDER BY tickid ASC'))
         return [dict(row._mapping) for row in rows]
 
-
 @app.get("/trends/day")
 def trends_day(day: str, scale: Optional[int] = None):
-    d = date.fromisoformat(day)  # YYYY-MM-DD
+    d = date.fromisoformat(day)
     a = f"{d.isoformat()}T00:00:00Z"
     b = f"{(d + timedelta(days=1)).isoformat()}T00:00:00Z"
     return trends_range(a, b, scale)
 
-
 # ----------------------------------------------------
-# Static: movements visual
+# Static
 # ----------------------------------------------------
 public_dir = os.path.join(os.path.dirname(__file__), "..", "public")
 if os.path.isdir(public_dir):
