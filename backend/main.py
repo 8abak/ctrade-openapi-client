@@ -20,6 +20,13 @@ from fastapi import APIRouter
 from sqlalchemy.exc import ProgrammingError
 from fastapi import Query, HTTPException
 
+#new learning imports
+from label_macro_segments import BuildOrExtendSegments
+from label_micro_events import DetectMicroEventsForLatestClosedSegment
+from compute_outcomes import ResolveOutcomes
+from train_predict import TrainAndPredict
+
+
 # ---------  App & CORS ---------
 app = FastAPI(title="cTrade backend")
 app.add_middleware(
@@ -229,6 +236,95 @@ def labels_schema():
 @app.get("/version")
 def get_version():
     return {"version": "2025.08.08.walk-forward.001"}
+
+# === WALKFORWARD: step ===
+@app.post("/api/walkforward/step")
+def walkforward_step():
+    """
+    One-click step:
+      1) Extend/close macro ($6) segment(s) if a pivot is confirmed.
+      2) Seed micro events in the latest CLOSED segment (idempotent).
+      3) Resolve outcomes for events with enough forward data (60 min).
+      4) Train on resolved history; predict on latest segment's events.
+      5) Return a compact snapshot for front-end layers.
+    """
+    try:
+        msum = BuildOrExtendSegments()
+        esum = DetectMicroEventsForLatestClosedSegment()
+        osum = ResolveOutcomes()
+        psum = TrainAndPredict()
+
+        snap = walkforward_snapshot()
+        return {
+            "macro_segments": msum,
+            "micro_events": esum,
+            "outcomes": osum,
+            "predictions": psum,
+            "snapshot": snap
+        }
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+# === WALKFORWARD: snapshot ===
+@app.get("/api/walkforward/snapshot")
+def walkforward_snapshot():
+    """
+    Return latest data blobs required by review page:
+    - macro bands (recent 40)
+    - micro events (from recent 5 segments)
+    - predictions (latest model per event if multiple)
+    - outcomes for those events
+    """
+    with engine.connect() as conn:
+        segs = [dict(r._mapping) for r in conn.execute(text("""
+            SELECT segment_id, start_ts, end_ts, direction, confidence, start_price, end_price,
+                   start_tick_id, end_tick_id
+            FROM macro_segments
+            ORDER BY end_ts DESC
+            LIMIT 40
+        """))]
+
+        # which segments to show micro events for
+        seg_ids = [s["segment_id"] for s in segs[:5]] if segs else []
+        events = []
+        if seg_ids:
+            events = [dict(r._mapping) for r in conn.execute(text("""
+                SELECT e.event_id, e.segment_id, e.tick_id, e.event_type, e.features,
+                       t.timestamp AS event_ts, t.mid AS event_price
+                FROM micro_events e
+                JOIN ticks t ON t.id = e.tick_id
+                WHERE e.segment_id = ANY(:seg_ids)
+                ORDER BY e.event_id
+            """), {"seg_ids": seg_ids})]
+
+        # outcomes
+        outcomes = []
+        if events:
+            eids = [e["event_id"] for e in events]
+            outcomes = [dict(r._mapping) for r in conn.execute(text("""
+                SELECT event_id, outcome, tp_hit_ts, sl_hit_ts, timeout_ts, horizon_seconds, mfe, mae
+                FROM outcomes
+                WHERE event_id = ANY(:eids)
+            """), {"eids": eids})]
+
+        # predictions: pick the latest per event_id
+        preds = []
+        if events:
+            preds = [dict(r._mapping) for r in conn.execute(text("""
+                SELECT DISTINCT ON (event_id)
+                       event_id, model_version, p_tp, threshold, decided, predicted_at
+                FROM predictions
+                WHERE event_id = ANY(:eids)
+                ORDER BY event_id, predicted_at DESC
+            """), {"eids": [e["event_id"] for e in events]})]
+
+        return {
+            "segments": segs,
+            "events": events,
+            "outcomes": outcomes,
+            "predictions": preds
+        }
+
 
 
 # ---------- Trends (unchanged) ----------

@@ -1,124 +1,270 @@
-(async function() {
-  const chartEl = document.getElementById('chart');
-  const chart = echarts.init(chartEl, null, { renderer: 'canvas' });
+/* frontend/review-core.js
+ * Walk-forward UI glue for review.html.
+ * - Adds a Run button handler
+ * - Fetches /api/walkforward/snapshot
+ * - Renders layers: Macro bands, Micro events, Predictions, Outcomes
+ * - Non-destructive: if a chart exists, we reuse it; else we init one.
+ */
 
-  // --- API helpers ---
-  async function fetchKalman(start, end) {
-    const res = await fetch(`/kalman_layers?start=${start}&end=${end}`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return await res.json(); // [{tickid, k1, k1_rts, k2_cv}]
+(function () {
+  // -------- DOM helpers --------
+  function $(sel) { return document.querySelector(sel); }
+  function EnsureEl(idCandidates) {
+    for (const id of idCandidates) {
+      const el = document.getElementById(id) || document.querySelector(`#${id}`);
+      if (el) return el;
+    }
+    // fallback: create and append to body minimally
+    const el = document.createElement('div');
+    el.id = 'chart';
+    el.style.cssText = 'height:65vh;min-height:480px;width:100%;';
+    document.body.appendChild(el);
+    return el;
   }
-  async function fetchTicks(start, end) {
-    const sql = `SELECT id, bid, ask, mid FROM ticks WHERE id BETWEEN ${start} AND ${end} ORDER BY id`;
-    const url = `/sqlvw/query?query=${encodeURIComponent(sql)}`; // uses existing endpoint
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return await res.json(); // [{id,bid,ask,mid}]
+
+  // -------- Chart bootstrap --------
+  const chartEl = EnsureEl(['chart','main','echart','review-chart']);
+  let chart = (window.echarts && window.echarts.getInstanceByDom)
+    ? (window.echarts.getInstanceByDom(chartEl) || (window.echarts.init ? window.echarts.init(chartEl) : null))
+    : null;
+
+  if (!chart && window.echarts && window.echarts.init) {
+    chart = window.echarts.init(chartEl);
   }
 
-  // --- Transforms ---
-  const xy = (rows, xKey, yKey) => rows.map(r => [r[xKey], r[yKey]]);
-  const asXY = (rows, key) => rows.map(r => [r.tickid, r[key]]);
-
-  function render(krows, trows) {
-    const mid = xy(trows, 'id', 'mid');
-    const bid = xy(trows, 'id', 'bid');
-    const ask = xy(trows, 'id', 'ask');
-
-    const k1    = asXY(krows, 'k1');
-    const k1rts = asXY(krows, 'k1_rts');
-    const kbig  = asXY(krows, 'k2_cv');
-
-    const option = {
-      backgroundColor: '#0b0f1a',
+  // Base option if empty
+  if (chart && !chart.getOption().series) {
+    chart.setOption({
       animation: false,
-      textStyle: { color: '#c7d2e1' },
-      legend: {
-        top: 4,
-        textStyle: { color: '#aeb9cc' },
-        selectedMode: 'multiple',
-        selected: {
-          'Mid': true, 'Bid': true, 'Ask': true,
-          'k1 (old Kalman)': true, 'k1_rts (RTS)': true, 'Big-Move': true
-        }
-      },
-      grid: { left: 45, right: 20, top: 28, bottom: 60 },
-      tooltip: {
-        trigger: 'axis',
-        axisPointer: { type: 'line' },
-        backgroundColor: '#101826',
-        borderColor: '#26314a',
-        textStyle: { color: '#dce6f2' },
-        valueFormatter: v => (v != null ? Number(v).toFixed(2) : v)
-      },
-      xAxis: {
-        type: 'value',
-        name: 'tick',
-        nameTextStyle: { color: '#6b7a99' },
-        axisLabel: { color: '#98a7c7' },
-        axisLine: { lineStyle: { color: '#24304a' } },
-        splitLine: { show: true, lineStyle: { color: '#1b2438', type: 'dashed' } }
-      },
-      yAxis: {
-        type: 'value',
-        scale: true,
-        axisLabel: { color: '#98a7c7' },
-        axisLine: { lineStyle: { color: '#24304a' } },
-        splitLine: { show: true, lineStyle: { color: '#1b2438' } }
-      },
-      dataZoom: [
-        { type: 'inside', throttle: 50 },
-        { type: 'slider', height: 18, bottom: 24, backgroundColor: '#0f1524', borderColor: '#2a3654' }
-      ],
-      series: [
-        { name: 'Mid', type: 'line', showSymbol: false, smooth: false, sampling: 'lttb', large: true, largeThreshold: 10000, lineStyle: { width: 1.1 }, data: mid },
-        { name: 'Bid', type: 'line', showSymbol: false, smooth: false, sampling: 'lttb', large: true, largeThreshold: 10000, lineStyle: { width: 0.8, opacity: 0.7 }, data: bid },
-        { name: 'Ask', type: 'line', showSymbol: false, smooth: false, sampling: 'lttb', large: true, largeThreshold: 10000, lineStyle: { width: 0.8, opacity: 0.7 }, data: ask },
-
-        { name: 'k1 (old Kalman)', type: 'line', showSymbol: false, smooth: false, lineStyle: { width: 1.5 }, data: k1 },
-        { name: 'k1_rts (RTS)',     type: 'line', showSymbol: false, smooth: true,  lineStyle: { width: 1 },   opacity: 0.9, data: k1rts },
-        { name: 'Big-Move',         type: 'line', showSymbol: false, smooth: false, lineStyle: { width: 2.2 }, data: kbig }
-      ]
-    };
-    chart.setOption(option, true);
+      tooltip: { trigger: 'axis' },
+      xAxis: { type: 'time' },
+      yAxis: { type: 'value', scale: true },
+      series: []
+    });
   }
 
-  async function loadRange() {
-    const start = parseInt(document.getElementById('startTick').value, 10);
-    const end   = parseInt(document.getElementById('endTick').value, 10);
-    const [krows, trows] = await Promise.all([fetchKalman(start, end), fetchTicks(start, end)]);
-    render(krows, trows);
+  // -------- UI toggles --------
+  const Layers = {
+    macro: true,
+    events: true,
+    predictions: true,
+    outcomes: true
+  };
 
-    if (krows.length > 5000) {
-      chart.dispatchAction({ type: 'dataZoom', startValue: krows[0].tickid, endValue: krows[0].tickid + 5000 });
+  function BindToggles() {
+    const pairs = [
+      ['wf-macro', 'macro'],
+      ['wf-events', 'events'],
+      ['wf-preds',  'predictions'],
+      ['wf-out',    'outcomes'],
+    ];
+    for (const [id, key] of pairs) {
+      const el = document.getElementById(id);
+      if (el) {
+        el.checked = Layers[key];
+        el.addEventListener('change', () => { Layers[key] = !!el.checked; RenderLayers(window.__WF_SNAPSHOT || {}); });
+      }
     }
   }
 
-  // toolbar checkboxes -> legend toggle
-  const legendMap = {
-    chkMid: 'Mid', chkBid: 'Bid', chkAsk: 'Ask',
-    chkK1: 'k1 (old Kalman)', chkRTS: 'k1_rts (RTS)', chkBM: 'Big-Move'
-  };
-  for (const id in legendMap) {
-    const el = document.getElementById(id);
-    if (el) el.addEventListener('change', () => {
-      const name = legendMap[id];
-      chart.dispatchAction({ type: el.checked ? 'legendSelect' : 'legendUnSelect', name });
-    });
+  // -------- Fetch helpers --------
+  async function FetchJSON(url, opts) {
+    const r = await fetch(url, opts);
+    if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+    return r.json();
   }
 
-  document.getElementById('loadBtn').addEventListener('click', () => loadRange().catch(err => console.error(err)));
-  document.getElementById('jumpBtn').addEventListener('click', () => {
-    const v = parseInt(document.getElementById('jumpTick').value, 10);
-    if (!Number.isFinite(v)) return;
-    chart.dispatchAction({ type: 'dataZoom', startValue: v - 2000, endValue: v + 2000 });
-  });
+  async function RunWalkForwardStep() {
+    const btn = $('#wf-run');
+    if (btn) { btn.disabled = true; btn.textContent = 'Running…'; }
+    try {
+      const res = await FetchJSON('/api/walkforward/step', { method: 'POST' });
+      if (res && res.snapshot) {
+        window.__WF_SNAPSHOT = res.snapshot;
+      } else {
+        window.__WF_SNAPSHOT = await FetchJSON('/api/walkforward/snapshot');
+      }
+      RenderLayers(window.__WF_SNAPSHOT);
+    } catch (e) {
+      console.error(e);
+      alert('Walk-forward step failed: ' + e.message);
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = 'Run'; }
+    }
+  }
 
-  // initial load
-  loadRange().catch(err => {
-    console.error(err);
-    chart.setOption({
-      title: { text: 'Failed to load data', left: 'center', top: 'middle', textStyle: { color: '#ee8888' } }
-    });
-  });
+  async function RefreshSnapshot() {
+    try {
+      window.__WF_SNAPSHOT = await FetchJSON('/api/walkforward/snapshot');
+      RenderLayers(window.__WF_SNAPSHOT);
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  // -------- Renderers --------
+  function ColorForDirection(dir, alpha=0.12) {
+    return dir === 1 ? `rgba(0, 140, 0, ${alpha})` : `rgba(180, 0, 0, ${alpha})`;
+  }
+  function ColorForEventType(tp) {
+    if (tp === 'pullback_end') return '#1f77b4';
+    if (tp === 'breakout')     return '#9467bd';
+    if (tp === 'retest_hold')  return '#ff7f0e';
+    return '#777';
+  }
+  function ShapeForEventType(tp) {
+    if (tp === 'pullback_end') return 'circle';
+    if (tp === 'breakout')     return 'triangle';
+    if (tp === 'retest_hold')  return 'diamond';
+    return 'rect';
+  }
+  function OutcomeColor(out) {
+    if (out === 'TP') return '#00a000';
+    if (out === 'SL') return '#c00000';
+    return '#888888';
+  }
+
+  function BuildMacroMarkAreas(segments) {
+    // ECharts markArea requires data: [[{xAxis:.., yAxis:..},{xAxis:.., yAxis:..}], ...]
+    const areas = [];
+    for (const s of (segments||[])) {
+      areas.push([
+        { xAxis: s.start_ts, itemStyle: { color: ColorForDirection(s.direction, Math.max(0.05, Math.min(0.28, (s.confidence||0)/1.5))) } },
+        { xAxis: s.end_ts }
+      ]);
+    }
+    return areas;
+  }
+
+  function ComposeSeries(snapshot) {
+    const segs  = snapshot.segments || [];
+    const evts  = snapshot.events || [];
+    const outs  = snapshot.outcomes || [];
+    const preds = snapshot.predictions || [];
+
+    // Map outcomes, predictions by event_id
+    const byOutcome = new Map();
+    for (const o of outs) byOutcome.set(o.event_id, o);
+    const byPred = new Map();
+    for (const p of preds) byPred.set(p.event_id, p);
+
+    const series = [];
+
+    // Macro bands via markArea on a dummy series
+    if (Layers.macro) {
+      series.push({
+        name: 'Macro',
+        type: 'line',
+        data: [],
+        markArea: {
+          silent: true,
+          data: BuildMacroMarkAreas(segs)
+        }
+      });
+    }
+
+    // Micro events
+    if (Layers.events) {
+      const pts = evts.map(e => {
+        return {
+          name: e.event_type,
+          value: [e.event_ts, e.event_price],
+          symbol: ShapeForEventType(e.event_type),
+          itemStyle: { color: ColorForEventType(e.event_type) },
+          event_id: e.event_id,
+          tooltip: {
+            formatter: () => {
+              return `#${e.event_id} ${e.event_type}<br/>${new Date(e.event_ts).toISOString()}<br/>$${(e.event_price||0).toFixed(2)}`;
+            }
+          }
+        };
+      });
+      series.push({
+        name: 'Events',
+        type: 'scatter',
+        symbolSize: 6,
+        data: pts
+      });
+    }
+
+    // Predictions (overlay)
+    if (Layers.predictions) {
+      const pts = evts.filter(e => byPred.has(e.event_id)).map(e => {
+        const p = byPred.get(e.event_id);
+        const c = p.p_tp; // 0..1
+        const alpha = Math.max(0.25, Math.min(0.95, c));
+        const decided = !!p.decided;
+        return {
+          name: 'pred',
+          value: [e.event_ts, e.event_price],
+          symbol: 'circle',
+          symbolSize: decided ? 9 : 7,
+          itemStyle: { color: `rgba(0,0,0,${alpha})`, borderColor: decided ? '#000' : '#666', borderWidth: decided ? 1.5 : 1 },
+          tooltip: {
+            formatter: () => {
+              return [
+                `P(TP)=${(c*100).toFixed(1)}%`,
+                `τ=${(p.threshold||0).toFixed(2)}`,
+                `model=${p.model_version}`,
+              ].join('<br/>');
+            }
+          }
+        };
+      });
+      series.push({
+        name: 'Predictions',
+        type: 'scatter',
+        symbolSize: 8,
+        data: pts
+      });
+    }
+
+    // Outcomes (ring/halo)
+    if (Layers.outcomes) {
+      const pts = evts.filter(e => byOutcome.has(e.event_id)).map(e => {
+        const o = byOutcome.get(e.event_id);
+        const col = OutcomeColor(o.outcome);
+        return {
+          name: o.outcome,
+          value: [e.event_ts, e.event_price],
+          symbol: 'circle',
+          symbolSize: 13,
+          itemStyle: { color: 'transparent', borderColor: col, borderWidth: 2.2 },
+          tooltip: { formatter: () => `Outcome: ${o.outcome}` }
+        };
+      });
+      series.push({
+        name: 'Outcomes',
+        type: 'scatter',
+        data: pts
+      });
+    }
+
+    return series;
+  }
+
+  function RenderLayers(snapshot) {
+    if (!chart || !window.echarts) return;
+    const opt = chart.getOption() || {};
+    opt.series = ComposeSeries(snapshot);
+    chart.setOption(opt, { notMerge: false, replaceMerge: ['series'] });
+  }
+
+  // -------- Wire up controls --------
+  function Wire() {
+    const btn = $('#wf-run');
+    if (btn) btn.addEventListener('click', RunWalkForwardStep);
+    BindToggles();
+    RefreshSnapshot();
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', Wire);
+  } else {
+    Wire();
+  }
+
+  // Expose for console debugging
+  window.runWalkForwardStep = RunWalkForwardStep;
+  window.refreshWalkForwardSnapshot = RefreshSnapshot;
 })();
