@@ -25,11 +25,23 @@
       background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: 4px 10px; cursor: pointer;
     }
     .toolbar button:disabled { opacity: .6; cursor: default; }
-    #status { padding: 6px 12px 4px 12px; color: #8b949e; font-size: 12px; min-height: 18px; }
+
+    .subbar {
+      display: flex; align-items: center; gap: 10px;
+      padding: 6px 12px; color: #8b949e;
+    }
+    .ghost {
+      background: transparent; color: #aab6c7; border: 1px solid #2a2f36; border-radius: 6px; padding: 2px 8px; cursor: pointer;
+    }
+
+    #status { padding: 0 2px; color: #8b949e; font-size: 12px; min-height: 18px; }
+
     #journal {
       margin: 0 12px 6px 12px; background: #0f1420; border: 1px solid #222b3d; border-radius: 8px;
       padding: 8px 10px; max-height: 160px; overflow: auto; font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; color: #a5b4c3;
     }
+    #journal.collapsed { display: none; }
+
     #chart  { height: 68vh; min-height: 520px; width: 100%; background: #0d1117; }
     .spacer { flex: 1 1 auto; }
     .muted  { color: #9aa4b2; }
@@ -59,21 +71,26 @@
     <button id="jumpBtn">Jump</button>
   </div>
 
-  <div id="status">Ready</div>
-  <pre id="journal"></pre>
+  <div class="subbar">
+    <div id="status">Ready</div>
+    <div class="spacer"></div>
+    <button id="toggleJournal" class="ghost" title="Show/Hide journal">Journal ▸</button>
+  </div>
+
+  <pre id="journal" class="collapsed"></pre>
   <div id="chart"></div>
 
-  <!-- ECharts: try local first; if missing, fall back to CDN -->
+  <!-- ECharts: try local first; fallback to CDN if missing -->
   <script src="/public/echarts.min.js?v=20250825"></script>
   <script>
     if (typeof echarts === 'undefined') {
-      var s = document.createElement('script');
+      const s = document.createElement('script');
       s.src = 'https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js';
       document.head.appendChild(s);
     }
   </script>
 
-  <!-- IMPORTANT: path is relative to nginx root (/home/ec2-user/cTrade/frontend) -->
-  <script src="/review-core.js?v=20250825-2"></script>
+  <!-- IMPORTANT: path relative to nginx root (/home/ec2-user/cTrade/frontend) -->
+  <script src="/review-core.js?v=20250825-3"></script>
 </body>
 </html>

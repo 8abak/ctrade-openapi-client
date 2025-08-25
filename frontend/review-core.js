@@ -1,15 +1,17 @@
-// frontend/review-core.js — Walk-Forward UI with journal + integer-only display
+// frontend/review-core.js — Walk-Forward UI
+// - Plots data at exact float values; only y-axis labels/grid are integers
+// - Collapsible journal with persisted state
+// - Jump-to-tick window loading + live journal for Run
 
 (function () {
-  window.__reviewBoot = 'ok'; // tiny smoke flag to see in console
+  window.__reviewBoot = 'ok';
 
   const $ = (sel) => document.querySelector(sel);
 
-  // integer helpers
-  const iRound = (v) => (v == null ? v : Math.round(Number(v)));
-  const asInt  = (v) => (v == null ? '' : String(iRound(v)));
+  // integers for display only
+  const asInt = (v) => (v == null ? '' : String(Math.round(Number(v))));
 
-  // window size for Jump (± window on each side)
+  // Jump window (± each side)
   const JUMP_WINDOW = 6000;
 
   function setStatus(text, kind = 'info') {
@@ -27,7 +29,30 @@
     j.scrollTop = j.scrollHeight;
   }
 
-  // ----- data -----
+  // ---- Collapsible journal ----
+  (function initJournalToggle(){
+    const btn = $('#toggleJournal');
+    const j = $('#journal');
+    const key = 'reviewJournalOpen';
+    function apply(open){
+      if (open) {
+        j.classList.remove('collapsed');
+        btn.textContent = 'Journal ▾';
+      } else {
+        j.classList.add('collapsed');
+        btn.textContent = 'Journal ▸';
+      }
+      localStorage.setItem(key, open ? '1' : '0');
+    }
+    const saved = localStorage.getItem(key);
+    apply(saved === '1');
+    btn.addEventListener('click', () => {
+      const nowOpen = j.classList.contains('collapsed');
+      apply(nowOpen);
+    });
+  })();
+
+  // ----- data access -----
   async function fetchTicksRange(startId, endId) {
     const sql = `SELECT id, bid, ask, mid FROM ticks WHERE id BETWEEN ${startId} AND ${endId} ORDER BY id`;
     const url = `/sqlvw/query?query=${encodeURIComponent(sql)}`;
@@ -36,20 +61,19 @@
     return await res.json();
   }
 
-  // legacy layer (ignored if not present)
-  async function fetchKalman(startId, endId) {
-    try {
-      const res = await fetch(`/kalman_layers?start=${startId}&end=${endId}`);
-      if (!res.ok) return [];
-      return await res.json();
-    } catch { return []; }
+  async function wfStep() {
+    const r = await fetch('/walkforward/step', { method: 'POST' });
+    if (!r.ok) throw new Error(`step: HTTP ${r.status}`);
+    return r.json();
+  }
+  async function wfSnap() {
+    const r = await fetch('/walkforward/snapshot');
+    if (!r.ok) throw new Error(`snapshot: HTTP ${r.status}`);
+    return r.json();
   }
 
-  async function wfStep()   { const r = await fetch('/walkforward/step', { method: 'POST' }); if (!r.ok) throw new Error(`step: ${r.status}`); return r.json(); }
-  async function wfSnap()   { const r = await fetch('/walkforward/snapshot'); if (!r.ok) throw new Error(`snapshot: ${r.status}`); return r.json(); }
-
   // ----- transforms -----
-  const xy   = (rows, xKey, yKey) => rows.map(r => [r[xKey], iRound(r[yKey])]);
+  const xyFloat = (rows, xKey, yKey) => rows.map(r => [r[xKey], Number(r[yKey])]); // exact floats for plotting
 
   // ----- chart -----
   let chart;
@@ -73,7 +97,7 @@
         backgroundColor: '#101826',
         borderColor: '#26314a',
         textStyle: { color: '#dce6f2' },
-        valueFormatter: (v) => asInt(v)
+        valueFormatter: (v) => asInt(v)    // display integers only
       },
       xAxis: {
         type: 'value',
@@ -85,7 +109,7 @@
       },
       yAxis: {
         type: 'value',
-        scale: true,
+        // Keep float scale for plotting, but force grid/labels at integer steps
         minInterval: 1,
         axisLabel: { color: '#8b949e', formatter: (v) => asInt(v) },
         axisLine:  { lineStyle: { color: '#30363d' } },
@@ -100,9 +124,9 @@
   }
 
   function seriesForPrice(ticks) {
-    const mid = xy(ticks, 'id', 'mid');
-    const bid = xy(ticks, 'id', 'bid');
-    const ask = xy(ticks, 'id', 'ask');
+    const mid = xyFloat(ticks, 'id', 'mid');
+    const bid = xyFloat(ticks, 'id', 'bid');
+    const ask = xyFloat(ticks, 'id', 'ask');
     return [
       { name: 'Mid', type: 'line', showSymbol: false, sampling: 'lttb', large: true, largeThreshold: 10000, lineStyle: { width: 1.2 }, data: mid },
       { name: 'Bid', type: 'line', showSymbol: false, sampling: 'lttb', large: true, largeThreshold: 10000, lineStyle: { width: 0.9, opacity: 0.7 }, data: bid },
@@ -140,7 +164,7 @@
     const mapSymbol = (t) => t === 'pullback_end' ? 'triangle' : t === 'breakout' ? 'diamond' : 'circle';
     const mapColor  = (t) => t === 'pullback_end' ? '#58a6ff' : t === 'breakout' ? '#f2cc60' : '#b981f5';
     const data = evs.map(e => ({
-      value: [e.tick_id, iRound(e.event_price)],
+      value: [e.tick_id, Number(e.event_price)],
       name: e.event_type,
       symbol: mapSymbol(e.event_type),
       itemStyle: { color: mapColor(e.event_type) }
@@ -157,7 +181,7 @@
       if (!e) continue;
       if (e.tick_id < startId || e.tick_id > endId) continue;
       rows.push({
-        value: [e.tick_id, iRound(e.event_price)],
+        value: [e.tick_id, Number(e.event_price)],
         p_tp: p.p_tp ?? null, threshold: p.threshold ?? null,
         model_version: p.model_version ?? '', decided: !!p.decided, predicted_at: p.predicted_at
       });
@@ -204,7 +228,7 @@
       const e = evById.get(o.event_id); if (!e) continue;
       if (e.tick_id < startId || e.tick_id > endId) continue;
       const col = o.outcome === 'TP' ? '#2ea043' : o.outcome === 'SL' ? '#f85149' : '#8b949e';
-      rows.push({ value: [e.tick_id, iRound(e.event_price)], itemStyle: { color: col, borderColor: col } });
+      rows.push({ value: [e.tick_id, Number(e.event_price)], itemStyle: { color: col, borderColor: col } });
     }
     if (!rows.length) return [];
     return [{
@@ -217,14 +241,27 @@
     }];
   }
 
+  function explainSnapshotCounts(snap) {
+    const nSeg = snap?.segments?.length || 0;
+    const nEv  = snap?.events?.length || 0;
+    const nPr  = snap?.predictions?.length || 0;
+    const nOc  = snap?.outcomes?.length || 0;
+    if (nSeg === 0) log('Note: snapshot has no macro segments — run the pipeline or check tables.');
+    if (nEv  === 0) log('Note: snapshot has no micro events.');
+    if (nPr  === 0) log('Note: snapshot has no predictions.');
+    if (nOc  === 0) log('Note: snapshot has no outcomes.');
+    return { nSeg, nEv, nPr, nOc };
+  }
+
   async function renderWindow(startId, endId) {
     const c = ensureChart(); if (!c) return;
     setStatus('Loading data…'); log(`Load window [${startId}, ${endId}]`);
-    const [ticks, , snap] = await Promise.all([
-      fetchTicksRange(startId, endId),
-      fetchKalman(startId, endId), // ignored if empty
-      wfSnap().catch(() => ({segments:[],events:[],predictions:[],outcomes:[]})),
-    ]);
+
+    // Pull snapshot first so we can log counts early if empty
+    const snap = await wfSnap().catch(() => ({segments:[],events:[],predictions:[],outcomes:[]}));
+    const { nSeg, nEv, nPr, nOc } = explainSnapshotCounts(snap);
+
+    const ticks = await fetchTicksRange(startId, endId);
 
     const opt = baseOption();
     opt.series = [
@@ -242,7 +279,7 @@
     opt.legend.selected = sel;
 
     c.setOption(opt, true);
-    setStatus(`Loaded ${ticks.length} ticks`, 'ok');
+    setStatus(`Loaded ${ticks.length} ticks · seg:${nSeg} ev:${nEv} pr:${nPr} oc:${nOc}`, 'ok');
   }
 
   // ----- UI wiring -----
