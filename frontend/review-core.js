@@ -1,6 +1,8 @@
 // frontend/review-core.js — Walk-Forward UI with journal + integer-only display
 
 (function () {
+  window.__reviewBoot = 'ok'; // tiny smoke flag to see in console
+
   const $ = (sel) => document.querySelector(sel);
 
   // integer helpers
@@ -34,32 +36,36 @@
     return await res.json();
   }
 
+  // legacy layer (ignored if not present)
   async function fetchKalman(startId, endId) {
-    // Keep legacy layer available for reference; harmless if endpoint returns empty
-    const res = await fetch(`/kalman_layers?start=${startId}&end=${endId}`);
-    if (!res.ok) return [];
-    try { return await res.json(); } catch { return []; }
+    try {
+      const res = await fetch(`/kalman_layers?start=${startId}&end=${endId}`);
+      if (!res.ok) return [];
+      return await res.json();
+    } catch { return []; }
   }
 
-  async function wfStep()   { return fetch('/walkforward/step',   { method: 'POST' }).then(r => r.json()); }
-  async function wfSnap()   { return fetch('/walkforward/snapshot').then(r => r.json()); }
+  async function wfStep()   { const r = await fetch('/walkforward/step', { method: 'POST' }); if (!r.ok) throw new Error(`step: ${r.status}`); return r.json(); }
+  async function wfSnap()   { const r = await fetch('/walkforward/snapshot'); if (!r.ok) throw new Error(`snapshot: ${r.status}`); return r.json(); }
 
   // ----- transforms -----
   const xy   = (rows, xKey, yKey) => rows.map(r => [r[xKey], iRound(r[yKey])]);
 
   // ----- chart -----
-  const chart = echarts.init($('#chart'), null, { renderer: 'canvas' });
+  let chart;
+  function ensureChart() {
+    if (chart) return chart;
+    if (typeof echarts === 'undefined') { setStatus('ECharts not loaded', 'err'); return null; }
+    chart = echarts.init($('#chart'), null, { renderer: 'canvas' });
+    return chart;
+  }
 
   function baseOption() {
     return {
       backgroundColor: '#0d1117',
       animation: false,
       textStyle: { color: '#c9d1d9' },
-      legend: {
-        top: 6,
-        textStyle: { color: '#aeb9cc' },
-        selectedMode: 'multiple',
-      },
+      legend: { top: 6, textStyle: { color: '#aeb9cc' }, selectedMode: 'multiple' },
       grid: { left: 48, right: 20, top: 32, bottom: 64 },
       tooltip: {
         trigger: 'axis',
@@ -105,8 +111,7 @@
   }
 
   function markAreasForMacro(segments, startId, endId) {
-    // filter to current window
-    const segs = segments.filter(s => s.end_tick_id >= startId && s.start_tick_id <= endId);
+    const segs = (segments || []).filter(s => s.end_tick_id >= startId && s.start_tick_id <= endId);
     if (!segs.length) return [];
     const data = segs.map(s => {
       const dir = s.direction > 0 ? 1 : -1;
@@ -130,25 +135,17 @@
   }
 
   function seriesForEvents(events, startId, endId) {
-    const evs = events.filter(e => e.tick_id >= startId && e.tick_id <= endId);
+    const evs = (events || []).filter(e => e.tick_id >= startId && e.tick_id <= endId);
     if (!evs.length) return [];
-
     const mapSymbol = (t) => t === 'pullback_end' ? 'triangle' : t === 'breakout' ? 'diamond' : 'circle';
     const mapColor  = (t) => t === 'pullback_end' ? '#58a6ff' : t === 'breakout' ? '#f2cc60' : '#b981f5';
-
     const data = evs.map(e => ({
       value: [e.tick_id, iRound(e.event_price)],
       name: e.event_type,
       symbol: mapSymbol(e.event_type),
       itemStyle: { color: mapColor(e.event_type) }
     }));
-
-    return [{
-      name: 'Events',
-      type: 'scatter',
-      symbolSize: 9,
-      data
-    }];
+    return [{ name: 'Events', type: 'scatter', symbolSize: 9, data }];
   }
 
   function seriesForPreds(preds, events, startId, endId) {
@@ -161,11 +158,8 @@
       if (e.tick_id < startId || e.tick_id > endId) continue;
       rows.push({
         value: [e.tick_id, iRound(e.event_price)],
-        p_tp: p.p_tp ?? null,
-        threshold: p.threshold ?? null,
-        model_version: p.model_version ?? '',
-        decided: !!p.decided,
-        predicted_at: p.predicted_at
+        p_tp: p.p_tp ?? null, threshold: p.threshold ?? null,
+        model_version: p.model_version ?? '', decided: !!p.decided, predicted_at: p.predicted_at
       });
     }
     if (!rows.length) return [];
@@ -174,11 +168,9 @@
       type: 'scatter',
       symbol: 'circle',
       symbolSize: 8,
-      encode: { x: 0, y: 1 },
       itemStyle: {
         color: (params) => {
           const p = params.data.p_tp ?? 0;
-          // greenish from 0.5..1, bluish lower; alpha by confidence
           const a = 0.25 + 0.45 * Math.max(0, Math.min(1, p));
           const g = Math.round(120 + 120 * p);
           const r = Math.round(60 * (1 - p));
@@ -188,7 +180,7 @@
       tooltip: {
         formatter: (params) => {
           const d = params.data;
-          const parts = [
+          return [
             `<b>Prediction</b>`,
             `tick: ${asInt(d.value[0])}`,
             `price: ${asInt(d.value[1])}`,
@@ -197,8 +189,7 @@
             `model: ${d.model_version || '-'}`,
             `decided: ${d.decided ? 'yes' : 'no'}`,
             `at: ${d.predicted_at || ''}`
-          ];
-          return parts.join('<br/>');
+          ].join('<br/>');
         }
       },
       data: rows
@@ -210,14 +201,10 @@
     const evById = new Map(events.map(e => [e.event_id, e]));
     const rows = [];
     for (const o of outcomes) {
-      const e = evById.get(o.event_id);
-      if (!e) continue;
+      const e = evById.get(o.event_id); if (!e) continue;
       if (e.tick_id < startId || e.tick_id > endId) continue;
       const col = o.outcome === 'TP' ? '#2ea043' : o.outcome === 'SL' ? '#f85149' : '#8b949e';
-      rows.push({
-        value: [e.tick_id, iRound(e.event_price)],
-        itemStyle: { color: col, borderColor: col }
-      });
+      rows.push({ value: [e.tick_id, iRound(e.event_price)], itemStyle: { color: col, borderColor: col } });
     }
     if (!rows.length) return [];
     return [{
@@ -231,12 +218,11 @@
   }
 
   async function renderWindow(startId, endId) {
-    setStatus('Loading data…');
-    log(`Load window [${startId}, ${endId}]`);
-
-    const [ticks, kalman, snap] = await Promise.all([
+    const c = ensureChart(); if (!c) return;
+    setStatus('Loading data…'); log(`Load window [${startId}, ${endId}]`);
+    const [ticks, , snap] = await Promise.all([
       fetchTicksRange(startId, endId),
-      fetchKalman(startId, endId), // ok if empty
+      fetchKalman(startId, endId), // ignored if empty
       wfSnap().catch(() => ({segments:[],events:[],predictions:[],outcomes:[]})),
     ]);
 
@@ -249,33 +235,23 @@
       ...seriesForOutcomes(snap.outcomes || [], snap.events || [], startId, endId),
     ];
 
-    // Initial legend visibility from checkboxes
     const sel = {};
-    sel['Mid'] = $('#chkMid').checked;
-    sel['Bid'] = $('#chkBid').checked;
-    sel['Ask'] = $('#chkAsk').checked;
-    sel['Macro'] = $('#chkMacro').checked;
-    sel['Events'] = $('#chkEvents').checked;
-    sel['Predictions'] = $('#chkPreds').checked;
-    sel['Outcomes'] = $('#chkOutcomes').checked;
+    sel['Mid'] = $('#chkMid').checked; sel['Bid'] = $('#chkBid').checked; sel['Ask'] = $('#chkAsk').checked;
+    sel['Macro'] = $('#chkMacro').checked; sel['Events'] = $('#chkEvents').checked;
+    sel['Predictions'] = $('#chkPreds').checked; sel['Outcomes'] = $('#chkOutcomes').checked;
     opt.legend.selected = sel;
 
-    chart.setOption(opt, true);
-
+    c.setOption(opt, true);
     setStatus(`Loaded ${ticks.length} ticks`, 'ok');
   }
 
   // ----- UI wiring -----
   function applyLegendFromToggles() {
-    const map = {
-      chkMid: 'Mid', chkBid: 'Bid', chkAsk: 'Ask',
-      chkMacro: 'Macro', chkEvents: 'Events', chkPreds: 'Predictions', chkOutcomes: 'Outcomes'
-    };
+    const map = { chkMid:'Mid', chkBid:'Bid', chkAsk:'Ask', chkMacro:'Macro', chkEvents:'Events', chkPreds:'Predictions', chkOutcomes:'Outcomes' };
     for (const id in map) {
-      const el = $('#' + id);
-      if (!el) continue;
+      const el = $('#' + id); if (!el) continue;
       const name = map[id];
-      chart.dispatchAction({ type: el.checked ? 'legendSelect' : 'legendUnSelect', name });
+      chart?.dispatchAction({ type: el.checked ? 'legendSelect' : 'legendUnSelect', name });
     }
   }
 
@@ -295,19 +271,13 @@
     try { await renderWindow(s, e); applyLegendFromToggles(); }
     catch (err) { console.error(err); setStatus('Jump failed: ' + (err.message || err), 'err'); log('Jump failed: ' + err); }
   });
-
   $('#jumpTick').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') $('#jumpBtn').click(); });
 
-  // toggles → legend
   ['chkMid','chkBid','chkAsk','chkMacro','chkEvents','chkPreds','chkOutcomes'].forEach(id => {
     const el = $('#' + id);
-    if (el) el.addEventListener('change', () => {
-      chart.dispatchAction({ type: el.checked ? 'legendSelect' : 'legendUnSelect', name: el.nextSibling.textContent.trim() || el.id.replace('chk','') });
-      applyLegendFromToggles();
-    });
+    if (el) el.addEventListener('change', applyLegendFromToggles);
   });
 
-  // Run → call step and show journal
   $('#runBtn').addEventListener('click', async () => {
     const btn = $('#runBtn');
     btn.disabled = true; btn.textContent = 'Running…';
@@ -322,7 +292,6 @@
         setStatus(res?.message || 'Working', 'ok');
         log('Run: done');
       }
-      // Refresh current window if inputs set
       const s = parseInt($('#startTick').value || '1', 10);
       const e = parseInt($('#endTick').value || (s + 12000), 10);
       await renderWindow(s, e);
@@ -335,6 +304,6 @@
     }
   });
 
-  // Initial hint
+  // initial hint
   setStatus('Ready — use Jump or Load to fetch a window.');
 })();

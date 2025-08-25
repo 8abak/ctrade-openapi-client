@@ -63,7 +63,17 @@
   <pre id="journal"></pre>
   <div id="chart"></div>
 
+  <!-- ECharts: try local first; if missing, fall back to CDN -->
   <script src="/public/echarts.min.js?v=20250825"></script>
-  <script src="/frontend/review-core.js?v=20250825"></script>
+  <script>
+    if (typeof echarts === 'undefined') {
+      var s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js';
+      document.head.appendChild(s);
+    }
+  </script>
+
+  <!-- IMPORTANT: path is relative to nginx root (/home/ec2-user/cTrade/frontend) -->
+  <script src="/review-core.js?v=20250825-2"></script>
 </body>
 </html>
