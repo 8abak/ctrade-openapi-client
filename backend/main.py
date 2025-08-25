@@ -350,7 +350,7 @@ def walkforward_step():
         j(f"predict: {psum}")
 
         j("Snapshot…")
-        snap = walkforward_snapshot()
+        snap = _do_walkforward_snapshot()
 
         return { "ok": True, "journal": journal, **snap }
     except Exception as e:
