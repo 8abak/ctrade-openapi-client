@@ -2,23 +2,16 @@
 # Purpose: Build/extend macro segments using a $6 Renko/ZigZag rule.
 # - Idempotent: if the next confirmed pivot already exists, does nothing.
 # - Bounded: at most one new CLOSED segment is appended per call.
-# Deps: SQLAlchemy Core only. Works with ticks(id, timestamp, mid).
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any
 
-from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Engine
+from sqlalchemy import text
 
-DB_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql+psycopg2://babak:babak33044@localhost:5432/trading",
-)
-engine = create_engine(DB_URL, pool_pre_ping=True)
-
-RENKO_USD = 6.0  # size for macro legs
+RENKO_USD = float(__import__("os").environ.get("RENKO_USD", 6.0))
 
 
 @dataclass
@@ -59,8 +52,8 @@ def _tick_by_id(conn, tick_id: int) -> Optional[TickRow]:
 
 def _scan_for_pivot(conn, start_tick_id: int, start_price: float) -> Optional[TickRow]:
     """
-    Scan forward in small batches until price has moved >= RENKO_USD
-    from start_price (either direction). Returns the *pivot* tick (end).
+    Scan forward in batches until price has moved >= RENKO_USD from start_price.
+    Returns the *pivot* tick (end). None if no further data.
     """
     batch = 20000
     last_id = start_tick_id
@@ -84,28 +77,17 @@ def _scan_for_pivot(conn, start_tick_id: int, start_price: float) -> Optional[Ti
             if abs(mid - start_price) >= RENKO_USD:
                 return TickRow(rid, ts, mid)
             last_id = rid
-        # continue loop (bounded by end of data)
 
 
-def _insert_segment(
-    conn,
-    start: TickRow,
-    end: TickRow,
-) -> int:
+def _insert_segment(conn, start: TickRow, end: TickRow) -> int:
     direction = 1 if (end.mid - start.mid) > 0 else -1
     length_usd = abs(end.mid - start.mid)
-    # confidence proxy: range (0.15..0.95) scaled by move size over renko size
     raw = max(0.0, min(1.0, length_usd / (RENKO_USD * 1.5)))
     confidence = 0.15 + 0.8 * raw
 
-    # Idempotency guard: do we already have this exact pair?
     exists = conn.execute(
         text(
-            """
-            SELECT segment_id
-            FROM macro_segments
-            WHERE start_tick_id=:a AND end_tick_id=:b
-            """
+            "SELECT segment_id FROM macro_segments WHERE start_tick_id=:a AND end_tick_id=:b"
         ),
         {"a": start.id, "b": end.id},
     ).first()
@@ -138,16 +120,14 @@ def _insert_segment(
     return int(seg_id)
 
 
-def BuildOrExtendSegments() -> Dict[str, Any]:
+def BuildOrExtendSegments(engine: Engine) -> Dict[str, Any]:
     """
-    Append at most one CLOSED macro segment based on a $6 Renko/ZigZag rule.
+    Append at most one CLOSED macro segment based on a $RENKO_USD Renko/ZigZag rule.
     If the table is empty, bootstrap from the earliest tick.
-    Returns: {"segments_added": int, "last_segment_id": Optional[int]}
     """
     with engine.begin() as conn:
         last = _latest_segment(conn)
         if last is None:
-            # Bootstrap: pick very first tick as pivot A, scan for first pivot B
             first = _first_tick(conn)
             if not first:
                 return {"segments_added": 0, "last_segment_id": None}
@@ -157,10 +137,9 @@ def BuildOrExtendSegments() -> Dict[str, Any]:
             seg_id = _insert_segment(conn, first, nxt)
             return {"segments_added": 1, "last_segment_id": seg_id}
 
-        # We have at least one closed segment; continue from its end pivot
         pivot_tick = _tick_by_id(conn, last["end_tick_id"])
         if not pivot_tick:
-            return {"segments_added": 0, "last_segment_id": None}
+            return {"segments_added": 0, "last_segment_id": last["segment_id"]}
 
         nxt = _scan_for_pivot(conn, pivot_tick.id, pivot_tick.mid)
         if not nxt:

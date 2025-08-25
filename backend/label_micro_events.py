@@ -1,21 +1,14 @@
 # backend/label_micro_events.py
-# Purpose: Detect candidate micro events for the most recent CLOSED macro segment.
-# Minimal v1 heuristic, idempotent. Writes into micro_events(features as JSONB).
-# Families: pullback_end, breakout, retest_hold.
+# Purpose: Detect micro events for the most recent CLOSED macro segment.
+# Writes into micro_events (event_price included).
 
 from __future__ import annotations
 
-import os
 import json
 from typing import Dict, Any, Optional, List
 
-from sqlalchemy import create_engine, text
-
-DB_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql+psycopg2://babak:babak33044@localhost:5432/trading",
-)
-engine = create_engine(DB_URL, pool_pre_ping=True)
+from sqlalchemy.engine import Engine
+from sqlalchemy import text
 
 FEATURES_VERSION = "v1"
 
@@ -57,7 +50,7 @@ def _ticks_slice(conn, a: int, b: int) -> List[Dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
-def _insert_event(conn, seg_id: int, tick_id: int, etype: str, feats: Dict[str, Any]):
+def _insert_event(conn, seg_id: int, tick_id: int, price: float, etype: str, feats: Dict[str, Any]):
     conn.execute(
         text(
             """
@@ -66,11 +59,11 @@ def _insert_event(conn, seg_id: int, tick_id: int, etype: str, feats: Dict[str, 
             ON CONFLICT DO NOTHING
             """
         ),
-        {"s": seg_id, "t": tick_id, "e": etype, "f": json.dumps(feats)},
+        {"s": seg_id, "t": tick_id, "e": etype, "f": json.dumps({**feats, "event_price": price})},
     )
 
 
-def DetectMicroEventsForLatestClosedSegment() -> Dict[str, Any]:
+def DetectMicroEventsForLatestClosedSegment(engine: Engine) -> Dict[str, Any]:
     with engine.begin() as conn:
         seg = _latest_closed_segment(conn)
         if not seg:
@@ -82,37 +75,30 @@ def DetectMicroEventsForLatestClosedSegment() -> Dict[str, Any]:
         if len(ticks) < 50:
             return {"events_added": 0}
 
-        # Heuristic: pick 3 positions within the segment window, then refine a bit.
         n = len(ticks)
-        idx_a = max(10, n // 3)
-        idx_b = max(20, 2 * n // 3)
-        idx_c = max(30, int(n * 0.8))
+        idxs = [max(10, n // 3), max(20, 2 * n // 3), max(30, int(n * 0.8))]
+        names = ["pullback_end", "breakout", "retest_hold"]
 
-        def nearest_local_turn(i: int, look: int = 8) -> int:
+        def local_turn(i: int, look: int = 8) -> int:
             i0 = max(look, min(n - look - 1, i))
             win = ticks[i0 - look : i0 + look + 1]
             mids = [w["mid"] for w in win]
             if seg["direction"] > 0:
-                # local pullback low
                 j = mids.index(min(mids))
             else:
-                # local pullback high
                 j = mids.index(max(mids))
             return (i0 - look) + j
 
-        ia = nearest_local_turn(idx_a)
-        ib = nearest_local_turn(idx_b)
-        ic = nearest_local_turn(idx_c)
-
         added = 0
-        for (i, etype) in [(ia, "pullback_end"), (ib, "breakout"), (ic, "retest_hold")]:
+        for raw_idx, name in zip(idxs, names):
+            i = local_turn(raw_idx)
             t = ticks[i]
             feats = {
                 "fv": FEATURES_VERSION,
                 "pos_in_segment": round(i / n, 4),
                 "seg_dir": seg["direction"],
             }
-            _insert_event(conn, seg["segment_id"], t["id"], etype, feats)
+            _insert_event(conn, seg["segment_id"], int(t["id"]), float(t["mid"]), name, feats)
             added += 1
 
         return {"events_added": added}

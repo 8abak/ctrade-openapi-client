@@ -22,6 +22,8 @@ from .label_micro_events import DetectMicroEventsForLatestClosedSegment
 from .compute_outcomes import ResolveOutcomes
 from .train_predict import TrainAndPredict
 
+
+
 # ----------------------------------------------------
 # App & CORS
 # ----------------------------------------------------
@@ -325,8 +327,36 @@ def _do_walkforward_snapshot() -> Dict[str, Any]:
 
 # Root paths
 @app.post("/walkforward/step")
-def walkforward_step_root():
-    return _do_walkforward_step()
+def walkforward_step():
+    journal = []
+
+    def j(msg): journal.append(msg)
+
+    try:
+        j("Build/extend macro segments…")
+        msum = BuildOrExtendSegments(engine)
+        j(f"macro: {msum}")
+
+        j("Detect micro events for latest closed segment…")
+        esum = DetectMicroEventsForLatestClosedSegment(engine)
+        j(f"micro: {esum}")
+
+        j("Resolve outcomes for eligible events…")
+        osum = ResolveOutcomes(engine)
+        j(f"outcomes: {osum}")
+
+        j("Train & predict…")
+        psum = TrainAndPredict(engine)
+        j(f"predict: {psum}")
+
+        j("Snapshot…")
+        snap = walkforward_snapshot()
+
+        return { "ok": True, "journal": journal, **snap }
+    except Exception as e:
+        j(f"ERROR: {repr(e)}")
+        return { "ok": False, "error": str(e), "journal": journal }
+
 
 @app.get("/walkforward/snapshot")
 def walkforward_snapshot_root():

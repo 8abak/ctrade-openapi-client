@@ -1,20 +1,11 @@
 # backend/compute_outcomes.py
-# Purpose: For micro_events that don't yet have an outcomes row and
-# have enough forward data, resolve TP(+$2) / SL(-$1) / Timeout(60m) first-touch.
-# Direction is inherited from the event's segment.
+# Purpose: Resolve TP/SL/Timeout for micro events that don't have outcomes yet.
 
 from __future__ import annotations
 
-import os
 from datetime import timedelta
-
-from sqlalchemy import create_engine, text
-
-DB_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql+psycopg2://babak:babak33044@localhost:5432/trading",
-)
-engine = create_engine(DB_URL, pool_pre_ping=True)
+from sqlalchemy.engine import Engine
+from sqlalchemy import text
 
 TP = 2.0
 SL = 1.0
@@ -25,7 +16,8 @@ def _eligible_events(conn):
     return conn.execute(
         text(
             """
-            SELECT e.event_id, e.tick_id, e.segment_id, t.timestamp AS ts, t.mid AS price,
+            SELECT e.event_id, e.tick_id, e.features,
+                   t.timestamp AS ts, t.mid AS price,
                    s.direction
             FROM micro_events e
             JOIN ticks t ON t.id = e.tick_id
@@ -52,7 +44,7 @@ def _forward_ticks(conn, after_tick_id: int, until_ts):
     ).mappings().all()
 
 
-def ResolveOutcomes():
+def ResolveOutcomes(engine: Engine):
     with engine.begin() as conn:
         rows = _eligible_events(conn)
         resolved = 0
@@ -70,22 +62,14 @@ def ResolveOutcomes():
                 p = float(f["mid"])
                 if direction > 0:
                     if p >= tp:
-                        winner = "TP"
-                        tp_ts = f["timestamp"]
-                        break
+                        winner = "TP"; tp_ts = f["timestamp"]; break
                     if p <= sl:
-                        winner = "SL"
-                        sl_ts = f["timestamp"]
-                        break
+                        winner = "SL"; sl_ts = f["timestamp"]; break
                 else:
                     if p <= tp:
-                        winner = "TP"
-                        tp_ts = f["timestamp"]
-                        break
+                        winner = "TP"; tp_ts = f["timestamp"]; break
                     if p >= sl:
-                        winner = "SL"
-                        sl_ts = f["timestamp"]
-                        break
+                        winner = "SL"; sl_ts = f["timestamp"]; break
 
             outcome = winner if winner else "Timeout"
             conn.execute(
@@ -104,9 +88,8 @@ def ResolveOutcomes():
                     "outc": outcome,
                     "tp": tp_ts,
                     "sl": sl_ts,
-                    "tout": until_ts if not winner else None,
+                    "tout": None if winner else until_ts,
                     "hz": HORIZON_SEC,
-                    # quick stats in the horizon window
                     "mfe": None,
                     "mae": None,
                 },
