@@ -1,471 +1,443 @@
-/* frontend/review-core.js
- * Walk-forward review UI:
- * - Loads a natural tick window
- * - Preserves zoom/pan on Load/Run
- * - Journal with progress messages
- * - Renders Macro (bands), Micro events, Outcomes, Predictions
- * - Integer y-axis labels; exact prices plotted
- *
- * Assumes backend routes:
- *   GET  /ticks?start=<id>&end=<id>
- *   POST /walkforward/step
- *   GET  /walkforward/snapshot
- *
- * If your tick route differs, adjust fetchTicks().
- */
-
 (() => {
-  // ---------------------- Config ----------------------
-  const DEFAULT_WINDOW = 6000;       // "Natural" window size
-  const Y_PAD = 0.15;                // vertical pad as % of visible range
-  const CACHE_BUSTER = () => `&_=${Date.now()}`; // dev cache buster
-  const LS = window.localStorage;
+  // ------------------------------------------------------------
+  // Small helpers
+  // ------------------------------------------------------------
+  const $ = (id) => document.getElementById(id);
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  const nowIso = () => new Date().toISOString();
+  const status = (msg) => { $('status').textContent = msg; };
 
-  // ---------------------- State -----------------------
-  const el = {
-    start: document.getElementById('start-tick'),
-    end: document.getElementById('end-tick'),
-    load: document.getElementById('btn-load'),
-    run: document.getElementById('btn-run'),
-    jumpTo: document.getElementById('jump-tick'),
-    jumpBtn: document.getElementById('btn-jump'),
-    chkMacro: document.getElementById('chk-macro'),
-    chkEvents: document.getElementById('chk-events'),
-    chkPred: document.getElementById('chk-preds'),
-    chkOut: document.getElementById('chk-outs'),
-    chkMid: document.getElementById('chk-mid'),
-    chkBid: document.getElementById('chk-bid'),
-    chkAsk: document.getElementById('chk-ask'),
-    journal: document.getElementById('journal'),
-    journalToggle: document.getElementById('journal-toggle'),
-    status: document.getElementById('status'),
-    chart: document.getElementById('chart')
+  // Journal helpers
+  const jwrap = $('journalWrap');
+  const jbox  = $('journal');
+  const journalToggle = () => {
+    const open = jwrap.style.display !== 'none';
+    jwrap.style.display = open ? 'none' : 'block';
+    $('btnJournal').textContent = open ? 'Journal ▸' : 'Journal ▾';
+  };
+  const j = (line) => {
+    const t = new Date().toISOString().replace('T',' ').replace('Z','');
+    jbox.textContent += `[${t}] ${line}\n`;
+    jbox.scrollTop = jbox.scrollHeight;
   };
 
+  $('btnJournal').addEventListener('click', journalToggle);
+  $('btnHideJ').addEventListener('click', journalToggle);
+  $('btnClearJ').addEventListener('click', () => jbox.textContent = '');
+  // Start collapsed
+  jwrap.style.display = 'none';
+  $('btnJournal').textContent = 'Journal ▸';
+
+  // ------------------------------------------------------------
+  // API endpoints (with /walkforward first, then /api fallback)
+  // ------------------------------------------------------------
+  async function wfFetch(path, opts = {}) {
+    // try /walkforward/*
+    let res = await fetch(path.startsWith('/') ? path : `/${path}`, opts);
+    if (res.status === 404 && path.startsWith('walkforward/')) {
+      // try /api/walkforward/*
+      res = await fetch(`/api/${path}`, opts);
+    }
+    return res;
+  }
+
+  // ------------------------------------------------------------
+  // State
+  // ------------------------------------------------------------
   const state = {
-    ticks: [],        // [{id, ts, mid, bid, ask}]
-    macro: [],        // [{segment_id, start_tick_id, end_tick_id, direction, confidence}]
-    events: [],       // [{event_id, tick_id, event_type, features}]
-    outcomes: [],     // [{event_id, outcome}]
-    preds: [],        // [{event_id, p_tp, threshold, decided, model_version}]
-    zoom: null        // {xStart, xEnd, yMin, yMax}
+    // data
+    ticks: [],        // [{id, timestamp, bid, ask, mid}]
+    segments: [],     // [{segment_id, start_tick_id, end_tick_id, direction, confidence, ...}]
+    events: [],       // [{event_id, segment_id, tick_id, event_type, features, event_ts, event_price}]
+    outcomes: [],     // [{event_id, outcome, ...}]
+    preds: [],        // [{event_id, model_version, p_tp, threshold, decided, predicted_at}]
+    // lookups
+    eventsByTick: new Map(),   // tick_id -> array of events
+    outcomeByEvent: new Map(), // event_id -> outcome row
+    predByEvent: new Map(),    // event_id -> prediction row
+    // UI / view
+    view: { xStart: null, xEnd: null, yMin: null, yMax: null }, // persisted view window
   };
 
-  // ---------------------- ECharts ---------------------
-  const chart = echarts.init(el.chart, null, { renderer: 'canvas' });
+  // ------------------------------------------------------------
+  // ECharts setup
+  // ------------------------------------------------------------
+  const el = $('chart');
+  const chart = echarts.init(el, null, { renderer: 'canvas' });
 
   function intTickFormatter(val) {
-    // Show integers only on y-axis labels
+    // y-axis labels as integers only (no decimals on the axis labels)
     return Math.round(val).toString();
   }
 
   const baseOption = {
     darkMode: true,
     animation: false,
-    grid: { left: 40, right: 20, top: 40, bottom: 80 },
+    backgroundColor: '#0f141a',
     tooltip: {
       trigger: 'axis',
       axisPointer: { type: 'cross' },
-      formatter: (params) => {
+      confine: true,
+      formatter: function (params) {
+        // params: array (Mid/Bid/Ask) at the same index
         if (!params || !params.length) return '';
         const idx = params[0].dataIndex;
-        const t = state.ticks[idx];
-        if (!t) return '';
-        const dt = new Date(t.ts);
-        const d = dt.toISOString().slice(0, 10);
-        const time = dt.toISOString().slice(11, 19);
+        const row = state.ticks[idx];
+        if (!row) return '';
+
+        const dt = new Date(row.timestamp);
+        const date = dt.toISOString().slice(0,10);
+        const time = dt.toISOString().slice(11,19);
+
+        // events/preds/outcomes on this tick
+        const evs = state.eventsByTick.get(row.id) || [];
         const lines = [
-          `tick: <b>${t.id}</b>`,
-          `date: ${d} time (UTC): ${time}`,
-          `Mid: <b>${(+t.mid).toFixed(2)}</b> Bid: <b>${(+t.bid).toFixed(2)}</b> Ask: <b>${(+t.ask).toFixed(2)}</b>`
+          `<b>tick:</b> ${row.id}`,
+          `<b>date:</b> ${date} <b>time (UTC):</b> ${time}`,
+          `<b>Mid:</b> ${row.mid} <b>Bid:</b> ${row.bid} <b>Ask:</b> ${row.ask}`
         ];
+
+        if (evs.length) {
+          for (const e of evs) {
+            let pred = state.predByEvent.get(e.event_id);
+            let outc = state.outcomeByEvent.get(e.event_id);
+            lines.push(
+              `<hr style="border:none;border-top:1px solid #23354a;margin:.3rem 0;" />` +
+              `<b>Event</b> #${e.event_id} <i>${e.event_type}</i>` +
+              (pred ? `<br/><b>Pred:</b> p_tp=${(+pred.p_tp).toFixed(6)}, th=${pred.threshold}, decided=${pred.decided}, model=${pred.model_version}` : '') +
+              (outc ? `<br/><b>Outcome:</b> ${outc.outcome}` : '')
+            );
+          }
+        } else {
+          lines.push(`<i>No events on this tick.</i>`);
+        }
+
+        // macro segment membership
+        const seg = state.segments.find(s => row.id >= s.start_tick_id && row.id <= s.end_tick_id);
+        if (seg) {
+          lines.push(
+            `<hr style="border:none;border-top:1px solid #23354a;margin:.3rem 0;" />` +
+            `<b>Macro:</b> seg ${seg.segment_id} dir=${seg.direction} conf=${(+seg.confidence).toFixed(3)}`
+          );
+        }
+
         return lines.join('<br/>');
       }
     },
+    grid: { left: 56, right: 16, top: 28, bottom: 48, containLabel: false },
     xAxis: {
       type: 'category',
       boundaryGap: false,
-      // category = tick id as string
-      data: [],
-      axisLabel: { showMinLabel: true, showMaxLabel: true }
+      axisLine: { lineStyle: { color: '#3a4856' } },
+      axisLabel: { color: '#95a4b3' },
+      axisTick: { show: false },
+      data: [], // tick ids
     },
     yAxis: {
       type: 'value',
       scale: true,
-      axisLabel: { formatter: intTickFormatter },
-      splitNumber: 6
+      minInterval: 1,              // do not label fractional numbers
+      axisLabel: { color: '#95a4b3', formatter: intTickFormatter },
+      splitLine: { lineStyle: { color: '#1e2833' } },
     },
     dataZoom: [
-      { id: 'xInside', type: 'inside', xAxisIndex: 0, filterMode: 'none' },
-      { id: 'xSlider', type: 'slider', xAxisIndex: 0, height: 28, bottom: 40 },
-      { id: 'yInside', type: 'inside', yAxisIndex: 0, filterMode: 'none' }
+      // X inside (drag left/right & wheel to zoom)
+      { type: 'inside', xAxisIndex: 0, filterMode: 'none', zoomOnMouseWheel: true, moveOnMouseMove: true, moveOnMouseWheel: true, throttle: 50 },
+      // X slider
+      { type: 'slider', xAxisIndex: 0, height: 22, top: null, bottom: 12, showDetail: false, brushSelect: true },
+      // Y inside (wheel to zoom; hold Shift to zoom Y with wheel; drag to pan when zoomed)
+      { type: 'inside', yAxisIndex: 0, filterMode: 'none', zoomOnMouseWheel: 'shift', moveOnMouseMove: true, moveOnMouseWheel: true }
     ],
-    legend: { top: 10, left: 'center' },
-    series: [
-      {
-        name: 'Mid',
-        type: 'line',
-        smooth: false,
-        showSymbol: false,
-        data: []
-      },
-      {
-        name: 'Bid',
-        type: 'line',
-        smooth: false,
-        showSymbol: false,
-        data: []
-      },
-      {
-        name: 'Ask',
-        type: 'line',
-        smooth: false,
-        showSymbol: false,
-        data: []
-      },
-      // Macro bands (markAreas)
-      {
-        name: 'Macro',
-        type: 'line',
-        data: [],
-        lineStyle: { opacity: 0 },
-        areaStyle: { opacity: 0.10 },
-        markArea: { silent: true, itemStyle: { color: '#2e7d32', opacity: 0.12 }, data: [] }
-      },
-      // Events (points)
-      {
-        name: 'Events',
-        type: 'scatter',
-        symbolSize: 8,
-        data: []
-      },
-      // Outcomes halo
-      {
-        name: 'Outcomes',
-        type: 'scatter',
-        symbolSize: 12,
-        data: []
-      }
-    ]
+    legend: {
+      top: 4,
+      textStyle: { color: '#aab9c8' },
+      data: ['Mid','Bid','Ask','Macro','Events','Outcomes'],
+    },
+    series: []
   };
 
   chart.setOption(baseOption);
 
-  // When user zooms horizontally, recompute visible y-range (natural min/max)
-  chart.on('dataZoom', () => {
-    autoAdjustY();
-    captureZoom();
-  });
+  // ------------------------------------------------------------
+  // Series builders
+  // ------------------------------------------------------------
+  function buildPriceSeries() {
+    const ids = state.ticks.map(r => r.id);
+    const mid = state.ticks.map(r => r.mid);
+    const bid = state.ticks.map(r => r.bid);
+    const ask = state.ticks.map(r => r.ask);
 
-  function captureZoom() {
-    const opt = chart.getOption();
-    const dzX = (opt.dataZoom || []).find(z => z.id === 'xInside') || (opt.dataZoom || [])[0];
-    const dzY = (opt.dataZoom || []).find(z => z.id === 'yInside');
-    const yAxis = (opt.yAxis && opt.yAxis[0]) || {};
-
-    state.zoom = {
-      xStart: dzX ? (dzX.start ?? 0) : 0,
-      xEnd: dzX ? (dzX.end ?? 100) : 100,
-      yMin: (typeof yAxis.min === 'number') ? yAxis.min : null,
-      yMax: (typeof yAxis.max === 'number') ? yAxis.max : null
-    };
-  }
-
-  function restoreZoom() {
-    if (!state.zoom) return;
-    chart.setOption({
-      dataZoom: [
-        { id: 'xInside', start: state.zoom.xStart, end: state.zoom.xEnd },
-        { id: 'xSlider', start: state.zoom.xStart, end: state.zoom.xEnd },
-        { id: 'yInside' } // keep
-      ],
-      yAxis: {
-        min: state.zoom.yMin,
-        max: state.zoom.yMax
+    return [
+      {
+        name: 'Mid', type: 'line', showSymbol: false, smooth: false,
+        lineStyle: { width: 1.2, color: '#9dbbff' },
+        emphasis: { focus: 'series' },
+        data: mid, xAxisIndex: 0, yAxisIndex: 0,
+        visible: $('chkMid').checked
+      },
+      {
+        name: 'Bid', type: 'line', showSymbol: false, smooth: false,
+        lineStyle: { width: .9, color: '#4aa3ff' },
+        emphasis: { focus: 'series' },
+        data: bid, xAxisIndex: 0, yAxisIndex: 0,
+        visible: $('chkBid').checked
+      },
+      {
+        name: 'Ask', type: 'line', showSymbol: false, smooth: false,
+        lineStyle: { width: .9, color: '#eab66c' },
+        emphasis: { focus: 'series' },
+        data: ask, xAxisIndex: 0, yAxisIndex: 0,
+        visible: $('chkAsk').checked
       }
-    }, false, false);
+    ];
   }
 
-  function autoAdjustY() {
-    // Compute visible x range and adjust y-axis bounds with padding, integers on labels only
-    const opt = chart.getOption();
-    const dz = (opt.dataZoom || []).find(z => z.id === 'xInside');
-    const data = state.ticks;
-    if (!dz || !data.length) return;
+  function buildMacroAreas() {
+    if (!$('chkMacro').checked || !state.segments.length) return [];
+    // Draw shaded areas over macro segments using markArea on a dummy line
+    const areas = state.segments.map(s => ({
+      name: `Seg ${s.segment_id}`,
+      itemStyle: {
+        color: s.direction > 0 ? 'rgba(39,211,142,0.10)' : 'rgba(255,107,107,0.10)'
+      },
+      label: { show: false },
+      xAxis: s.start_tick_id,
+      xAxis2: s.end_tick_id
+    }));
+    return [{
+      name: 'Macro',
+      type: 'line',
+      data: state.ticks.map(_ => null),
+      showSymbol: false,
+      lineStyle: { width: 0 },
+      markArea: {
+        itemStyle: { opacity: 1 },
+        data: areas.map(a => [{ xAxis: a.xAxis }, { xAxis: a.xAxis2, itemStyle: a.itemStyle }])
+      }
+    }];
+  }
 
-    // dataZoom.start/end are percentages (0..100)
-    const startIdx = Math.max(0, Math.floor((dz.start / 100) * (data.length - 1)));
-    const endIdx = Math.min(data.length - 1, Math.ceil((dz.end / 100) * (data.length - 1)));
+  function buildEventsScatter() {
+    if (!$('chkEvents').checked || !state.events.length) return [];
+    return [{
+      name: 'Events',
+      type: 'scatter',
+      symbolSize: 7,
+      itemStyle: { color: '#ff7d7d' },
+      data: state.events.map(e => {
+        const x = state.ticks.findIndex(t => t.id === e.tick_id);
+        if (x < 0) return null;
+        return [x, state.ticks[x].mid];
+      }).filter(Boolean)
+    }];
+  }
 
-    let min = Infinity, max = -Infinity;
-    for (let i = startIdx; i <= endIdx; i++) {
-      const v = data[i].mid;
-      if (v < min) min = v;
-      if (v > max) max = v;
+  function buildOutcomesScatter() {
+    if (!$('chkOutcomes').checked || !state.outcomes.length) return [];
+    // show at the event tick too
+    return [{
+      name: 'Outcomes',
+      type: 'scatter',
+      symbolSize: 7,
+      itemStyle: { color: '#b784ff' },
+      data: state.outcomes.map(o => {
+        const ev = state.events.find(e => e.event_id === o.event_id);
+        if (!ev) return null;
+        const x = state.ticks.findIndex(t => t.id === ev.tick_id);
+        if (x < 0) return null;
+        return [x, state.ticks[x].mid];
+      }).filter(Boolean)
+    }];
+  }
+
+  function rebuildLookups() {
+    state.eventsByTick.clear();
+    state.outcomeByEvent.clear();
+    state.predByEvent.clear();
+    for (const e of state.events) {
+      const arr = state.eventsByTick.get(e.tick_id) || [];
+      arr.push(e);
+      state.eventsByTick.set(e.tick_id, arr);
     }
-    if (!isFinite(min) || !isFinite(max)) return;
-
-    const pad = Math.max(0.01, (max - min) * Y_PAD);
-    const yMin = Math.floor(min - pad);
-    const yMax = Math.ceil(max + pad);
-
-    chart.setOption({ yAxis: { min: yMin, max: yMax } }, false, false);
-    // Keep record for restore
-    state.zoom = state.zoom || {};
-    state.zoom.yMin = yMin; state.zoom.yMax = yMax;
+    for (const o of state.outcomes) state.outcomeByEvent.set(o.event_id, o);
+    for (const p of state.preds)    state.predByEvent.set(p.event_id, p);
   }
 
-  // ---------------------- Fetchers --------------------
-  async function fetchTicks(startId, endId) {
-    const url = `/ticks?start=${encodeURIComponent(startId)}&end=${encodeURIComponent(endId)}${CACHE_BUSTER()}`;
+  // ------------------------------------------------------------
+  // Rendering with view preservation
+  // ------------------------------------------------------------
+  function currentViewFromChart() {
+    const opt = chart.getOption();
+    const xData = state.ticks.map(t => t.id);
+    // dataZoom slider is opt.dataZoom[1] (the slider)
+    if (opt.dataZoom && opt.dataZoom.length) {
+      const dz = opt.dataZoom[0]; // inside-x
+      const start = (dz.startValue !== undefined) ? dz.startValue :
+                    (dz.start !== undefined) ? Math.floor(dz.start / 100 * (xData.length-1)) : 0;
+      const end   = (dz.endValue   !== undefined) ? dz.endValue   :
+                    (dz.end   !== undefined) ? Math.floor(dz.end / 100 * (xData.length-1))   : xData.length-1;
+      state.view.xStart = start;
+      state.view.xEnd   = end;
+    }
+    if (opt.yAxis && opt.yAxis.length) {
+      state.view.yMin = opt.yAxis[0].min ?? null;
+      state.view.yMax = opt.yAxis[0].max ?? null;
+    }
+  }
+
+  function applyViewToOption(option) {
+    const xLen = state.ticks.length;
+    const defaultSpan = Math.min(xLen - 1, Math.max(500, Math.floor(xLen * 0.3))); // show ~30% or ≥500 points
+    let start = state.view.xStart, end = state.view.xEnd;
+
+    if (start == null || end == null) {
+      // first load: focus last defaultSpan points
+      end   = xLen - 1;
+      start = Math.max(0, end - defaultSpan);
+    } else {
+      // clamp to new length
+      start = Math.max(0, Math.min(start, xLen - 2));
+      end   = Math.max(start + 1, Math.min(end, xLen - 1));
+    }
+
+    option.dataZoom = option.dataZoom || baseOption.dataZoom;
+    option.dataZoom[0].startValue = start;
+    option.dataZoom[0].endValue   = end;
+    option.dataZoom[1].startValue = start;
+    option.dataZoom[1].endValue   = end;
+
+    // y auto-fit for the visible window unless user locked with manual min/max
+    if (state.view.yMin != null && state.view.yMax != null) {
+      option.yAxis.min = state.view.yMin;
+      option.yAxis.max = state.view.yMax;
+    } else {
+      const slice = state.ticks.slice(start, end + 1);
+      if (slice.length) {
+        const lo = Math.min(...slice.map(r => r.mid));
+        const hi = Math.max(...slice.map(r => r.mid));
+        const pad = (hi - lo) * 0.05 || 1;
+        option.yAxis.min = Math.floor(lo - pad);
+        option.yAxis.max = Math.ceil(hi + pad);
+      }
+    }
+  }
+
+  function renderAll(preserve=true) {
+    if (preserve) currentViewFromChart();
+
+    const xCats = state.ticks.map(r => r.id);
+    const series = [
+      ...buildPriceSeries(),
+      ...buildMacroAreas(),
+      ...buildEventsScatter(),
+      ...buildOutcomesScatter()
+    ];
+
+    const option = {
+      ...baseOption,
+      xAxis: { ...baseOption.xAxis, data: xCats },
+      yAxis: { ...baseOption.yAxis },
+      series
+    };
+    applyViewToOption(option);
+    chart.setOption(option, true); // replace – keeps dataZoom handles coherent
+  }
+
+  // ------------------------------------------------------------
+  // Data loading
+  // ------------------------------------------------------------
+  async function loadTicksRange(startId, endId) {
+    const url = `/ticks/range?start=${encodeURIComponent(startId)}&end=${encodeURIComponent(endId)}&limit=200000`;
     const res = await fetch(url);
-    if (!res.ok) throw new Error(`ticks HTTP ${res.status}`);
-    return res.json(); // [{id, timestamp, bid, ask, mid}]
+    if (!res.ok) throw new Error(`GET ${url} → ${res.status}`);
+    const rows = await res.json();
+    state.ticks = rows || [];
   }
 
-  async function fetchSnapshot() {
-    const res = await fetch(`/walkforward/snapshot${CACHE_BUSTER()}`);
-    if (!res.ok) throw new Error(`snapshot HTTP ${res.status}`);
-    return res.json();
+  async function refreshSnapshot() {
+    const res = await wfFetch('walkforward/snapshot');
+    if (!res.ok) throw new Error(`snapshot → ${res.status}`);
+    const snap = await res.json();
+    state.segments = snap.segments || [];
+    state.events   = snap.events   || [];
+    state.outcomes = snap.outcomes || [];
+    state.preds    = snap.predictions || [];
+    rebuildLookups();
   }
 
-  async function postStep() {
-    const res = await fetch(`/walkforward/step${CACHE_BUSTER()}`, { method: 'POST' });
-    if (!res.ok) throw new Error(`step HTTP ${res.status}`);
-    return res.json();
-  }
-
-  // ---------------------- Journal ---------------------
-  function j(msg) {
-    const now = new Date().toISOString().replace('T', ' ').replace('Z', '');
-    const line = `[${now}] ${msg}`;
-    if (el.journal) {
-      const p = document.createElement('div');
-      p.textContent = line;
-      el.journal.prepend(p);
-    }
-    if (el.status) el.status.textContent = msg;
-    console.log(line);
-  }
-
-  function initJournalToggle() {
-    if (!el.journal || !el.journalToggle) return;
-    const key = 'review.journal.open';
-    const apply = (open) => {
-      el.journal.style.display = open ? 'block' : 'none';
-      el.journalToggle.textContent = open ? 'Journal ▾' : 'Journal ▸';
-    };
-    const saved = LS.getItem(key);
-    let open = saved ? saved === '1' : false;
-    apply(open);
-    el.journalToggle.addEventListener('click', () => {
-      open = !open;
-      LS.setItem(key, open ? '1' : '0');
-      apply(open);
-    });
-  }
-
-  // ---------------------- Renderers -------------------
-  function setSeriesVisibility() {
-    chart.setOption({
-      series: [
-        { name: 'Mid',   show: el.chkMid?.checked ?? true },
-        { name: 'Bid',   show: el.chkBid?.checked ?? false },
-        { name: 'Ask',   show: el.chkAsk?.checked ?? false },
-        { name: 'Macro', show: el.chkMacro?.checked ?? true },
-        { name: 'Events', show: el.chkEvents?.checked ?? true },
-        { name: 'Outcomes', show: el.chkOut?.checked ?? true }
-      ]
-    });
-  }
-
-  function renderAll() {
-    const xCats = state.ticks.map(t => String(t.id));
-    const mid = state.ticks.map(t => t.mid);
-    const bid = state.ticks.map(t => t.bid);
-    const ask = state.ticks.map(t => t.ask);
-
-    // Macro bands
-    const markAreas = [];
-    for (const seg of state.macro) {
-      const startIdx = state.ticks.findIndex(t => t.id === seg.start_tick_id);
-      const endIdx = state.ticks.findIndex(t => t.id === seg.end_tick_id);
-      if (startIdx === -1 || endIdx === -1) continue;
-      const color = seg.direction > 0 ? '#2e7d32' : '#b71c1c';
-      const opacity = Math.min(0.25, Math.max(0.08, seg.confidence || 0.12));
-      markAreas.push([
-        { xAxis: String(state.ticks[startIdx].id), itemStyle: { color, opacity } },
-        { xAxis: String(state.ticks[endIdx].id) }
-      ]);
-    }
-
-    // Events
-    const evPts = [];
-    for (const ev of state.events) {
-      const t = state.ticks.find(tk => tk.id === ev.tick_id);
-      if (!t) continue;
-      const color = ev.event_type === 'pullback_end' ? '#00e676'
-                  : ev.event_type === 'breakout'     ? '#29b6f6'
-                  : '#ef5350';
-      evPts.push({ value: [String(t.id), t.mid], itemStyle: { color } });
-    }
-
-    // Outcomes halo (use outcome color ring)
-    const ocPts = [];
-    for (const oc of state.outcomes) {
-      const ev = state.events.find(e => e.event_id === oc.event_id);
-      if (!ev) continue;
-      const t = state.ticks.find(tk => tk.id === ev.tick_id);
-      if (!t) continue;
-      const color = oc.outcome === 'TP' ? '#00e676' : oc.outcome === 'SL' ? '#ff5252' : '#9e9e9e';
-      ocPts.push({ value: [String(t.id), t.mid], itemStyle: { color, opacity: 0.9 } });
-    }
-
-    // Apply data & try to keep zoom
-    captureZoom();
-    chart.setOption({
-      xAxis: { data: xCats },
-      series: [
-        { name: 'Mid', data: mid },
-        { name: 'Bid', data: bid },
-        { name: 'Ask', data: ask },
-        {
-          name: 'Macro',
-          data: [], // invisible line
-          markArea: { data: markAreas }
-        },
-        { name: 'Events', data: evPts },
-        { name: 'Outcomes', data: ocPts }
-      ]
-    }, false, false);
-    setSeriesVisibility();
-    if (state.zoom) restoreZoom();
-    autoAdjustY();
-  }
-
-  // ---------------------- Loading logic ----------------
-  function currentWindow() {
-    // A natural window using end tick (input) minus DEFAULT_WINDOW
-    const startId = Math.max(1, parseInt(el.start.value || '1', 10));
-    let endId = parseInt(el.end.value || '0', 10);
-    if (!endId || endId < startId) endId = startId + DEFAULT_WINDOW - 1;
-    const n = endId - startId + 1;
-    if (n > DEFAULT_WINDOW) {
-      const newStart = endId - DEFAULT_WINDOW + 1;
-      return { start: newStart, end: endId };
-    }
-    return { start: startId, end: endId };
-  }
-
-  async function loadNaturalWindow() {
+  // ------------------------------------------------------------
+  // UI wiring
+  // ------------------------------------------------------------
+  async function doLoad() {
     try {
-      const win = currentWindow();
-      j(`Load window [${win.start}, ${win.end}]`);
-      const rows = await fetchTicks(win.start, win.end);
-      state.ticks = rows.map(r => ({
-        id: r.id,
-        ts: r.timestamp, mid: +r.mid, bid: +r.bid, ask: +r.ask
-      }));
-      // Snapshot layers
-      const snap = await fetchSnapshot();
-      state.macro = snap.macro_segments || [];
-      state.events = snap.micro_events || [];
-      state.outcomes = snap.outcomes || [];
-      state.preds = snap.predictions || [];
-      renderAll();
-
-      // If first load, set view to the last DEFAULT_WINDOW region
-      if (!state.zoom) {
-        const n = state.ticks.length;
-        if (n > 0) {
-          const startPct = Math.max(0, (n - Math.min(n, DEFAULT_WINDOW)) / n) * 100;
-          chart.setOption({
-            dataZoom: [
-              { id: 'xInside', start: startPct, end: 100 },
-              { id: 'xSlider', start: startPct, end: 100 }
-            ]
-          }, false, false);
-          autoAdjustY();
-        }
-      }
+      status('Loading…');
+      const a = parseInt($('startTick').value, 10);
+      const b = parseInt($('endTick').value, 10);
+      await loadTicksRange(a, b);
+      await refreshSnapshot();
+      renderAll(true);
+      status(`Loaded ${state.ticks.length} ticks`);
+      j(`Load window [${a}, ${b}]`);
     } catch (e) {
-      j(`ERROR loading: ${e.message}`);
+      console.error(e);
+      status('Load failed');
+      j('ERROR load: ' + (e?.message || e));
     }
   }
 
   async function doRun() {
     try {
-      captureZoom();
+      status('Run: start');
       j('Run: start');
-      const r = await postStep();
-      if (r && r.journal) {
-        (Array.isArray(r.journal) ? r.journal : [r.journal]).forEach(x => x && j(x));
+
+      const res = await wfFetch('walkforward/step', { method: 'POST' });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.error || ('HTTP ' + res.status));
       }
-      // pull fresh layers but keep current focus
-      const snap = await fetchSnapshot();
-      state.macro = snap.macro_segments || [];
-      state.events = snap.micro_events || [];
-      state.outcomes = snap.outcomes || [];
-      state.preds = snap.predictions || [];
-      renderAll();
+      const body = await res.json();
+      if (Array.isArray(body.journal)) {
+        for (const line of body.journal) j(line);
+      } else {
+        j('Run ok.');
+      }
+
+      // Always get a fresh snapshot, and DO NOT change current focus
+      await refreshSnapshot();
+      renderAll(true);
+
+      status('Run: done');
       j('Run: done');
     } catch (e) {
-      j(`Run error: ${e.message}`);
+      console.error(e);
+      status('Run: error');
+      j('Run error: ' + (e?.message || e));
     }
   }
 
-  async function doJump() {
-    const tid = parseInt(el.jumpTo.value || '0', 10);
-    if (!tid) return;
-    const half = Math.floor(DEFAULT_WINDOW / 2);
-    const start = Math.max(1, tid - half);
-    const end = start + DEFAULT_WINDOW - 1;
-    el.start.value = start;
-    el.end.value = end;
-    await loadNaturalWindow();
-    // Center the slider on the requested tick if it exists in window
-    const idx = state.ticks.findIndex(t => t.id === tid);
-    if (idx >= 0) {
-      const n = state.ticks.length;
-      const windowSpan = Math.max(10, Math.floor(n * 0.3)); // show ~30% span around center
-      const left = Math.max(0, idx - Math.floor(windowSpan / 2));
-      const right = Math.min(n - 1, left + windowSpan);
-      const startPct = (left / (n - 1)) * 100;
-      const endPct = (right / (n - 1)) * 100;
-      chart.setOption({
-        dataZoom: [
-          { id: 'xInside', start: startPct, end: endPct },
-          { id: 'xSlider', start: startPct, end: endPct }
-        ]
-      }, false, false);
-      autoAdjustY();
-    }
+  function onJump() {
+    let t = parseInt($('jumpTick').value, 10);
+    if (!Number.isFinite(t) || !state.ticks.length) return;
+
+    // Choose a healthy window around the tick (~3000 each side, clamped)
+    const span = 3000;
+    const start = Math.max(1, t - span);
+    const end   = t + span;
+
+    $('startTick').value = start;
+    $('endTick').value   = end;
+    doLoad();
   }
 
-  // ---------------------- Wire up UI -------------------
-  function initControls() {
-    el.load?.addEventListener('click', () => {
-      captureZoom();
-      loadNaturalWindow();
-    });
-    el.run?.addEventListener('click', async () => {
-      await doRun();
-    });
-    el.jumpBtn?.addEventListener('click', doJump);
-
-    [el.chkMacro, el.chkEvents, el.chkPred, el.chkOut, el.chkMid, el.chkBid, el.chkAsk]
-      .forEach(ch => ch && ch.addEventListener('change', setSeriesVisibility));
+  // toggles
+  for (const id of ['chkMid','chkBid','chkAsk','chkMacro','chkEvents','chkPreds','chkOutcomes']) {
+    $(id).addEventListener('change', () => renderAll(true));
   }
 
-  // ---------------------- Init ------------------------
-  function boot() {
-    initJournalToggle();
-    initControls();
-    // sensible defaults
-    if (!el.start.value) el.start.value = '1';
-    if (!el.end.value) el.end.value = String(DEFAULT_WINDOW);
-    loadNaturalWindow().then(() => j('Ready'));
-  }
+  $('btnLoad').addEventListener('click', doLoad);
+  $('btnRun').addEventListener('click', doRun);
+  $('btnJump').addEventListener('click', onJump);
 
-  document.addEventListener('DOMContentLoaded', boot);
+  // First paint: if someone lands and hits Run before Load, we still show snapshot overlays after first data load.
+  status('Ready');
 })();

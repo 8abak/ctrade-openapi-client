@@ -2,95 +2,80 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>ML Review — Walk-Forward</title>
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ML Review — Walk-Forward</title>
   <style>
-    :root { color-scheme: dark; }
-    html, body { height: 100%; }
-    body {
-      margin: 0;
-      background: #0d1117;
-      color: #e6edf3;
-      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+    :root{
+      --bg:#0f141a; --panel:#141b23; --ink:#e7edf3; --muted:#93a0ad;
+      --accent:#4aa3ff; --good:#27d38e; --bad:#ff6b6b; --warn:#e7b75f; --violet:#b784ff;
     }
-    .toolbar {
-      display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
-      padding: 10px 12px; border-bottom: 1px solid #30363d; background: #0d1117; position: sticky; top: 0; z-index: 5;
-    }
-    .toolbar label { color: #e6edf3; }
-    .toolbar input[type="number"], .toolbar input[type="text"] {
-      background: #161b22; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: 4px 8px;
-    }
-    .toolbar button {
-      background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: 4px 10px; cursor: pointer;
-    }
-    .toolbar button:disabled { opacity: .6; cursor: default; }
-
-    .subbar {
-      display: flex; align-items: center; gap: 10px;
-      padding: 6px 12px; color: #8b949e;
-    }
-    .ghost {
-      background: transparent; color: #aab6c7; border: 1px solid #2a2f36; border-radius: 6px; padding: 2px 8px; cursor: pointer;
-    }
-
-    #status { padding: 0 2px; color: #8b949e; font-size: 12px; min-height: 18px; }
-
-    #journal {
-      margin: 0 12px 6px 12px; background: #0f1420; border: 1px solid #222b3d; border-radius: 8px;
-      padding: 8px 10px; max-height: 160px; overflow: auto; font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; color: #a5b4c3;
-    }
-    #journal.collapsed { display: none; }
-
-    #chart  { height: 68vh; min-height: 520px; width: 100%; background: #0d1117; }
-    .spacer { flex: 1 1 auto; }
-    .muted  { color: #9aa4b2; }
+    html, body { height:100%; margin:0; }
+    body { background:var(--bg); color:var(--ink); font:14px/1.4 ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; }
+    .toolbar{ display:flex; gap:.5rem; align-items:center; padding:.6rem .8rem; background:var(--panel); position:sticky; top:0; z-index:10; }
+    .toolbar input[type="number"]{ width:110px; padding:.35rem .45rem; background:#0b1016; border:1px solid #2a3642; border-radius:.4rem; color:var(--ink); }
+    .toolbar button{ padding:.35rem .65rem; border:1px solid #2a3642; background:#0b1016; color:var(--ink); border-radius:.45rem; cursor:pointer; }
+    .toolbar button:hover{ border-color:#44586c; }
+    .toolbar label{ display:inline-flex; gap:.3rem; align-items:center; color:var(--muted); }
+    .spacer{ flex:1; }
+    #status{ padding:.35rem .8rem; color:var(--muted); }
+    #chart{ height: calc(100vh - 180px); min-height:460px; }
+    .footer{ height:8px; }
+    /* Journal panel */
+    #journalWrap{ background:#0b1016; border-top:1px solid #263241; display:none; }
+    #journalHead{ display:flex; align-items:center; justify-content:space-between; padding:.45rem .8rem; color:var(--muted); }
+    #journal{ height:180px; overflow:auto; padding:.4rem .8rem; font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; white-space:pre; }
+    .chip{ padding:.2rem .45rem; border-radius:999px; border:1px solid #2a3642; color:var(--muted); }
   </style>
+
+  <!-- ECharts (CDN) with cache-buster -->
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js?v=2025-08-26-a"></script>
+  <!-- Your app code (cache-busted) -->
+  <script defer src="./review-core.js?v=2025-08-26-a"></script>
 </head>
 <body>
   <div class="toolbar">
-    <label>Start tick <input id="startTick" type="number" value="1" style="width:120px" /></label>
-    <label>End tick <input id="endTick" type="number" value="100000" style="width:120px" /></label>
-    <button id="loadBtn">Load</button>
+    <label>Start tick <input id="startTick" type="number" value="1" min="1" step="1"></label>
+    <label>End tick <input id="endTick" type="number" value="100000" min="1" step="1"></label>
+    <button id="btnLoad">Load</button>
+    <button id="btnRun">Run</button>
 
-    <button id="runBtn" title="Run walk-forward step">Run</button>
-
-    <label><input id="chkMacro" type="checkbox" checked /> Macro</label>
-    <label><input id="chkEvents" type="checkbox" checked /> Events</label>
-    <label><input id="chkPreds" type="checkbox" checked /> Predictions</label>
-    <label><input id="chkOutcomes" type="checkbox" checked /> Outcomes</label>
-
-    <span style="width:16px"></span>
-    <span class="muted">Price streams:</span>
-    <label><input id="chkMid" type="checkbox" checked /> Mid</label>
-    <label><input id="chkBid" type="checkbox" /> Bid</label>
-    <label><input id="chkAsk" type="checkbox" /> Ask</label>
+    <label><input id="chkMacro" type="checkbox" checked> Macro</label>
+    <label><input id="chkEvents" type="checkbox" checked> Events</label>
+    <label><input id="chkPreds" type="checkbox" checked> Predictions</label>
+    <label><input id="chkOutcomes" type="checkbox" checked> Outcomes</label>
 
     <span class="spacer"></span>
-    <label class="muted">Jump to tick <input id="jumpTick" type="number" value="1" style="width:140px" /></label>
-    <button id="jumpBtn">Jump</button>
+
+    <span class="chip">Price streams:</span>
+    <label><input id="chkMid"  type="checkbox" checked> Mid</label>
+    <label><input id="chkBid"  type="checkbox"> Bid</label>
+    <label><input id="chkAsk"  type="checkbox"> Ask</label>
+
+    <span class="spacer"></span>
+
+    <label>Jump to tick <input id="jumpTick" type="number" value="1" min="1" step="1"></label>
+    <button id="btnJump">Jump</button>
+
+    <button id="btnJournal" title="Show/Hide journal">Journal ▸</button>
   </div>
 
-  <div class="subbar">
-    <div id="status">Ready</div>
-    <div class="spacer"></div>
-    <button id="toggleJournal" class="ghost" title="Show/Hide journal">Journal ▸</button>
-  </div>
-
-  <pre id="journal" class="collapsed"></pre>
+  <div id="status">Ready</div>
   <div id="chart"></div>
 
-  <!-- ECharts: try local first; fallback to CDN if missing -->
-  <script src="/public/echarts.min.js?v=20250825"></script>
-  <script>
-    if (typeof echarts === 'undefined') {
-      const s = document.createElement('script');
-      s.src = 'https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js';
-      document.head.appendChild(s);
-    }
-  </script>
+  <div id="journalWrap">
+    <div id="journalHead">
+      <span>Walk-forward journal</span>
+      <div>
+        <button id="btnClearJ">Clear</button>
+        <button id="btnHideJ">Close</button>
+      </div>
+    </div>
+    <div id="journal"></div>
+  </div>
 
-  <!-- IMPORTANT: path relative to nginx root (/home/ec2-user/cTrade/frontend) -->
-  <script src="/review-core.js?v=20250825-7"></script>
+  <div class="footer"></div>
 </body>
 </html>
