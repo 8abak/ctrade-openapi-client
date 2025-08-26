@@ -2,6 +2,7 @@
 # Purpose: Build/extend macro segments using a $6 Renko/ZigZag rule.
 # - Idempotent: if the next confirmed pivot already exists, does nothing.
 # - Bounded: at most one new CLOSED segment is appended per call.
+# NOTE: We DO NOT write to `length_usd` because it's a GENERATED column in DB.
 
 from __future__ import annotations
 
@@ -81,8 +82,9 @@ def _scan_for_pivot(conn, start_tick_id: int, start_price: float) -> Optional[Ti
 
 def _insert_segment(conn, start: TickRow, end: TickRow) -> int:
     direction = 1 if (end.mid - start.mid) > 0 else -1
-    length_usd = abs(end.mid - start.mid)
-    raw = max(0.0, min(1.0, length_usd / (RENKO_USD * 1.5)))
+    # confidence proxy based on move size (we don't store length_usd directly)
+    move = abs(end.mid - start.mid)
+    raw = max(0.0, min(1.0, move / (RENKO_USD * 1.5)))
     confidence = 0.15 + 0.8 * raw
 
     exists = conn.execute(
@@ -99,9 +101,9 @@ def _insert_segment(conn, start: TickRow, end: TickRow) -> int:
             """
             INSERT INTO macro_segments
                 (start_ts, end_ts, direction, start_price, end_price,
-                 length_usd, confidence, start_tick_id, end_tick_id)
+                 confidence, start_tick_id, end_tick_id)
             VALUES
-                (:s_ts, :e_ts, :dir, :s_p, :e_p, :len, :conf, :s_id, :e_id)
+                (:s_ts, :e_ts, :dir, :s_p, :e_p, :conf, :s_id, :e_id)
             RETURNING segment_id
             """
         ),
@@ -111,7 +113,6 @@ def _insert_segment(conn, start: TickRow, end: TickRow) -> int:
             "dir": direction,
             "s_p": start.mid,
             "e_p": end.mid,
-            "len": length_usd,
             "conf": confidence,
             "s_id": start.id,
             "e_id": end.id,
