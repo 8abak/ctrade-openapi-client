@@ -3,32 +3,21 @@ walkforward.py
 --------------
 
 Run a long walk-forward backtest over many ticks, one macro segment at a time.
-Process per step:
-  1) Build/extend macro segments (up to a target tick id)
+Per step:
+  1) Build/extend macro segments (compat with old/new signatures)
   2) Detect micro events for the latest CLOSED segment
-  3) Resolve outcomes for any eligible events
+  3) Resolve outcomes for eligible events
   4) Train & predict (train on fully resolved past, predict on next segment’s events)
 
-Stops when the latest closed segment's end_tick_id reaches the target tick bound.
+Stops when the latest closed segment's end_tick_id reaches the target bound
+(or when progress stalls).
 
-Outputs:
-  - CSV with per-segment decided/correct/incorrect
-  - PNG chart of cumulative correct/incorrect
-  - Log file of steps
+Artifacts are saved under: backend/reports/wf2m-YYYYMMDD-HHMMSS[-TAG]/
 
-Artifacts live under: backend/reports/wf2m-YYYYMMDD-HHMMSS[-TAG]/
-
-Run on EC2:
+Usage (EC2):
 
   $ source venv/bin/activate
   $ python -m backend.walkforward --max-ticks 2000000
-  # optional:
-  $ python -m backend.walkforward --start 100000 --max-ticks 2000000 --report-tag resume1
-
-Requires:
-  - pandas, matplotlib  (pip install pandas matplotlib)
-  - existing backend modules: label_macro_segments.py, label_micro_events.py,
-    compute_outcomes.py, train_predict.py
 """
 
 from __future__ import annotations
@@ -46,7 +35,7 @@ from sqlalchemy import text
 if __name__ == "__main__" and __package__ is None:
     sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
-# Import shared engine + pipeline modules
+# Shared DB engine + pipeline modules
 from .main import engine  # type: ignore
 from .label_macro_segments import BuildOrExtendSegments  # type: ignore
 from .label_micro_events import DetectMicroEventsForLatestClosedSegment  # type: ignore
@@ -57,6 +46,16 @@ import pandas as pd  # type: ignore
 import matplotlib
 matplotlib.use("Agg")  # headless
 import matplotlib.pyplot as plt  # type: ignore
+
+# -----------------------------
+# Small utilities
+# -----------------------------
+
+def _nowstamp() -> str:
+    return dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+def jprint(msg: str):
+    print(f"[{_nowstamp()}] {msg}", flush=True)
 
 # -----------------------------
 # SQL helpers
@@ -86,16 +85,6 @@ JOIN outcomes o ON o.event_id = p.event_id
 ORDER BY e.segment_id, e.tick_id;
 """
 
-def _nowstamp() -> str:
-    return dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-
-def jprint(msg: str):
-    print(f"[{_nowstamp()}] {msg}", flush=True)
-
-# -----------------------------
-# Core driver
-# -----------------------------
-
 def get_tick_bounds() -> Tuple[int, int]:
     with engine.connect() as conn:
         row = conn.execute(SQL_TICK_BOUNDS).first()
@@ -110,16 +99,32 @@ def get_last_closed_segment_end_id() -> int:
         return 0
     return int(row[1] or 0)
 
+# -----------------------------
+# One step
+# -----------------------------
+
+def _build_or_extend_macro(engine, target_end_tick_id: int) -> Dict[str, Any]:
+    """
+    Compatibility wrapper:
+    - Try new signature: BuildOrExtendSegments(engine, until_tick_id=…)
+    - Fall back to old signature: BuildOrExtendSegments(engine)
+    """
+    try:
+        return BuildOrExtendSegments(engine, until_tick_id=target_end_tick_id)  # type: ignore[arg-type]
+    except TypeError:
+        # Current codebase still on old signature — proceed without bound
+        return BuildOrExtendSegments(engine)  # type: ignore[call-arg]
+
 def step_once(target_end_tick_id: int) -> Dict[str, Any]:
     """
-    Perform one step: build/extend one new macro leg if possible, then
-    micro events, outcomes, train & predict. Return dict summary.
+    Perform one step: build/extend (one leg), micro events, outcomes, train & predict.
+    Return a dict summary for logging.
     """
     out: Dict[str, Any] = {"macro": None, "micro": None, "outcomes": None, "predict": None}
-    out["macro"] = BuildOrExtendSegments(engine, until_tick_id=target_end_tick_id)
-    out["micro"] = DetectMicroEventsForLatestClosedSegment(engine)
+    out["macro"]    = _build_or_extend_macro(engine, target_end_tick_id)
+    out["micro"]    = DetectMicroEventsForLatestClosedSegment(engine)
     out["outcomes"] = ResolveOutcomes(engine)
-    out["predict"] = TrainAndPredict(engine)
+    out["predict"]  = TrainAndPredict(engine)
     return out
 
 # -----------------------------
@@ -129,7 +134,7 @@ def step_once(target_end_tick_id: int) -> Dict[str, Any]:
 def evaluate_predictions() -> pd.DataFrame:
     """
     Return dataframe of decided predictions joined with outcomes,
-    sorted by (segment_id, tick_id), with a 'correct' column.
+    sorted by (segment_id, tick_id), with a 'correct' column (TP=correct).
     """
     with engine.connect() as conn:
         df = pd.read_sql(SQL_EVAL, conn)
@@ -138,15 +143,13 @@ def evaluate_predictions() -> pd.DataFrame:
         return df
 
     df = df[df["decided"] == True].copy()
-    # Correct if TP; treat SL and Timeout as incorrect
-    df["correct"] = (df["outcome"] == "TP")
+    df["correct"] = (df["outcome"] == "TP")  # SL/Timeout counted as incorrect
     df.sort_values(["segment_id", "tick_id"], inplace=True, ignore_index=True)
     return df
 
 def per_segment_summary(df_eval: pd.DataFrame) -> pd.DataFrame:
     if df_eval.empty:
         return pd.DataFrame(columns=["segment_id", "n_decided", "n_correct", "n_incorrect", "acc"])
-
     g = df_eval.groupby("segment_id", as_index=False).agg(
         n_decided=("correct", "size"),
         n_correct=("correct", "sum"),
@@ -188,9 +191,10 @@ def cumulative_plot(df_seg: pd.DataFrame, out_png: str):
 def main():
     ap = argparse.ArgumentParser(description="Long walk-forward backtest driver")
     ap.add_argument("--start", type=int, default=None, help="Start tick id (default: DB min id)")
-    ap.add_argument("--max-ticks", type=int, default=2_000_000, help="Max ticks to traverse (default: 2,000,000)")
+    ap.add_argument("--max-ticks", type=int, default=2_000_000, help="Max ticks to traverse")
     ap.add_argument("--sleep-ms", type=int, default=0, help="Sleep between steps")
-    ap.add_argument("--limit-steps", type=int, default=10_000_000, help="Safety cap on number of steps")
+    ap.add_argument("--limit-steps", type=int, default=10_000_000, help="Safety cap")
+    ap.add_argument("--stalled-limit", type=int, default=50, help="Stop if no progress for N steps")
     ap.add_argument("--report-tag", type=str, default="", help="Optional tag for report folder")
     args = ap.parse_args()
 
@@ -260,17 +264,32 @@ def main():
             if args.sleep_ms > 0:
                 time.sleep(args.sleep_ms / 1000.0)
 
-            if stalled >= 50:
-                jprint("No forward progress for 50 steps; stopping.")
+            if stalled >= args.stalled_limit:
+                jprint(f"No forward progress for {args.stalled_limit} steps; stopping.")
                 flog.write(f"[{_nowstamp()}] stalled; stopping\n")
                 break
 
         # Evaluation
         jprint("Evaluating predictions vs outcomes…")
-        df_eval = evaluate_predictions()
-        df_seg  = per_segment_summary(df_eval)
+        with engine.connect() as conn:
+            df_eval = pd.read_sql(SQL_EVAL, conn)
+        if not df_eval.empty:
+            df_eval = df_eval[df_eval["decided"] == True].copy()
+            df_eval["correct"] = (df_eval["outcome"] == "TP")
+            df_eval.sort_values(["segment_id", "tick_id"], inplace=True, ignore_index=True)
 
-        # Save CSV
+        if df_eval.empty:
+            df_seg = pd.DataFrame(columns=["segment_id", "n_decided", "n_correct", "n_incorrect", "acc"])
+        else:
+            g = df_eval.groupby("segment_id", as_index=False).agg(
+                n_decided=("correct", "size"),
+                n_correct=("correct", "sum"),
+            )
+            g["n_incorrect"] = g["n_decided"] - g["n_correct"]
+            g["acc"] = (g["n_correct"] / g["n_decided"]).round(4).fillna(0)
+            df_seg = g
+
+        # Save CSV + plot
         with open(csv_path, "w", encoding="utf-8") as fcsv:
             if not df_seg.empty:
                 df_seg.to_csv(fcsv, index=False)
@@ -278,12 +297,36 @@ def main():
                 fcsv.write("segment_id,n_decided,n_correct,n_incorrect,acc\n")
 
         # Plot cumulative
-        cumulative_plot(df_seg, png_path)
+        if df_seg.empty:
+            fig, ax = plt.subplots(figsize=(8, 4))
+            ax.text(0.5, 0.5, "No decided predictions to plot.", ha="center", va="center")
+            ax.axis("off")
+            fig.tight_layout()
+            fig.savefig(png_path, dpi=150)
+            plt.close(fig)
+            total_decided = total_correct = total_incorrect = 0
+            acc = 0.0
+        else:
+            dfp = df_seg.sort_values("segment_id").copy()
+            dfp["cum_correct"] = dfp["n_correct"].cumsum()
+            dfp["cum_incorrect"] = dfp["n_incorrect"].cumsum()
 
-        total_decided   = int(df_seg["n_decided"].sum()) if not df_seg.empty else 0
-        total_correct   = int(df_seg["n_correct"].sum()) if not df_seg.empty else 0
-        total_incorrect = int(df_seg["n_incorrect"].sum()) if not df_seg.empty else 0
-        acc = (total_correct / total_decided) if total_decided else 0.0
+            fig, ax = plt.subplots(figsize=(12, 6))
+            ax.plot(dfp["segment_id"], dfp["cum_correct"],   label="Cumulative correct",   linewidth=2)
+            ax.plot(dfp["segment_id"], dfp["cum_incorrect"], label="Cumulative incorrect", linewidth=2)
+            ax.set_xlabel("Segment ID")
+            ax.set_ylabel("Count")
+            ax.set_title("Walk-forward cumulative decisions")
+            ax.grid(True, linestyle="--", alpha=0.3)
+            ax.legend()
+            fig.tight_layout()
+            fig.savefig(png_path, dpi=160)
+            plt.close(fig)
+
+            total_decided   = int(df_seg["n_decided"].sum())
+            total_correct   = int(df_seg["n_correct"].sum())
+            total_incorrect = int(df_seg["n_incorrect"].sum())
+            acc = (total_correct / total_decided) if total_decided else 0.0
 
         jprint(f"Done. steps={steps} decided={total_decided} correct={total_correct} "
                f"incorrect={total_incorrect} accuracy={acc:.3f}")
