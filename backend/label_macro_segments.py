@@ -2,7 +2,7 @@
 # Purpose: Build/extend macro segments using a $6 Renko/ZigZag rule.
 # - Idempotent: if the next confirmed pivot already exists, does nothing.
 # - Bounded: at most one new CLOSED segment is appended per call.
-# NOTE: We DO NOT write to `length_usd` because it's a GENERATED column in DB.
+# NOTE: We DO NOT write to `length_usd` (it's a GENERATED column).
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from typing import Optional, Dict, Any
 from sqlalchemy.engine import Engine
 from sqlalchemy import text
 
+MODULE_TAG = "macro_builder_v02_no_length_insert"
 RENKO_USD = float(__import__("os").environ.get("RENKO_USD", 6.0))
 
 
@@ -131,20 +132,20 @@ def BuildOrExtendSegments(engine: Engine) -> Dict[str, Any]:
         if last is None:
             first = _first_tick(conn)
             if not first:
-                return {"segments_added": 0, "last_segment_id": None}
+                return {"segments_added": 0, "last_segment_id": None, "module": MODULE_TAG}
             nxt = _scan_for_pivot(conn, first.id, first.mid)
             if not nxt:
-                return {"segments_added": 0, "last_segment_id": None}
+                return {"segments_added": 0, "last_segment_id": None, "module": MODULE_TAG}
             seg_id = _insert_segment(conn, first, nxt)
-            return {"segments_added": 1, "last_segment_id": seg_id}
+            return {"segments_added": 1, "last_segment_id": seg_id, "module": MODULE_TAG}
 
         pivot_tick = _tick_by_id(conn, last["end_tick_id"])
         if not pivot_tick:
-            return {"segments_added": 0, "last_segment_id": last["segment_id"]}
+            return {"segments_added": 0, "last_segment_id": last["segment_id"], "module": MODULE_TAG}
 
         nxt = _scan_for_pivot(conn, pivot_tick.id, pivot_tick.mid)
         if not nxt:
-            return {"segments_added": 0, "last_segment_id": last["segment_id"]}
+            return {"segments_added": 0, "last_segment_id": last["segment_id"], "module": MODULE_TAG}
 
         seg_id = _insert_segment(conn, pivot_tick, nxt)
-        return {"segments_added": 1, "last_segment_id": seg_id}
+        return {"segments_added": 1, "last_segment_id": seg_id, "module": MODULE_TAG}
