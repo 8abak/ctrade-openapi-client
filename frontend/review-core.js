@@ -347,23 +347,49 @@
   // Data loading
   // ------------------------------------------------------------
   async function loadTicksRange(startId, endId) {
-    const url = `/ticks/range?start=${encodeURIComponent(startId)}&end=${encodeURIComponent(endId)}&limit=200000`;
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`GET ${url} → ${res.status}`);
-    const rows = await res.json();
-    state.ticks = rows || [];
+      const url = `/ticks/range?start=${encodeURIComponent(startId)}&end=${encodeURIComponent(endId)}&limit=200000`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`GET ${url} → ${res.status}`);
+      const rows = await res.json();
+      state.ticks = rows || [];
+    }
+
+    async function refreshSnapshot() {
+      const res = await wfFetch('walkforward/snapshot');
+      if (!res.ok) throw new Error(`snapshot → ${res.status}`);
+      const snap = await res.json();
+      state.segments = snap.segments || [];
+      state.events   = snap.events   || [];
+      state.outcomes = snap.outcomes || [];
+      state.preds    = snap.predictions || [];
+      rebuildLookups();
+    }
+    // ------------------------------------------------------------
+    // run day MLing
+    // ------------------------------------------------------------
+    async function runDay() {
+    setBusy(true);
+    try {
+      const resp = await fetch('/walkforward/run_day', { method: 'POST' });
+      const data = await resp.json();
+      appendLog(`Run Day: ${data.ok ? 'OK' : 'FAILED'}`);
+      if (data.ok) {
+        appendLog(
+          `From tick ${data.start_tick_id} @ ${data.start_ts}\n` +
+          `→ day end ${data.day_end_ts}\n` +
+          `iters=${data.iterations}, target_tick_id=${data.target_tick_id}, ` +
+          `events<=${data.max_event_id_now}, predictions_total=${data.predictions_total}`
+        );
+      } else {
+        appendLog(`Reason: ${data.reason || 'unknown'}`);
+      }
+    } catch (e) {
+      appendLog('Run Day error: ' + e.message);
+    } finally {
+      setBusy(false);
+    }
   }
 
-  async function refreshSnapshot() {
-    const res = await wfFetch('walkforward/snapshot');
-    if (!res.ok) throw new Error(`snapshot → ${res.status}`);
-    const snap = await res.json();
-    state.segments = snap.segments || [];
-    state.events   = snap.events   || [];
-    state.outcomes = snap.outcomes || [];
-    state.preds    = snap.predictions || [];
-    rebuildLookups();
-  }
 
   // ------------------------------------------------------------
   // UI wiring
@@ -384,6 +410,8 @@
       j('ERROR load: ' + (e?.message || e));
     }
   }
+
+
 
   async function doRun() {
     try {
