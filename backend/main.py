@@ -1,249 +1,263 @@
-# backend/main.py
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import os
-import traceback
-from datetime import datetime, timedelta, time
-from typing import Dict, Any, List, Optional
+import json
+import re
+import datetime as dt
+import subprocess
+from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import FastAPI, HTTPException, Body
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, FileResponse
-from fastapi.staticfiles import StaticFiles
-from sqlalchemy import create_engine, text
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+import psycopg2
+import psycopg2.extras
 
-# === keep your existing imports for pipeline steps ===
-# NOTE: these match your repo layout; if your originals are absolute, keep them absolute.
-from label_macro_segments import BuildOrExtendSegments
-from label_micro_events import DetectMicroEventsForLatestClosedSegment
-from compute_outcomes import ResolveOutcomes
-from train_predict import TrainAndPredict
+# ====== CONFIG ======
+DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("POSTGRES_URL") or \
+               "postgresql://postgres:postgres@localhost:5432/postgres"
 
-# -------------------------------------------------------------------
-# App + DB
-# -------------------------------------------------------------------
-app = FastAPI(title="cTrade backend")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+# Jobs we call without modifying your existing code
+JOB_RUN_DAY = ["python", "-m", "make_dataset"]         # expects: --date YYYY-MM-DD
+JOB_WALK_FWD = ["python", "-m", "jobs.backfill"]       # expects: --start N --end M
+
+# Fallback table names used by the chart / pipeline
+TABLE_TICKS = os.getenv("TABLE_TICKS", "ticks")
+TABLE_MACRO = os.getenv("TABLE_MACRO", "macro_trends")
+TABLE_MICRO = os.getenv("TABLE_MICRO", "micro_trends")
+TABLE_PRED  = os.getenv("TABLE_PRED",  "predictions")
+
+# ====== APP ======
+app = Flask(__name__)
+CORS(app)
+
+# ====== DB UTILS ======
+def _db() -> psycopg2.extensions.connection:
+    conn = psycopg2.connect(DATABASE_URL)
+    return conn
+
+def _one(sql: str, args: Tuple = ()) -> Optional[Tuple]:
+    with _db() as conn, conn.cursor() as cur:
+        cur.execute(sql, args)
+        return cur.fetchone()
+
+def _all(sql: str, args: Tuple = ()) -> List[Tuple]:
+    with _db() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(sql, args)
+        return [dict(r) for r in cur.fetchall()]
+
+def _exists_table(schema: str, table: str) -> bool:
+    q = """
+    SELECT 1
+    FROM information_schema.tables
+    WHERE table_schema=%s AND table_name=%s
+    """
+    return _one(q, (schema, table)) is not None
+
+def _has_column(schema: str, table: str, column: str) -> bool:
+    q = """
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema=%s AND table_name=%s AND column_name=%s
+    """
+    return _one(q, (schema, table, column)) is not None
+
+def _max_tick_id_from_table(schema: str, table: str, col: str) -> Optional[int]:
+    if not _exists_table(schema, table) or not _has_column(schema, table, col):
+        return None
+    q = f"SELECT MAX({col}) FROM {schema}.{table}"
+    row = _one(q)
+    return row[0] if row and row[0] is not None else None
+
+def _min_tick_id() -> Optional[int]:
+    row = _one(f"SELECT MIN(id) FROM {TABLE_TICKS}")
+    return row[0] if row and row[0] is not None else None
+
+def _max_tick_id() -> Optional[int]:
+    row = _one(f"SELECT MAX(id) FROM {TABLE_TICKS}")
+    return row[0] if row and row[0] is not None else None
+
+# ====== SAFE SQL (READ-ONLY) ======
+_SQL_ALLOWED_START = re.compile(r"^\s*(WITH|SELECT)\b", re.IGNORECASE | re.DOTALL)
+_SQL_FORBIDDEN = re.compile(
+    r"\b(INSERT|UPDATE|DELETE|MERGE|ALTER|DROP|TRUNCATE|CREATE|GRANT|REVOKE|VACUUM|ANALYZE)\b",
+    re.IGNORECASE,
 )
 
-DB_URL = os.getenv("DATABASE_URL", "postgresql+psycopg2://babak:babak33044@localhost:5432/trading")
-engine = create_engine(DB_URL)
+def _validate_readonly_sql(sql: str) -> Optional[str]:
+    if ";" in sql:
+        return "Multiple statements are not allowed."
+    if not _SQL_ALLOWED_START.search(sql):
+        return "Only SELECT/WITH queries are allowed."
+    if _SQL_FORBIDDEN.search(sql):
+        return "DDL/DML statements are not allowed."
+    return None
 
-# -------------------------------------------------------------------
-# Small DB helpers
-# -------------------------------------------------------------------
-def q1(sql: str, params: Dict[str, Any] = None) -> Optional[Dict[str, Any]]:
-    with engine.connect() as cx:
-        r = cx.execute(text(sql), params or {}).mappings().first()
-        return dict(r) if r else None
+# ====== JOB RUNNERS ======
+def _run_single_day(date_str: str) -> Tuple[int, str]:
+    # Ex: make_dataset --date 2025-06-17
+    cmd = JOB_RUN_DAY + ["--date", date_str]
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    return proc.returncode, proc.stdout
 
-def qall(sql: str, params: Dict[str, Any] = None) -> List[Dict[str, Any]]:
-    with engine.connect() as cx:
-        return [dict(r) for r in cx.execute(text(sql), params or {}).mappings().all()]
+def _run_walk_forward(start_id: int, end_id: int) -> Tuple[int, str]:
+    # Ex: jobs.backfill --start 1 --end 200000
+    cmd = JOB_WALK_FWD + ["--start", str(start_id), "--end", str(end_id)]
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    return proc.returncode, proc.stdout
 
-# -------------------------------------------------------------------
-# Snapshot used by the review page
-# -------------------------------------------------------------------
-def snapshot() -> Dict[str, Any]:
-    segs = qall("""
-        SELECT segment_id, start_ts, end_ts, direction, confidence,
-               start_price, end_price, start_tick_id, end_tick_id
-        FROM macro_segments
-        ORDER BY end_ts DESC
-        LIMIT 200
-    """)
-    eids = []
-    events = []
-    if segs:
-        events = qall("""
-            SELECT e.event_id, e.segment_id, e.tick_id, e.event_type, e.features,
-                   t.timestamp AS event_ts, t.mid AS event_price
-            FROM micro_events e
-            JOIN ticks t ON t.id = e.tick_id
-            WHERE e.segment_id = ANY(:ids)
-            ORDER BY e.event_id
-        """, {"ids": [s["segment_id"] for s in segs]})
-        eids = [e["event_id"] for e in events]
-
-    outcomes = qall("""
-        SELECT event_id, outcome, tp_hit_ts, sl_hit_ts, timeout_ts,
-               horizon_seconds, mfe, mae
-        FROM outcomes
-        WHERE event_id = ANY(:eids)
-    """, {"eids": eids}) if eids else []
-
-    preds = qall("""
-        SELECT DISTINCT ON (event_id)
-            event_id, model_version, p_tp, threshold, decided, predicted_at
-        FROM predictions
-        WHERE event_id = ANY(:eids)
-        ORDER BY event_id, predicted_at DESC
-    """, {"eids": eids}) if eids else []
-
-    return {"segments": segs, "events": events, "outcomes": outcomes, "predictions": preds}
-
-# -------------------------------------------------------------------
-# One normal walk-forward step (your canonical order)
-# -------------------------------------------------------------------
-@app.post("/walkforward/step")
-def walkforward_step():
-    journal = []
+# ====== ROUTES ======
+@app.get("/api/health")
+def health():
     try:
-        journal.append("Build/extend macro segments…")
-        m = BuildOrExtendSegments(engine)
-        journal.append(f"macro: {m}")
-
-        journal.append("Detect micro events for latest closed segment…")
-        me = DetectMicroEventsForLatestClosedSegment(engine)
-        journal.append(f"micro: {me}")
-
-        journal.append("Resolve outcomes…")
-        oc = ResolveOutcomes(engine)
-        journal.append(f"outcomes: {oc}")
-
-        journal.append("Train & predict…")
-        pr = TrainAndPredict(engine)
-        journal.append(f"predict: {pr}")
-
-        snap = snapshot()
-        return {"ok": True, "journal": journal, "snapshot": snap}
+        _ = _one("SELECT 1")
+        return jsonify({"ok": True})
     except Exception as e:
-        journal.append(traceback.format_exc())
-        return JSONResponse(status_code=500, content={"ok": False, "error": str(e), "journal": journal})
+        return jsonify({"ok": False, "error": str(e)}), 500
 
-@app.get("/walkforward/snapshot")
-def walkforward_snapshot():
-    return snapshot()
+@app.post("/api/sql")
+def sql_console():
+    payload = request.get_json(silent=True) or {}
+    sql = payload.get("sql", "")
+    limit = int(payload.get("limit", 1000))
+    err = _validate_readonly_sql(sql)
+    if err:
+        return jsonify({"ok": False, "error": err}), 400
 
-# -------------------------------------------------------------------
-# NEW: Run until next 06:00 Sydney boundary (1h daily gap 06–08; weekends closed)
-# -------------------------------------------------------------------
-def _last_progress_tick_id() -> int:
-    # prefer micro event anchor; fall back to predictions/events anchor; else 0
-    r = q1("SELECT COALESCE(MAX(tick_id),0) AS x FROM micro_events")
-    if r and r["x"]:
-        return int(r["x"])
-    r = q1("SELECT COALESCE(MAX(e.tick_id),0) AS x FROM outcomes o JOIN micro_events e USING(event_id)")
-    return int(r["x"] or 0)
+    sql_limited = f"WITH q AS ({sql}) SELECT * FROM q LIMIT %s"
+    try:
+        rows = _all(sql_limited, (limit,))
+        return jsonify({"ok": True, "rows": rows})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
 
-def _tick_ts_by_id(tid: int) -> Optional[datetime]:
-    if tid <= 0:
-        r = q1("SELECT MIN(timestamp) AS ts FROM ticks")
-        return r["ts"] if r else None
-    r = q1("SELECT timestamp AS ts FROM ticks WHERE id=:i", {"i": tid})
-    return r["ts"] if r else None
+@app.post("/api/run-day")
+def run_day():
+    payload = request.get_json(silent=True) or {}
+    date_str = payload.get("date")
+    if not date_str:
+        return jsonify({"ok": False, "error": "Missing 'date' (YYYY-MM-DD)"}), 400
 
-def _next_session_end_after(ts: datetime) -> datetime:
-    # Timestamps in your DB already carry +10:00; just compute next local 06:00 strictly after ts.
-    cand = datetime.combine(ts.date(), time(6, 0, 0), tzinfo=ts.tzinfo)
-    if ts >= cand:
-        cand = cand + timedelta(days=1)
-    # If we hit Sunday 06:00, push to Monday 06:00 (no sessions on weekend)
-    if cand.weekday() == 6:  # Sunday
-        cand = cand + timedelta(days=1)
-    return cand
+    try:
+        # Validate date
+        _ = dt.date.fromisoformat(date_str)
+    except Exception:
+        return jsonify({"ok": False, "error": "Invalid date format. Use YYYY-MM-DD"}), 400
 
-def _last_tick_id_before(ts: datetime) -> int:
-    r = q1("SELECT COALESCE(MAX(id),0) AS x FROM ticks WHERE timestamp < :ts", {"ts": ts})
-    return int(r["x"] or 0)
+    code, out = _run_single_day(date_str)
+    return jsonify({"ok": code == 0, "code": code, "log": out})
 
-def _progress_counters() -> Dict[str, int]:
-    r1 = q1("SELECT COALESCE(COUNT(*),0) AS c FROM macro_segments")
-    r2 = q1("SELECT COALESCE(COUNT(*),0) AS c FROM micro_events")
-    r3 = q1("SELECT COALESCE(COUNT(*),0) AS c FROM outcomes")
-    r4 = q1("SELECT COALESCE(COUNT(*),0) AS c FROM predictions")
-    r5 = q1("SELECT COALESCE(MAX(id),0) AS mx FROM ticks")
-    r6 = q1("SELECT COALESCE(MAX(tick_id),0) AS mx FROM micro_events")
-    return {
-        "macro_segments": int(r1["c"]),
-        "micro_events": int(r2["c"]),
-        "outcomes": int(r3["c"]),
-        "predictions": int(r4["c"]),
-        "ticks_max_id": int(r5["mx"]),
-        "micro_max_tick": int(r6["mx"]),
-    }
-
-def _step_once(journal: List[str]):
-    journal.append("Build/extend macro segments…")
-    BuildOrExtendSegments(engine)
-
-    journal.append("Detect micro events…")
-    DetectMicroEventsForLatestClosedSegment(engine)
-
-    journal.append("Resolve outcomes…")
-    ResolveOutcomes(engine)
-
-    journal.append("Train & predict…")
-    TrainAndPredict(engine)
-
-@app.post("/walkforward/run_day")
-def run_whole_day():
+@app.post("/api/run")
+def run_until_now():
     """
-    From the last processed tick, loop the standard step until we reach the
-    last tick before the next 06:00 boundary.
+    Walk forward from the last analyzed macro segment tick to the latest tick id.
+    If no macro table yet, start from MIN(ticks.id).
     """
-    journal: List[str] = []
-    before = _progress_counters()
+    schema = request.args.get("schema", "public")
 
-    start_tid = _last_progress_tick_id()
-    start_ts = _tick_ts_by_id(start_tid)
-    if not start_ts:
-        return {"ok": False, "reason": "No ticks in DB."}
+    start_from = _max_tick_id_from_table(schema, TABLE_MACRO, "end_tickid")
+    if start_from is None:
+        start_from = _min_tick_id()
+    latest = _max_tick_id()
 
-    day_end_ts = _next_session_end_after(start_ts)
-    target_tid = _last_tick_id_before(day_end_ts)
+    if start_from is None or latest is None:
+        return jsonify({"ok": False, "error": "ticks table is empty"}), 400
+    if start_from >= latest:
+        return jsonify({"ok": True, "message": "Already up-to-date", "start": start_from, "end": latest})
 
-    journal.append(f"Start tick = {start_tid} @ {start_ts.isoformat()}")
-    journal.append(f"Target boundary = {day_end_ts.isoformat()} (tick < boundary)")
-    journal.append(f"Target tick id = {target_tid}")
+    # Make inclusive ranges friendly to your job
+    start_id = int(start_from)
+    end_id = int(latest)
 
-    # loop while we make progress and haven't reached target
-    last_seen = _last_progress_tick_id()
-    iters = 0
-    HARD_CAP = 2000
+    code, out = _run_walk_forward(start_id, end_id)
+    return jsonify({"ok": code == 0, "code": code, "start": start_id, "end": end_id, "log": out})
 
-    while iters < HARD_CAP and last_seen < target_tid:
-        _step_once(journal)
-        now_seen = _last_progress_tick_id()
-        journal.append(f"progress: {last_seen} → {now_seen}")
-        if now_seen <= last_seen:
-            journal.append("No further progress; breaking.")
-            break
-        last_seen = now_seen
-        iters += 1
+@app.get("/api/label-tables")
+def label_tables():
+    """
+    Return tables in 'public' schema that contain a 'tickid' column.
+    The frontend can use this list to render toggleable layers.
+    """
+    schema = request.args.get("schema", "public")
+    q = """
+    SELECT table_name
+    FROM information_schema.columns
+    WHERE table_schema=%s AND column_name='tickid'
+    ORDER BY table_name
+    """
+    tables = [r["table_name"] for r in _all(q, (schema,))]
+    return jsonify({"ok": True, "tables": tables})
 
-    after = _progress_counters()
-    snap = snapshot()
+@app.get("/api/labels/<table>")
+def labels_for_table(table: str):
+    """
+    Fetch labels windowed by tickid range. Expects the table to have a 'tickid' column.
+    Query args:
+      from (inclusive), to (inclusive), limit (default 5000)
+    """
+    schema = request.args.get("schema", "public")
+    if not _has_column(schema, table, "tickid"):
+        return jsonify({"ok": False, "error": f"{schema}.{table} has no column 'tickid'"}), 400
 
-    return {
-        "ok": True,
-        "iterations": iters,
-        "start_tick_id": start_tid,
-        "target_tick_id": target_tid,
-        "start_ts": start_ts.isoformat(),
-        "day_end_ts": day_end_ts.isoformat(),
-        "before": before,
-        "after": after,
-        "journal": journal,
-        "snapshot": snap,
-    }
+    t_from = request.args.get("from", type=int)
+    t_to   = request.args.get("to", type=int)
+    limit  = request.args.get("limit", default=5000, type=int)
 
-# -------------------------------------------------------------------
-# Misc convenience routes you already had (kept minimal)
-# -------------------------------------------------------------------
-@app.get("/version")
-def version():
-    return {"version": "2025-08-27.whole-day+report"}
+    where, args = ["1=1"], []
+    if t_from is not None:
+        where.append("tickid >= %s"); args.append(t_from)
+    if t_to is not None:
+        where.append("tickid <= %s"); args.append(t_to)
 
-public_dir = os.path.join(os.path.dirname(__file__), "..", "public")
-if os.path.isdir(public_dir):
-    app.mount("/public", StaticFiles(directory=public_dir, html=True), name="public")
+    sql = f"SELECT * FROM {schema}.{table} WHERE {' AND '.join(where)} ORDER BY tickid LIMIT %s"
+    args.append(limit)
+    rows = _all(sql, tuple(args))
+    return jsonify({"ok": True, "rows": rows, "count": len(rows)})
 
-@app.get("/movements")
-def movements_page():
-    path = os.path.join(public_dir, "movements.html")
-    if os.path.exists(path):
-        return FileResponse(path)
-    return {"message": "movements.html not found."}
+@app.get("/api/macro-segments")
+def macro_segments():
+    schema = request.args.get("schema", "public")
+    limit = request.args.get("limit", type=int, default=1000)
+    if not _exists_table(schema, TABLE_MACRO):
+        return jsonify({"ok": True, "rows": [], "count": 0})
+    sql = f"SELECT * FROM {schema}.{TABLE_MACRO} ORDER BY start_time DESC LIMIT %s"
+    rows = _all(sql, (limit,))
+    return jsonify({"ok": True, "rows": rows, "count": len(rows)})
+
+@app.get("/api/micro-events")
+def micro_events():
+    schema = request.args.get("schema", "public")
+    seg_id = request.args.get("macro_id", type=int)
+    limit = request.args.get("limit", type=int, default=5000)
+
+    if not _exists_table(schema, TABLE_MICRO):
+        return jsonify({"ok": True, "rows": [], "count": 0})
+
+    where, args = [], []
+    if seg_id is not None and _has_column(schema, TABLE_MICRO, "macro_id"):
+        where.append("macro_id=%s"); args.append(seg_id)
+
+    sql = f"SELECT * FROM {schema}.{TABLE_MICRO}"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY start_tickid LIMIT %s"
+    args.append(limit)
+    rows = _all(sql, tuple(args))
+    return jsonify({"ok": True, "rows": rows, "count": len(rows)})
+
+@app.get("/api/predictions")
+def predictions():
+    schema = request.args.get("schema", "public")
+    limit = request.args.get("limit", type=int, default=5000)
+    if not _exists_table(schema, TABLE_PRED):
+        return jsonify({"ok": True, "rows": [], "count": 0})
+    sql = f"SELECT * FROM {schema}.{TABLE_PRED} ORDER BY tickid DESC LIMIT %s"
+    rows = _all(sql, (limit,))
+    return jsonify({"ok": True, "rows": rows, "count": len(rows)})
+
+# ====== MAIN ======
+if __name__ == "__main__":
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", "8501"))
+    debug = os.getenv("DEBUG", "0") == "1"
+    app.run(host=host, port=port, debug=debug)
