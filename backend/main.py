@@ -1,263 +1,454 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+# backend/main.py
 
 import os
-import json
-import re
-import datetime as dt
-import subprocess
-from typing import Any, Dict, List, Optional, Tuple
+import traceback
+from datetime import datetime, timedelta, date
+from typing import List, Optional, Dict, Any
 
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-import psycopg2
-import psycopg2.extras
+from fastapi import FastAPI, Query, HTTPException, Body
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+from sqlalchemy import create_engine, text
+from sqlalchemy import text as sqtxt
 
-# ====== CONFIG ======
-DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("POSTGRES_URL") or \
-               "postgresql://postgres:postgres@localhost:5432/postgres"
+# Your existing router under /api
+from zig_api import router as lview_router
 
-# Jobs we call without modifying your existing code
-JOB_RUN_DAY = ["python", "-m", "make_dataset"]         # expects: --date YYYY-MM-DD
-JOB_WALK_FWD = ["python", "-m", "jobs.backfill"]       # expects: --start N --end M
+# Relative imports (we run as package `backend`)
+from .label_macro_segments import BuildOrExtendSegments
+from .label_micro_events import DetectMicroEventsForLatestClosedSegment
+from .compute_outcomes import ResolveOutcomes
+from .train_predict import TrainAndPredict
 
-# Fallback table names used by the chart / pipeline
-TABLE_TICKS = os.getenv("TABLE_TICKS", "ticks")
-TABLE_MACRO = os.getenv("TABLE_MACRO", "macro_trends")
-TABLE_MICRO = os.getenv("TABLE_MICRO", "micro_trends")
-TABLE_PRED  = os.getenv("TABLE_PRED",  "predictions")
 
-# ====== APP ======
-app = Flask(__name__)
-CORS(app)
 
-# ====== DB UTILS ======
-def _db() -> psycopg2.extensions.connection:
-    conn = psycopg2.connect(DATABASE_URL)
-    return conn
-
-def _one(sql: str, args: Tuple = ()) -> Optional[Tuple]:
-    with _db() as conn, conn.cursor() as cur:
-        cur.execute(sql, args)
-        return cur.fetchone()
-
-def _all(sql: str, args: Tuple = ()) -> List[Tuple]:
-    with _db() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(sql, args)
-        return [dict(r) for r in cur.fetchall()]
-
-def _exists_table(schema: str, table: str) -> bool:
-    q = """
-    SELECT 1
-    FROM information_schema.tables
-    WHERE table_schema=%s AND table_name=%s
-    """
-    return _one(q, (schema, table)) is not None
-
-def _has_column(schema: str, table: str, column: str) -> bool:
-    q = """
-    SELECT 1
-    FROM information_schema.columns
-    WHERE table_schema=%s AND table_name=%s AND column_name=%s
-    """
-    return _one(q, (schema, table, column)) is not None
-
-def _max_tick_id_from_table(schema: str, table: str, col: str) -> Optional[int]:
-    if not _exists_table(schema, table) or not _has_column(schema, table, col):
-        return None
-    q = f"SELECT MAX({col}) FROM {schema}.{table}"
-    row = _one(q)
-    return row[0] if row and row[0] is not None else None
-
-def _min_tick_id() -> Optional[int]:
-    row = _one(f"SELECT MIN(id) FROM {TABLE_TICKS}")
-    return row[0] if row and row[0] is not None else None
-
-def _max_tick_id() -> Optional[int]:
-    row = _one(f"SELECT MAX(id) FROM {TABLE_TICKS}")
-    return row[0] if row and row[0] is not None else None
-
-# ====== SAFE SQL (READ-ONLY) ======
-_SQL_ALLOWED_START = re.compile(r"^\s*(WITH|SELECT)\b", re.IGNORECASE | re.DOTALL)
-_SQL_FORBIDDEN = re.compile(
-    r"\b(INSERT|UPDATE|DELETE|MERGE|ALTER|DROP|TRUNCATE|CREATE|GRANT|REVOKE|VACUUM|ANALYZE)\b",
-    re.IGNORECASE,
+# ----------------------------------------------------
+# App & CORS
+# ----------------------------------------------------
+app = FastAPI(title="cTrade backend")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
+app.include_router(lview_router, prefix="/api")
 
-def _validate_readonly_sql(sql: str) -> Optional[str]:
-    if ";" in sql:
-        return "Multiple statements are not allowed."
-    if not _SQL_ALLOWED_START.search(sql):
-        return "Only SELECT/WITH queries are allowed."
-    if _SQL_FORBIDDEN.search(sql):
-        return "DDL/DML statements are not allowed."
-    return None
+# ----------------------------------------------------
+# DB
+# ----------------------------------------------------
+db_url = os.getenv(
+    "DATABASE_URL",
+    "postgresql+psycopg2://babak:babak33044@localhost:5432/trading",
+)
+engine = create_engine(db_url)
 
-# ====== JOB RUNNERS ======
-def _run_single_day(date_str: str) -> Tuple[int, str]:
-    # Ex: make_dataset --date 2025-06-17
-    cmd = JOB_RUN_DAY + ["--date", date_str]
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    return proc.returncode, proc.stdout
+# ----------------------------------------------------
+# Models
+# ----------------------------------------------------
+class Tick(BaseModel):
+    id: int
+    timestamp: datetime
+    bid: float
+    ask: float
+    mid: float
 
-def _run_walk_forward(start_id: int, end_id: int) -> Tuple[int, str]:
-    # Ex: jobs.backfill --start 1 --end 200000
-    cmd = JOB_WALK_FWD + ["--start", str(start_id), "--end", str(end_id)]
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    return proc.returncode, proc.stdout
+# ----------------------------------------------------
+# Helpers
+# ----------------------------------------------------
+def q_all(sql: str, params: Dict[str, Any]):
+    with engine.connect() as conn:
+        return [dict(r._mapping) for r in conn.execute(sqtxt(sql), params)]
 
-# ====== ROUTES ======
-@app.get("/api/health")
-def health():
-    try:
-        _ = _one("SELECT 1")
-        return jsonify({"ok": True})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+# ----------------------------------------------------
+# Root
+# ----------------------------------------------------
+@app.get("/")
+def home():
+    return {"message": "API live. Try /ticks/recent, /trends/day, /sqlvw/tables, /version"}
+
+# ----------------------------------------------------
+# Ticks
+# ----------------------------------------------------
+@app.get("/ticks", response_model=List[Tick])
+def get_ticks(offset: int = 0, limit: int = 2000):
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT id, timestamp, bid, ask, mid
+                FROM ticks
+                ORDER BY timestamp ASC
+                OFFSET :offset LIMIT :limit
+            """),
+            {"offset": offset, "limit": limit},
+        ).mappings().all()
+    return list(rows)
 
 @app.post("/api/sql")
-def sql_console():
-    payload = request.get_json(silent=True) or {}
-    sql = payload.get("sql", "")
-    limit = int(payload.get("limit", 1000))
-    err = _validate_readonly_sql(sql)
-    if err:
-        return jsonify({"ok": False, "error": err}), 400
-
-    sql_limited = f"WITH q AS ({sql}) SELECT * FROM q LIMIT %s"
+def sql_post(sql: str = Body(..., embed=True)):
     try:
-        rows = _all(sql_limited, (limit,))
-        return jsonify({"ok": True, "rows": rows})
+        with engine.begin() as conn:
+            result = conn.execute(text(sql))
+            if result.returns_rows:
+                return {"rows": [dict(r._mapping) for r in result]}
+            return {"message": "Query executed successfully."}
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 400
+        return JSONResponse(status_code=400, content={"error": str(e)})
 
-@app.post("/api/run-day")
-def run_day():
-    payload = request.get_json(silent=True) or {}
-    date_str = payload.get("date")
-    if not date_str:
-        return jsonify({"ok": False, "error": "Missing 'date' (YYYY-MM-DD)"}), 400
+@app.get("/ticks/latest", response_model=List[Tick])
+def get_latest_ticks(after: str = Query(..., description="UTC timestamp in ISO format")):
+    with engine.connect() as conn:
+        result = conn.execute(
+            text("""
+                SELECT id, timestamp, bid, ask, mid
+                FROM ticks
+                WHERE timestamp > :after
+                ORDER BY timestamp ASC
+                LIMIT 1000
+            """),
+            {"after": after},
+        )
+    return [dict(row._mapping) for row in result]
+
+@app.get("/ticks/recent", response_model=List[Tick])
+def get_recent_ticks(limit: int = Query(2200, le=5000)):
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT id, timestamp, bid, ask, mid
+                FROM (
+                    SELECT id, timestamp, bid, ask, mid
+                    FROM ticks
+                    ORDER BY timestamp DESC
+                    LIMIT :limit
+                ) sub
+                ORDER BY timestamp ASC
+            """),
+            {"limit": limit},
+        ).mappings().all()
+    return list(rows)
+
+@app.get("/ticks/before/{tickid}", response_model=List[Tick])
+def get_ticks_before(tickid: int, limit: int = 2000):
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT id, timestamp, bid, ask, mid
+                FROM ticks
+                WHERE id < :tickid
+                ORDER BY timestamp DESC
+                LIMIT :limit
+            """),
+            {"tickid": tickid, "limit": limit},
+        ).mappings().all()
+    return list(reversed(rows))
+
+@app.get("/ticks/lastid")
+def get_lastid():
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("""SELECT id, timestamp FROM ticks ORDER BY id DESC LIMIT 1""")
+        ).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="No ticks")
+    return {"lastId": row["id"], "timestamp": row["timestamp"]}
+
+@app.get("/ticks/range", response_model=List[Tick])
+def ticks_range(start: str, end: str, limit: int = 200000):
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT id, timestamp, bid, ask, mid
+                FROM ticks
+                WHERE id BETWEEN :start AND :end
+                ORDER BY id ASC
+                LIMIT :limit
+            """),
+            {"start": start, "end": end, "limit": limit},
+        ).mappings().all()
+    return list(rows)
+
+# ----------------------------------------------------
+# SQL viewer helpers
+# ----------------------------------------------------
+@app.get("/sqlvw/tables")
+def get_all_table_names():
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema='public' AND table_type='BASE TABLE'
+        """)).all()
+    return [r[0] for r in rows]
+
+@app.get("/sqlvw/query")
+def run_sql_query(query: str = Query(...)):
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(text(query))
+            if result.returns_rows:
+                return [dict(row._mapping) for row in result]
+            else:
+                return {"message": "Query executed successfully."}
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+# Labels discovery (kept under /api/*)
+@app.get("/api/labels/available")
+def get_label_tables():
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT table_name
+            FROM information_schema.columns
+            WHERE column_name ILIKE 'tickid' AND table_schema='public'
+        """)).all()
+    return sorted({r[0] for r in rows})
+
+@app.get("/api/labels/schema")
+def labels_schema():
+    q = text("""
+        SELECT c.table_name, c.column_name
+        FROM information_schema.columns c
+        JOIN information_schema.columns k
+          ON k.table_name = c.table_name AND k.column_name ILIKE 'tickid'
+        WHERE c.table_schema='public'
+        ORDER BY c.table_name, c.ordinal_position
+    """)
+    out: Dict[str, Dict[str, Any]] = {}
+    with engine.connect() as conn:
+        for tname, cname in conn.execute(q):
+            if tname not in out:
+                out[tname] = {"table": tname, "labels": []}
+            low = cname.lower()
+            if low != "id" and low != "tickid" and not low.startswith("ts"):
+                out[tname]["labels"].append(cname)
+    return [v for v in out.values() if v["labels"]]
+
+# ----------------------------------------------------
+# Version
+# ----------------------------------------------------
+@app.get("/version")
+def get_version():
+    return {"version": "2025.08.24.walk-forward.ui2"}
+
+# ----------------------------------------------------
+# Walk-forward internals + journal
+# ----------------------------------------------------
+def _do_walkforward_step() -> Dict[str, Any]:
+    journal: List[str] = []
+    try:
+        journal.append("Build/extend macro segments…")
+        msum = BuildOrExtendSegments()
+        journal.append(f"macro: {msum}")
+
+        journal.append("Detect micro events for latest closed segment…")
+        esum = DetectMicroEventsForLatestClosedSegment()
+        journal.append(f"micro: {esum}")
+
+        journal.append("Resolve outcomes for eligible events…")
+        osum = ResolveOutcomes()
+        journal.append(f"outcomes: {osum}")
+
+        journal.append("Train & predict…")
+        psum = TrainAndPredict()
+        journal.append(f"predict: {psum}")
+
+        journal.append("Snapshot…")
+        snap = _do_walkforward_snapshot()
+
+        return {
+            "ok": True,
+            "message": "Working",
+            "macro_segments": msum,
+            "micro_events": esum,
+            "outcomes": osum,
+            "predictions": psum,
+            "snapshot": snap,
+            "journal": journal,
+        }
+    except Exception as e:
+        journal.append("ERROR during walk-forward step")
+        journal.append(traceback.format_exc())
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "error": str(e), "journal": journal},
+        )
+
+def _do_walkforward_snapshot() -> Dict[str, Any]:
+    with engine.connect() as conn:
+        segs = [dict(r._mapping) for r in conn.execute(text("""
+            SELECT segment_id, start_ts, end_ts, direction, confidence,
+                   start_price, end_price, start_tick_id, end_tick_id
+            FROM macro_segments
+            ORDER BY end_ts DESC
+            LIMIT 200
+        """))]
+
+        seg_ids = [s["segment_id"] for s in segs] if segs else []
+        events: List[Dict[str, Any]] = []
+        if seg_ids:
+            events = [dict(r._mapping) for r in conn.execute(text("""
+                SELECT e.event_id, e.segment_id, e.tick_id, e.event_type, e.features,
+                       t.timestamp AS event_ts, t.mid AS event_price
+                FROM micro_events e
+                JOIN ticks t ON t.id = e.tick_id
+                WHERE e.segment_id = ANY(:seg_ids)
+                ORDER BY e.event_id
+            """), {"seg_ids": seg_ids})]
+
+        outcomes: List[Dict[str, Any]] = []
+        if events:
+            eids = [e["event_id"] for e in events]
+            outcomes = [dict(r._mapping) for r in conn.execute(text("""
+                SELECT event_id, outcome, tp_hit_ts, sl_hit_ts, timeout_ts,
+                       horizon_seconds, mfe, mae
+                FROM outcomes
+                WHERE event_id = ANY(:eids)
+            """), {"eids": eids})]
+
+        preds: List[Dict[str, Any]] = []
+        if events:
+            preds = [dict(r._mapping) for r in conn.execute(text("""
+                SELECT DISTINCT ON (event_id)
+                       event_id, model_version, p_tp, threshold, decided, predicted_at
+                FROM predictions
+                WHERE event_id = ANY(:eids)
+                ORDER BY event_id, predicted_at DESC
+            """), {"eids": [e["event_id"] for e in events]})]
+
+        return {
+            "segments": segs,
+            "events": events,
+            "outcomes": outcomes,
+            "predictions": preds,
+        }
+
+# Root paths
+@app.post("/walkforward/step")
+def walkforward_step():
+    journal = []
+
+    def j(msg): journal.append(msg)
 
     try:
-        # Validate date
-        _ = dt.date.fromisoformat(date_str)
-    except Exception:
-        return jsonify({"ok": False, "error": "Invalid date format. Use YYYY-MM-DD"}), 400
+        j("Build/extend macro segments…")
+        msum = BuildOrExtendSegments(engine)
+        j(f"macro: {msum}")
 
-    code, out = _run_single_day(date_str)
-    return jsonify({"ok": code == 0, "code": code, "log": out})
+        j("Detect micro events for latest closed segment…")
+        esum = DetectMicroEventsForLatestClosedSegment(engine)
+        j(f"micro: {esum}")
 
-@app.post("/api/run")
-def run_until_now():
-    """
-    Walk forward from the last analyzed macro segment tick to the latest tick id.
-    If no macro table yet, start from MIN(ticks.id).
-    """
-    schema = request.args.get("schema", "public")
+        j("Resolve outcomes for eligible events…")
+        osum = ResolveOutcomes(engine)
+        j(f"outcomes: {osum}")
 
-    start_from = _max_tick_id_from_table(schema, TABLE_MACRO, "end_tickid")
-    if start_from is None:
-        start_from = _min_tick_id()
-    latest = _max_tick_id()
+        j("Train & predict…")
+        psum = TrainAndPredict(engine)
+        j(f"predict: {psum}")
 
-    if start_from is None or latest is None:
-        return jsonify({"ok": False, "error": "ticks table is empty"}), 400
-    if start_from >= latest:
-        return jsonify({"ok": True, "message": "Already up-to-date", "start": start_from, "end": latest})
+        j("Snapshot…")
+        snap = _do_walkforward_snapshot()
 
-    # Make inclusive ranges friendly to your job
-    start_id = int(start_from)
-    end_id = int(latest)
+        return { "ok": True, "journal": journal, **snap }
+    except Exception as e:
+        j(f"ERROR: {repr(e)}")
+        return { "ok": False, "error": str(e), "journal": journal }
 
-    code, out = _run_walk_forward(start_id, end_id)
-    return jsonify({"ok": code == 0, "code": code, "start": start_id, "end": end_id, "log": out})
 
-@app.get("/api/label-tables")
-def label_tables():
-    """
-    Return tables in 'public' schema that contain a 'tickid' column.
-    The frontend can use this list to render toggleable layers.
-    """
-    schema = request.args.get("schema", "public")
+@app.get("/walkforward/snapshot")
+def walkforward_snapshot_root():
+    try:
+        return _do_walkforward_snapshot()
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+# /api mirrors (optional)
+@app.post("/api/walkforward/step")
+def walkforward_step_api():
+    return _do_walkforward_step()
+
+@app.get("/api/walkforward/snapshot")
+def walkforward_snapshot_api():
+    try:
+        return _do_walkforward_snapshot()
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+# ----------------------------------------------------
+# Trends (unchanged)
+# ----------------------------------------------------
+@app.get("/trends/recent")
+def trends_recent(limit: int = 200):
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT id, scale, direction, start_ts, end_ts, start_tickid, end_tickid,
+                       start_price, end_price, magnitude, duration_sec, velocity
+                FROM swings
+                WHERE status=1
+                ORDER BY end_ts DESC
+                LIMIT :limit
+            """),
+            {"limit": limit},
+        ).mappings().all()
+    return list(rows)
+
+@app.get("/trends/range")
+def trends_range(start: str, end: str, scale: Optional[int] = None):
     q = """
-    SELECT table_name
-    FROM information_schema.columns
-    WHERE table_schema=%s AND column_name='tickid'
-    ORDER BY table_name
+        SELECT id, scale, direction, start_ts, end_ts, start_tickid, end_tickid,
+               start_price, end_price, magnitude, duration_sec, velocity
+        FROM swings
+        WHERE status=1
+          AND end_ts >= :a AND start_ts <= :b
     """
-    tables = [r["table_name"] for r in _all(q, (schema,))]
-    return jsonify({"ok": True, "tables": tables})
+    params: Dict[str, Any] = {"a": start, "b": end}
+    if scale in (1, 2):
+        q += " AND scale=:scale"
+        params["scale"] = scale
+    q += " ORDER BY start_ts"
+    with engine.connect() as conn:
+        rows = conn.execute(text(q), params).mappings().all()
+    return list(rows)
 
-@app.get("/api/labels/<table>")
-def labels_for_table(table: str):
-    """
-    Fetch labels windowed by tickid range. Expects the table to have a 'tickid' column.
-    Query args:
-      from (inclusive), to (inclusive), limit (default 5000)
-    """
-    schema = request.args.get("schema", "public")
-    if not _has_column(schema, table, "tickid"):
-        return jsonify({"ok": False, "error": f"{schema}.{table} has no column 'tickid'"}), 400
+@app.get("/labels/{name}")
+def get_labels_for_table(name: str):
+    with engine.connect() as conn:
+        tables = {
+            row[0]
+            for row in conn.execute(
+                text("""
+                    SELECT table_name
+                    FROM information_schema.columns
+                    WHERE column_name ILIKE 'tickid' AND table_schema='public'
+                """)
+            )
+        }
+        if name not in tables:
+            raise HTTPException(status_code=400, detail="Unknown label table")
+        rows = conn.execute(text(f'SELECT tickid FROM "{name}" ORDER BY tickid ASC'))
+        return [dict(row._mapping) for row in rows]
 
-    t_from = request.args.get("from", type=int)
-    t_to   = request.args.get("to", type=int)
-    limit  = request.args.get("limit", default=5000, type=int)
+@app.get("/trends/day")
+def trends_day(day: str, scale: Optional[int] = None):
+    d = date.fromisoformat(day)
+    a = f"{d.isoformat()}T00:00:00Z"
+    b = f"{(d + timedelta(days=1)).isoformat()}T00:00:00Z"
+    return trends_range(a, b, scale)
 
-    where, args = ["1=1"], []
-    if t_from is not None:
-        where.append("tickid >= %s"); args.append(t_from)
-    if t_to is not None:
-        where.append("tickid <= %s"); args.append(t_to)
+# ----------------------------------------------------
+# Static
+# ----------------------------------------------------
+public_dir = os.path.join(os.path.dirname(__file__), "..", "public")
+if os.path.isdir(public_dir):
+    app.mount("/public", StaticFiles(directory=public_dir, html=True), name="public")
 
-    sql = f"SELECT * FROM {schema}.{table} WHERE {' AND '.join(where)} ORDER BY tickid LIMIT %s"
-    args.append(limit)
-    rows = _all(sql, tuple(args))
-    return jsonify({"ok": True, "rows": rows, "count": len(rows)})
-
-@app.get("/api/macro-segments")
-def macro_segments():
-    schema = request.args.get("schema", "public")
-    limit = request.args.get("limit", type=int, default=1000)
-    if not _exists_table(schema, TABLE_MACRO):
-        return jsonify({"ok": True, "rows": [], "count": 0})
-    sql = f"SELECT * FROM {schema}.{TABLE_MACRO} ORDER BY start_time DESC LIMIT %s"
-    rows = _all(sql, (limit,))
-    return jsonify({"ok": True, "rows": rows, "count": len(rows)})
-
-@app.get("/api/micro-events")
-def micro_events():
-    schema = request.args.get("schema", "public")
-    seg_id = request.args.get("macro_id", type=int)
-    limit = request.args.get("limit", type=int, default=5000)
-
-    if not _exists_table(schema, TABLE_MICRO):
-        return jsonify({"ok": True, "rows": [], "count": 0})
-
-    where, args = [], []
-    if seg_id is not None and _has_column(schema, TABLE_MICRO, "macro_id"):
-        where.append("macro_id=%s"); args.append(seg_id)
-
-    sql = f"SELECT * FROM {schema}.{TABLE_MICRO}"
-    if where:
-        sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY start_tickid LIMIT %s"
-    args.append(limit)
-    rows = _all(sql, tuple(args))
-    return jsonify({"ok": True, "rows": rows, "count": len(rows)})
-
-@app.get("/api/predictions")
-def predictions():
-    schema = request.args.get("schema", "public")
-    limit = request.args.get("limit", type=int, default=5000)
-    if not _exists_table(schema, TABLE_PRED):
-        return jsonify({"ok": True, "rows": [], "count": 0})
-    sql = f"SELECT * FROM {schema}.{TABLE_PRED} ORDER BY tickid DESC LIMIT %s"
-    rows = _all(sql, (limit,))
-    return jsonify({"ok": True, "rows": rows, "count": len(rows)})
-
-# ====== MAIN ======
-if __name__ == "__main__":
-    host = os.getenv("HOST", "0.0.0.0")
-    port = int(os.getenv("PORT", "8501"))
-    debug = os.getenv("DEBUG", "0") == "1"
-    app.run(host=host, port=port, debug=debug)
+@app.get("/movements")
+def movements_page():
+    file_path = os.path.join(public_dir, "movements.html")
+    if os.path.exists(file_path):
+        return FileResponse(file_path)
+    return {"message": "movements.html not found."}
