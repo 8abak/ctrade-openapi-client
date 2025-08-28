@@ -11,6 +11,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
+#----------------------------------------------------
+# fixing decimal import
+from decimal import Decimal
+
 from .db import (
     q_dicts,
     exec_sql,
@@ -207,7 +211,7 @@ def api_ticks(from_id: int = Query(...), to_id: int = Query(...)):
 # ----------------------------------------------------
 # New: Price-Action Segments API
 # ----------------------------------------------------
-@app.post("/api/run")
+@app.post("/run")
 def api_run():
     """
     Runs the pipeline from stat.last_done_tick_id+1 until now, segment-by-segment.
@@ -234,7 +238,7 @@ def api_outcome(limit: int = 50):
     )
     return rows
 
-@app.get("/api/segm")
+@app.get("/segm")
 def api_segment(id: int):
     seg = q_dicts("SELECT * FROM segm WHERE id=%s", (id,))
     if not seg:
@@ -257,6 +261,19 @@ def api_segment(id: int):
 # ----------------------------------------------------
 # SSE Live: ticks + pred updates (minimal)
 # ----------------------------------------------------
+def _to_jsonable(o):
+    """Recursively convert Decimals to float and datetimes to ISO strings."""
+    if isinstance(o, Decimal):
+        return float(o)
+    if isinstance(o, (datetime, date)):
+        return o.isoformat()
+    if isinstance(o, dict):
+        return {k: _to_jsonable(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [_to_jsonable(v) for v in o]
+    return o
+
+
 async def _sse_generator():
     # Track last sent tick id and last sent resolved pred id
     last_sent_tick = last_tick_id() or 0
@@ -276,7 +293,7 @@ async def _sse_generator():
             )
             for r in rows:
                 payload = {"type": "tick", "id": int(r["id"]), "ts": r["ts"].isoformat(), "mid": float(r["mid"])}
-                yield f"event: tick\ndata: {json.dumps(payload)}\n\n"
+                yield f"event: tick\ndata: {json.dumps(_to_jsonable(payload))}\n\n"
                 last_sent_tick = int(r["id"])
 
             # Recently resolved predictions (tail segment)
@@ -296,7 +313,15 @@ async def _sse_generator():
                     pdata["at_ts"] = pdata["at_ts"].isoformat()
                 if isinstance(pdata.get("resolved_at_ts"), datetime):
                     pdata["resolved_at_ts"] = pdata["resolved_at_ts"].isoformat()
-                yield f"event: pred\ndata: {json.dumps({'type':'pred', **pdata})}\n\n"
+
+                for k in ("id","segm_id","at_id","resolved_at_id"):
+                    if k in pdata and pdata[k] is not None:
+                        pdata[k] = int(pdata[k])
+                if "goal_usd" in pdata and pdata["goal_usd"] is not None:
+                    pdata["goal_usd"] = float(pdata["goal_usd"])
+
+
+                yield f"event: pred\ndata: {json.dumps(_to_jsonable({'type':'pred', **pdata}))}\n\n"
                 last_pred_id = max(last_pred_id, int(p["id"]))
 
             await asyncio.sleep(1.0)
