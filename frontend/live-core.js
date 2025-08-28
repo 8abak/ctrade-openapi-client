@@ -1,4 +1,4 @@
-# PATH: frontend/live-core.js
+//# PATH: frontend/live-core.js
 const API = '/api';
 
 const chart = echarts.init(document.getElementById('chart'));

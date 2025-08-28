@@ -1,4 +1,4 @@
-# PATH: frontend/sql-core.js
+//# PATH: frontend/sql-core.js
 const API = '/sqlvw';
 const ddl = document.getElementById('tables');
 const sql = document.getElementById('sql');

@@ -1,4 +1,4 @@
-# PATH: frontend/review-core.js
+//# PATH: frontend/review-core.js
 const API = '/api'; // behind Nginx now
 const fmtTs = (s)=> new Date(s).toLocaleString();
 
