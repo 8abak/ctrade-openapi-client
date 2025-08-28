@@ -219,7 +219,7 @@ def api_run():
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-@app.get("/api/outcome")
+@app.get("/outcome")
 def api_outcome(limit: int = 50):
     rows = q_dicts(
         """
