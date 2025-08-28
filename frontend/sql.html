@@ -1,48 +1,44 @@
 # PATH: frontend/sql.html
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
+  <meta charset="utf-8"/>
   <title>SQL Console</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background:#f8f9fb; margin:0; }
-    header { padding:10px 14px; background:#fff; border-bottom:1px solid #e5e7eb; display:flex; gap:10px; align-items:center; position:sticky; top:0; }
-    select, textarea { width:100%; }
-    textarea { height:120px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
-    .wrap { padding:10px; display:grid; grid-template-columns: 320px 1fr; gap:10px; }
-    .panel { background:#fff; border:1px solid #e5e7eb; border-radius:10px; overflow:hidden; }
-    .panel h2 { margin:0; padding:10px 12px; font-size:14px; background:#f9fafb; border-bottom:1px solid #e5e7eb; }
-    .p { padding:10px 12px; }
-    table { width:100%; border-collapse: collapse; }
-    th, td { padding:6px 8px; border-bottom:1px solid #f1f5f9; font-size:12px; text-align:left; }
-    tr:hover { background:#f9fafb; }
-    button { padding:6px 10px; border:1px solid #d1d5db; border-radius:8px; background:#fff; cursor:pointer; }
-    button:hover { background:#f3f4f6; }
+    :root{--bg:#0d1117; --panel:#161b22; --muted:#30363d; --text:#c9d1d9; --sub:#8b949e; --accent:#58a6ff}
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--text);font:14px/1.4 ui-sans-serif,system-ui}
+    header{padding:10px;border-bottom:1px solid var(--muted)}
+    .grid{display:grid;grid-template-columns:280px 1fr;gap:12px;padding:12px}
+    .card{background:var(--panel);border:1px solid var(--muted);border-radius:10px;overflow:hidden}
+    .card h3{margin:0;padding:10px 12px;border-bottom:1px solid var(--muted);font-size:13px;color:var(--sub)}
+    select,button,textarea{background:var(--panel);color:var(--text);border:1px solid var(--muted);border-radius:8px;padding:6px}
+    table{width:100%;border-collapse:collapse}
+    th,td{padding:6px;border-bottom:1px solid var(--muted);font-variant-numeric:tabular-nums}
+    th{position:sticky;top:0;background:var(--panel)}
   </style>
 </head>
 <body>
-  <header>
-    <strong>SQL Console</strong>
-    <span id="note" style="margin-left:8px;color:#555;font-size:12px;">Default query shows latest rows</span>
-  </header>
-  <div class="wrap">
-    <div class="panel">
-      <h2>Tables</h2>
-      <div class="p">
-        <select id="tableSelect"></select>
-      </div>
-      <h2>Query</h2>
-      <div class="p">
-        <textarea id="sqlInput"></textarea>
-        <div style="margin-top:8px; display:flex; gap:8px;">
-          <button id="runBtn">Run</button>
-          <button id="latestBtn">Latest 100</button>
-        </div>
+  <header><strong>SQL Console (dark)</strong></header>
+  <div class="grid">
+    <div class="card">
+      <h3>Tables</h3>
+      <div style="padding:10px">
+        <select id="tables" size="12" style="width:100%"></select>
+        <button id="refresh">Refresh</button>
+        <p style="color:#8b949e">Default query: <code>SELECT * FROM &lt;table&gt; ORDER BY id DESC LIMIT 100;</code></p>
       </div>
     </div>
-    <div class="panel">
-      <h2>Results</h2>
-      <div class="p" id="result"></div>
+    <div class="card">
+      <h3>Query</h3>
+      <div style="padding:10px;display:flex;gap:10px;align-items:center">
+        <textarea id="sql" rows="4" style="width:100%"></textarea>
+        <button id="run">Run</button>
+      </div>
+      <div style="overflow:auto; max-height: calc(100vh - 220px)">
+        <table id="grid"><thead></thead><tbody></tbody></table>
+      </div>
     </div>
   </div>
   <script src="./sql-core.js"></script>

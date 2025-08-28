@@ -1,61 +1,63 @@
 # PATH: frontend/review.html
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
+  <meta charset="utf-8"/>
   <title>ML Review — Price-Action Segments</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <link rel="icon" href="data:,">
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; background: #f8f9fb; color: #222; }
-    header { display:flex; gap:12px; align-items:center; padding:10px 14px; background:#fff; border-bottom:1px solid #e5e7eb; position: sticky; top: 0; z-index: 1; }
-    button { padding:8px 12px; border:1px solid #d1d5db; border-radius:8px; background:#fff; cursor:pointer; }
-    button:hover { background:#f3f4f6; }
-    .wrap { display:grid; grid-template-columns: 420px 1fr; gap: 10px; padding: 10px; }
-    .panel { background:#fff; border:1px solid #e5e7eb; border-radius:10px; overflow: hidden; }
-    .panel h2 { margin:0; padding:10px 12px; font-size:14px; background:#f9fafb; border-bottom:1px solid #e5e7eb; }
-    .journal { height: calc(100vh - 120px); overflow:auto; }
-    table { width:100%; border-collapse: collapse; }
-    th, td { padding:8px 6px; border-bottom:1px solid #f1f5f9; font-size:12px; text-align:left; }
-    tr:hover { background:#f9fafb; }
-    #chart { height: calc(100vh - 120px); }
-    .meta { padding:8px 12px; font-size:12px; color:#555; }
-    .badge { display:inline-block; padding:2px 6px; border-radius:6px; font-size:11px; border:1px solid #d1d5db; }
+    :root{
+      --bg:#0d1117; --panel:#161b22; --muted:#30363d; --text:#c9d1d9; --sub:#8b949e; --accent:#58a6ff; --good:#2ea043; --bad:#f85149;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--text);font:14px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif}
+    header{padding:10px 14px;border-bottom:1px solid var(--muted);position:sticky;top:0;background:var(--bg);z-index:10}
+    button{background:var(--panel);color:var(--text);border:1px solid var(--muted);padding:6px 10px;border-radius:8px;cursor:pointer}
+    button:hover{border-color:var(--accent)}
+    .row{display:grid;grid-template-columns:360px 1fr;gap:12px;padding:12px}
+    .card{background:var(--panel);border:1px solid var(--muted);border-radius:10px;overflow:hidden}
+    .card h3{margin:0;padding:10px 12px;border-bottom:1px solid var(--muted);font-size:13px;color:var(--sub)}
+    table{width:100%;border-collapse:collapse}
+    th,td{padding:8px;border-bottom:1px solid var(--muted);font-variant-numeric:tabular-nums}
+    th{position:sticky;top:0;background:var(--panel);text-align:left}
+    tr:hover{background:#0f131a}
+    .pill{padding:2px 6px;border-radius:999px;border:1px solid var(--muted);font-size:12px}
+    .pill.good{color:var(--good);border-color:var(--good)}
+    .pill.bad{color:var(--bad);border-color:var(--bad)}
+    #chart{height:560px}
+    .note{color:var(--sub);padding:8px 12px}
   </style>
-  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
 </head>
 <body>
   <header>
     <button id="runBtn">▶ Run until now (server)</button>
-    <span id="runStatus" class="badge">idle</span>
+    <span id="runStatus" class="note">idle</span>
   </header>
 
-  <div class="wrap">
-    <div class="panel">
-      <h2>Journal (Outcomes)</h2>
-      <div class="journal">
-        <table id="outcomeTable">
+  <div class="row">
+    <div class="card">
+      <h3>Journal (Outcomes)</h3>
+      <div style="overflow:auto; max-height: calc(100vh - 140px);">
+        <table id="journal">
           <thead>
             <tr>
-              <th>ID</th>
-              <th>Time</th>
-              <th>Dur(s)</th>
-              <th>Preds</th>
-              <th>Ratio</th>
-              <th>Dir</th>
-              <th>Ticks</th>
+              <th>ID</th><th>Time</th><th>Dur(s)</th><th>Preds</th><th>Ratio</th><th>Dir</th><th>Ticks</th>
             </tr>
           </thead>
-          <tbody id="outcomeBody"></tbody>
+          <tbody></tbody>
         </table>
       </div>
     </div>
-    <div class="panel">
-      <h2 id="segTitle">Segment</h2>
-      <div class="meta" id="segMeta"></div>
+
+    <div class="card">
+      <h3>Segment</h3>
       <div id="chart"></div>
+      <div id="segInfo" class="note"></div>
     </div>
   </div>
 
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
   <script src="./review-core.js"></script>
 </body>
 </html>

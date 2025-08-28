@@ -1,165 +1,121 @@
-/* Price-Action Segments Review UI
- * - Shows latest outcomes (journal)
- * - Click an outcome to load its segment ticks/smal/pred
- * - "Run until now" triggers POST /api/run (server processes segments)
- */
-(() => {
-  const elRun = document.getElementById('runBtn');
-  const elRunStatus = document.getElementById('runStatus');
-  const elBody = document.getElementById('outcomeBody');
-  const elSegTitle = document.getElementById('segTitle');
-  const elSegMeta = document.getElementById('segMeta');
-  const chart = echarts.init(document.getElementById('chart'));
+# PATH: frontend/review-core.js
+const API = '/api'; // behind Nginx now
+const fmtTs = (s)=> new Date(s).toLocaleString();
 
-  const fmt = (d) => new Date(d).toLocaleString();
-  const fetchJSON = (u, opt) => fetch(u, opt).then(r => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    return r.json();
+const runBtn = document.getElementById('runBtn');
+const runStatus = document.getElementById('runStatus');
+const journalBody = document.querySelector('#journal tbody');
+const chartEl = document.getElementById('chart');
+const segInfo = document.getElementById('segInfo');
+
+let chart;
+
+function initChart() {
+  chart = echarts.init(chartEl, null, {renderer:'canvas'});
+  chart.setOption({
+    backgroundColor: '#0d1117',
+    animation: false,
+    tooltip: { trigger: 'axis' },
+    legend: { textStyle:{color:'#c9d1d9'} },
+    grid: { left: 48, right: 24, top: 24, bottom: 36 },
+    xAxis: { type:'category', axisLabel:{color:'#c9d1d9'}, axisLine:{lineStyle:{color:'#30363d'}} },
+    yAxis: { type:'value', scale:true, axisLabel:{color:'#c9d1d9'}, splitLine:{lineStyle:{color:'#30363d'}} },
+    series: []
+  });
+}
+
+async function loadOutcomes() {
+  const res = await fetch(`${API}/outcome?limit=100`);
+  const rows = await res.json();
+  journalBody.innerHTML = '';
+  rows.forEach(r => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${r.id}</td>
+      <td>${fmtTs(r.time)}</td>
+      <td>${r.duration}</td>
+      <td>${r.predictions}</td>
+      <td><span class="pill ${r.ratio>0?'good': (r.ratio<0?'bad':'')}">${r.ratio.toFixed ? r.ratio.toFixed(2) : r.ratio}</span></td>
+      <td>${r.dir}</td>
+      <td>${r.len}</td>`;
+    tr.onclick = ()=> loadSeg(r.segm_id);
+    journalBody.appendChild(tr);
+  });
+}
+
+function smooth(arr, n=20) {
+  const out = [];
+  let sum=0;
+  for (let i=0;i<arr.length;i++){
+    sum += arr[i];
+    if (i>=n) sum -= arr[i-n];
+    out.push(sum/Math.min(i+1,n));
+  }
+  return out;
+}
+
+async function loadSeg(segId) {
+  segInfo.textContent = 'loading...';
+  const res = await fetch(`${API}/segm?id=${segId}`);
+  const data = await res.json();
+  const xs = data.ticks.map(t=>t.id);
+  const ys = data.ticks.map(t=>t.mid);
+  const ysm = smooth(ys, 80);
+
+  const bigBands = data.bigm.map(b => {
+    const aidx = xs.indexOf(b.a_id);
+    const bidx = xs.indexOf(b.b_id);
+    return [[aidx, Math.min(ys[aidx], ys[bidx])], [bidx, Math.max(ys[aidx], ys[bidx])]];
   });
 
-  function setStatus(t) { elRunStatus.textContent = t; }
-
-  async function loadOutcomes() {
-    const rows = await fetchJSON('/api/outcome?limit=100');
-    elBody.innerHTML = '';
-    for (const r of rows) {
-      const tr = document.createElement('tr');
-      tr.innerHTML = `
-        <td>${r.id}</td>
-        <td>${fmt(r.time)}</td>
-        <td>${r.duration}</td>
-        <td>${r.predictions}</td>
-        <td>${r.ratio}</td>
-        <td>${r.dir}</td>
-        <td>${r.len}</td>
-      `;
-      tr.style.cursor = 'pointer';
-      tr.addEventListener('click', () => loadSegment(r.segm_id));
-      elBody.appendChild(tr);
-    }
-    if (rows.length) loadSegment(rows[0].segm_id);
-  }
-
-  function smoothMA(series, n) {
-    const out = [];
-    const q = [];
-    let s = 0;
-    for (let i = 0; i < series.length; i++) {
-      q.push(series[i]); s += series[i];
-      if (q.length > n) s -= q.shift();
-      out.push(s / q.length);
-    }
-    return out;
-  }
-
-  function renderChart(segm, ticks, smal, pred) {
-    const xs = ticks.map(t => t.id);
-    const ts = ticks.map(t => new Date(t.ts));
-    const ys = ticks.map(t => Number(t.mid));
-    const ma = smoothMA(ys, Math.min(100, Math.max(10, Math.floor(ys.length / 10))));
-
-    // Build scatter markers for predictions
-    const predHit = pred.filter(p => p.hit === true).map(p => {
-      const idx = xs.indexOf(p.at_id);
-      return [ts[idx], ys[idx]];
-    });
-    const predMiss = pred.filter(p => p.hit === false).map(p => {
-      const idx = xs.indexOf(p.at_id);
-      return [ts[idx], ys[idx]];
-    });
-    const predWait = pred.filter(p => p.hit === null).map(p => {
-      const idx = xs.indexOf(p.at_id);
-      return [ts[idx], ys[idx]];
-    });
-
-    // smal ranges as lines
-    const smalLines = smal.map(s => {
-      const aIdx = xs.indexOf(s.a_id), bIdx = xs.indexOf(s.b_id);
-      return [
-        { coord: [ts[aIdx], ys[aIdx]] },
-        { coord: [ts[bIdx], ys[bIdx]] }
-      ];
-    });
-
-    chart.setOption({
-      animation: false,
-      tooltip: {
-        trigger: 'axis',
-        axisPointer: { type: 'cross' }
-      },
-      xAxis: {
-        type: 'time',
-        boundaryGap: false,
-      },
-      yAxis: { type: 'value', scale: true },
-      series: [
-        {
-          type: 'line',
-          name: 'Mid',
-          showSymbol: false,
-          data: ts.map((t, i) => [t, ys[i]]),
-        },
-        {
-          type: 'line',
-          name: 'MA',
-          showSymbol: false,
-          data: ts.map((t, i) => [t, ma[i]]),
-        },
-        {
-          type: 'scatter',
-          name: 'Pred ✓',
-          data: predHit,
-          symbol: 'circle',
-          symbolSize: 8,
-        },
-        {
-          type: 'scatter',
-          name: 'Pred ✗',
-          data: predMiss,
-          symbol: 'diamond',
-          symbolSize: 8,
-        },
-        {
-          type: 'scatter',
-          name: 'Pred …',
-          data: predWait,
-          symbol: 'triangle',
-          symbolSize: 8,
-        },
-        {
-          type: 'lines',
-          name: 'Small moves',
-          coordinateSystem: 'cartesian2d',
-          polyline: false,
-          lineStyle: { width: 2 },
-          data: smalLines
-        }
-      ],
-      legend: { top: 10 },
-      grid: { left: 10, right: 10, top: 40, bottom: 10, containLabel: true },
-    });
-
-    elSegTitle.textContent = `Segment #${segm.id} (${segm.dir})`;
-    elSegMeta.textContent = `Ticks ${segm.start_id}→${segm.end_id} | ${fmt(segm.start_ts)} → ${fmt(segm.end_ts)} | span=${Number(segm.span).toFixed(2)} | len=${segm.len}`;
-  }
-
-  async function loadSegment(segmId) {
-    const data = await fetchJSON(`/api/segm?id=${segmId}`);
-    renderChart(data.segm, data.ticks, data.smal, data.pred);
-  }
-
-  elRun.addEventListener('click', async () => {
-    setStatus('running…');
-    try {
-      const res = await fetchJSON('/api/run', { method: 'POST' });
-      setStatus(`done (${res.segments} seg)`);
-      await loadOutcomes();
-    } catch (e) {
-      console.error(e);
-      setStatus('error');
-      alert('Run failed. See console.');
-    }
+  const smMarks = data.smal.map(s => {
+    const idx = xs.indexOf(s.b_id);
+    return {name:`${s.dir} ${s.move.toFixed(2)}`, xAxis: idx, yAxis: ys[idx]};
   });
 
-  loadOutcomes().catch(console.error);
-})();
+  const predMarks = data.pred.map(p => {
+    const idx = xs.indexOf(p.at_id);
+    const symbol = p.hit == null ? 'circle' : (p.hit ? 'path://M5 12l3 3 7-7' : 'path://M4 4l12 12M16 4L4 16');
+    return {name:`${p.dir} ${p.hit===true?'✓':p.hit===false?'✗':'?'}`, xAxis: idx, yAxis: ys[idx], symbolSize: 12, symbol};
+  });
+
+  chart.setOption({
+    xAxis: { data: xs },
+    series: [
+      {name:'mid', type:'line', data: ys, showSymbol:false},
+      {name:'smooth', type:'line', data: ysm, showSymbol:false, lineStyle:{width:1, opacity:0.6}},
+      // big movements as custom rectangles (ribbons)
+      {
+        name:'bigm', type:'custom', renderItem: (params, api) => {
+          const band = bigBands[params.dataIndex];
+          if (!band) return;
+          const x0 = api.coord([band[0][0], band[0][1]]);
+          const x1 = api.coord([band[1][0], band[1][1]]);
+          const rect = echarts.graphic.clipRectByRect({
+            x: x0[0], y: Math.min(x0[1], x1[1]),
+            width: x1[0]-x0[0], height: Math.abs(x1[1]-x0[1])
+          }, {x: params.coordSys.x, y: params.coordSys.y, width: params.coordSys.width, height: params.coordSys.height});
+          return rect && { type:'rect', shape: rect, style: { fill:'#2d333b', opacity:0.25 }};
+        },
+        data: bigBands.map((_,i)=>i), z: -1
+      },
+      // small moves as mark points
+      {name:'smal', type:'line', data: ys, showSymbol:false, markPoint:{data: smMarks}},
+      // preds as mark points with icons
+      {name:'pred', type:'line', data: ys, showSymbol:false, markPoint:{data: predMarks}}
+    ]
+  });
+
+  segInfo.textContent = `Segment #${data.segm.id} | ticks ${data.segm.start_id}..${data.segm.end_id} | ${data.segm.dir} span=${(+data.segm.span).toFixed(2)} | small=${data.smal.length} big=${data.bigm.length} preds=${data.pred.length}`;
+}
+
+runBtn.onclick = async ()=>{
+  runStatus.textContent = 'running...';
+  const r = await fetch(`${API}/run`, {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+  const j = await r.json();
+  runStatus.textContent = `done: ${j.segments} segs`;
+  await loadOutcomes();
+};
+
+initChart();
+loadOutcomes();

@@ -1,55 +1,58 @@
-(() => {
-  const sel = document.getElementById('tableSelect');
-  const txt = document.getElementById('sqlInput');
-  const res = document.getElementById('result');
-  const btnRun = document.getElementById('runBtn');
-  const btnLatest = document.getElementById('latestBtn');
+# PATH: frontend/sql-core.js
+const API = '/sqlvw';
+const ddl = document.getElementById('tables');
+const sql = document.getElementById('sql');
+const gridHead = document.querySelector('#grid thead');
+const gridBody = document.querySelector('#grid tbody');
 
-  const fetchJSON = (u, opt) => fetch(u, opt).then(r => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json();
+async function loadTables(){
+  const res = await fetch(`${API}/tables`);
+  const tabs = await res.json();
+  ddl.innerHTML = '';
+  tabs.forEach(t=>{
+    const opt = document.createElement('option');
+    opt.value = t; opt.textContent = t;
+    ddl.appendChild(opt);
   });
+  // focus on our new tables
+  const prefer = ['outcome','segm','bigm','smal','pred','stat','ticks'];
+  const first = prefer.find(p => tabs.includes(p)) || tabs[0];
+  ddl.value = first;
+  setDefaultQuery();
+}
+function setDefaultQuery(){
+  const t = ddl.value;
+  sql.value = `SELECT * FROM ${t} ORDER BY id DESC LIMIT 100;`;
+}
+ddl.onchange = setDefaultQuery;
+document.getElementById('refresh').onclick = loadTables;
 
-  function tableToHTML(rows) {
-    if (!rows || !rows.length) return '<em>No rows.</em>';
-    const cols = Object.keys(rows[0]);
-    let html = '<table><thead><tr>' + cols.map(c => `<th>${c}</th>`).join('') + '</tr></thead><tbody>';
-    for (const r of rows) {
-      html += '<tr>' + cols.map(c => `<td>${r[c] !== null ? r[c] : ''}</td>`).join('') + '</tr>';
-    }
-    html += '</tbody></table>';
-    return html;
-  }
+document.getElementById('run').onclick = async ()=>{
+  const res = await fetch(`/sqlvw/query?query=${encodeURIComponent(sql.value)}`);
+  const data = await res.json();
+  renderTable(Array.isArray(data) ? data : []);
+};
 
-  function setDefaultQuery(name) {
-    txt.value = `SELECT * FROM ${name} ORDER BY id DESC LIMIT 100;`;
-  }
+function renderTable(rows){
+  gridHead.innerHTML = ''; gridBody.innerHTML = '';
+  if (!rows.length){ return; }
+  const cols = Object.keys(rows[0]);
+  const trh = document.createElement('tr');
+  cols.forEach(c=>{
+    const th = document.createElement('th'); th.textContent = c;
+    trh.appendChild(th);
+  });
+  gridHead.appendChild(trh);
+  rows.forEach(r=>{
+    const tr = document.createElement('tr');
+    cols.forEach(c=>{
+      const td = document.createElement('td');
+      const v = r[c];
+      td.textContent = (v===null || v===undefined) ? '' : v;
+      tr.appendChild(td);
+    });
+    gridBody.appendChild(tr);
+  });
+}
 
-  async function loadTables() {
-    const tables = await fetchJSON('/sqlvw/tables');
-    sel.innerHTML = '';
-    // prefer our new short tables first
-    const preferred = ['segm', 'smal', 'pred', 'outcome', 'stat', 'ticks'];
-    const sorted = [...preferred.filter(t => tables.includes(t)), ...tables.filter(t => !preferred.includes(t))];
-    for (const t of sorted) {
-      const opt = document.createElement('option');
-      opt.value = t; opt.textContent = t;
-      sel.appendChild(opt);
-    }
-    setDefaultQuery(sel.value);
-  }
-
-  async function run() {
-    try {
-      const rows = await fetchJSON('/sqlvw/query?query=' + encodeURIComponent(txt.value));
-      res.innerHTML = tableToHTML(rows);
-    } catch (e) {
-      res.innerHTML = `<pre style="color:#b91c1c">${String(e)}</pre>`;
-    }
-  }
-
-  sel.addEventListener('change', () => setDefaultQuery(sel.value));
-  btnRun.addEventListener('click', run);
-  btnLatest.addEventListener('click', () => setDefaultQuery(sel.value));
-
-  loadTables().then(run).catch(err => res.innerHTML = `<pre>${String(err)}</pre>`);
-})();
+loadTables();

@@ -1,93 +1,71 @@
-(() => {
-  const chart = echarts.init(document.getElementById('chart'));
-  const btnToggle = document.getElementById('toggleBtn');
-  const selWin = document.getElementById('winSel');
-  const inpJump = document.getElementById('jumpId');
-  const btnJump = document.getElementById('jumpBtn');
-  const state = document.getElementById('state');
+# PATH: frontend/live-core.js
+const API = '/api';
 
-  let running = true;
-  let es = null;
-  const xs = [];      // Date objects
-  const ys = [];      // mid
-  const ids = [];     // tick ids
-  const preds = [];   // {id, at_id, hit, ts, y}
+const chart = echarts.init(document.getElementById('chart'));
+chart.setOption({
+  backgroundColor:'#0d1117', animation:false,
+  tooltip:{trigger:'axis'},
+  grid:{left:48,right:24,top:24,bottom:36},
+  xAxis:{type:'category',axisLabel:{color:'#c9d1d9'},axisLine:{lineStyle:{color:'#30363d'}}},
+  yAxis:{type:'value',scale:true,axisLabel:{color:'#c9d1d9'},splitLine:{lineStyle:{color:'#30363d'}}},
+  series:[
+    {name:'mid', type:'line', data:[], showSymbol:false},
+    {name:'pred', type:'scatter', data:[], symbolSize:10}
+  ]
+});
 
-  function render() {
-    const win = Number(selWin.value);
-    const n = xs.length;
-    const start = Math.max(0, n - win);
-    const xSlice = xs.slice(start);
-    const ySlice = ys.slice(start);
-    const predHit = preds.filter(p => p.hit === true).map(p => [p.ts, p.y]);
-    const predMiss = preds.filter(p => p.hit === false).map(p => [p.ts, p.y]);
+let xs=[], ys=[], preds=[];
+let paused=false;
+let win = 2000;
 
-    chart.setOption({
-      animation: false,
-      tooltip: { trigger: 'axis' },
-      xAxis: { type: 'time' },
-      yAxis: { type: 'value', scale: true },
-      series: [
-        { type: 'line', name: 'Mid', showSymbol: false, data: xSlice.map((t, i) => [t, ySlice[i]]) },
-        { type: 'scatter', name: 'Pred ✓', data: predHit, symbol: 'circle', symbolSize: 8 },
-        { type: 'scatter', name: 'Pred ✗', data: predMiss, symbol: 'diamond', symbolSize: 8 },
-      ],
-      legend: { top: 10 },
-      grid: { left: 10, right: 10, top: 40, bottom: 10, containLabel: true },
-    });
-  }
+function pushTick(id, mid){
+  xs.push(id); ys.push(mid);
+  if (xs.length>win){ xs.shift(); ys.shift(); }
+  chart.setOption({xAxis:{data:xs}, series:[{data:ys}, {data:preds}]});
+}
+function pushPred(p){
+  preds.push([p.at_id, null]); // mark on x; y auto via null (aligns with axis)
+  if (preds.length>win) preds.shift();
+  chart.setOption({series:[{data:ys}, {data:preds}]});
+}
 
-  function startStream() {
-    if (es) es.close();
-    es = new EventSource('/api/live');
-    es.addEventListener('tick', (ev) => {
-      const d = JSON.parse(ev.data);
-      const dt = new Date(d.ts);
-      ids.push(d.id);
-      xs.push(dt);
-      ys.push(Number(d.mid));
-      render();
-    });
-    es.addEventListener('pred', (ev) => {
-      const p = JSON.parse(ev.data);
-      // place marker at entry
-      const i = ids.indexOf(p.at_id);
-      if (i >= 0) {
-        preds.push({ id: p.id, at_id: p.at_id, hit: p.hit, ts: xs[i], y: ys[i] });
-        render();
-      }
-    });
-    es.onerror = () => { /* keep alive; server will retry */ }
-    state.textContent = 'live';
-  }
+async function bootstrap(){
+  const r = await fetch(`${API}/ticks?from_id=${Math.max(1, (await (await fetch('/ticks/lastid')).json()).lastId - win)}&to_id=${(await (await fetch('/ticks/lastid')).json()).lastId}`);
+  const rows = await r.json();
+  xs = rows.map(r=>r.id);
+  ys = rows.map(r=>r.mid);
+  chart.setOption({xAxis:{data:xs}, series:[{data:ys}, {data:preds}]});
+}
+bootstrap();
 
-  function stopStream() {
-    if (es) { es.close(); es = null; }
-    state.textContent = 'paused';
-  }
+const es = new EventSource(`${API}/live`);
+es.onmessage = ()=>{};
+es.addEventListener('tick', ev=>{
+  if (paused) return;
+  const d = JSON.parse(ev.data);
+  pushTick(d.id, d.mid);
+});
+es.addEventListener('pred', ev=>{
+  if (paused) return;
+  const d = JSON.parse(ev.data);
+  pushPred(d);
+});
 
-  btnToggle.addEventListener('click', () => {
-    running = !running;
-    btnToggle.textContent = running ? '⏸ Pause' : '▶ Resume';
-    if (running) startStream(); else stopStream();
-  });
-
-  btnJump.addEventListener('click', async () => {
-    const id = Number(inpJump.value);
-    if (!id) return;
-    // Load a window around the id for quick context
-    const from = Math.max(1, id - 2000), to = id + 2000;
-    const rows = await fetch(`/api/ticks?from_id=${from}&to_id=${to}`).then(r => r.json());
-    xs.length = 0; ys.length = 0; ids.length = 0;
-    for (const r of rows) {
-      ids.push(r.id);
-      xs.push(new Date(r.ts));
-      ys.push(Number(r.mid));
-    }
-    render();
-  });
-
-  selWin.addEventListener('change', render);
-
-  startStream();
-})();
+document.getElementById('toggle').onclick = ()=>{
+  paused = !paused;
+  document.getElementById('toggle').textContent = paused ? 'Resume' : 'Pause';
+};
+document.getElementById('go').onclick = async ()=>{
+  const val = +document.getElementById('jump').value;
+  if (!val) return;
+  const end = val, start = Math.max(1, end - win + 1);
+  const r = await fetch(`${API}/ticks?from_id=${start}&to_id=${end}`);
+  const rows = await r.json();
+  xs = rows.map(r=>r.id);
+  ys = rows.map(r=>r.mid);
+  preds = [];
+  chart.setOption({xAxis:{data:xs}, series:[{data:ys}, {data:preds}]});
+};
+document.getElementById('win').onchange = (e)=>{
+  win = +e.target.value;
+};

@@ -1,268 +1,39 @@
 # PATH: backend/main.py
+# FastAPI app: preserves existing endpoints and adds bigm in /api/segm.
 import os
 import json
-import math
-import asyncio
-from datetime import datetime, timedelta, date
-from typing import Any, Dict, List, Optional
+from datetime import datetime, date, timezone
+from decimal import Decimal
+from typing import Any, Dict
 
-from fastapi import FastAPI, HTTPException, Body, Query
+from fastapi import FastAPI, Request, Response
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
-#----------------------------------------------------
-# fixing decimal import
-from decimal import Decimal
+import psycopg2
+import psycopg2.extras
 
-from .db import (
-    q_dicts,
-    exec_sql,
-    tick_sql_fields,
-    tick_ts_col,
-    tick_mid_expr,
-    last_tick_id,
-)
-from .runner import run_until_now
+from backend.db import get_conn, dict_cur, detect_ts_col, detect_mid_expr, scalar
+from backend.runner import Runner
 
-# ----------------------------------------------------
-# App & CORS
-# ----------------------------------------------------
 app = FastAPI(title="cTrade backend")
+
+# Static files (the Nginx root points here too; mounting is still useful for direct app access)
+FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend")
+if os.path.isdir(FRONTEND_DIR):
+    app.mount("/frontend", StaticFiles(directory=FRONTEND_DIR), name="frontend")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["*"],
+    allow_methods=["GET","POST","OPTIONS"],
     allow_headers=["*"],
 )
 
-# ----------------------------------------------------
-# Helpers
-# ----------------------------------------------------
-def _ticks_select_base() -> str:
-    return f"SELECT {tick_sql_fields()} FROM ticks"
+VERSION = "2025.08.29.price-action-segments.bigm"
 
-def _normalize_tick_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    # Ensure both 'ts' and 'timestamp' keys for backward compatibility
-    out: List[Dict[str, Any]] = []
-    for r in rows:
-        d = dict(r)
-        if "ts" not in d and "timestamp" in d:
-            d["ts"] = d["timestamp"]
-        if "timestamp" not in d and "ts" in d:
-            d["timestamp"] = d["ts"]
-        # ensure floats for json
-        if isinstance(d.get("mid"), (int, float)):
-            pass
-        else:
-            try:
-                d["mid"] = float(d["mid"])
-            except Exception:
-                pass
-        out.append(d)
-    return out
-
-# ----------------------------------------------------
-# Root
-# ----------------------------------------------------
-@app.get("/")
-def home():
-    return {"message": "API live. Try /ticks/recent, /api/outcome, /sqlvw/tables, /version"}
-
-# ----------------------------------------------------
-# SQL endpoints (kept compatible)
-# ----------------------------------------------------
-@app.post("/api/sql")
-def sql_post(sql: str = Body(..., embed=True)):
-    try:
-        rows = q_dicts(sql)
-        return {"rows": rows}
-    except Exception as e:
-        return JSONResponse(status_code=400, content={"error": str(e)})
-
-@app.get("/sqlvw/tables")
-def get_all_table_names():
-    rows = q_dicts("""
-        SELECT table_name
-        FROM information_schema.tables
-        WHERE table_schema='public' AND table_type='BASE TABLE'
-        ORDER BY table_name
-    """)
-    return [r["table_name"] for r in rows]
-
-@app.get("/sqlvw/query")
-def run_sql_query(query: str = Query(...)):
-    try:
-        # If returns rows, return them; else return message
-        rows = q_dicts(query)
-        return rows
-    except Exception as e:
-        return JSONResponse(status_code=400, content={"error": str(e)})
-
-# ----------------------------------------------------
-# Legacy label discovery endpoints (kept; may be empty)
-# ----------------------------------------------------
-@app.get("/api/labels/available")
-def get_label_tables():
-    rows = q_dicts("""
-        SELECT table_name
-        FROM information_schema.columns
-        WHERE column_name ILIKE 'tickid' AND table_schema='public'
-    """)
-    return sorted({r["table_name"] for r in rows})
-
-@app.get("/api/labels/schema")
-def labels_schema():
-    q = """
-    SELECT c.table_name, c.column_name
-    FROM information_schema.columns c
-    JOIN information_schema.columns k
-      ON k.table_name = c.table_name
-     AND k.column_name ILIKE 'tickid'
-    WHERE c.table_schema='public'
-    ORDER BY c.table_name, c.ordinal_position
-    """
-    out: Dict[str, Dict[str, Any]] = {}
-    for row in q_dicts(q):
-        tname = row["table_name"]
-        cname = row["column_name"]
-        if tname not in out:
-            out[tname] = {"table": tname, "labels": []}
-        low = cname.lower()
-        if low not in ("id", "tickid") and not low.startswith("ts"):
-            out[tname]["labels"].append(cname)
-    return [v for v in out.values() if v["labels"]]
-
-# ----------------------------------------------------
-# Version
-# ----------------------------------------------------
-@app.get("/version")
-def get_version():
-    return {"version": "2025.08.28.price-action-segments"}
-
-# ----------------------------------------------------
-# Ticks (compatible shapes)
-# ----------------------------------------------------
-@app.get("/ticks/recent")
-def get_recent_ticks(limit: int = Query(2200, le=10000)):
-    rows = q_dicts(
-        f"""
-        SELECT * FROM (
-           {_ticks_select_base()}
-           ORDER BY id DESC
-           LIMIT %s
-        ) sub
-        ORDER BY id ASC
-        """,
-        (limit,),
-    )
-    return _normalize_tick_rows(rows)
-
-@app.get("/ticks/lastid")
-def get_lastid():
-    lid = last_tick_id()
-    if lid is None:
-        raise HTTPException(status_code=404, detail="No ticks")
-    rows = q_dicts(f"SELECT id, {tick_ts_col()} as ts FROM ticks WHERE id=%s", (lid,))
-    return {"lastId": lid, "timestamp": rows[0]["ts"] if rows else None}
-
-@app.get("/ticks/before/{tickid}")
-def get_ticks_before(tickid: int, limit: int = 2000):
-    rows = q_dicts(
-        f"""
-        SELECT * FROM (
-            {_ticks_select_base()}
-            WHERE id < %s
-            ORDER BY id DESC
-            LIMIT %s
-        ) x
-        ORDER BY id ASC
-        """,
-        (tickid, limit),
-    )
-    return _normalize_tick_rows(rows)
-
-@app.get("/ticks/range")
-def ticks_range(start: int, end: int, limit: int = 200000):
-    rows = q_dicts(
-        f"""
-        SELECT {_ticks_select_base().split('FROM')[0]}FROM ticks
-        WHERE id BETWEEN %s AND %s
-        ORDER BY id ASC
-        LIMIT %s
-        """,
-        (start, end, limit),
-    )
-    return _normalize_tick_rows(rows)
-
-# New generic endpoint used by frontend
-@app.get("/api/ticks")
-def api_ticks(from_id: int = Query(...), to_id: int = Query(...)):
-    rows = q_dicts(
-        f"""
-        {_ticks_select_base()}
-        WHERE id BETWEEN %s AND %s
-        ORDER BY id ASC
-        """,
-        (from_id, to_id),
-    )
-    return _normalize_tick_rows(rows)
-
-# ----------------------------------------------------
-# New: Price-Action Segments API
-# ----------------------------------------------------
-@app.post("/run")
-def api_run():
-    """
-    Runs the pipeline from stat.last_done_tick_id+1 until now, segment-by-segment.
-    Returns summary: {segments, from_tick, to_tick}
-    """
-    try:
-        res = run_until_now()
-        return res
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
-
-@app.get("/outcome")
-def api_outcome(limit: int = 50):
-    rows = q_dicts(
-        """
-        SELECT o.id, o.time, o.duration, o.predictions, o.ratio,
-               s.id AS segm_id, s.start_id, s.end_id, s.start_ts, s.end_ts, s.dir, s.span, s.len
-        FROM outcome o
-        JOIN segm s ON s.id = o.segm_id
-        ORDER BY o.id DESC
-        LIMIT %s
-        """,
-        (limit,),
-    )
-    return rows
-
-@app.get("/segm")
-def api_segment(id: int):
-    seg = q_dicts("SELECT * FROM segm WHERE id=%s", (id,))
-    if not seg:
-        raise HTTPException(status_code=404, detail="segment not found")
-    s = seg[0]
-    ticks = q_dicts(
-        f"""
-        SELECT {tick_sql_fields()}
-        FROM ticks
-        WHERE id BETWEEN %s AND %s
-        ORDER BY id ASC
-        """,
-        (s["start_id"], s["end_id"]),
-    )
-    ticks = _normalize_tick_rows(ticks)
-    smals = q_dicts("SELECT * FROM smal WHERE segm_id=%s ORDER BY id ASC", (id,))
-    preds = q_dicts("SELECT * FROM pred WHERE segm_id=%s ORDER BY id ASC", (id,))
-    return {"segm": s, "ticks": ticks, "smal": smals, "pred": preds}
-
-# ----------------------------------------------------
-# SSE Live: ticks + pred updates (minimal)
-# ----------------------------------------------------
 def _to_jsonable(o):
-    """Recursively convert Decimals to float and datetimes to ISO strings."""
     if isinstance(o, Decimal):
         return float(o)
     if isinstance(o, (datetime, date)):
@@ -273,107 +44,248 @@ def _to_jsonable(o):
         return [_to_jsonable(v) for v in o]
     return o
 
+def _ts_mid_expr(conn):
+    return detect_ts_col(conn), detect_mid_expr(conn)
 
-async def _sse_generator():
-    # Track last sent tick id and last sent resolved pred id
-    last_sent_tick = last_tick_id() or 0
-    last_pred_id = 0
-    while True:
-        try:
-            # New ticks
-            rows = q_dicts(
-                f"""
-                SELECT {tick_sql_fields()}
-                FROM ticks
-                WHERE id > %s
-                ORDER BY id ASC
-                LIMIT 2000
-                """,
-                (last_sent_tick,),
-            )
-            for r in rows:
-                payload = {"type": "tick", "id": int(r["id"]), "ts": r["ts"].isoformat(), "mid": float(r["mid"])}
-                yield f"event: tick\ndata: {json.dumps(_to_jsonable(payload))}\n\n"
-                last_sent_tick = int(r["id"])
+# ----------------- Basic/legacy endpoints (kept) -----------------
+@app.get("/")
+def home():
+    return {"ok": True}
 
-            # Recently resolved predictions (tail segment)
-            preds = q_dicts(
-                """
-                SELECT id, segm_id, at_id, at_ts, dir, goal_usd, hit, resolved_at_id, resolved_at_ts
-                FROM pred
-                WHERE id > %s AND resolved_at_id IS NOT NULL
-                ORDER BY id ASC
-                LIMIT 1000
-                """,
-                (last_pred_id,),
-            )
-            for p in preds:
-                pdata = dict(p)
-                if isinstance(pdata.get("at_ts"), datetime):
-                    pdata["at_ts"] = pdata["at_ts"].isoformat()
-                if isinstance(pdata.get("resolved_at_ts"), datetime):
-                    pdata["resolved_at_ts"] = pdata["resolved_at_ts"].isoformat()
+@app.get("/version")
+def get_version():
+    return {"version": VERSION}
 
-                for k in ("id","segm_id","at_id","resolved_at_id"):
-                    if k in pdata and pdata[k] is not None:
-                        pdata[k] = int(pdata[k])
-                if "goal_usd" in pdata and pdata["goal_usd"] is not None:
-                    pdata["goal_usd"] = float(pdata["goal_usd"])
+# SQL passthrough used by SQL UI
+@app.get("/sqlvw/tables")
+def get_all_table_names():
+    conn = get_conn()
+    with dict_cur(conn) as cur:
+        cur.execute("""
+          SELECT tablename FROM pg_tables
+          WHERE schemaname='public' AND tablename NOT LIKE 'pg_%'
+          ORDER BY tablename
+        """)
+        tabs = [r["tablename"] for r in cur.fetchall()]
+    return tabs
 
+@app.get("/sqlvw/query")
+def run_sql_query(query: str):
+    conn = get_conn()
+    with dict_cur(conn) as cur:
+        cur.execute(query)
+        if cur.description:
+            rows = cur.fetchall()
+            return _to_jsonable(rows)
+        return {"ok": True, "rowcount": cur.rowcount}
 
-                yield f"event: pred\ndata: {json.dumps(_to_jsonable({'type':'pred', **pdata}))}\n\n"
-                last_pred_id = max(last_pred_id, int(p["id"]))
+# Ticks views (compat)
+@app.get("/ticks/lastid")
+def get_lastid():
+    conn = get_conn()
+    ts_col, mid_expr = _ts_mid_expr(conn)
+    with dict_cur(conn) as cur:
+        cur.execute(f"SELECT MAX(id) AS last_id FROM ticks")
+        last_id = int(cur.fetchone()["last_id"] or 0)
+        cur.execute(f"SELECT {ts_col} AS ts FROM ticks WHERE id=%s", (last_id,))
+        r = cur.fetchone()
+        ts = r["ts"].isoformat() if r and r["ts"] else None
+    return {"lastId": last_id, "timestamp": ts}
 
-            await asyncio.sleep(1.0)
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            # Send error and keep trying
-            yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
-            await asyncio.sleep(2.0)
+@app.get("/ticks/recent")
+def get_recent_ticks(limit: int = 2200):
+    limit = max(1, min(limit, 10000))
+    conn = get_conn()
+    ts_col, mid_expr = _ts_mid_expr(conn)
+    with dict_cur(conn) as cur:
+        cur.execute(f"""
+          SELECT id, {ts_col} AS ts, {mid_expr} AS mid
+          FROM ticks
+          ORDER BY id DESC
+          LIMIT %s
+        """, (limit,))
+        rows = list(reversed(cur.fetchall()))
+        for r in rows:
+            if isinstance(r["mid"], Decimal):
+                r["mid"] = float(r["mid"])
+            r["ts"] = r["ts"].isoformat()
+    return rows
 
+@app.get("/ticks/before/{tickid}")
+def get_ticks_before(tickid: int, limit: int = 2000):
+    conn = get_conn()
+    ts_col, mid_expr = _ts_mid_expr(conn)
+    with dict_cur(conn) as cur:
+        cur.execute(f"""
+          SELECT id, {ts_col} AS ts, {mid_expr} AS mid
+          FROM ticks
+          WHERE id <= %s
+          ORDER BY id DESC
+          LIMIT %s
+        """, (tickid, limit))
+        rows = list(reversed(cur.fetchall()))
+        for r in rows:
+            if isinstance(r["mid"], Decimal):
+                r["mid"] = float(r["mid"])
+            r["ts"] = r["ts"].isoformat()
+    return rows
+
+@app.get("/ticks/range")
+def ticks_range(start: int, end: int, limit: int = 200000):
+    conn = get_conn()
+    ts_col, mid_expr = _ts_mid_expr(conn)
+    with dict_cur(conn) as cur:
+        cur.execute(f"""
+          SELECT id, {ts_col} AS ts, {mid_expr} AS mid
+          FROM ticks
+          WHERE id BETWEEN %s AND %s
+          ORDER BY id ASC
+          LIMIT %s
+        """, (start, end, limit))
+        rows = cur.fetchall()
+        for r in rows:
+            if isinstance(r["mid"], Decimal):
+                r["mid"] = float(r["mid"])
+            r["ts"] = r["ts"].isoformat()
+    return rows
+
+# Compatibility API for charts
+@app.get("/api/ticks")
+def api_ticks(from_id: int, to_id: int):
+    return ticks_range(from_id, to_id, 200000)
+
+# ----------------- New ML endpoints -----------------
+@app.post("/api/run")
+def api_run():
+    r = Runner().run_until_now()
+    return r
+
+@app.get("/api/outcome")
+def api_outcome(limit: int = 50):
+    limit = max(1, min(limit, 500))
+    conn = get_conn()
+    with dict_cur(conn) as cur:
+        cur.execute("""
+          SELECT o.*, s.start_id, s.end_id, s.start_ts, s.end_ts, s.dir, s.span, s.len
+          FROM outcome o
+          JOIN segm s ON s.id = o.segm_id
+          ORDER BY o.id DESC
+          LIMIT %s
+        """, (limit,))
+        rows = cur.fetchall()
+        for r in rows:
+            r["time"] = r["time"].isoformat()
+            r["start_ts"] = r["start_ts"].isoformat()
+            r["end_ts"] = r["end_ts"].isoformat()
+            if isinstance(r["ratio"], Decimal):
+                r["ratio"] = float(r["ratio"])
+            if isinstance(r["span"], Decimal):
+                r["span"] = float(r["span"])
+    return rows
+
+@app.get("/api/segm")
+def api_segment(id: int):
+    conn = get_conn()
+    ts_col, mid_expr = _ts_mid_expr(conn)
+    with dict_cur(conn) as cur:
+        cur.execute("SELECT * FROM segm WHERE id=%s", (id,))
+        seg = cur.fetchone()
+        if not seg:
+            return JSONResponse({"detail":"not found"}, status_code=404)
+        # ticks bounded to the segment
+        cur.execute(f"""
+          SELECT id, {ts_col} AS ts, {mid_expr} AS mid
+          FROM ticks
+          WHERE id BETWEEN %s AND %s
+          ORDER BY id ASC
+        """, (seg["start_id"], seg["end_id"]))
+        ticks = cur.fetchall()
+        for r in ticks:
+            if isinstance(r["mid"], Decimal):
+                r["mid"] = float(r["mid"])
+            r["ts"] = r["ts"].isoformat()
+
+        # small moves
+        cur.execute("SELECT * FROM smal WHERE segm_id=%s ORDER BY id ASC", (id,))
+        sm = cur.fetchall()
+        for r in sm:
+            r["a_ts"] = r["a_ts"].isoformat()
+            r["b_ts"] = r["b_ts"].isoformat()
+            if isinstance(r["move"], Decimal):
+                r["move"] = float(r["move"])
+
+        # big moves
+        cur.execute("SELECT * FROM bigm WHERE segm_id=%s ORDER BY id ASC", (id,))
+        bm = cur.fetchall()
+        for r in bm:
+            r["a_ts"] = r["a_ts"].isoformat()
+            r["b_ts"] = r["b_ts"].isoformat()
+            if isinstance(r["move"], Decimal):
+                r["move"] = float(r["move"])
+
+        # predictions
+        cur.execute("SELECT * FROM pred WHERE segm_id=%s ORDER BY id ASC", (id,))
+        pd = cur.fetchall()
+        for r in pd:
+            r["at_ts"] = r["at_ts"].isoformat()
+            if r["resolved_at_ts"]:
+                r["resolved_at_ts"] = r["resolved_at_ts"].isoformat()
+            if isinstance(r.get("goal_usd"), Decimal):
+                r["goal_usd"] = float(r["goal_usd"])
+
+    return {"segm": _to_jsonable(seg), "ticks": ticks, "smal": sm, "bigm": bm, "pred": pd}
+
+# SSE live: pushes new ticks and pred updates (tail segment)
 @app.get("/api/live")
 def api_live():
-    return StreamingResponse(_sse_generator(), media_type="text/event-stream")
+    conn = get_conn()
+    ts_col, mid_expr = _ts_mid_expr(conn)
 
-# ----------------------------------------------------
-# Walk-forward compatibility shims
-# ----------------------------------------------------
+    def gen():
+        last_tick_id = scalar(conn, "SELECT COALESCE(MAX(id),0) FROM ticks") or 0
+        last_pred_id = scalar(conn, "SELECT COALESCE(MAX(id),0) FROM pred") or 0
+        yield "event: hello\ndata: {}\n\n"
+        while True:
+            # ticks
+            with dict_cur(conn) as cur:
+                cur.execute(f"""
+                   SELECT id, {ts_col} AS ts, {mid_expr} AS mid
+                   FROM ticks
+                   WHERE id > %s
+                   ORDER BY id ASC
+                """, (last_tick_id,))
+                for r in cur.fetchall():
+                    last_tick_id = int(r["id"])
+                    mid = float(r["mid"]) if isinstance(r["mid"], Decimal) else r["mid"]
+                    data = {"type": "tick", "id": last_tick_id, "ts": r["ts"].isoformat(), "mid": mid}
+                    yield f"event: tick\ndata: {json.dumps(_to_jsonable(data))}\n\n"
+            # preds
+            with dict_cur(conn) as cur:
+                cur.execute("""
+                   SELECT * FROM pred
+                   WHERE id > %s
+                   ORDER BY id ASC
+                """, (last_pred_id,))
+                for p in cur.fetchall():
+                    last_pred_id = int(p["id"])
+                    yield f"event: pred\ndata: {json.dumps(_to_jsonable({'type':'pred', **p}))}\n\n"
+            # gentle poll
+            yield "event: ping\ndata: {}\n\n"
+            import time as _t; _t.sleep(1)
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+# Convenience: step once + snapshot (compat shims)
 @app.post("/walkforward/step")
 def walkforward_step():
-    # Run at most one segment to mimic a 'step'
-    res = run_until_now(max_segments=1)
-    return {"ok": True, "journal": [f"processed {res['segments']} segment(s)"], "segments": res["segments"]}
+    n = Runner().run_until_now()
+    return {"ok": True, **n}
 
 @app.get("/walkforward/snapshot")
 def walkforward_snapshot():
-    # Provide a snapshot-like view from new schema
-    segs = q_dicts("SELECT * FROM segm ORDER BY id DESC LIMIT 200")
-    seg_ids = [s["id"] for s in segs]
-    events = q_dicts("SELECT * FROM smal WHERE segm_id = ANY(%s) ORDER BY id ASC", (seg_ids,)) if seg_ids else []
-    outcomes = q_dicts("SELECT * FROM outcome WHERE segm_id = ANY(%s)", (seg_ids,)) if seg_ids else []
-    preds = q_dicts(
-        """
-        SELECT * FROM (
-          SELECT *, ROW_NUMBER() OVER(PARTITION BY segm_id ORDER BY id DESC) AS rn
-          FROM pred
-          WHERE segm_id = ANY(%s)
-        ) x WHERE rn=1
-        """,
-        (seg_ids,),
-    ) if seg_ids else []
-    return {"segments": segs, "events": events, "outcomes": outcomes, "predictions": preds}
+    return {"ok": True, "last_done_tick_id": scalar(get_conn(), "SELECT val FROM stat WHERE key='last_done_tick_id'")}
 
-# ----------------------------------------------------
-# Static (preserve prior behavior)
-# ----------------------------------------------------
-public_dir = os.path.join(os.path.dirname(__file__), "..", "public")
-if os.path.isdir(public_dir):
-    app.mount("/public", StaticFiles(directory=public_dir, html=True), name="public")
-
+# Simple page (optional)
 @app.get("/movements")
 def movements_page():
-    file_path = os.path.join(public_dir, "movements.html")
-    if os.path.exists(file_path):
-        return FileResponse(file_path)
-    return {"message": "movements.html not found."}
+    return HTMLResponse("<html><body><h3>Movements Page</h3><p>Use /frontend/review.html for charts.</p></body></html>")
