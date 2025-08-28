@@ -1,0 +1,40 @@
+# PATH: frontend/live.html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Live — Price-Action Stream</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; background: #f8f9fb; color: #222; }
+    header { display:flex; gap:12px; align-items:center; padding:10px 14px; background:#fff; border-bottom:1px solid #e5e7eb; position: sticky; top: 0; z-index: 1; }
+    button, input, select { padding:6px 10px; border:1px solid #d1d5db; border-radius:8px; background:#fff; }
+    button { cursor:pointer; }
+    button:hover { background:#f3f4f6; }
+    #chart { height: calc(100vh - 64px); }
+    .badge { display:inline-block; padding:2px 6px; border-radius:6px; font-size:11px; border:1px solid #d1d5db; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+</head>
+<body>
+  <header>
+    <button id="toggleBtn">⏸ Pause</button>
+    <label>Window:
+      <select id="winSel">
+        <option value="1000">1k</option>
+        <option value="2000" selected>2k</option>
+        <option value="5000">5k</option>
+        <option value="10000">10k</option>
+      </select>
+    </label>
+    <label>Jump to tick:
+      <input id="jumpId" type="number" placeholder="tick id" />
+      <button id="jumpBtn">Jump</button>
+    </label>
+    <span id="state" class="badge">live</span>
+  </header>
+  <div id="chart"></div>
+
+  <script src="./live-core.js"></script>
+</body>
+</html>

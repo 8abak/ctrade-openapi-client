@@ -1,83 +1,61 @@
-<!doctype html>
+# PATH: frontend/review.html
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
-  <meta http-equiv="Pragma" content="no-cache" />
-  <meta http-equiv="Expires" content="0" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>ML Review — Walk-Forward</title>
+  <meta charset="UTF-8" />
+  <title>ML Review — Price-Action Segments</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <style>
-    :root{
-      --bg:#0f141a; --panel:#141b23; --ink:#e7edf3; --muted:#93a0ad;
-      --accent:#4aa3ff; --good:#27d38e; --bad:#ff6b6b; --warn:#e7b75f; --violet:#b784ff;
-    }
-    html, body { height:100%; margin:0; }
-    body { background:var(--bg); color:var(--ink); font:14px/1.4 ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; }
-    .toolbar{ display:flex; gap:.5rem; align-items:center; padding:.6rem .8rem; background:var(--panel); position:sticky; top:0; z-index:10; }
-    .toolbar input[type="number"]{ width:110px; padding:.35rem .45rem; background:#0b1016; border:1px solid #2a3642; border-radius:.4rem; color:var(--ink); }
-    .toolbar button{ padding:.35rem .65rem; border:1px solid #2a3642; background:#0b1016; color:var(--ink); border-radius:.45rem; cursor:pointer; }
-    .toolbar button:hover{ border-color:#44586c; }
-    .toolbar label{ display:inline-flex; gap:.3rem; align-items:center; color:var(--muted); }
-    .spacer{ flex:1; }
-    #status{ padding:.35rem .8rem; color:var(--muted); }
-    #chart{ height: calc(100vh - 180px); min-height:460px; }
-    .footer{ height:8px; }
-    /* Journal panel */
-    #journalWrap{ background:#0b1016; border-top:1px solid #263241; display:none; }
-    #journalHead{ display:flex; align-items:center; justify-content:space-between; padding:.45rem .8rem; color:var(--muted); }
-    #journal{ height:180px; overflow:auto; padding:.4rem .8rem; font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; white-space:pre; }
-    .chip{ padding:.2rem .45rem; border-radius:999px; border:1px solid #2a3642; color:var(--muted); }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; background: #f8f9fb; color: #222; }
+    header { display:flex; gap:12px; align-items:center; padding:10px 14px; background:#fff; border-bottom:1px solid #e5e7eb; position: sticky; top: 0; z-index: 1; }
+    button { padding:8px 12px; border:1px solid #d1d5db; border-radius:8px; background:#fff; cursor:pointer; }
+    button:hover { background:#f3f4f6; }
+    .wrap { display:grid; grid-template-columns: 420px 1fr; gap: 10px; padding: 10px; }
+    .panel { background:#fff; border:1px solid #e5e7eb; border-radius:10px; overflow: hidden; }
+    .panel h2 { margin:0; padding:10px 12px; font-size:14px; background:#f9fafb; border-bottom:1px solid #e5e7eb; }
+    .journal { height: calc(100vh - 120px); overflow:auto; }
+    table { width:100%; border-collapse: collapse; }
+    th, td { padding:8px 6px; border-bottom:1px solid #f1f5f9; font-size:12px; text-align:left; }
+    tr:hover { background:#f9fafb; }
+    #chart { height: calc(100vh - 120px); }
+    .meta { padding:8px 12px; font-size:12px; color:#555; }
+    .badge { display:inline-block; padding:2px 6px; border-radius:6px; font-size:11px; border:1px solid #d1d5db; }
   </style>
-
-  <!-- ECharts (CDN) with cache-buster -->
-  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js?v=2025-08-26-a"></script>
-  <!-- Your app code (cache-busted) -->
-  <script defer src="./review-core.js?v=2025-08-26-a"></script>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
 </head>
 <body>
-  <div class="toolbar">
-    <label>Start tick <input id="startTick" type="number" value="1" min="1" step="1"></label>
-    <label>End tick <input id="endTick" type="number" value="100000" min="1" step="1"></label>
-    <button id="btnLoad">Load</button>
-    <button id="btnRun">Run</button>
-    <button id="btn-run-day" class="btn" onclick="runDay()">Run (whole day)</button>
+  <header>
+    <button id="runBtn">▶ Run until now (server)</button>
+    <span id="runStatus" class="badge">idle</span>
+  </header>
 
-
-    <label><input id="chkMacro" type="checkbox" checked> Macro</label>
-    <label><input id="chkEvents" type="checkbox" checked> Events</label>
-    <label><input id="chkPreds" type="checkbox" checked> Predictions</label>
-    <label><input id="chkOutcomes" type="checkbox" checked> Outcomes</label>
-
-    <span class="spacer"></span>
-
-    <span class="chip">Price streams:</span>
-    <label><input id="chkMid"  type="checkbox" checked> Mid</label>
-    <label><input id="chkBid"  type="checkbox"> Bid</label>
-    <label><input id="chkAsk"  type="checkbox"> Ask</label>
-
-    <span class="spacer"></span>
-
-    <label>Jump to tick <input id="jumpTick" type="number" value="1" min="1" step="1"></label>
-    <button id="btnJump">Jump</button>
-
-    <button id="btnJournal" title="Show/Hide journal">Journal ▸</button>
-  </div>
-
-  <div id="status">Ready</div>
-  <div id="chart"></div>
-
-  <div id="journalWrap">
-    <div id="journalHead">
-      <span>Walk-forward journal</span>
-      <div>
-        <button id="btnClearJ">Clear</button>
-        <button id="btnHideJ">Close</button>
+  <div class="wrap">
+    <div class="panel">
+      <h2>Journal (Outcomes)</h2>
+      <div class="journal">
+        <table id="outcomeTable">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Time</th>
+              <th>Dur(s)</th>
+              <th>Preds</th>
+              <th>Ratio</th>
+              <th>Dir</th>
+              <th>Ticks</th>
+            </tr>
+          </thead>
+          <tbody id="outcomeBody"></tbody>
+        </table>
       </div>
     </div>
-    <div id="journal"></div>
+    <div class="panel">
+      <h2 id="segTitle">Segment</h2>
+      <div class="meta" id="segMeta"></div>
+      <div id="chart"></div>
+    </div>
   </div>
 
-  <div class="footer"></div>
+  <script src="./review-core.js"></script>
 </body>
 </html>
