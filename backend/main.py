@@ -205,7 +205,8 @@ def api_segment(id: int):
         seg = cur.fetchone()
         if not seg:
             return JSONResponse({"detail":"not found"}, status_code=404)
-        # ticks bounded to the segment
+
+        # ticks bound to the segment
         cur.execute(f"""
           SELECT id, {ts_col} AS ts, {mid_expr} AS mid{bid_sel}{ask_sel}
           FROM ticks
@@ -214,7 +215,7 @@ def api_segment(id: int):
         """, (seg["start_id"], seg["end_id"]))
         ticks = cur.fetchall()
         for r in ticks:
-            if isinstance(r["mid"], Decimal): r["mid"] = float(r["mid"])
+            if isinstance(r.get("mid"), Decimal): r["mid"] = float(r["mid"])
             if has_bid and isinstance(r.get("bid"), Decimal): r["bid"] = float(r["bid"])
             if has_ask and isinstance(r.get("ask"), Decimal): r["ask"] = float(r["ask"])
             r["spread"] = (r.get("ask") - r.get("bid")) if (has_bid and has_ask and r.get("ask") is not None and r.get("bid") is not None) else None
@@ -226,7 +227,7 @@ def api_segment(id: int):
         for r in sm:
             r["a_ts"] = r["a_ts"].isoformat()
             r["b_ts"] = r["b_ts"].isoformat()
-            if isinstance(r["move"], Decimal): r["move"] = float(r["move"])
+            if isinstance(r.get("move"), Decimal): r["move"] = float(r["move"])
 
         # big moves
         cur.execute("SELECT * FROM bigm WHERE segm_id=%s ORDER BY id ASC", (id,))
@@ -234,7 +235,16 @@ def api_segment(id: int):
         for r in bm:
             r["a_ts"] = r["a_ts"].isoformat()
             r["b_ts"] = r["b_ts"].isoformat()
-            if isinstance(r["move"], Decimal): r["move"] = float(r["move"])
+            if isinstance(r.get("move"), Decimal): r["move"] = float(r["move"])
+
+        # pivot levels
+        cur.execute("SELECT * FROM level WHERE segm_id=%s ORDER BY id ASC", (id,))
+        lv = cur.fetchall()
+        for r in lv:
+            r["ts"] = r["ts"].isoformat()
+            if r.get("used_at_ts"):
+                r["used_at_ts"] = r["used_at_ts"].isoformat()
+            if isinstance(r.get("price"), Decimal): r["price"] = float(r["price"])
 
         # predictions
         cur.execute("SELECT * FROM pred WHERE segm_id=%s ORDER BY id ASC", (id,))
@@ -246,7 +256,7 @@ def api_segment(id: int):
             if isinstance(r.get("goal_usd"), Decimal):
                 r["goal_usd"] = float(r["goal_usd"])
 
-    return {"segm": _to_jsonable(seg), "ticks": ticks, "smal": sm, "bigm": bm, "pred": pd}
+    return {"segm": _to_jsonable(seg), "ticks": ticks, "smal": sm, "bigm": bm, "level": lv, "pred": pd}
 
 # SSE live: pushes new ticks and pred updates (tail segment)
 @app.get("/api/live")

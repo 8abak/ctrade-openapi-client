@@ -198,6 +198,83 @@ runBtn.onclick = async ()=>{
   }
 };
 
+async function loadSegment(segmId){
+  const r = await fetch(`${API}/segm?id=${segmId}`);
+  const data = await r.json();
+  currentSeg = data.segm;
+
+  const tickIndex = new Map(data.ticks.map(t=>[t.id, t]));
+  const {midSeries, smoothSeries} = mapTicksForSeries(data.ticks);
+
+  // small lines
+  const smalLines = buildSmallLines(data.smal || [], tickIndex);
+
+  // big move areas
+  const bigAreas  = buildBigAreas(data.bigm || []);
+
+  // preds
+  const predDots  = buildPredScatter(data.pred || [], tickIndex);
+
+  // levels -> markLine segments across full x-range
+  const xStart = data.ticks.length ? new Date(data.ticks[0].ts) : null;
+  const xEnd   = data.ticks.length ? new Date(data.ticks[data.ticks.length-1].ts) : null;
+  const levelLines = [];
+  if (xStart && xEnd){
+    for (const L of (data.level || [])){
+      const used = !!L.used_at_id;
+      levelLines.push({
+        lineStyle:{color: used ? (L.kind==='high' ? '#2ea043' : '#f85149') : '#8b949e', type:'dashed', width:1},
+        label:{show:true, formatter:`${L.kind}@${(+L.price).toFixed(2)}${used?' • used':''}`, position:'insideEndTop', color:'#c9d1d9'},
+        data:[
+          [{coord:[xStart, +L.price]}],
+          [{coord:[xEnd,   +L.price]}]
+        ]
+      });
+    }
+  }
+
+  chart.setOption({
+    series: [
+      {name:'mid', data: midSeries},
+      {name:'smooth', data: smoothSeries},
+      {name:'bigm', data: [], markArea:{itemStyle:{color:'rgba(234,179,8,0.18)'}, data: bigAreas}},
+      {name:'smal', data: smalLines},
+      {name:'pred', data: predDots}
+    ],
+    // add/refresh markLines via a dedicated invisible series so they render over the chart
+    markLine: undefined
+  });
+
+  // Use a dedicated helper series for level markLines
+  chart.setOption({
+    series: [
+      {}, {}, {}, {},
+      {},
+      {
+        // helper transparent line to carry markLine
+        name:'levels',
+        type:'line',
+        showSymbol:false,
+        data:[],
+        markLine:{
+          silent:true,
+          symbol:['none','none'],
+          data: levelLines.flatMap(x=>x.data),
+          lineStyle:{type:'dashed', width:1, color:'#8b949e'},
+          label:{show:false}
+        }
+      }
+    ]
+  });
+
+  const meta = data.segm;
+  const statsLine = `Segment #${meta.id} | ticks ${meta.start_id}..${meta.end_id} | span=${fmt2(meta.span)} | small=${(data.smal||[]).length} big=${(data.bigm||[]).length} preds=${(data.pred||[]).length} levels=${(data.level||[]).length}`;
+  segInfo.textContent = statsLine;
+}
+
+
+
+
 setupChart();
 loadOutcomes();
 window.addEventListener('resize', ()=>chart.resize());
