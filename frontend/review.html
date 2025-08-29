@@ -5,57 +5,73 @@
   <meta charset="utf-8"/>
   <title>ML Review — Price-Action Segments</title>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <link rel="icon" href="data:,">
   <style>
-    :root{
-      --bg:#0d1117; --panel:#161b22; --muted:#30363d; --text:#c9d1d9; --sub:#8b949e; --accent:#58a6ff; --good:#2ea043; --bad:#f85149;
-    }
+    :root{--bg:#0d1117; --panel:#161b22; --muted:#30363d; --text:#c9d1d9; --sub:#8b949e; --good:#2ea043; --bad:#f85149; --warn:#d29922}
     *{box-sizing:border-box}
-    body{margin:0;background:var(--bg);color:var(--text);font:14px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif}
-    header{padding:10px 14px;border-bottom:1px solid var(--muted);position:sticky;top:0;background:var(--bg);z-index:10}
+    body{margin:0;background:var(--bg);color:var(--text);font:14px/1.4 ui-sans-serif,system-ui}
+    header{padding:10px;border-bottom:1px solid var(--muted);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
     button{background:var(--panel);color:var(--text);border:1px solid var(--muted);padding:6px 10px;border-radius:8px;cursor:pointer}
-    button:hover{border-color:var(--accent)}
-    .row{display:grid;grid-template-columns:360px 1fr;gap:12px;padding:12px}
-    .card{background:var(--panel);border:1px solid var(--muted);border-radius:10px;overflow:hidden}
-    .card h3{margin:0;padding:10px 12px;border-bottom:1px solid var(--muted);font-size:13px;color:var(--sub)}
+    input,select,label{background:var(--panel);color:var(--text);border:1px solid var(--muted);border-radius:8px;padding:6px}
+    label{display:inline-flex;align-items:center;gap:6px}
+    main{display:grid;grid-template-columns:320px 1fr;height:calc(100vh - 56px)}
+    aside{border-right:1px solid var(--muted);overflow:auto}
+    .panel{padding:8px;height:100%}
     table{width:100%;border-collapse:collapse}
-    th,td{padding:8px;border-bottom:1px solid var(--muted);font-variant-numeric:tabular-nums}
-    th{position:sticky;top:0;background:var(--panel);text-align:left}
-    tr:hover{background:#0f131a}
-    .pill{padding:2px 6px;border-radius:999px;border:1px solid var(--muted);font-size:12px}
-    .pill.good{color:var(--good);border-color:var(--good)}
-    .pill.bad{color:var(--bad);border-color:var(--bad)}
-    #chart{height:560px}
-    .note{color:var(--sub);padding:8px 12px}
+    th,td{padding:6px 8px;border-bottom:1px solid var(--muted);white-space:nowrap}
+    th{position:sticky;top:0;background:var(--panel);z-index:1}
+    tr:hover{background:#0f141a;cursor:pointer}
+    .pill{display:inline-block;min-width:40px;text-align:center;padding:2px 6px;border-radius:999px;border:1px solid var(--muted);font-variant-numeric:tabular-nums}
+    .good{color:var(--good);border-color:var(--good)}
+    .bad{color:var(--bad);border-color:var(--bad)}
+    .zero{color:var(--sub)}
+    #chart{height:100%}
+    .legend{position:absolute;top:8px;right:12px;display:flex;gap:10px;font-size:12px}
+    .legend span{display:inline-flex;gap:6px;align-items:center}
+    .dot{width:10px;height:10px;border-radius:2px;display:inline-block}
+    .dot.mid{background:#79c0ff}
+    .dot.smooth{background:#a5d6a7}
+    .dot.smal{background:#ef4444}
+    .dot.bigm{background:#eab308}
+    .dot.pred{background:#60a5fa}
+    footer#seginfo{padding:6px 10px;border-top:1px solid var(--muted);font-variant-numeric:tabular-nums;color:var(--sub)}
+    .rightWrap{position:relative;display:flex;flex-direction:column}
   </style>
 </head>
 <body>
   <header>
-    <button id="runBtn">▶ Run until now (server)</button>
-    <span id="runStatus" class="note">idle</span>
+    <button id="run">▶ Run until now (server)</button><span id="runStat" style="color:var(--sub)">idle</span>
   </header>
-
-  <div class="row">
-    <div class="card">
-      <h3>Journal (Outcomes)</h3>
-      <div style="overflow:auto; max-height: calc(100vh - 140px);">
+  <main>
+    <aside>
+      <div class="panel">
         <table id="journal">
           <thead>
             <tr>
-              <th>ID</th><th>Time</th><th>Dur(s)</th><th>Preds</th><th>Ratio</th><th>Dir</th><th>Ticks</th>
+              <th>ID</th>
+              <th>Time</th>
+              <th>Dur(s)</th>
+              <th>Preds</th>
+              <th>Ratio</th>
+              <th>Dir</th>
+              <th>Ticks</th>
             </tr>
           </thead>
           <tbody></tbody>
         </table>
       </div>
-    </div>
-
-    <div class="card">
-      <h3>Segment</h3>
+    </aside>
+    <section class="rightWrap">
+      <div class="legend">
+        <span><i class="dot mid"></i>mid</span>
+        <span><i class="dot smooth"></i>smooth</span>
+        <span><i class="dot bigm"></i>bigm</span>
+        <span><i class="dot smal"></i>smal</span>
+        <span><i class="dot pred"></i>pred</span>
+      </div>
       <div id="chart"></div>
-      <div id="segInfo" class="note"></div>
-    </div>
-  </div>
+      <footer id="seginfo">Segment: —</footer>
+    </section>
+  </main>
 
   <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
   <script src="./review-core.js"></script>
