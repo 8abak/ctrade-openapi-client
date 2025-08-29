@@ -1,12 +1,15 @@
 //# PATH: frontend/live-core.js
+// Live chart with wheel-zoom, time x-axis, integer y-grid, rich tooltip, and optional label markers.
+// NOTE: Historical labels (bigm/smal/pred) are best viewed on /review.html:
+// open https://www.datavis.au/review.html, then click a Journal row to load its segment;
+// the chart overlays big movements (shaded), small moves (markers), and predictions (✓/✗).
 const API = '/api';
 
 const chart = echarts.init(document.getElementById('chart'));
-let rows = [];                 // [{id, ts, mid, bid?, ask?, spread?}]
-let preds = [];                // raw pred events
+let rows = [];   // [{id, ts, mid, bid?, ask?, spread?}]
+let preds = [];  // raw pred events
 let paused = false;
 let win = 2000;
-let showLabels = false;
 
 function setupChart(){
   chart.setOption({
@@ -14,49 +17,53 @@ function setupChart(){
     animation:false,
     tooltip:{
       trigger:'axis',
-      axisPointer:{type:'cross', label:{backgroundColor:'#161b22'}},
+      // Single vertical pointer (no horizontal line), cleaner measurement grid
+      axisPointer:{type:'line'},
       formatter:(params)=>{
-        // params is array; we care about the line point (seriesIndex 0)
         const p = params.find(x=>x.seriesName==='mid') || params[0];
         const d = p && p.data ? p.data.meta : null;
         if (!d) return '';
         const dt = new Date(d.ts);
         const date = dt.toLocaleDateString();
         const time = dt.toLocaleTimeString();
-        const labelsHere = [];
-        // show any predictions at this tick
-        const pHere = preds.filter(x=>x.at_id===d.id);
-        if (pHere.length){
-          pHere.forEach(x=>labelsHere.push(`pred:${x.dir} ${x.hit===true?'✓':x.hit===false?'✗':'?'}`));
-        }
-        // compose tooltip lines
+        // collect any prediction labels at this timestamp
+        const pHere = preds.filter(x=>x.at_ts && new Date(x.at_ts).getTime() === new Date(d.ts).getTime());
+        const labelsHere = pHere.map(x=>`pred:${x.dir} ${x.hit===true?'✓':x.hit===false?'✗':'?'}`);
+        const fmt = (v)=> (v===null || v===undefined) ? '' : (+v).toFixed(2);
         const lines = [
           `id: ${d.id}`,
           `${date} ${time}`,
-          `mid: ${d.mid !== undefined ? d.mid : ''}`,
-          `bid: ${d.bid !== undefined && d.bid !== null ? d.bid : ''}`,
-          `ask: ${d.ask !== undefined && d.ask !== null ? d.ask : ''}`,
-          `spread: ${d.spread !== undefined && d.spread !== null ? d.spread : ''}`,
+          `mid: ${fmt(d.mid)}`,
+          `bid: ${fmt(d.bid)}`,
+          `ask: ${fmt(d.ask)}`,
+          `spread: ${fmt(d.spread)}`
         ];
         if (labelsHere.length) lines.push(`labels: ${labelsHere.join(', ')}`);
-        return lines.filter(Boolean).join('<br/>');
+        return lines.join('<br/>');
       }
     },
     grid:{left:48,right:24,top:24,bottom:48},
     xAxis:{
       type:'time',
       axisLabel:{color:'#c9d1d9'},
-      axisLine:{lineStyle:{color:'#30363d'}}
+      axisLine:{lineStyle:{color:'#30363d'}},
+      // keep vertical pointer only
+      axisPointer:{show:true}
     },
     yAxis:{
       type:'value',
       scale:true,
-      axisLabel:{color:'#c9d1d9', formatter:(v)=> String(Math.round(v))},  // no decimals on axis labels
-      splitLine:{lineStyle:{color:'#30363d'}}
+      // Integer-spaced grid for stable vertical measurement
+      minInterval: 1,
+      splitNumber: 8,
+      axisLabel:{color:'#c9d1d9', formatter:(v)=> String(Math.round(v))},
+      splitLine:{lineStyle:{color:'#30363d'}},
+      // hide horizontal axis pointer line to avoid "double" lines per price
+      axisPointer:{show:false}
     },
-    dataZoom: [
+    dataZoom:[
       {type:'inside', xAxisIndex:0, filterMode:'weakFilter'},
-      {type:'slider', xAxisIndex:0, bottom:6}
+      {type:'slider',  xAxisIndex:0, bottom:6}
     ],
     series:[
       {
@@ -64,14 +71,13 @@ function setupChart(){
         type:'line',
         showSymbol:false,
         lineStyle:{width:1.5},
-        // we push objects: {value:[ts, mid], meta:{...fullRow}}
-        data:[]
+        data:[] // objects: {value:[ts, mid], meta:{...fullRow}}
       },
       {
         name:'pred',
         type:'scatter',
         symbolSize:10,
-        data:[], // elements: {value:[ts, y], p:{...}}
+        data:[], // objects: {value:[ts,y], p:{...}}
         label:{show:false, formatter:(p)=> p.data?.p?.hit===true?'✓':(p.data?.p?.hit===false?'✗':'?')}
       }
     ]
@@ -88,10 +94,10 @@ function rebuildLine(){
 
 function buildPredScatter(){
   if (!rows.length) return [];
-  const startTs = new Date(rows[Math.max(0, rows.length - win)].ts).getTime();
-  const endTs = new Date(rows[rows.length - 1].ts).getTime();
-  // map ts->mid for quick lookup
-  const tsToMid = new Map(rows.slice(-win).map(r=>[new Date(r.ts).getTime(), r.mid]));
+  const windowRows = rows.slice(-win);
+  const tsToMid = new Map(windowRows.map(r=>[new Date(r.ts).getTime(), r.mid]));
+  const startTs = new Date(windowRows[0].ts).getTime();
+  const endTs   = new Date(windowRows[windowRows.length-1].ts).getTime();
   const items = [];
   for (const p of preds){
     const ts = p.at_ts ? new Date(p.at_ts).getTime() : null;
@@ -115,7 +121,6 @@ function pushTick(t){
 }
 
 function pushPred(p){
-  // p has at_id, at_ts, dir, hit, etc. (from SSE)
   preds.push(p);
   chart.setOption({series:[{data: chart.getOption().series[0].data}, {data: buildPredScatter()}]});
 }
@@ -136,8 +141,8 @@ async function bootstrap(){
 setupChart();
 bootstrap();
 
+// --- Live SSE wiring (includes prediction markers when ML catches up) ---
 const es = new EventSource(`${API}/live`);
-es.onmessage = ()=>{};
 es.addEventListener('tick', ev=>{
   if (paused) return;
   const d = JSON.parse(ev.data);
@@ -145,7 +150,7 @@ es.addEventListener('tick', ev=>{
 });
 es.addEventListener('pred', ev=>{
   if (paused) return;
-  const d = JSON.parse(ev.data); // contains at_id, at_ts, hit, etc.
+  const d = JSON.parse(ev.data); // {at_id, at_ts, dir, hit, ...}
   pushPred(d);
 });
 
@@ -166,11 +171,10 @@ document.getElementById('win').onchange = (e)=>{
   win = +e.target.value;
   rebuildLine();
 };
+// Toggle visible labels on pred scatter (✓/✗ text)
 document.getElementById('labels')?.addEventListener('change', (e)=>{
-  // currently toggles label visibility for pred series
   const on = e.target.checked;
   chart.setOption({ series: [ {}, { label:{show:on} } ] });
 });
 
-// resize on window change
 window.addEventListener('resize', ()=>chart.resize());
