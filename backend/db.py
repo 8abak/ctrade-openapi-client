@@ -36,7 +36,7 @@ def columns_exist(conn, table, cols):
     return {c for c in cols if c in have}
 
 def detect_ts_col(conn):
-    # prefer 'ts' then 'timestamp' then 'time' then 'created_at'
+    """prefer 'ts' then 'timestamp' then 'time' then 'created_at'"""
     prefs = ["ts", "timestamp", "time", "created_at"]
     have = columns_exist(conn, "ticks", prefs)
     for p in prefs:
@@ -45,7 +45,7 @@ def detect_ts_col(conn):
     raise RuntimeError("No timestamp column found in ticks")
 
 def detect_mid_expr(conn):
-    # priority: price -> mid -> (bid+ask)/2.0
+    """priority: price -> mid -> (bid+ask)/2.0"""
     have = columns_exist(conn, "ticks", ["price", "mid", "bid", "ask"])
     if "price" in have:
         return "price"
@@ -54,3 +54,8 @@ def detect_mid_expr(conn):
     if {"bid","ask"}.issubset(have):
         return "(bid+ask)/2.0"
     raise RuntimeError("No price / bid+ask / mid columns found in ticks")
+
+def detect_bid_ask(conn):
+    """return tuple (has_bid, has_ask) booleans"""
+    have = columns_exist(conn, "ticks", ["bid", "ask"])
+    return ("bid" in have, "ask" in have)

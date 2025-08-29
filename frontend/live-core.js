@@ -2,9 +2,8 @@
 const API = '/api';
 
 const chart = echarts.init(document.getElementById('chart'));
-let xs = [], ys = [];
-let rawPreds = [];           // store all pred SSE payloads we receive
-let predsPlotted = [];       // current scatter items plotted
+let rows = [];                 // [{id, ts, mid, bid?, ask?, spread?}]
+let preds = [];                // raw pred events
 let paused = false;
 let win = 2000;
 let showLabels = false;
@@ -15,103 +14,110 @@ function setupChart(){
     animation:false,
     tooltip:{
       trigger:'axis',
-      axisPointer:{type:'cross', label:{backgroundColor:'#161b22'}}
+      axisPointer:{type:'cross', label:{backgroundColor:'#161b22'}},
+      formatter:(params)=>{
+        // params is array; we care about the line point (seriesIndex 0)
+        const p = params.find(x=>x.seriesName==='mid') || params[0];
+        const d = p && p.data ? p.data.meta : null;
+        if (!d) return '';
+        const dt = new Date(d.ts);
+        const date = dt.toLocaleDateString();
+        const time = dt.toLocaleTimeString();
+        const labelsHere = [];
+        // show any predictions at this tick
+        const pHere = preds.filter(x=>x.at_id===d.id);
+        if (pHere.length){
+          pHere.forEach(x=>labelsHere.push(`pred:${x.dir} ${x.hit===true?'✓':x.hit===false?'✗':'?'}`));
+        }
+        // compose tooltip lines
+        const lines = [
+          `id: ${d.id}`,
+          `${date} ${time}`,
+          `mid: ${d.mid !== undefined ? d.mid : ''}`,
+          `bid: ${d.bid !== undefined && d.bid !== null ? d.bid : ''}`,
+          `ask: ${d.ask !== undefined && d.ask !== null ? d.ask : ''}`,
+          `spread: ${d.spread !== undefined && d.spread !== null ? d.spread : ''}`,
+        ];
+        if (labelsHere.length) lines.push(`labels: ${labelsHere.join(', ')}`);
+        return lines.filter(Boolean).join('<br/>');
+      }
     },
-    grid:{left:48,right:24,top:24,bottom:36},
+    grid:{left:48,right:24,top:24,bottom:48},
     xAxis:{
-      type:'category',
+      type:'time',
       axisLabel:{color:'#c9d1d9'},
       axisLine:{lineStyle:{color:'#30363d'}}
     },
     yAxis:{
-      type:'value',scale:true,
-      axisLabel:{color:'#c9d1d9'},
+      type:'value',
+      scale:true,
+      axisLabel:{color:'#c9d1d9', formatter:(v)=> String(Math.round(v))},  // no decimals on axis labels
       splitLine:{lineStyle:{color:'#30363d'}}
     },
-    // <<< mouse-wheel zoom & drag >>>
     dataZoom: [
-      {type:'inside', xAxisIndex:0, filterMode:'weakFilter'}, // wheel, pinch, drag inside
-      {type:'slider', xAxisIndex:0, bottom:6}                  // visible slider
+      {type:'inside', xAxisIndex:0, filterMode:'weakFilter'},
+      {type:'slider', xAxisIndex:0, bottom:6}
     ],
     series:[
       {
         name:'mid',
         type:'line',
-        data:[],
         showSymbol:false,
-        label:{show:false},
-        lineStyle:{width:1.5}
+        lineStyle:{width:1.5},
+        // we push objects: {value:[ts, mid], meta:{...fullRow}}
+        data:[]
       },
       {
         name:'pred',
         type:'scatter',
-        data:[],
         symbolSize:10,
-        encode:{x:0,y:1},
+        data:[], // elements: {value:[ts, y], p:{...}}
         label:{show:false, formatter:(p)=> p.data?.p?.hit===true?'✓':(p.data?.p?.hit===false?'✗':'?')}
       }
     ]
   });
 }
 
-function setSeriesLabels(show){
-  showLabels = !!show;
-  chart.setOption({
-    series: [
-      {label:{show: showLabels}},                   // mid line values (usually off)
-      {label:{show: showLabels}}                    // pred symbols
-    ]
-  });
+function rebuildLine(){
+  const data = rows.slice(-win).map(r=>({
+    value:[new Date(r.ts), r.mid],
+    meta:r
+  }));
+  chart.setOption({series:[{data}, {data: buildPredScatter()}]});
 }
 
-function idToIndex(id){
-  // xs is array of tick ids (category labels). For perf we can binary search, but indexOf is OK at 2k window.
-  return xs.indexOf(id);
-}
-
-function rebuildPredScatter(){
-  const minId = xs[0], maxId = xs[xs.length-1];
+function buildPredScatter(){
+  if (!rows.length) return [];
+  const startTs = new Date(rows[Math.max(0, rows.length - win)].ts).getTime();
+  const endTs = new Date(rows[rows.length - 1].ts).getTime();
+  // map ts->mid for quick lookup
+  const tsToMid = new Map(rows.slice(-win).map(r=>[new Date(r.ts).getTime(), r.mid]));
   const items = [];
-  for (const p of rawPreds){
-    if (p.at_id >= minId && p.at_id <= maxId){
-      const idx = idToIndex(p.at_id);
-      if (idx >= 0){
-        const y = ys[idx];
-        items.push({
-          value:[idx, y],
-          p,
-          itemStyle:{ color: p.hit===true ? '#2ea043' : (p.hit===false ? '#f85149' : '#8b949e') },
-          symbol: p.hit==null ? 'circle' : (p.hit ? 'triangle' : 'rect')
-        });
-      }
-    }
+  for (const p of preds){
+    const ts = p.at_ts ? new Date(p.at_ts).getTime() : null;
+    if (!ts || ts < startTs || ts > endTs) continue;
+    const y = tsToMid.get(ts);
+    if (y === undefined) continue;
+    items.push({
+      value:[ts, y],
+      p,
+      itemStyle:{ color: p.hit===true ? '#2ea043' : (p.hit===false ? '#f85149' : '#8b949e') },
+      symbol: p.hit==null ? 'circle' : (p.hit ? 'triangle' : 'rect')
+    });
   }
-  predsPlotted = items;
-  chart.setOption({series:[{data:ys}, {data:predsPlotted}]});
+  return items;
 }
 
-function pushTick(id, mid){
-  xs.push(id); ys.push(mid);
-  if (xs.length>win){ xs.shift(); ys.shift(); }
-  chart.setOption({xAxis:{data:xs}, series:[{data:ys}]});
-  // keep preds aligned with the visible window
-  rebuildPredScatter();
+function pushTick(t){
+  rows.push(t);
+  if (rows.length>win*2){ rows = rows.slice(-win*2); } // bound memory
+  rebuildLine();
 }
 
 function pushPred(p){
-  rawPreds.push(p);
-  // bail if not visible yet
-  const idx = idToIndex(p.at_id);
-  if (idx < 0) return;
-  const y = ys[idx];
-  predsPlotted.push({
-    value:[idx, y],
-    p,
-    itemStyle:{ color: p.hit===true ? '#2ea043' : (p.hit===false ? '#f85149' : '#8b949e') },
-    symbol: p.hit==null ? 'circle' : (p.hit ? 'triangle' : 'rect')
-  });
-  if (predsPlotted.length>win) predsPlotted.shift();
-  chart.setOption({series:[{data:ys}, {data:predsPlotted}]});
+  // p has at_id, at_ts, dir, hit, etc. (from SSE)
+  preds.push(p);
+  chart.setOption({series:[{data: chart.getOption().series[0].data}, {data: buildPredScatter()}]});
 }
 
 async function bootstrap(){
@@ -120,10 +126,11 @@ async function bootstrap(){
   const end = last.lastId;
   const start = Math.max(1, end - win + 1);
   const r = await fetch(`${API}/ticks?from_id=${start}&to_id=${end}`);
-  const rows = await r.json();
-  xs = rows.map(r=>r.id);
-  ys = rows.map(r=>r.mid);
-  chart.setOption({xAxis:{data:xs}, series:[{data:ys}, {data:[]}]});
+  const arr = await r.json();
+  rows = arr.map(r=>({
+    id:r.id, ts:r.ts, mid:r.mid, bid:r.bid, ask:r.ask, spread:r.spread
+  }));
+  rebuildLine();
 }
 
 setupChart();
@@ -134,11 +141,11 @@ es.onmessage = ()=>{};
 es.addEventListener('tick', ev=>{
   if (paused) return;
   const d = JSON.parse(ev.data);
-  pushTick(d.id, d.mid);
+  pushTick({ id:d.id, ts:d.ts, mid:d.mid, bid:d.bid, ask:d.ask, spread:d.spread });
 });
 es.addEventListener('pred', ev=>{
   if (paused) return;
-  const d = JSON.parse(ev.data); // contains at_id, hit, etc.
+  const d = JSON.parse(ev.data); // contains at_id, at_ts, hit, etc.
   pushPred(d);
 });
 
@@ -151,20 +158,19 @@ document.getElementById('go').onclick = async ()=>{
   if (!val) return;
   const end = val, start = Math.max(1, end - win + 1);
   const r = await fetch(`${API}/ticks?from_id=${start}&to_id=${end}`);
-  const rows = await r.json();
-  xs = rows.map(r=>r.id);
-  ys = rows.map(r=>r.mid);
-  chart.setOption({xAxis:{data:xs}, series:[{data:ys}]});
-  rebuildPredScatter();
+  const arr = await r.json();
+  rows = arr.map(r=>({id:r.id, ts:r.ts, mid:r.mid, bid:r.bid, ask:r.ask, spread:r.spread}));
+  rebuildLine();
 };
 document.getElementById('win').onchange = (e)=>{
   win = +e.target.value;
-  // shrink to new window immediately
-  if (xs.length>win){ xs = xs.slice(-win); ys = ys.slice(-win); }
-  chart.setOption({xAxis:{data:xs}, series:[{data:ys}]});
-  rebuildPredScatter();
+  rebuildLine();
 };
-document.getElementById('labels').onchange = (e)=> setSeriesLabels(e.target.checked);
+document.getElementById('labels')?.addEventListener('change', (e)=>{
+  // currently toggles label visibility for pred series
+  const on = e.target.checked;
+  chart.setOption({ series: [ {}, { label:{show:on} } ] });
+});
 
-// Expose resize handler (useful if user resizes window)
+// resize on window change
 window.addEventListener('resize', ()=>chart.resize());

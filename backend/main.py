@@ -14,8 +14,7 @@ from fastapi.staticfiles import StaticFiles
 import psycopg2
 import psycopg2.extras
 
-from backend.db import get_conn, dict_cur, detect_ts_col, detect_mid_expr, scalar
-from backend.runner import Runner
+from backend.db import get_conn, dict_cur, detect_ts_col, detect_mid_expr, detect_bid_ask, scalar
 
 app = FastAPI(title="cTrade backend")
 
@@ -31,7 +30,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-VERSION = "2025.08.29.price-action-segments.bigm"
+VERSION = "2025.08.29.price-action-segments.bigm.v2"
 
 def _to_jsonable(o):
     if isinstance(o, Decimal):
@@ -44,8 +43,8 @@ def _to_jsonable(o):
         return [_to_jsonable(v) for v in o]
     return o
 
-def _ts_mid_expr(conn):
-    return detect_ts_col(conn), detect_mid_expr(conn)
+def _ts_mid_cols(conn):
+    return detect_ts_col(conn), detect_mid_expr(conn), detect_bid_ask(conn)
 
 # ----------------- Basic/legacy endpoints (kept) -----------------
 @app.get("/")
@@ -83,7 +82,7 @@ def run_sql_query(query: str):
 @app.get("/ticks/lastid")
 def get_lastid():
     conn = get_conn()
-    ts_col, mid_expr = _ts_mid_expr(conn)
+    ts_col, mid_expr, _ = _ts_mid_cols(conn)
     with dict_cur(conn) as cur:
         cur.execute(f"SELECT MAX(id) AS last_id FROM ticks")
         last_id = int(cur.fetchone()["last_id"] or 0)
@@ -96,28 +95,34 @@ def get_lastid():
 def get_recent_ticks(limit: int = 2200):
     limit = max(1, min(limit, 10000))
     conn = get_conn()
-    ts_col, mid_expr = _ts_mid_expr(conn)
+    ts_col, mid_expr, (has_bid, has_ask) = _ts_mid_cols(conn)
+    bid_sel = ", bid" if has_bid else ""
+    ask_sel = ", ask" if has_ask else ""
     with dict_cur(conn) as cur:
         cur.execute(f"""
-          SELECT id, {ts_col} AS ts, {mid_expr} AS mid
+          SELECT id, {ts_col} AS ts, {mid_expr} AS mid{bid_sel}{ask_sel}
           FROM ticks
           ORDER BY id DESC
           LIMIT %s
         """, (limit,))
         rows = list(reversed(cur.fetchall()))
         for r in rows:
-            if isinstance(r["mid"], Decimal):
-                r["mid"] = float(r["mid"])
+            if isinstance(r["mid"], Decimal): r["mid"] = float(r["mid"])
+            if has_bid and isinstance(r["bid"], Decimal): r["bid"] = float(r["bid"])
+            if has_ask and isinstance(r["ask"], Decimal): r["ask"] = float(r["ask"])
+            r["spread"] = (r.get("ask") - r.get("bid")) if (has_bid and has_ask and r.get("ask") is not None and r.get("bid") is not None) else None
             r["ts"] = r["ts"].isoformat()
     return rows
 
 @app.get("/ticks/before/{tickid}")
 def get_ticks_before(tickid: int, limit: int = 2000):
     conn = get_conn()
-    ts_col, mid_expr = _ts_mid_expr(conn)
+    ts_col, mid_expr, (has_bid, has_ask) = _ts_mid_cols(conn)
+    bid_sel = ", bid" if has_bid else ""
+    ask_sel = ", ask" if has_ask else ""
     with dict_cur(conn) as cur:
         cur.execute(f"""
-          SELECT id, {ts_col} AS ts, {mid_expr} AS mid
+          SELECT id, {ts_col} AS ts, {mid_expr} AS mid{bid_sel}{ask_sel}
           FROM ticks
           WHERE id <= %s
           ORDER BY id DESC
@@ -125,18 +130,22 @@ def get_ticks_before(tickid: int, limit: int = 2000):
         """, (tickid, limit))
         rows = list(reversed(cur.fetchall()))
         for r in rows:
-            if isinstance(r["mid"], Decimal):
-                r["mid"] = float(r["mid"])
+            if isinstance(r["mid"], Decimal): r["mid"] = float(r["mid"])
+            if has_bid and isinstance(r["bid"], Decimal): r["bid"] = float(r["bid"])
+            if has_ask and isinstance(r["ask"], Decimal): r["ask"] = float(r["ask"])
+            r["spread"] = (r.get("ask") - r.get("bid")) if (has_bid and has_ask and r.get("ask") is not None and r.get("bid") is not None) else None
             r["ts"] = r["ts"].isoformat()
     return rows
 
 @app.get("/ticks/range")
 def ticks_range(start: int, end: int, limit: int = 200000):
     conn = get_conn()
-    ts_col, mid_expr = _ts_mid_expr(conn)
+    ts_col, mid_expr, (has_bid, has_ask) = _ts_mid_cols(conn)
+    bid_sel = ", bid" if has_bid else ""
+    ask_sel = ", ask" if has_ask else ""
     with dict_cur(conn) as cur:
         cur.execute(f"""
-          SELECT id, {ts_col} AS ts, {mid_expr} AS mid
+          SELECT id, {ts_col} AS ts, {mid_expr} AS mid{bid_sel}{ask_sel}
           FROM ticks
           WHERE id BETWEEN %s AND %s
           ORDER BY id ASC
@@ -144,8 +153,10 @@ def ticks_range(start: int, end: int, limit: int = 200000):
         """, (start, end, limit))
         rows = cur.fetchall()
         for r in rows:
-            if isinstance(r["mid"], Decimal):
-                r["mid"] = float(r["mid"])
+            if isinstance(r["mid"], Decimal): r["mid"] = float(r["mid"])
+            if has_bid and isinstance(r["bid"], Decimal): r["bid"] = float(r["bid"])
+            if has_ask and isinstance(r["ask"], Decimal): r["ask"] = float(r["ask"])
+            r["spread"] = (r.get("ask") - r.get("bid")) if (has_bid and has_ask and r.get("ask") is not None and r.get("bid") is not None) else None
             r["ts"] = r["ts"].isoformat()
     return rows
 
@@ -155,6 +166,8 @@ def api_ticks(from_id: int, to_id: int):
     return ticks_range(from_id, to_id, 200000)
 
 # ----------------- New ML endpoints -----------------
+from backend.runner import Runner
+
 @app.post("/api/run")
 def api_run():
     r = Runner().run_until_now()
@@ -177,16 +190,16 @@ def api_outcome(limit: int = 50):
             r["time"] = r["time"].isoformat()
             r["start_ts"] = r["start_ts"].isoformat()
             r["end_ts"] = r["end_ts"].isoformat()
-            if isinstance(r["ratio"], Decimal):
-                r["ratio"] = float(r["ratio"])
-            if isinstance(r["span"], Decimal):
-                r["span"] = float(r["span"])
+            if isinstance(r["ratio"], Decimal): r["ratio"] = float(r["ratio"])
+            if isinstance(r["span"], Decimal): r["span"] = float(r["span"])
     return rows
 
 @app.get("/api/segm")
 def api_segment(id: int):
     conn = get_conn()
-    ts_col, mid_expr = _ts_mid_expr(conn)
+    ts_col, mid_expr, (has_bid, has_ask) = _ts_mid_cols(conn)
+    bid_sel = ", bid" if has_bid else ""
+    ask_sel = ", ask" if has_ask else ""
     with dict_cur(conn) as cur:
         cur.execute("SELECT * FROM segm WHERE id=%s", (id,))
         seg = cur.fetchone()
@@ -194,15 +207,17 @@ def api_segment(id: int):
             return JSONResponse({"detail":"not found"}, status_code=404)
         # ticks bounded to the segment
         cur.execute(f"""
-          SELECT id, {ts_col} AS ts, {mid_expr} AS mid
+          SELECT id, {ts_col} AS ts, {mid_expr} AS mid{bid_sel}{ask_sel}
           FROM ticks
           WHERE id BETWEEN %s AND %s
           ORDER BY id ASC
         """, (seg["start_id"], seg["end_id"]))
         ticks = cur.fetchall()
         for r in ticks:
-            if isinstance(r["mid"], Decimal):
-                r["mid"] = float(r["mid"])
+            if isinstance(r["mid"], Decimal): r["mid"] = float(r["mid"])
+            if has_bid and isinstance(r.get("bid"), Decimal): r["bid"] = float(r["bid"])
+            if has_ask and isinstance(r.get("ask"), Decimal): r["ask"] = float(r["ask"])
+            r["spread"] = (r.get("ask") - r.get("bid")) if (has_bid and has_ask and r.get("ask") is not None and r.get("bid") is not None) else None
             r["ts"] = r["ts"].isoformat()
 
         # small moves
@@ -211,8 +226,7 @@ def api_segment(id: int):
         for r in sm:
             r["a_ts"] = r["a_ts"].isoformat()
             r["b_ts"] = r["b_ts"].isoformat()
-            if isinstance(r["move"], Decimal):
-                r["move"] = float(r["move"])
+            if isinstance(r["move"], Decimal): r["move"] = float(r["move"])
 
         # big moves
         cur.execute("SELECT * FROM bigm WHERE segm_id=%s ORDER BY id ASC", (id,))
@@ -220,8 +234,7 @@ def api_segment(id: int):
         for r in bm:
             r["a_ts"] = r["a_ts"].isoformat()
             r["b_ts"] = r["b_ts"].isoformat()
-            if isinstance(r["move"], Decimal):
-                r["move"] = float(r["move"])
+            if isinstance(r["move"], Decimal): r["move"] = float(r["move"])
 
         # predictions
         cur.execute("SELECT * FROM pred WHERE segm_id=%s ORDER BY id ASC", (id,))
@@ -239,7 +252,9 @@ def api_segment(id: int):
 @app.get("/api/live")
 def api_live():
     conn = get_conn()
-    ts_col, mid_expr = _ts_mid_expr(conn)
+    ts_col, mid_expr, (has_bid, has_ask) = _ts_mid_cols(conn)
+    bid_sel = ", bid" if has_bid else ""
+    ask_sel = ", ask" if has_ask else ""
 
     def gen():
         last_tick_id = scalar(conn, "SELECT COALESCE(MAX(id),0) FROM ticks") or 0
@@ -249,7 +264,7 @@ def api_live():
             # ticks
             with dict_cur(conn) as cur:
                 cur.execute(f"""
-                   SELECT id, {ts_col} AS ts, {mid_expr} AS mid
+                   SELECT id, {ts_col} AS ts, {mid_expr} AS mid{bid_sel}{ask_sel}
                    FROM ticks
                    WHERE id > %s
                    ORDER BY id ASC
@@ -257,7 +272,10 @@ def api_live():
                 for r in cur.fetchall():
                     last_tick_id = int(r["id"])
                     mid = float(r["mid"]) if isinstance(r["mid"], Decimal) else r["mid"]
-                    data = {"type": "tick", "id": last_tick_id, "ts": r["ts"].isoformat(), "mid": mid}
+                    bid = float(r["bid"]) if (has_bid and isinstance(r.get("bid"), Decimal)) else (r.get("bid") if has_bid else None)
+                    ask = float(r["ask"]) if (has_ask and isinstance(r.get("ask"), Decimal)) else (r.get("ask") if has_ask else None)
+                    spread = (ask - bid) if (ask is not None and bid is not None) else None
+                    data = {"type": "tick", "id": last_tick_id, "ts": r["ts"].isoformat(), "mid": mid, "bid": bid, "ask": ask, "spread": spread}
                     yield f"event: tick\ndata: {json.dumps(_to_jsonable(data))}\n\n"
             # preds
             with dict_cur(conn) as cur:
