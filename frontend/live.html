@@ -7,12 +7,22 @@
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <style>
     :root{--bg:#0d1117; --panel:#161b22; --muted:#30363d; --text:#c9d1d9; --sub:#8b949e}
+    *{box-sizing:border-box}
     body{margin:0;background:var(--bg);color:var(--text);font:14px/1.4 ui-sans-serif,system-ui}
     header{padding:10px;border-bottom:1px solid var(--muted);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
     button{background:var(--panel);color:var(--text);border:1px solid var(--muted);padding:6px 10px;border-radius:8px;cursor:pointer}
     input,select,label{background:var(--panel);color:var(--text);border:1px solid var(--muted);border-radius:8px;padding:6px}
     label{display:inline-flex;align-items:center;gap:6px}
-    #chart{height:80vh}
+    #chart{height:calc(100vh - 56px)}
+    .legend{position:absolute;top:8px;right:12px;display:flex;gap:10px;font-size:12px}
+    .legend span{display:inline-flex;gap:6px;align-items:center}
+    .dot{width:10px;height:10px;border-radius:2px;display:inline-block}
+    .mid{background:#79c0ff}
+    .smooth{background:#a5d6a7}
+    .pred{background:#60a5fa}
+    .smal{background:#ef4444}
+    .bigm{background:#eab308}
+    .level{background:#8b949e}
   </style>
 </head>
 <body>
@@ -20,15 +30,19 @@
     <button id="toggle">Pause</button>
     <label>Window
       <select id="win">
-        <option value="1000">1k</option>
-        <option value="2000" selected>2k</option>
+        <option value="2000">2k</option>
         <option value="5000">5k</option>
+        <option value="10000">10k</option>
+        <option value="20000">20k</option>
       </select>
     </label>
-    <label>Jump to tick <input id="jump" type="number" placeholder="id"/></label>
+    <label>Jump to tick <input id="jump" type="number" placeholder="id" style="width:140px"></label>
     <button id="go">Go</button>
-    <label><input type="checkbox" id="labels"> Labels</label>
-    <span id="status"></span>
+
+    <label><input type="checkbox" id="ckPred" checked>Pred</label>
+    <label><input type="checkbox" id="ckLevels" checked>Levels</label>
+    <label><input type="checkbox" id="ckSmals">Small</label>
+    <label><input type="checkbox" id="ckBigm">Big</label>
   </header>
 
   <div id="chart"></div>
