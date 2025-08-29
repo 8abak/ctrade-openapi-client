@@ -8,22 +8,26 @@
   <style>
     :root{--bg:#0d1117; --panel:#161b22; --muted:#30363d; --text:#c9d1d9; --sub:#8b949e}
     body{margin:0;background:var(--bg);color:var(--text);font:14px/1.4 ui-sans-serif,system-ui}
-    header{padding:10px;border-bottom:1px solid var(--muted);display:flex;gap:8px;align-items:center}
+    header{padding:10px;border-bottom:1px solid var(--muted);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
     button{background:var(--panel);color:var(--text);border:1px solid var(--muted);padding:6px 10px;border-radius:8px;cursor:pointer}
-    input,select{background:var(--panel);color:var(--text);border:1px solid var(--muted);border-radius:8px;padding:6px}
+    input,select,label{background:var(--panel);color:var(--text);border:1px solid var(--muted);border-radius:8px;padding:6px}
+    label{display:inline-flex;align-items:center;gap:6px}
     #chart{height:80vh}
   </style>
 </head>
 <body>
   <header>
     <button id="toggle">Pause</button>
-    <label>Window <select id="win">
-      <option value="1000">1k</option>
-      <option value="2000" selected>2k</option>
-      <option value="5000">5k</option>
-    </select></label>
+    <label>Window
+      <select id="win">
+        <option value="1000">1k</option>
+        <option value="2000" selected>2k</option>
+        <option value="5000">5k</option>
+      </select>
+    </label>
     <label>Jump to tick <input id="jump" type="number" placeholder="id"/></label>
     <button id="go">Go</button>
+    <label><input type="checkbox" id="labels"> Labels</label>
     <span id="status"></span>
   </header>
 
