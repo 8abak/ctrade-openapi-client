@@ -1,46 +1,39 @@
-# PATH: frontend/sql.html
-<!doctype html>
+<!-- PATH: frontend/sql.html -->
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8"/>
-  <title>SQL Console</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta charset="utf-8" />
+  <title>SQL Console (dark)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    :root{--bg:#0d1117; --panel:#161b22; --muted:#30363d; --text:#c9d1d9; --sub:#8b949e; --accent:#58a6ff}
-    *{box-sizing:border-box}
-    body{margin:0;background:var(--bg);color:var(--text);font:14px/1.4 ui-sans-serif,system-ui}
-    header{padding:10px;border-bottom:1px solid var(--muted)}
-    .grid{display:grid;grid-template-columns:280px 1fr;gap:12px;padding:12px}
-    .card{background:var(--panel);border:1px solid var(--muted);border-radius:10px;overflow:hidden}
-    .card h3{margin:0;padding:10px 12px;border-bottom:1px solid var(--muted);font-size:13px;color:var(--sub)}
-    select,button,textarea{background:var(--panel);color:var(--text);border:1px solid var(--muted);border-radius:8px;padding:6px}
-    table{width:100%;border-collapse:collapse}
-    th,td{padding:6px;border-bottom:1px solid var(--muted);font-variant-numeric:tabular-nums}
-    th{position:sticky;top:0;background:var(--panel)}
+    body{margin:0;background:#0f1419;color:#e6edf3;font:14px/1.4 system-ui,Segoe UI,Roboto,Arial}
+    .wrap{display:grid;grid-template-columns:240px 1fr;gap:12px;padding:12px}
+    .card{background:#111826;border:1px solid #1f2a37;border-radius:10px;padding:12px}
+    .title{font-weight:600;margin-bottom:8px;color:#93a4b8}
+    #tables{height:60vh;overflow:auto;font-family:ui-monospace,Consolas,monaco,monospace}
+    #query{width:100%;height:18vh;background:#0b1220;color:#e6edf3;border:1px solid #1f2a37;border-radius:8px;padding:8px}
+    button{background:#334155;border:0;color:#e6edf3;padding:8px 12px;border-radius:8px;cursor:pointer}
+    button:hover{background:#455a75}
+    table{width:100%;border-collapse:collapse;margin-top:12px}
+    th,td{border-bottom:1px solid #1f2a37;padding:6px 8px;text-align:left;font-family:ui-monospace,Consolas,monaco,monospace;white-space:nowrap}
+    .muted{color:#93a4b8}
   </style>
 </head>
 <body>
-  <header><strong>SQL Console (dark)</strong></header>
-  <div class="grid">
+  <div class="wrap">
     <div class="card">
-      <h3>Tables</h3>
-      <div style="padding:10px">
-        <select id="tables" size="12" style="width:100%"></select>
-        <button id="refresh">Refresh</button>
-        <p style="color:#8b949e">Default query: <code>SELECT * FROM &lt;table&gt; ORDER BY id DESC LIMIT 100;</code></p>
-      </div>
+      <div class="title">Tables</div>
+      <div id="tables"></div>
+      <div style="margin-top:8px;"><button id="btnRefresh">Refresh</button></div>
+      <div class="muted" style="margin-top:10px;">Default query:<br/>SELECT * FROM &lt;table&gt; ORDER BY id DESC LIMIT 100;</div>
     </div>
     <div class="card">
-      <h3>Query</h3>
-      <div style="padding:10px;display:flex;gap:10px;align-items:center">
-        <textarea id="sql" rows="4" style="width:100%"></textarea>
-        <button id="run">Run</button>
-      </div>
-      <div style="overflow:auto; max-height: calc(100vh - 220px)">
-        <table id="grid"><thead></thead><tbody></tbody></table>
-      </div>
+      <div class="title">Query</div>
+      <textarea id="query" spellcheck="false"></textarea>
+      <div style="margin-top:8px;"><button id="btnRun">Run</button></div>
+      <div id="results"></div>
     </div>
   </div>
-  <script src="./sql-core.js"></script>
+  <script src="sql-core.js"></script>
 </body>
 </html>

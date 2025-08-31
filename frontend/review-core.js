@@ -16,6 +16,114 @@ function pillClass(v){
   return v>0 ? 'pill good' : 'pill bad';
 }
 
+// === helpers: time & lookup ===
+const ms = t => (typeof t === 'number' ? t : +new Date(t));
+function buildTickArrays(ticks) {
+  const tms = new Array(ticks.length);
+  const mids = new Array(ticks.length);
+  const id2idx = new Map();
+  for (let i = 0; i < ticks.length; i++) {
+    tms[i]  = ms(ticks[i].ts);
+    mids[i] = +ticks[i].mid;
+    if (ticks[i].id != null) id2idx.set(ticks[i].id, i);
+  }
+  return { tms, mids, id2idx };
+}
+function lowerBound(arr, x) { // arr is sorted ascending
+  let lo = 0, hi = arr.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (arr[mid] < x) lo = mid + 1; else hi = mid;
+  }
+  return Math.min(Math.max(lo, 0), arr.length - 1);
+}
+
+function makeShapes(ticks, bigms, smals) {
+  const { tms, mids, id2idx } = buildTickArrays(ticks);
+
+  // ----- BIG moves → markArea rectangles, y-range = min..max(mid) within [a..b]
+  const bigAreas = [];
+  for (const bm of (bigms || [])) {
+    // Accept shapes as [a_ts,b_ts,dir] or [a_ts,b_ts,dir,a_id,b_id]
+    const aTs = bm[0], bTs = bm[1], dir = (bm[2] || '').toString();
+    const aMs = ms(aTs), bMs = ms(bTs);
+    let i0 = (bm[3] != null && id2idx.has(bm[3])) ? id2idx.get(bm[3]) : lowerBound(tms, aMs);
+    let i1 = (bm[4] != null && id2idx.has(bm[4])) ? id2idx.get(bm[4]) : lowerBound(tms, bMs);
+    if (i0 > i1) [i0, i1] = [i1, i0];
+
+    let lo = +Infinity, hi = -Infinity;
+    for (let i = i0; i <= i1; i++) { const v = mids[i]; if (v < lo) lo = v; if (v > hi) hi = v; }
+    const color = dir.startsWith('u') ? 'rgba(60,160,60,0.16)' : 'rgba(180,80,50,0.16)';
+
+    bigAreas.push([
+      { xAxis: aMs, yAxis: lo },
+      { xAxis: bMs, yAxis: hi, itemStyle: { color } }
+    ]);
+  }
+
+  // ----- SMALL moves → disjoint line segments (zig-zag)
+  // Accept smals as [a_ts,b_ts,a_id,b_id] (ids optional)
+  const smallLine = [];
+  for (const s of (smals || [])) {
+    const aTs = s[0], bTs = s[1];
+    const aId = s[2], bId = s[3];
+
+    let i0 = (aId != null && id2idx.has(aId)) ? id2idx.get(aId) : lowerBound(tms, ms(aTs));
+    let i1 = (bId != null && id2idx.has(bId)) ? id2idx.get(bId) : lowerBound(tms, ms(bTs));
+    smallLine.push([tms[i0], mids[i0]]);
+    smallLine.push([tms[i1], mids[i1]]);
+    smallLine.push([null, null]); // break segment
+  }
+
+  return { bigAreas, smallLine };
+}
+
+function buildOptionForSegment(ticks, bigms, smals, show = { ticks:true, big:true, small:true }) {
+  const tms   = ticks.map(t => ms(t.ts));
+  const mids  = ticks.map(t => +t.mid);
+  const { bigAreas, smallLine } = makeShapes(ticks, bigms, smals);
+
+  return {
+    animation: false,
+    grid: { left: 60, right: 20, top: 20, bottom: 40, containLabel: false },
+    tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
+    legend: { top: 0, selected: { 'Ticks': !!show.ticks, 'Small moves': !!show.small } },
+    xAxis: { type: 'time' },
+    yAxis: { type: 'value', scale: true, axisLabel: { formatter: v => Math.round(v) } },
+    dataZoom: [
+      { type: 'inside', xAxisIndex: 0, filterMode: 'none' },
+      { type: 'slider', xAxisIndex: 0, filterMode: 'none', height: 22, bottom: 4 }
+    ],
+    series: [
+      show.ticks ? {
+        name: 'Ticks', type: 'line', showSymbol: false, sampling: 'lttb',
+        lineStyle: { width: 1 },
+        data: tms.map((x, i) => [x, mids[i]]), z: 1
+      } : null,
+      show.small ? {
+        name: 'Small moves', type: 'line', showSymbol: false, connectNulls: false,
+        lineStyle: { width: 2 },
+        data: smallLine, z: 3
+      } : null,
+    ].filter(Boolean),
+    markArea: show.big ? { silent: true, data: bigAreas } : undefined,
+  };
+}
+
+// === wherever you currently redraw ===
+function drawSegment(segData) {
+  // segData should expose: ticks, bigms, smals
+  const option = buildOptionForSegment(segData.ticks, segData.bigms, segData.smals, {
+    ticks: true,
+    big:   document.getElementById('ckBigs')?.checked ?? true,
+    small: document.getElementById('ckSmals')?.checked ?? true,
+  });
+
+  chart.clear(); // important: fully reset
+  chart.setOption(option, { notMerge: true, replaceMerge: ['series','dataset','xAxis','yAxis','markArea','dataZoom'] });
+}
+
+
 function setupChart(){
   chart.setOption({
     backgroundColor:'#0d1117',
