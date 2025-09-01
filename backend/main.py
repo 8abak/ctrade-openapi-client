@@ -226,45 +226,70 @@ def api_ticks(from_id: int, to_id: int):
 # list of segments for the left-side table
 @app.get("/api/segms")
 def api_segms(limit: int = 200):
+    """
+    Return a lightweight list of segments for the left pane.
+    - Always returns ratio, but uses 0.0 as a neutral default (no fragile join).
+    - Counts preds only if table exists; otherwise 0.
+    """
     limit = max(1, min(limit, 2000))
     conn = get_conn()
+
+    def _table_exists(name: str) -> bool:
+        with dict_cur(conn) as cur:
+            cur.execute(
+                "select 1 from information_schema.tables "
+                "where table_schema='public' and table_name=%s", (name,)
+            )
+            return cur.fetchone() is not None
+
+    has_pred = _table_exists("pred")
+
     with dict_cur(conn) as cur:
-        cur.execute(
-            """
-            SELECT s.id,
-                   s.start_ts,
-                   s.end_ts,
-                   EXTRACT(EPOCH FROM (s.end_ts - s.start_ts))::int AS dur_s,
-                   COALESCE(p.cnt, 0) AS preds,
-                   COALESCE(o.ratio, 0.0) AS ratio,
-                   s.dir
-            FROM segm s
-            LEFT JOIN (
-               SELECT segm_id, COUNT(*) AS cnt
-               FROM pred
-               GROUP BY segm_id
-            ) p ON p.segm_id = s.id
-            LEFT JOIN (
-               -- best-effort ratio: TP / (TP+SL), when columns exist
-               SELECT segm_id,
-                 AVG(CASE
-                       WHEN tp_hit_ts IS NOT NULL THEN 1.0
-                       WHEN sl_hit_ts IS NOT NULL THEN 0.0
-                       ELSE NULL
-                     END) AS ratio
-               FROM outcome
-               GROUP BY segm_id
-            ) o ON o.segm_id = s.id
-            ORDER BY s.id ASC
-            LIMIT %s
-            """,
-            (limit,),
-        )
+        if has_pred:
+            cur.execute(
+                """
+                SELECT s.id,
+                       s.start_ts,
+                       s.end_ts,
+                       EXTRACT(EPOCH FROM (s.end_ts - s.start_ts))::int AS dur_s,
+                       COALESCE(p.cnt, 0) AS preds,
+                       0.0::float AS ratio,     -- safe default
+                       s.dir
+                FROM segm s
+                LEFT JOIN (
+                   SELECT segm_id, COUNT(*) AS cnt
+                   FROM pred
+                   GROUP BY segm_id
+                ) p ON p.segm_id = s.id
+                ORDER BY s.id ASC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT s.id,
+                       s.start_ts,
+                       s.end_ts,
+                       EXTRACT(EPOCH FROM (s.end_ts - s.start_ts))::int AS dur_s,
+                       0::int AS preds,
+                       0.0::float AS ratio,
+                       s.dir
+                FROM segm s
+                ORDER BY s.id ASC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+
         rows = cur.fetchall()
+
     for r in rows:
         r["start_ts"] = r["start_ts"].isoformat()
-        r["end_ts"] = r["end_ts"].isoformat()
-        if isinstance(r.get("ratio"), Decimal): r["ratio"] = float(r["ratio"])
+        r["end_ts"]   = r["end_ts"].isoformat()
+        if isinstance(r.get("ratio"), Decimal):
+            r["ratio"] = float(r["ratio"])
     return rows
 
 # full data for a single segment id
