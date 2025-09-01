@@ -11,7 +11,7 @@ async function fetchJSON(url, opts) {
 async function listTables() {
   // Try /api/tables then /api/sql/tables
   try { return await fetchJSON(`${API}/tables`); }
-  catch { return await fetchJSON(`${API}/sql/tables`); }
+  catch { return await fetchJSON(`${API}/sqlvw/tables`); }
 }
 
 async function runSQL(q) {
