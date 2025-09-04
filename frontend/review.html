@@ -1,82 +1,72 @@
-<!-- # PATH: frontend/review.html -->
 <!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>ML Review — Price-Action Segments</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <style>
-    :root{--bg:#0d1117; --panel:#161b22; --muted:#30363d; --text:#c9d1d9; --sub:#8b949e; --good:#2ea043; --bad:#f85149; --warn:#d29922}
-    *{box-sizing:border-box}
-    body{margin:0;background:var(--bg);color:var(--text);font:14px/1.4 ui-sans-serif,system-ui}
-    header{padding:10px;border-bottom:1px solid var(--muted);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-    button{background:var(--panel);color:var(--text);border:1px solid var(--muted);padding:6px 10px;border-radius:8px;cursor:pointer}
-    input,select,label{background:var(--panel);color:var(--text);border:1px solid var(--muted);border-radius:8px;padding:6px}
-    label{display:inline-flex;align-items:center;gap:6px}
-    main{display:grid;grid-template-columns:320px 1fr;height:calc(100vh - 56px)}
-    aside{border-right:1px solid var(--muted);overflow:auto}
-    .panel{padding:8px;height:100%}
-    table{width:100%;border-collapse:collapse}
-    th,td{padding:6px 8px;border-bottom:1px solid var(--muted);white-space:nowrap}
-    th{position:sticky;top:0;background:var(--panel);z-index:1}
-    tr:hover{background:#0f141a;cursor:pointer}
-    .pill{display:inline-block;min-width:40px;text-align:center;padding:2px 6px;border-radius:999px;border:1px solid var(--muted);font-variant-numeric:tabular-nums}
-    .good{color:var(--good);border-color:var(--good)}
-    .bad{color:var(--bad);border-color:var(--bad)}
-    .zero{color:var(--sub)}
-    #chart{height:100%}
-    .legend{position:absolute;top:8px;right:12px;display:flex;gap:10px;font-size:12px}
-    .legend span{display:inline-flex;gap:6px;align-items:center}
-    .dot{width:10px;height:10px;border-radius:2px;display:inline-block}
-    .dot.mid{background:#79c0ff}
-    .dot.smooth{background:#a5d6a7}
-    .dot.smal{background:#ef4444}
-    .dot.bigm{background:#eab308}
-    .dot.pred{background:#60a5fa}
-    footer#seginfo{padding:6px 10px;border-top:1px solid var(--muted);font-variant-numeric:tabular-nums;color:var(--sub)}
-    .rightWrap{position:relative;display:flex;flex-direction:column}
+    :root { color-scheme: dark; }
+    body { margin:0; background:#0d1117; color:#c9d1d9; font:14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, sans-serif; }
+    header { display:flex; align-items:center; gap:.75rem; padding:.5rem .75rem; border-bottom:1px solid #30363d; }
+    header .spacer { flex:1; }
+    #run { appearance:none; background:#1f6feb; color:#fff; border:0; border-radius:10px; padding:.4rem .7rem; font-weight:600; cursor:pointer; }
+    #run:disabled { opacity:.6; cursor:not-allowed; }
+    #runStat { color:#8b949e; font-size:12px; }
+    main { display:grid; grid-template-columns: 380px 1fr; gap:0; height: calc(100vh - 50px); }
+    #left { border-right:1px solid #30363d; overflow:auto; }
+    #chart { height:100%; }
+    table { width:100%; border-collapse:collapse; }
+    thead th { position:sticky; top:0; background:#0d1117; border-bottom:1px solid #30363d; padding:.4rem .5rem; font-weight:600; text-align:left; }
+    tbody td { border-bottom:1px solid #161b22; padding:.35rem .5rem; }
+    tbody tr { cursor:pointer; }
+    tbody tr:hover { background:#161b22; }
+    .controls { position:absolute; left:400px; bottom:10px; display:flex; gap:16px; }
+    .controls label { user-select:none; }
+    #seginfo { padding:.35rem .75rem; border-top:1px solid #30363d; font-size:13px; color:#8b949e; }
   </style>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
 </head>
 <body>
   <header>
-    <!--<button id="run">▶ Run until now (server)</button><span id="runStat" style="color:var(--sub)">idle</span>-->
-    <button id="run">▶ Clean</button><span id="runStat" style="color:var(--sub)">idle</span>
+    <button id="run">▶ Clean</button>
+    <span id="runStat">idle</span>
+    <span class="spacer"></span>
+    <div style="display:flex; gap:16px; align-items:center; margin-right:.5rem;">
+      <span style="display:inline-flex; align-items:center; gap:6px;"><span style="width:10px;height:10px;background:#3b82f6;display:inline-block"></span> mid</span>
+      <span style="display:inline-flex; align-items:center; gap:6px;"><span style="width:10px;height:10px;background:#10b981;display:inline-block"></span> smooth</span>
+      <span style="display:inline-flex; align-items:center; gap:6px;"><span style="width:10px;height:10px;background:#eab308;display:inline-block"></span> bigm</span>
+      <span style="display:inline-flex; align-items:center; gap:6px;"><span style="width:10px;height:10px;background:#ef4444;display:inline-block"></span> smal</span>
+      <span style="display:inline-flex; align-items:center; gap:6px;"><span style="width:10px;height:10px;background:#94a3b8;display:inline-block"></span> pred</span>
+    </div>
   </header>
+
   <main>
-    <aside>
-      <div class="panel">
-        <table id="journal">
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Time</th>
-              <th>Dur(s)</th>
-              <th>Preds</th>
-              <th>Ratio</th>
-              <th>Dir</th>
-              <th>Ticks</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-      </div>
-    </aside>
-    <section class="rightWrap">
-      <div class="legend">
-        <span><i class="dot mid"></i>mid</span>
-        <span><i class="dot smooth"></i>smooth</span>
-        <span><i class="dot bigm"></i>bigm</span>
-        <span><i class="dot smal"></i>smal</span>
-        <span><i class="dot pred"></i>pred</span>
-      </div>
-      <div id="chart"></div>
-      <label><input type="checkbox" id="ckBigs" checked> Big moves</label>
-      <label style="margin-left:12px;"><input type="checkbox" id="ckSmals" checked> Small moves</label>
-      <footer id="seginfo">Segment: —</footer>
+    <section id="left">
+      <table id="journal">
+        <thead>
+          <tr>
+            <th style="width:70px;">ID</th>
+            <th style="width:152px;">Time</th>
+            <th style="width:70px;">Dur(s)</th>
+            <th style="width:60px;">Preds</th>
+            <th style="width:60px;">Ratio</th>
+            <th style="width:50px;">Dir</th>
+            <th style="width:70px;">Ticks</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div id="seginfo">Segment: —</div>
     </section>
+
+    <section id="chart"></section>
   </main>
 
-  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+  <div class="controls">
+    <label><input id="ckBigs" type="checkbox" checked> Big moves</label>
+    <label><input id="ckSmals" type="checkbox" checked> Small moves</label>
+  </div>
+
   <script src="./review-core.js"></script>
 </body>
 </html>
