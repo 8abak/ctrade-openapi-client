@@ -358,6 +358,24 @@ def api_segm(id: int = Query(...)):
 
     return {"segm": _jsonable(seg), "ticks": ticks, "smal": sm, "bigm": bm, "level": lv, "pred": pd}
 
+# --- recent segments for review sidebar ---
+@app.get("/api/segm/recent")
+def api_segm_recent(limit: int = 200):
+    q = """
+    SELECT id, start_id, end_id, start_ts, end_ts, dir, span, len
+    FROM segm
+    ORDER BY id DESC
+    LIMIT %s
+    """
+    with get_conn() as conn:  # use your existing conn helper
+        with conn.cursor() as cur:
+            cur.execute(q, (limit,))
+            rows = cur.fetchall()
+            cols = [d[0] for d in cur.description]
+    # return as list of dicts
+    return [dict(zip(cols, r)) for r in rows]
+
+
 
 # ----------------------------- Live SSE ------------------------------
 
