@@ -129,9 +129,21 @@ async function loadSegmList(){
   }
 }
 
+function clearReviewChart() {
+  try {
+    chart.clear();           // wipe all series/markAreas/zooms
+    currentSeg = null;       // no segment loaded
+    if (segInfo) segInfo.textContent = 'Segment: —';
+    if (runStat) runStat.textContent = 'cleared';
+  } catch (e) {
+    if (runStat) runStat.textContent = 'clear failed';
+    console.error('clearReviewChart error:', e);
+  }
+}
+
 // ---------------------------- Buttons --------------------------------
 
-async function runServer(){
+/*async function runServer(){
   try{
     const res = await postJSON(`${API}/run`, {});
     console.log('Run result', res);
@@ -147,7 +159,14 @@ function wireUI(){
     const el=document.getElementById(id);
     if(el) el.addEventListener('change', ()=> currentSeg && renderSegment(currentSeg));
   });
-}
+}*/
+
+runBtn?.addEventListener('click', (e) => {
+  e.preventDefault();
+  clearReviewChart();
+});
+
+
 
 // Boot
 wireUI();
