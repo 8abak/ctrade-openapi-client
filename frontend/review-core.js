@@ -196,6 +196,12 @@ async function loadSegment(segmId){
     if (!r.ok) throw new Error(`segm ${segmId} fetch failed: ${r.status}`);
     const data = await r.json();
 
+    data.smal  = Array.isArray(data.smal)  ? data.smal  : [];
+    data.bigm  = Array.isArray(data.bigm)  ? data.bigm  : [];
+    data.pred  = Array.isArray(data.pred)  ? data.pred  : [];
+    data.level = Array.isArray(data.level) ? data.level : [];
+
+
     const ticks = Array.isArray(data.ticks) ? data.ticks : [];
     const {midSeries, smoothSeries} = mapTicksForSeries(ticks);
     const timeIdx = makeTimeIndex(ticks);
