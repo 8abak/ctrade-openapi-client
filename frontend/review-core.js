@@ -1,6 +1,6 @@
 // Review page wired to existing backend routes in backend/main.py (no assumptions).
-// Uses:   GET /api/segm?id=...   (present)
-// Prefers GET /api/segm/recent   (you added it); falls back to GET /sqlvw/query?query=...
+// Uses: GET /api/segm?id=... (present) and the list loader you already wired.
+// Change: draw "smal" using markLine (not a 'lines' series) to avoid ECharts crash.
 
 const API = '/api';
 
@@ -15,18 +15,17 @@ let currentSeg = null;
 
 // -------------------- utils --------------------
 function fmt2(x){ return (x===null||x===undefined||isNaN(+x)) ? '' : (+x).toFixed(2); }
-function asDate(x){ return (x instanceof Date) ? x : new Date(x); }
 function ensureArray(v){ return Array.isArray(v) ? v : (v ? [v] : []); }
 
-// -------------------- list segments (prefer /api/segm/recent, fallback to /sqlvw/query) --------------------
+// -------------------- list segments (use your /api/segm/recent or SQL passthrough) --------------------
 async function fetchRecentSegm(limit = 200) {
-  // try native recent route
+  // prefer your native route (you added it)
   try {
     const r = await fetch(`${API}/segm/recent?limit=${limit}`);
     if (r.ok) return await r.json();
-  } catch(_) { /* fall through */ }
+  } catch(_) { /* ignore and fall back */ }
 
-  // fallback: use SQL passthrough that exists in main.py: GET /sqlvw/query?query=...
+  // fallback via SQL view you already have in main.py: GET /sqlvw/query?query=...
   const q = encodeURIComponent(`
     SELECT id, start_id, end_id, start_ts, end_ts, dir, span, len
     FROM segm
@@ -34,9 +33,8 @@ async function fetchRecentSegm(limit = 200) {
     LIMIT ${Math.max(1, Math.min(limit, 500))}
   `.trim());
   const r2 = await fetch(`/sqlvw/query?query=${q}`);
-  if (!r2.ok) throw new Error(`segm fetch failed: ${r2.status}`);
-  const rows = await r2.json(); // array of objects from dict_cur
-  return rows;
+  if (!r2.ok) throw new Error(`segm list failed: ${r2.status}`);
+  return await r2.json();
 }
 
 async function loadSegmList() {
@@ -60,7 +58,7 @@ async function loadSegmList() {
   segInfo.textContent = 'Segment: —';
 }
 
-// -------------------- chart scaffolding (keeps your original styling/legend intent) --------------------
+// -------------------- chart scaffolding (keeps your styling) --------------------
 function setupChart(){
   chart.setOption({
     backgroundColor:'#0d1117',
@@ -95,8 +93,14 @@ function setupChart(){
     series:[
       {name:'mid',    type:'line', showSymbol:false, lineStyle:{width:1.3}, data:[]},
       {name:'smooth', type:'line', showSymbol:false, lineStyle:{width:2, opacity:.8}, data:[]},
+      // big movements shaded
       {name:'bigm',   type:'line', data:[], markArea:{itemStyle:{color:'rgba(234,179,8,0.18)'}, data:[]}},
-      {name:'smal',   type:'lines', coordinateSystem:'cartesian2d', polyline:false, lineStyle:{width:2, color:'#ef4444'}, data:[]},
+      // NEW: small moves drawn as markLine on a helper empty series
+      {name:'smalLines', type:'line', showSymbol:false, data:[],
+        markLine:{silent:true, symbol:['none','none'],
+          lineStyle:{width:2, color:'#ef4444'}, data:[]}
+      },
+      // predictions
       {name:'pred',   type:'scatter', symbolSize:10, data:[],
         label:{show:true, formatter:(p)=> p.data?.p?.hit===true?'✓':(p.data?.p?.hit===false?'✗':'?')}
       }
@@ -108,16 +112,15 @@ function rollingMean(arr, n){
   const out = new Array(arr.length).fill(null);
   if (arr.length===0) return out;
   n = Math.max(1, Math.min(n, arr.length));
-  let sum = 0;
+  let sum=0;
   for (let i=0;i<arr.length;i++){
     sum += arr[i];
     if (i>=n) sum -= arr[i-n];
-    out[i] = i>=n-1 ? sum / n : arr[i]; // warm-up
+    out[i] = i>=n-1 ? sum / n : arr[i];
   }
   return out;
 }
 
-// -------------------- loaders mapped to your /api/segm payload --------------------
 function mapTicksForSeries(ticks){
   const mids = ticks.map(t=>+t.mid);
   const smooth = rollingMean(mids, Math.min(100, Math.max(50, Math.floor(ticks.length*0.1))));
@@ -126,74 +129,64 @@ function mapTicksForSeries(ticks){
   return {midSeries, smoothSeries};
 }
 
-function buildSmallLines(smal, tickIndex){
+// ---- helper: index by time so we can map ts→mid for lines/marks
+function makeTimeIndex(ticks){
+  const pairs = ticks.map(t=>[+new Date(t.ts), +t.mid]).sort((a,b)=>a[0]-b[0]);
+  function yAt(ts){
+    if (!pairs.length) return null;
+    const x = +new Date(ts);
+    // binary search nearest
+    let lo=0, hi=pairs.length-1, best=pairs[0];
+    while (lo<=hi){
+      const m=(lo+hi)>>1, dx=pairs[m][0]-x;
+      if (Math.abs(dx) < Math.abs(best[0]-x)) best=pairs[m];
+      if (dx===0) break;
+      if (dx<0) lo=m+1; else hi=m-1;
+    }
+    return best[1];
+  }
+  return { yAt };
+}
+
+// ---- build visuals from your backend shapes ----
+// small moves: backend returns {a_ts, b_ts, ...}
+function buildSmallMarkLines(smal, idx){
   const data = [];
-  for (const s of (smal||[])){
-    // small moves returned with a_ts/b_ts (timestamps) — we draw as time spans
-    if (!s.a_ts || !s.b_ts) continue;
-    // project to y using nearest ticks at those times
-    const a = s.a_ts, b = s.b_ts;
-    // find closest known points by time; fallback to first/last
-    const first = tickIndex.first, last = tickIndex.last;
-    const ay = tickIndex.byTime(a) ?? (first ? first.mid : null);
-    const by = tickIndex.byTime(b) ?? (last ? last.mid : null);
-    if (ay==null || by==null) continue;
-    data.push({ coords: [[new Date(a), +ay],[new Date(b), +by]] });
+  for (const s of ensureArray(smal)){
+    const a = s?.a_ts, b = s?.b_ts;
+    if (!a || !b) continue;
+    const y1 = idx.yAt(a), y2 = idx.yAt(b);
+    if (y1==null || y2==null) continue;
+    data.push([{coord:[new Date(a), +y1]}, {coord:[new Date(b), +y2]}]);
   }
   return data;
 }
 
 function buildBigAreas(bigm){
   const areas = [];
-  for (const b of (bigm||[])){
-    if (!b.a_ts || !b.b_ts) continue;
-    areas.push([{xAxis:new Date(b.a_ts)}, {xAxis:new Date(b.b_ts)}]);
+  for (const b of ensureArray(bigm)){
+    const a=b?.a_ts, c=b?.b_ts;
+    if (!a || !c) continue;
+    areas.push([{xAxis:new Date(a)}, {xAxis:new Date(c)}]);
   }
   return areas;
 }
 
-function buildPredScatter(pred, tickIndex){
-  const items = [];
-  for (const p of (pred||[])){
-    const x = p.at_ts ? new Date(p.at_ts) : null;
+function buildPredScatter(pred, idx){
+  const dots = [];
+  for (const p of ensureArray(pred)){
+    const x = p?.at_ts ? new Date(p.at_ts) : null;
     if (!x) continue;
-    const y = tickIndex.byTime(p.at_ts);
+    const y = idx.yAt(p.at_ts);
     if (y==null) continue;
-    items.push({
+    dots.push({
       value:[x, +y],
       p,
-      itemStyle:{ color: p.hit===true ? '#2ea043' : (p.hit===false ? '#f85149' : '#8b949e') },
-      symbol: p.hit==null ? 'circle' : (p.hit ? 'triangle' : 'rect')
+      itemStyle:{ color: p?.hit===true ? '#2ea043' : (p?.hit===false ? '#f85149' : '#8b949e') },
+      symbol: p?.hit==null ? 'circle' : (p?.hit ? 'triangle' : 'rect')
     });
   }
-  return items;
-}
-
-// helper: build index by id + time → mid
-function indexTicks(ticks){
-  const byId = new Map();
-  const byTs = [];
-  for (const t of ticks){ byId.set(t.id, t); byTs.push([+new Date(t.ts), +t.mid]); }
-  byTs.sort((a,b)=>a[0]-b[0]);
-  function byTime(ts){
-    const x = +new Date(ts);
-    // binary search nearest
-    let lo=0, hi=byTs.length-1, best=null;
-    while (lo<=hi){
-      const mid = (lo+hi)>>1;
-      const dx = byTs[mid][0]-x;
-      if (best===null || Math.abs(dx)<Math.abs(best[0]-x)) best = byTs[mid];
-      if (dx===0) break;
-      if (dx<0) lo=mid+1; else hi=mid-1;
-    }
-    return best ? best[1] : null;
-  }
-  return {
-    get:(id)=>byId.get(id),
-    byTime,
-    first: ticks[0] || null,
-    last: ticks[ticks.length-1] || null
-  };
+  return dots;
 }
 
 // -------------------- fetch & draw a single segment --------------------
@@ -204,45 +197,42 @@ async function loadSegment(segmId){
     const data = await r.json();
 
     const ticks = Array.isArray(data.ticks) ? data.ticks : [];
-    const tickIndex = indexTicks(ticks);
-
     const {midSeries, smoothSeries} = mapTicksForSeries(ticks);
-    const smalLines = buildSmallLines(data.smal || [], tickIndex);
+    const timeIdx = makeTimeIndex(ticks);
+
     const bigAreas  = buildBigAreas (data.bigm || []);
-    const predDots  = buildPredScatter(data.pred || [], tickIndex);
+    const predDots  = buildPredScatter(data.pred || [], timeIdx);
+    const smalLines = buildSmallMarkLines(data.smal || [], timeIdx);
 
     chart.clear();
     chart.setOption({
       series: [
-        {name:'mid',    data: midSeries},
-        {name:'smooth', data: smoothSeries},
-        {name:'bigm',   data: [], markArea:{itemStyle:{color:'rgba(234,179,8,0.18)'}, data: bigAreas}},
-        {name:'smal',   data: smalLines},
-        {name:'pred',   data: predDots}
+        {name:'mid',        data: midSeries},
+        {name:'smooth',     data: smoothSeries},
+        {name:'bigm',       data: [], markArea:{itemStyle:{color:'rgba(234,179,8,0.18)'}, data: bigAreas}},
+        {name:'smalLines',  data: [], markLine:{silent:true, symbol:['none','none'], lineStyle:{width:2, color:'#ef4444'}, data: smalLines}},
+        {name:'pred',       data: predDots}
       ]
     });
 
-    // horizontal levels
+    // horizontal levels (your shape: {price, kind, ts, [used_at_ts]})
     if (ticks.length && Array.isArray(data.level)){
       const xStart = new Date(ticks[0].ts);
       const xEnd   = new Date(ticks[ticks.length-1].ts);
-      const levelLines = [];
+      const levelData = [];
       for (const L of data.level){
         const used = !!L.used_at_ts;
-        levelLines.push({
-          lineStyle:{color: used ? (L.kind==='high' ? '#2ea043' : '#f85149') : '#8b949e', type:'dashed', width:1},
-          label:{show:true, formatter:`${L.kind}@${(+L.price).toFixed(2)}${used?' • used':''}`, position:'insideEndTop', color:'#c9d1d9'},
-          data:[ [{coord:[xStart, +L.price]}], [{coord:[xEnd, +L.price]}] ]
-        });
+        levelData.push([{coord:[xStart, +L.price]}, {coord:[xEnd, +L.price]}]);
       }
       chart.setOption({
         series: [
-          {}, {}, {}, {}, {},
-          {name:'levels', type:'line', showSymbol:false, data:[],
-           markLine:{ silent:true, symbol:['none','none'],
-             data: levelLines.flatMap(x=>x.data),
-             lineStyle:{type:'dashed', width:1, color:'#8b949e'}, label:{show:false}
-           }
+          {}, {}, {}, {},
+          { // add a second markLine layer on the pred series to keep UI simple
+            name:'pred',
+            markLine:{silent:true, symbol:['none','none'],
+              lineStyle:{type:'dashed', width:1, color:'#8b949e'},
+              data: levelData
+            }
           }
         ]
       });
@@ -293,11 +283,3 @@ function boot(){
 }
 boot();
 window.addEventListener('resize', ()=>chart.resize());
-
-// optional toggles: redraw current segm respecting checkboxes (kept behavior)
-document.getElementById('ckBigs')?.addEventListener('change', ()=> {
-  if (currentSeg?.id) loadSegment(currentSeg.id);
-});
-document.getElementById('ckSmals')?.addEventListener('change', ()=> {
-  if (currentSeg?.id) loadSegment(currentSeg.id);
-});
