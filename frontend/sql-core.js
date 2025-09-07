@@ -23,6 +23,41 @@ async function runSQL(q) {
   throw new Error('Query endpoint not found');
 }
 
+async function execSQLDanger(sqlText) {
+  const r = await fetch('/api/sql/exec?unsafe=true', {
+    method:'POST',
+    headers:{
+      'content-type':'application/json',
+      'X-Allow-Write':'yes'
+    },
+    body: JSON.stringify({ sql: sqlText })
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+document.getElementById('btnExec')?.addEventListener('click', async () => {
+  const q = document.getElementById('query').value.trim();
+  if (!q) return;
+  try {
+    const payload = await execSQLDanger(q);
+    // show rowcounts / result sets
+    const host = document.getElementById('results');
+    host.innerHTML = '';
+    (payload.results || []).forEach((res, i) => {
+      const pre = document.createElement('pre');
+      pre.style.whiteSpace = 'pre-wrap';
+      pre.textContent = (res.type === 'rowcount')
+        ? `Statement ${i+1}: ${res.rowcount} rows affected`
+        : JSON.stringify(res.rows, null, 2);
+      host.appendChild(pre);
+    });
+  } catch (e) {
+    alert('Exec failed: ' + e.message);
+  }
+});
+
+
 function renderTables(list) {
   const el = document.getElementById('tables');
   el.innerHTML = '';

@@ -7,7 +7,7 @@ from datetime import datetime, date
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, Body, Query, HTTPException
+from fastapi import FastAPI, Body, Query, HTTPException, Header
 from fastapi.responses import JSONResponse, StreamingResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -121,6 +121,45 @@ def api_sql_post(sql: str = Body("", embed=True)):
         cur.execute(stmt)
         return {"rows": _jsonable(cur.fetchall())}
 
+@app.post("/api/sql/exec")
+def api_sql_exec(
+    sql: str = Body("", embed=True),
+    unsafe: Optional[bool] = Query(False),
+    x_allow_write: Optional[str] = Header(None)
+):
+    """
+    Execute DDL/DML/PLpgSQL. By default blocked unless:
+      - unsafe=true query param AND
+      - X-Allow-Write: yes header is present.
+    Also supports multi-statement batches separated by semicolons.
+    Wraps everything in a transaction; returns per-statement rowcounts.
+    """
+    stmt = (sql or "").strip()
+    if not stmt:
+        return {"ok": True, "results": []}
+
+    # Safety gates (you can loosen for your dev box)
+    if not unsafe or (x_allow_write or "").lower() != "yes":
+        raise HTTPException(403, detail="Write access disabled. Use unsafe=true and X-Allow-Write: yes")
+
+    results = []
+    conn = get_conn()
+    conn.autocommit = False
+    try:
+        with conn, dict_cur(conn) as cur:
+            # crude splitter; Postgres also accepts DO $$...$$; this keeps $$ blocks intact
+            import sqlparse
+            for part in [p.strip() for p in sqlparse.split(stmt) if p.strip()]:
+                cur.execute(part)
+                if cur.description:
+                    rows = cur.fetchall()
+                    results.append({"type":"resultset","rows":_jsonable(rows)})
+                else:
+                    results.append({"type":"rowcount","rowcount": cur.rowcount})
+        return {"ok": True, "results": results}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(400, detail=f"{type(e).__name__}: {e}")
 
 # ----------------------- Tick data (kept/compat) ----------------------
 
