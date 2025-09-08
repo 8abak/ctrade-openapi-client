@@ -27,7 +27,11 @@
     button{background:var(--btn);color:var(--text);border:1px solid #1f2937;border-radius:8px;padding:6px 10px;cursor:pointer}
     button.secondary{background:var(--btn2)}
     button:disabled{opacity:.6;cursor:not-allowed}
-    #chart{height:100%;width:100%}
+    #chart {
+      height: calc(100vh - 140px);
+      width: 100%;
+      overflow: hidden;
+    }
     .footer{display:flex;gap:8px;align-items:center;justify-content:space-between;padding:8px}
     .small{color:var(--muted);font-size:12px}
     input[type="number"], select{background:#0b1220;border:1px solid #1f2937;border-radius:6px;color:var(--text);padding:4px 6px}
