@@ -32,9 +32,22 @@
     },
     // IMPORTANT: give dataZoom entries IDs so we can target them
     dataZoom: [
-      { id: 'dzIn',  type: 'inside', zoomOnMouseWheel: true },
-      { id: 'dzSl',  type: 'slider', height: 18 }
+      {
+        id: 'dzIn',
+        type: 'inside',
+        zoomOnMouseWheel: true,
+        filterMode: 'none',           // <— keep all data; just change the window
+        rangeMode: ['value','value']  // <— prefer absolute startValue/endValue
+      },
+      {
+        id: 'dzSl',
+        type: 'slider',
+        height: 18,
+        filterMode: 'none',           // <— same here
+        rangeMode: ['value','value']
+      }
     ],
+
     xAxis: { type: 'time', axisLabel: { color: '#cbd5e1' } },
     yAxis: {
       type: 'value', scale: true,
