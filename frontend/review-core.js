@@ -1,294 +1,239 @@
 // frontend/review-core.js
-// Drop-in: smart y-extents + segment-focus + no-thinning + show/hide ticks + ATR on 2nd axis.
+// Safe drop-in: preserves existing segment list + routes, adds smart axes & toggles.
 
 (() => {
-  const $ = (sel, root = document) => root.querySelector(sel);
-  const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+  const qs  = (s, r=document) => r.querySelector(s);
+  const qsa = (s, r=document) => Array.from(r.querySelectorAll(s));
 
   const State = {
     chunk: 2000,
     noThinning: false,
     showTicks: true,
-    segmListBound: false,     // bind segment table clicks once
-    data: {
-      segm: null,
-      layers: {}              // name -> [{ts, value}] etc.
-    },
+    data: { segm: null, layers: {} },
     echarts: null,
-    // x-window (ms) we want to display; null = auto (full data)
-    xMin: null,
-    xMax: null
+    xMin: null, xMax: null,
+    segmDelegated: false
   };
 
-  // ---------------- UI toggles ----------------
-  function ensureExtraToggles() {
-    const layersRow = document.querySelector('.layers-row') || document.querySelector('.layers') || document.body;
+  // ---------- Non-invasive UI mounts ----------
+  function mountToggles() {
+    // Prefer .layers-row if present; else put in a small footer slot.
+    let host = qs('.layers-row') || qs('#layersRow') || qs('#review-footer');
+    if (!host) {
+      host = document.createElement('div');
+      host.id = 'review-footer';
+      (qs('#review') || document.body).appendChild(host);
+    }
 
-    if (!$('#toggleNoThin')) {
-      const lbl = document.createElement('label');
-      lbl.style.marginLeft = '12px';
-      lbl.innerHTML = `<input type="checkbox" id="toggleNoThin" /> No thinning`;
-      layersRow.appendChild(lbl);
-      $('#toggleNoThin').addEventListener('change', (e) => {
+    if (!qs('#toggleNoThin')) {
+      const el = document.createElement('label');
+      el.style.marginLeft = '12px';
+      el.innerHTML = `<input type="checkbox" id="toggleNoThin"> No thinning`;
+      host.appendChild(el);
+      el.firstElementChild.addEventListener('change', e => {
         State.noThinning = e.target.checked;
         render();
       });
     }
 
-    if (!$('#toggleShowTicks')) {
-      const lbl = document.createElement('label');
-      lbl.style.marginLeft = '12px';
-      lbl.innerHTML = `<input type="checkbox" id="toggleShowTicks" checked /> Show ticks`;
-      layersRow.appendChild(lbl);
-      $('#toggleShowTicks').addEventListener('change', (e) => {
+    if (!qs('#toggleShowTicks')) {
+      const el = document.createElement('label');
+      el.style.marginLeft = '12px';
+      el.innerHTML = `<input type="checkbox" id="toggleShowTicks" checked> Show ticks`;
+      host.appendChild(el);
+      el.firstElementChild.addEventListener('change', e => {
         State.showTicks = e.target.checked;
         render();
       });
     }
   }
 
-  function wireChunkInput() {
-    const el = document.querySelector('#chunkInput') || document.querySelector('input[name="chunk"]');
-    if (!el) return;
+  function wireChunk() {
+    const inp = qs('#chunkInput') || qs('input[name="chunk"]');
+    if (!inp) return;
     const apply = () => {
-      const v = parseInt(el.value, 10);
-      if (!Number.isNaN(v) && v > 0) {
+      const v = +inp.value;
+      if (v > 0 && Number.isFinite(v)) {
         State.chunk = v;
         if (!State.noThinning) render();
       }
     };
-    el.addEventListener('change', apply);
+    inp.addEventListener('change', apply);
     apply();
   }
 
-  // ---------------- Downsampling ----------------
-  function thinToChunk(points, chunk) {
-    if (!points || points.length <= chunk) return points;
-    const stride = Math.ceil(points.length / chunk);
+  // ---------- Helpers ----------
+  function thin(arr, n) {
+    if (!arr || arr.length <= n) return arr || [];
+    const stride = Math.ceil(arr.length / n);
     const out = [];
-    for (let i = 0; i < points.length; i += stride) out.push(points[i]);
-    // include the last point for proper tooltips
-    if (out.length && out[out.length - 1][0] !== points[points.length - 1][0]) out.push(points[points.length - 1]);
+    for (let i = 0; i < arr.length; i += stride) out.push(arr[i]);
+    if (arr.length && out[out.length - 1] !== arr[arr.length - 1]) out.push(arr[arr.length - 1]);
     return out;
   }
 
-  // ---------------- Adapters ----------------
-  function mapTicksToSeries(segm) {
+  function ticksToSeries(segm) {
     return (segm?.ticks || []).map(t => [new Date(t.ts).getTime(), t.mid]);
   }
-  function mapAtrToSeries(arr) {
-    return (arr || []).map(r => [new Date(r.ts).getTime(), r.value ?? r.atr ?? r.atr1]).filter(p => p[1] != null);
+  function atrToSeries(rows) {
+    return (rows || [])
+      .map(r => [new Date(r.ts).getTime(), r.value ?? r.atr1 ?? r.atr])
+      .filter(p => p[1] != null);
   }
 
-  // ---------------- ECharts ----------------
-  function getChart() {
+  // ---------- Chart ----------
+  function chart() {
     if (State.echarts) return State.echarts;
-    const el = document.getElementById('chart') || document.getElementById('reviewChart');
+    const el = qs('#reviewChart') || qs('#chart');
     if (!el) return null;
     State.echarts = echarts.init(el);
     window.addEventListener('resize', () => State.echarts && State.echarts.resize());
-
-    // Re-fit Y on any zoom/pan
     State.echarts.on('dataZoom', () => {
-      const [xMin, xMax] = getCurrentXWindow();
-      State.xMin = xMin; State.xMax = xMax;
-      refitYAxes();
+      const [mn, mx] = currentX();
+      State.xMin = mn; State.xMax = mx;
+      refitY();
     });
     return State.echarts;
   }
 
-  function getCurrentXWindow() {
-    // Derive from dataZoom or fall back to State.xMin/xMax/full range
-    const chart = getChart();
-    const option = chart?.getOption?.();
-    const xAxis = option?.xAxis?.[0];
-    const min = (xAxis && xAxis.min != null) ? +xAxis.min : State.xMin;
-    const max = (xAxis && xAxis.max != null) ? +xAxis.max : State.xMax;
+  function currentX() {
+    const c = chart();
+    const opt = c?.getOption?.();
+    const xa  = opt?.xAxis?.[0];
+    const mn  = (xa && xa.min != null) ? +xa.min : State.xMin;
+    const mx  = (xa && xa.max != null) ? +xa.max : State.xMax;
 
-    if (min != null && max != null) return [min, max];
-
-    // fallback to full data range
-    const ticks = mapTicksToSeries(State.data.segm);
-    if (!ticks.length) return [null, null];
-    return [ticks[0][0], ticks[ticks.length - 1][0]];
+    if (mn != null && mx != null) return [mn, mx];
+    const pts = ticksToSeries(State.data.segm);
+    if (!pts.length) return [null, null];
+    return [pts[0][0], pts[pts.length - 1][0]];
   }
 
-  // Compute y-extent within the visible x-window
-  function computeExtent(series, xMin, xMax) {
-    let lo = +Infinity, hi = -Infinity;
-    for (const [x, y] of series) {
-      if (xMin != null && x < xMin) continue;
-      if (xMax != null && x > xMax) continue;
-      if (y < lo) lo = y;
-      if (y > hi) hi = y;
+  function extent(series, xMin, xMax, padFrac=0.08) {
+    let lo=Infinity, hi=-Infinity;
+    for (const [x,y] of series) {
+      if (xMin!=null && x<xMin) continue;
+      if (xMax!=null && x>xMax) continue;
+      if (y<lo) lo=y; if (y>hi) hi=y;
     }
     if (!isFinite(lo) || !isFinite(hi)) return null;
-    if (lo === hi) { // protect against flat lines
-      const pad = Math.max(1e-6, Math.abs(hi) * 0.001);
-      lo -= pad; hi += pad;
-    }
-    // add padding proportional to range
-    const pad = (hi - lo) * 0.08; // 8% headroom/footroom
-    return [lo - pad, hi + pad];
+    if (lo===hi) { const p = Math.max(1e-6, Math.abs(hi)*0.001); lo-=p; hi+=p; }
+    const pad = (hi-lo)*padFrac;
+    return [lo-pad, hi+pad];
   }
 
-  // Recompute Y axes based on visible window & visible series
-  function refitYAxes() {
-    const chart = getChart();
-    if (!chart) return;
-
-    const [xMin, xMax] = getCurrentXWindow();
-
-    // Visible series
-    let ticks = mapTicksToSeries(State.data.segm);
-    let atr = mapAtrToSeries(State.data.layers['atr1']);
-
-    if (!State.noThinning) {
-      ticks = thinToChunk(ticks, State.chunk);
-      atr   = thinToChunk(atr,   State.chunk);
-    }
-
-    const leftExtent  = State.showTicks ? computeExtent(ticks, xMin, xMax) : null;
-    const rightExtent = isAtrWanted() && atr.length ? computeExtent(atr, xMin, xMax) : null;
-
-    const option = {};
-    option.yAxis = [
-      {
-        type: 'value', scale: true, name: 'Price',
-        axisLabel: { formatter: v => (+v).toFixed(2) },
-        ...(leftExtent ? { min: leftExtent[0], max: leftExtent[1] } : {})
-      },
-      {
-        type: 'value', scale: true, name: 'ATR', position: 'right',
-        axisLabel: { formatter: v => (+v).toFixed(4) },
-        ...(rightExtent ? { min: rightExtent[0], max: rightExtent[1] } : {})
-      }
-    ];
-
-    chart.setOption(option);
-  }
-
-  function isAtrWanted() {
-    const cb = document.querySelector('input[type=checkbox][data-layer="atr1"]')
-           || document.querySelector('input[type=checkbox][name="atr1"]');
+  function atrWanted() {
+    const cb = qs('input[type=checkbox][data-layer="atr1"]') || qs('input[type=checkbox][name="atr1"]');
     return cb ? cb.checked : true;
   }
 
-  // ---------------- Render ----------------
+  function refitY() {
+    const c = chart(); if (!c) return;
+    const [xmn, xmx] = currentX();
+
+    let t = ticksToSeries(State.data.segm);
+    let a = atrToSeries(State.data.layers['atr1']);
+    if (!State.noThinning) { t = thin(t, State.chunk); a = thin(a, State.chunk); }
+
+    const left  = State.showTicks ? extent(t, xmn, xmx) : null;
+    const right = atrWanted() && a.length ? extent(a, xmn, xmx) : null;
+
+    c.setOption({
+      yAxis: [
+        { type:'value', scale:true, name:'Price',
+          axisLabel:{formatter:v=>(+v).toFixed(2)}, ...(left?{min:left[0],max:left[1]}:{})
+        },
+        { type:'value', scale:true, name:'ATR', position:'right',
+          axisLabel:{formatter:v=>(+v).toFixed(4)}, ...(right?{min:right[0],max:right[1]}:{})
+        }
+      ]
+    });
+  }
+
+  function isSegmRow(el) {
+    // works with <tr data-start="..."> or any row carrying dataset.start/end
+    if (!el) return false;
+    const row = el.closest('tr,[data-start]');
+    if (!row) return false;
+    const s = row.getAttribute('data-start') || row.dataset.start;
+    const e = row.getAttribute('data-end')   || row.dataset.end;
+    return !!(s && e);
+  }
+
+  function bindSegmDelegation() {
+    if (State.segmDelegated) return;
+    const host = qs('#segmTable') || qs('.segm-table') || qs('#segments') || qs('.segments-panel');
+    if (!host) return; // do nothing — we won’t break anything
+    host.addEventListener('click', (evt) => {
+      const row = evt.target.closest('tr,[data-start]');
+      if (!row) return;
+      const s = row.getAttribute('data-start') || row.dataset.start;
+      const e = row.getAttribute('data-end')   || row.dataset.end;
+      if (!s || !e) return;
+      const sMs = isFinite(+s) ? +s : Date.parse(s);
+      const eMs = isFinite(+e) ? +e : Date.parse(e);
+      if (!isFinite(sMs) || !isFinite(eMs)) return;
+
+      State.xMin = sMs; State.xMax = eMs;
+      const c = chart();
+      c && c.setOption({ xAxis: [{ min:sMs, max:eMs }] });
+      refitY();
+    });
+    State.segmDelegated = true;
+  }
+
+  // ---------- Render ----------
   function render() {
-    const chart = getChart();
-    if (!chart) return;
+    const c = chart(); if (!c) return;
 
-    let tickSeries = mapTicksToSeries(State.data.segm);
-    let atrSeries  = mapAtrToSeries(State.data.layers['atr1']);
-
-    if (!State.noThinning) {
-      tickSeries = thinToChunk(tickSeries, State.chunk);
-      atrSeries  = thinToChunk(atrSeries,  State.chunk);
-    }
+    let t = ticksToSeries(State.data.segm);
+    let a = atrToSeries(State.data.layers['atr1']);
+    if (!State.noThinning) { t = thin(t, State.chunk); a = thin(a, State.chunk); }
 
     const series = [];
     if (State.showTicks) {
       series.push({
-        name: 'mid',
-        type: 'line',
-        showSymbol: false,
-        yAxisIndex: 0,
-        data: tickSeries,
-        sampling: State.noThinning ? undefined : 'lttb',
-        large: true, largeThreshold: 200000
+        name:'mid', type:'line', yAxisIndex:0, showSymbol:false,
+        data:t, sampling: State.noThinning? undefined : 'lttb',
+        large:true, largeThreshold:200000
       });
     }
-    if (isAtrWanted() && atrSeries.length) {
+    if (atrWanted() && a.length) {
       series.push({
-        name: 'atr1',
-        type: 'line',
-        showSymbol: false,
-        yAxisIndex: 1,
-        data: atrSeries,
-        sampling: State.noThinning ? undefined : 'lttb',
-        large: true, largeThreshold: 200000,
-        lineStyle: { width: 1.5 }
+        name:'atr1', type:'line', yAxisIndex:1, showSymbol:false,
+        data:a, sampling: State.noThinning? undefined : 'lttb',
+        large:true, largeThreshold:200000, lineStyle:{width:1.5}
       });
     }
 
-    // x-axis window (stay put when user has focused a segment)
-    const [xMin, xMax] = (State.xMin != null && State.xMax != null)
+    const [xmn, xmx] = (State.xMin!=null && State.xMax!=null)
       ? [State.xMin, State.xMax]
-      : (tickSeries.length ? [tickSeries[0][0], tickSeries[tickSeries.length - 1][0]] : [null, null]);
+      : (t.length ? [t[0][0], t[t.length-1][0]] : [null,null]);
 
-    const option = {
-      animation: false,
-      tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
-      legend: { show: true },
-      xAxis: [{ type: 'time', min: xMin ?? 'dataMin', max: xMax ?? 'dataMax' }],
-      yAxis: [
-        { type: 'value', scale: true, name: 'Price', axisLabel: { formatter: v => (+v).toFixed(2) } },
-        { type: 'value', scale: true, name: 'ATR',   axisLabel: { formatter: v => (+v).toFixed(4) }, position: 'right' }
+    c.setOption({
+      animation:false,
+      tooltip:{ trigger:'axis', axisPointer:{type:'cross'} },
+      xAxis:[{ type:'time', min: xmn ?? 'dataMin', max: xmx ?? 'dataMax' }],
+      yAxis:[
+        { type:'value', scale:true, name:'Price', axisLabel:{formatter:v=>(+v).toFixed(2)} },
+        { type:'value', scale:true, name:'ATR', position:'right', axisLabel:{formatter:v=>(+v).toFixed(4)} }
       ],
-      dataZoom: [
-        { type: 'inside', throttle: 0 },
-        { type: 'slider', height: 20 }
-      ],
+      dataZoom:[ {type:'inside', throttle:0}, {type:'slider', height:20} ],
       series
-    };
+    }, true);
 
-    chart.setOption(option, true);
-    // after drawing, fit Y to the current X-window
-    refitYAxes();
-    // ensure we’re bound to segment list clicks
-    bindSegmListClicks();
+    refitY();
+    bindSegmDelegation();   // attach once; never touches the DOM structure
   }
 
-  // ---------------- Segment focus ----------------
-  // Try to auto-bind: rows must carry data-start and data-end (ISO ts or ms)
-  function bindSegmListClicks() {
-    if (State.segmListBound) return;
-    const table = document.querySelector('#segmTable') || document.querySelector('.segm-table');
-    if (!table) return;
-
-    table.addEventListener('click', (e) => {
-      const tr = e.target.closest('tr');
-      if (!tr) return;
-      const s = tr.getAttribute('data-start') || tr.dataset.start;
-      const eend = tr.getAttribute('data-end') || tr.dataset.end;
-      if (!s || !eend) return;
-
-      const startMs = isFinite(+s) ? +s : Date.parse(s);
-      const endMs   = isFinite(+eend) ? +eend : Date.parse(eend);
-      if (!isFinite(startMs) || !isFinite(endMs)) return;
-
-      focusWindow(startMs, endMs);
-    });
-
-    State.segmListBound = true;
-  }
-
-  // Public way to focus: call from your existing row handler if you prefer
-  function focusWindow(xMin, xMax) {
-    State.xMin = xMin;
-    State.xMax = xMax;
-
-    const chart = getChart();
-    if (!chart) return;
-
-    chart.setOption({
-      xAxis: [{ min: xMin, max: xMax }]
-    });
-    refitYAxes();
-  }
-
-  // ---------------- Public API ----------------
+  // ---------- Public API (same names) ----------
   window.ReviewCore = {
     setSegmData(segmObj) {
       State.data.segm = segmObj;
-      // If the segm object includes start_ts/end_ts, adopt them on first load so clicking the row isn’t mandatory
-      if (segmObj?.start_ts && segmObj?.end_ts) {
-        const s = Date.parse(segmObj.start_ts);
-        const e = Date.parse(segmObj.end_ts);
-        if (isFinite(s) && isFinite(e)) {
-          State.xMin = s; State.xMax = e;
-        }
+      // adopt segm window on first load if provided
+      if (segmObj?.start_ts && segmObj?.end_ts && State.xMin==null && State.xMax==null) {
+        const s = Date.parse(segmObj.start_ts), e = Date.parse(segmObj.end_ts);
+        if (isFinite(s) && isFinite(e)) { State.xMin=s; State.xMax=e; }
       }
       render();
     },
@@ -296,14 +241,18 @@
       State.data.layers[name] = rows || [];
       render();
     },
-    focusSegment(startTs, endTs) { // optional external call
-      const s = isFinite(+startTs) ? +startTs : Date.parse(startTs);
-      const e = isFinite(+endTs) ? +endTs : Date.parse(endTs);
-      if (isFinite(s) && isFinite(e)) focusWindow(s, e);
+    focusSegment(startTs, endTs) {
+      const s = isFinite(+startTs)?+startTs:Date.parse(startTs);
+      const e = isFinite(+endTs)?+endTs:Date.parse(endTs);
+      if (isFinite(s) && isFinite(e)) {
+        State.xMin=s; State.xMax=e;
+        chart()?.setOption({ xAxis:[{min:s, max:e}] });
+        refitY();
+      }
     },
     init() {
-      ensureExtraToggles();
-      wireChunkInput();
+      mountToggles();
+      wireChunk();
       render();
     }
   };
