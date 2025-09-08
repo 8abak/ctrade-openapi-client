@@ -219,14 +219,43 @@
   }
 
   async function doMore(){
-    const nextFrom=toId+1, nextTo=toId+chunk;
-    const t=await API.ticksRange(nextFrom,nextTo);
+    if(!chart || !ticks.length) return;
+
+    // 1. capture current zoom window (as percentages + actual id range)
+    const opt = chart.getOption();
+    const dz   = (opt.dataZoom && opt.dataZoom[0]) || {};
+    const startP = typeof dz.start === 'number' ? dz.start : 0;
+    const endP   = typeof dz.end   === 'number' ? dz.end   : 100;
+    const n = ticks.length;
+    const startIdx = Math.max(0, Math.floor(startP/100*n));
+    const endIdx   = Math.min(n-1, Math.ceil(endP/100*n));
+    const zoomStartId = ticks[startIdx].id;
+    const zoomEndId   = ticks[endIdx].id;
+
+    // 2. fetch next chunk
+    const nextFrom = toId+1, nextTo = toId+chunk;
+    const t = await API.ticksRange(nextFrom, nextTo);
     buildTickState(ticks, t);
     await loadAllActiveLabels(nextFrom,nextTo);
-    toId=nextTo;
+    toId = nextTo;
+
+    // 3. re-render
     render();
-    adjustYAxisToView();
+
+    // 4. restore zoom window (map back to new length using IDs)
+    const newStartIdx = idToIndex.get(zoomStartId) || 0;
+    const newEndIdx   = idToIndex.get(zoomEndId)   || ticks.length-1;
+    const newStartP = (newStartIdx / ticks.length) * 100;
+    const newEndP   = (newEndIdx   / ticks.length) * 100;
+
+    chart.setOption({
+      dataZoom: [
+        { start: newStartP, end: newEndP },
+        { start: newStartP, end: newEndP }
+      ]
+    });
   }
+
 
   function render(){
     if(!chart) return;
