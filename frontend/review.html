@@ -42,131 +42,132 @@
 
 <script>
 (function(){
-  // ---------- Shortcuts ----------
   const qs = s => document.querySelector(s);
 
-  // ---------- Backend APIs (read-only) ----------
+  // ---- API (read-only endpoints) ----
   const API = {
     lastId: () => fetch('/ticks/lastid').then(r=>r.json()),
     ticksRange: (a,b) => fetch(`/api/ticks?from_id=${a}&to_id=${b}`).then(r=>r.json()),
     sql: q => fetch(`/api/sql?q=${encodeURIComponent(q)}`).then(r=>r.json()),
   };
 
-  // ---------- State ----------
+  // ---- State ----
   let chart, option;
   let fromId=1, toId=1, chunk=2000;
-  let ticks=[]; // [{id, ts, mid, bid?, ask?}]
-  let idToIndex=new Map(), idToMid=new Map();
+  let ticks=[]; let idToIndex=new Map(); let idToMid=new Map();
   let hasBid=false, hasAsk=false;
 
-  const ACTIVE=new Set(['mid']);    // visible series
-  let labelTables=[];                // discovered tables
-  const labelData=new Map();         // table -> [{idx,y,raw}]
+  const ACTIVE=new Set(['mid']);
+  const labelTablesInfo=new Map(); // table -> {kind:'point'|'range'}
+  const pointData=new Map();       // table -> [{idx,y,raw}]
+  const rangeData=new Map();       // table -> [{startId,endId,raw}]
 
-  // ---------- UI ----------
+  // ---- UI ----
   const $start=qs('#startId'), $chunk=qs('#chunkSize');
   qs('#btnLoad').addEventListener('click', ()=>doLoad(true));
   qs('#btnMore').addEventListener('click', ()=>doMore());
 
-  // ---------- Helpers: zoom capture/restore ----------
+  // ---- Zoom helpers ----
   function getZoomPercents(){
     const opt=chart.getOption(); const dz=(opt.dataZoom && opt.dataZoom[0])||{};
     const startP = typeof dz.start === 'number' ? dz.start : 0;
     const endP   = typeof dz.end   === 'number' ? dz.end   : 100;
-    return {startP, endP};
+    return {startP,endP};
   }
   function getZoomIds(){
     if(!ticks.length) return {startId:null,endId:null};
     const {startP,endP}=getZoomPercents();
-    const n=ticks.length;
-    const sIdx=Math.max(0, Math.floor(startP/100*n));
-    const eIdx=Math.min(n-1, Math.ceil(endP/100*n));
-    return { startId: ticks[sIdx].id, endId: ticks[eIdx].id };
+    const n=ticks.length, s=Math.max(0,Math.floor(startP/100*n)), e=Math.min(n-1,Math.ceil(endP/100*n));
+    return { startId: ticks[s].id, endId: ticks[e].id };
   }
   function restoreZoomByIds(startId,endId){
-    if(startId==null || endId==null) return;
+    if(startId==null||endId==null) return;
     const sIdx = idToIndex.get(startId) ?? 0;
     const eIdx = idToIndex.get(endId)   ?? (ticks.length-1);
-    const sP = (sIdx / ticks.length) * 100;
-    const eP = (eIdx / ticks.length) * 100;
+    const sP=(sIdx/ticks.length)*100, eP=(eIdx/ticks.length)*100;
     chart.setOption({ dataZoom:[{start:sP,end:eP},{start:sP,end:eP}] });
   }
 
-  // ---------- Discovery ----------
+  // ---- Discovery: point vs range tables ----
   async function discoverLabelTables(){
-    const q=`
+    // Point labels: have tickid
+    const qPoint = `
       SELECT DISTINCT table_name
       FROM information_schema.columns
       WHERE table_schema='public' AND column_name='tickid'
-      ORDER BY table_name
-    `;
-    const res=await API.sql(q);
-    labelTables=(res.rows||[]).map(r=>r.table_name).filter(n=>n!=='ticks');
-
+      ORDER BY table_name`;
+    const pointRes = await API.sql(qPoint);
+    for(const r of (pointRes.rows||[])){
+      if(r.table_name==='ticks') continue;
+      labelTablesInfo.set(r.table_name, {kind:'point'});
+    }
+    // Range labels: have start_id & end_id
+    const qRange = `
+      SELECT t.table_name
+      FROM information_schema.columns t
+      WHERE t.table_schema='public' AND t.column_name IN ('start_id','end_id')
+      GROUP BY t.table_name
+      HAVING COUNT(DISTINCT t.column_name)=2
+      ORDER BY t.table_name`;
+    const rangeRes = await API.sql(qRange);
+    for(const r of (rangeRes.rows||[])){
+      labelTablesInfo.set(r.table_name, {kind:'range'});
+    }
+    // Build toggles
     const $labels=qs('#labelLayers'); $labels.innerHTML='';
-    for(const t of labelTables){
-      const defaultOn=['atr1','bigm','smal','pred'].includes(t);
-      const cb=makeToggle(t,t,defaultOn,true); // true => label-table mode
-      $labels.appendChild(cb);
-      if(defaultOn) ACTIVE.add(t);
+    const defaultOn = new Set(['atr1','bigm','smal','pred']);
+    for(const [tbl,info] of labelTablesInfo){
+      if(tbl==='ticks') continue;
+      const node = makeToggle(tbl, tbl, defaultOn.has(tbl), true);
+      $labels.appendChild(node);
+      if(defaultOn.has(tbl)) ACTIVE.add(tbl);
     }
   }
 
-  // ---------- UI toggles ----------
+  // ---- Toggles ----
   function makeToggle(id,label,checked=false,isLabel=false){
     const wrap=document.createElement('label');
     wrap.style.display='inline-flex'; wrap.style.gap='.35rem'; wrap.style.alignItems='center';
     const cb=document.createElement('input'); cb.type='checkbox'; cb.checked=checked; cb.value=id;
     const span=document.createElement('span'); span.textContent=label;
     wrap.append(cb,span);
-
     cb.addEventListener('change', async ()=>{
-      // preserve current zoom (by IDs) and Y-range
       const {startId,endId}=getZoomIds();
       const currentYAxis = chart.getOption().yAxis?.[0] || {};
-
       if(cb.checked){
         ACTIVE.add(id);
         if(isLabel){
-          // fetch this label table for the currently loaded ID range
-          await loadLabelTable(id, fromId, toId);
+          const info = labelTablesInfo.get(id);
+          if(info?.kind==='point')  await loadPointTable(id, fromId, toId);
+          if(info?.kind==='range')  await loadRangeTable(id, fromId, toId);
         }
       }else{
         ACTIVE.delete(id);
       }
-
-      // update series only, keep zoom and y as-is
-      render({preserveZoomIds:{startId,endId}, preserveYAxis: currentYAxis});
+      render({preserveZoomIds:{startId,endId}, preserveYAxis:currentYAxis});
     });
-
     return wrap;
   }
 
-  // ---------- Initial page setup ----------
+  // ---- Initial setup ----
   async function loadInitial(){
     try{
       const info=await API.lastId();
       const last=Number(info.lastId||info.lastid||0);
-      const c = Number($chunk.value||2000);
-      $start.value=Math.max(1, last - c + 1);
+      const c   =Number($chunk.value||2000);
+      $start.value=Math.max(1,last-c+1);
     }catch(e){}
-    // Build base toggles
+    // base layer toggles
     const $base=qs('#baseLayers'); $base.innerHTML='';
     $base.appendChild(makeToggle('mid','mid',true,false));
     $base.appendChild(makeToggle('bid','bid',false,false));
     $base.appendChild(makeToggle('ask','ask',false,false));
-
     await discoverLabelTables();
 
-    // Chart
+    // chart
     chart=echarts.init(qs('#chart'));
-    option=baseOption(); chart.setOption(option);
-    chart.on('dataZoom', adjustYAxisToView);
-  }
-
-  function baseOption(){
-    return {
-      backgroundColor: getComputedStyle(document.body).backgroundColor,
+    option={
+      backgroundColor:getComputedStyle(document.body).backgroundColor,
       animation:false,
       grid:{left:64,right:24,top:68,bottom:42},
       legend:{top:8,textStyle:{color:'#d1d5db'}},
@@ -175,44 +176,47 @@
       yAxis:{type:'value',scale:true,axisLine:{lineStyle:{color:'#475569'}},
              axisLabel:{color:'#cbd5e1',formatter:v=>Math.round(v)},splitLine:{lineStyle:{color:'#1f2937'}}},
       dataZoom:[
-        { type:'inside', zoomOnMouseWheel:'shift', moveOnMouseWheel:true, moveOnMouseMove:true, preventDefaultMouseMove:true },
-        { type:'slider', bottom:8 }
+        {type:'inside',zoomOnMouseWheel:'shift',moveOnMouseWheel:true,moveOnMouseMove:true,preventDefaultMouseMove:true},
+        {type:'slider',bottom:8}
       ],
       series:[]
     };
+    chart.setOption(option);
+    chart.on('dataZoom', adjustYAxisToView);
   }
 
+  // ---- Tooltip ----
   function tooltipHTML(params){
-    if(!params || !params.length) return '';
-    const i=params[0].dataIndex; const t=ticks[i]; if(!t) return '';
+    if(!params?.length) return '';
+    const i=params[0].dataIndex, t=ticks[i]; if(!t) return '';
     const dt=new Date(t.ts);
-    const parts=[
-      `<div><b>ID:</b> ${t.id} &nbsp; <b>Date:</b> ${dt.toLocaleDateString()} &nbsp; <b>Time:</b> ${dt.toLocaleTimeString()}</div>`
-    ];
-    if(ACTIVE.has('mid')) parts.push(`<div>mid: <b>${t.mid}</b></div>`);
-    if(ACTIVE.has('bid') && hasBid && t.bid!=null) parts.push(`<div>bid: <b>${t.bid}</b></div>`);
-    if(ACTIVE.has('ask') && hasAsk && t.ask!=null) parts.push(`<div>ask: <b>${t.ask}</b></div>`);
+    const lines=[`<div><b>ID:</b> ${t.id} &nbsp; <b>Date:</b> ${dt.toLocaleDateString()} &nbsp; <b>Time:</b> ${dt.toLocaleTimeString()}</div>`];
+    if(ACTIVE.has('mid')) lines.push(`<div>mid: <b>${t.mid}</b></div>`);
+    if(ACTIVE.has('bid') && hasBid && t.bid!=null) lines.push(`<div>bid: <b>${t.bid}</b></div>`);
+    if(ACTIVE.has('ask') && hasAsk && t.ask!=null) lines.push(`<div>ask: <b>${t.ask}</b></div>`);
     for(const p of params){
-      if(p.seriesType!=='scatter') continue;
-      const raw=Array.isArray(p.data)?p.data[2]:null; if(!raw) continue;
-      const obj={...raw}; delete obj.tickid;
-      parts.push(`<div>${p.seriesName}: <code>${JSON.stringify(obj)}</code></div>`);
+      if(p.seriesType==='scatter' && Array.isArray(p.data)){
+        const raw=p.data[2]; if(!raw) continue;
+        const obj={...raw}; delete obj.tickid;
+        lines.push(`<div>${p.seriesName}: <code>${JSON.stringify(obj)}</code></div>`);
+      }
     }
-    return parts.join('');
+    return lines.join('');
   }
 
-  // ---------- Data building ----------
-  function buildTickState(prev, newly){
+  // ---- Build tick state ----
+  function buildTickState(prev,newly){
     ticks=(prev||[]).concat(newly||[]);
     idToIndex=new Map(); idToMid=new Map(); hasBid=false; hasAsk=false;
     ticks.forEach((r,i)=>{
       idToIndex.set(r.id,i); idToMid.set(r.id,r.mid);
       if(r.bid!=null) hasBid=true; if(r.ask!=null) hasAsk=true;
-      if(typeof r.ts!=='string' && r.ts && r.ts.toISOString) r.ts=r.ts.toISOString();
+      if(typeof r.ts!=='string' && r.ts?.toISOString) r.ts=r.ts.toISOString();
     });
   }
 
-  async function loadLabelTable(tbl, a, b){
+  // ---- Load label data ----
+  async function loadPointTable(tbl,a,b){
     const q=`SELECT * FROM ${tbl} WHERE tickid BETWEEN ${a} AND ${b} ORDER BY tickid`;
     const res=await API.sql(q); const rows=res.rows||[];
     const pts=[];
@@ -220,19 +224,32 @@
       const idx=idToIndex.get(r.tickid), y=idToMid.get(r.tickid);
       if(idx!=null && y!=null) pts.push({idx,y,raw:r});
     }
-    labelData.set(tbl, pts);
+    pointData.set(tbl, pts);
   }
-
+  async function loadRangeTable(tbl,a,b){
+    // overlap with [a,b]: start_id <= b AND end_id >= a
+    const q=`SELECT * FROM ${tbl} WHERE start_id <= ${b} AND end_id >= ${a} ORDER BY start_id, end_id`;
+    const res=await API.sql(q); const rows=res.rows||[];
+    const segs=[];
+    for(const r of rows){
+      const s = Math.max(a, Number(r.start_id));
+      const e = Math.min(b, Number(r.end_id));
+      if(s>e) continue;
+      segs.push({ startId:s, endId:e, raw:r });
+    }
+    rangeData.set(tbl, segs);
+  }
   async function loadAllActiveLabels(a,b){
     const jobs=[];
-    for(const tbl of labelTables){
+    for(const [tbl,info] of labelTablesInfo){
       if(!ACTIVE.has(tbl)) continue;
-      jobs.push(loadLabelTable(tbl, a, b));
+      if(info.kind==='point') jobs.push(loadPointTable(tbl,a,b));
+      if(info.kind==='range') jobs.push(loadRangeTable(tbl,a,b));
     }
     await Promise.all(jobs);
   }
 
-  // ---------- Load / More ----------
+  // ---- Load & More ----
   async function doLoad(reset=true){
     fromId=Number($start.value||1);
     chunk =Number($chunk.value||2000);
@@ -241,14 +258,12 @@
     const t=await API.ticksRange(fromId,toId);
     buildTickState(reset?[]:ticks, t);
     await loadAllActiveLabels(fromId,toId);
-    // Render fresh, fit Y to view only once on explicit Load
-    render();
-    adjustYAxisToView();
+    render();            // draw
+    adjustYAxisToView(); // fit once on explicit load
   }
-
   async function doMore(){
     if(!ticks.length) return;
-    const {startId,endId}=getZoomIds();         // keep current view
+    const {startId,endId}=getZoomIds();
 
     const nextFrom=toId+1, nextTo=toId+chunk;
     const t=await API.ticksRange(nextFrom,nextTo);
@@ -256,66 +271,80 @@
     await loadAllActiveLabels(nextFrom,nextTo);
     toId=nextTo;
 
-    // Re-render and restore same IDs in view (no Y rescale)
-    render({preserveZoomIds:{startId,endId}});
+    render({preserveZoomIds:{startId,endId}}); // keep x/y as-is
   }
 
-  // ---------- Render ----------
+  // ---- Render ----
   function render(opts={}){
-    if(!chart) return;
     const preserve = opts.preserveZoomIds || null;
     const preserveYAxis = opts.preserveYAxis || null;
 
-    // x categories
-    const xCats = ticks.map(t=>String(t.id));
-
-    // Build series
     const series=[];
+    // base lines
     if(ACTIVE.has('mid')) series.push({name:'mid',type:'line',showSymbol:false,data:ticks.map(t=>t.mid)});
     if(ACTIVE.has('bid') && hasBid) series.push({name:'bid',type:'line',showSymbol:false,data:ticks.map(t=>t.bid)});
     if(ACTIVE.has('ask') && hasAsk) series.push({name:'ask',type:'line',showSymbol:false,data:ticks.map(t=>t.ask)});
 
-    for(const tbl of labelTables){
-      if(!ACTIVE.has(tbl)) continue;
-      const pts=labelData.get(tbl)||[];
+    // point layers
+    for(const [tbl,info] of labelTablesInfo){
+      if(info.kind!=='point' || !ACTIVE.has(tbl)) continue;
+      const pts=pointData.get(tbl)||[];
       series.push({name:tbl,type:'scatter',symbolSize:7,data:pts.map(p=>[p.idx,p.y,p.raw])});
     }
+    // range layers as markArea on a dummy series
+    // (one series per table so they can be toggled independently)
+    for(const [tbl,info] of labelTablesInfo){
+      if(info.kind!=='range' || !ACTIVE.has(tbl)) continue;
+      const segs=rangeData.get(tbl)||[];
+      const areas = segs.map(s => [
+        { name: tbl, xAxis: String(s.startId) },
+        { xAxis: String(s.endId) }
+      ]);
+      series.push({
+        name: tbl,
+        type: 'line', // invisible carrier for markArea
+        showSymbol: false,
+        data: [],     // no line points; we only use markArea
+        markArea: { silent:false, itemStyle:{opacity:0.12}, data: areas }
+      });
+    }
 
-    // Update minimal pieces to avoid resetting zoom
     chart.setOption(
       {
-        xAxis:{ data: xCats },
-        series: series,
+        xAxis:{ data: ticks.map(t=>String(t.id)) },
+        series,
         legend:{ data: series.map(s=>s.name) },
-        ...(preserveYAxis ? { yAxis: { min: preserveYAxis.min, max: preserveYAxis.max } } : {})
+        ...(preserveYAxis ? { yAxis:{ min:preserveYAxis.min, max:preserveYAxis.max } } : {})
       },
       { replaceMerge:['series','legend'], lazyUpdate:false }
     );
-
-    if(preserve){ restoreZoomByIds(preserve.startId, preserve.endId); }
+    if(preserve){ restoreZoomByIds(preserve.startId,preserve.endId); }
   }
 
-  // ---------- Y fit to current zoom ----------
+  // ---- Auto-fit Y to current zoom ----
   function adjustYAxisToView(){
     if(!ticks.length) return;
     const {startP,endP}=getZoomPercents();
-    const n=ticks.length;
-    const sIdx=Math.max(0, Math.floor(startP/100*n)), eIdx=Math.min(n-1, Math.ceil(endP/100*n));
-    const slice=ticks.slice(sIdx,eIdx+1);
+    const n=ticks.length, s=Math.max(0,Math.floor(startP/100*n)), e=Math.min(n-1,Math.ceil(endP/100*n));
+    const slice=ticks.slice(s,e+1);
     const vals=[];
     if(ACTIVE.has('mid')) vals.push(...slice.map(t=>t.mid).filter(v=>v!=null));
-    if(ACTIVE.has('bid') && hasBid) vals.push(...slice.map(t=>t.bid).filter(v=>v!=null));
-    if(ACTIVE.has('ask') && hasAsk) vals.push(...slice.map(t=>t.ask).filter(v=>v!=null));
+    if(ACTIVE.has('bid')) vals.push(...slice.map(t=>t.bid).filter(v=>v!=null));
+    if(ACTIVE.has('ask')) vals.push(...slice.map(t=>t.ask).filter(v=>v!=null));
     if(!vals.length) return;
     const min=Math.min(...vals), max=Math.max(...vals), pad=Math.max(0.5,(max-min)*0.05);
     chart.setOption({ yAxis:{ min:min-pad, max:max+pad }});
   }
 
-  // ---------- Boot ----------
+  // ---- Boot ----
   (async function(){
+    // base toggles first
+    const $base=qs('#baseLayers'); $base.innerHTML='';
+    $base.appendChild(makeToggle('mid','mid',true,false));
+    $base.appendChild(makeToggle('bid','bid',false,false));
+    $base.appendChild(makeToggle('ask','ask',false,false));
     await loadInitial();
   })();
-
 })();
 </script>
 </body>
