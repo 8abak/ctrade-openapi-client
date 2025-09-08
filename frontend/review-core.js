@@ -8,16 +8,17 @@
     animation: false,
     backgroundColor: '#0f172a',
     grid: { left: 50, right: 20, top: 10, bottom: 30 },
+    // --- tooltip: now reads p.data.meta.id so id always shows ---
     tooltip: {
       trigger: 'axis',
       axisPointer: { type: 'cross' },
       formatter: (params) => {
         if (!params || !params.length) return '';
         const base = params.find(p => (p.seriesId || '').startsWith('ticks:')) || params[0];
-        const d = base && base.data ? base.data : null;
-        const ts = d ? new Date(d[0]) : (params[0].axisValueLabel);
-        const mid = d ? d[1] : (params[0].value && params[0].value[1]);
-        const id = d && d.__id ? d.__id : '—';
+        const point = base && base.data ? base.data : null;
+        const ts = point ? new Date(point.value[0]) : (params[0].axisValueLabel);
+        const mid = point ? point.value[1] : (params[0].value && params[0].value[1]);
+        const id  = point && point.meta ? point.meta.id : '—';
         const dt = new Date(ts);
         const date = dt.toLocaleDateString(); const time = dt.toLocaleTimeString();
         let lines = [`<b>${date} ${time}</b>`, `id: ${id}`, `mid: ${mid}`];
@@ -162,6 +163,11 @@
     });
   }
 
+  // Helper to convert a tick record to a point for ECharts
+  function toPoint(r) {
+    return { value: [r.ts, r.mid], meta: { id: r.id } };
+  }
+
   // ---------------- Series ops (now preserving window) ----------------
   function setSeriesPreserveWindow() {
     const zw = getZoomWindowValues();        // capture absolute window
@@ -171,8 +177,8 @@
 
   function addOrUpdateTickSeries(segmId, ticks) {
     const k = keyS('ticks', segmId);
-    const data = ticks.map(r => { const d=[r.ts, r.mid]; d.__id=r.id; return d; });
-    const s = { id: k, name: `mid #${segmId}`, type: 'line', showSymbol:false, sampling:'lttb', large:true, data };
+    const data = ticks.map(toPoint);
+    const s = { id:k, name:`mid #${segmId}`, type:'line', showSymbol:false, sampling:'lttb', large:true, data };
     state.seriesMap.set(k, s);
     setSeriesPreserveWindow();
   }
@@ -181,8 +187,7 @@
     const k = keyS('ticks', segmId);
     const s = state.seriesMap.get(k);
     if (!s) return addOrUpdateTickSeries(segmId, ticks);
-    const more = ticks.map(r => { const d=[r.ts, r.mid]; d.__id=r.id; return d; });
-    s.data = s.data.concat(more);
+    s.data = s.data.concat(ticks.map(toPoint));
     setSeriesPreserveWindow();
   }
 
@@ -190,10 +195,18 @@
     const k = keyS('ticks', segmId);
     const s = state.seriesMap.get(k);
     if (!s) return addOrUpdateTickSeries(segmId, ticks);
-    const more = ticks.map(r => { const d=[r.ts, r.mid]; d.__id=r.id; return d; });
-    s.data = more.concat(s.data);
+    s.data = ticks.map(toPoint).concat(s.data);
     setSeriesPreserveWindow();
   }
+
+
+  function getLastDrawnId(segmId) {
+    const s = state.seriesMap.get(keyS('ticks', segmId));
+    if (!s || !s.data || !s.data.length) return null;
+    const last = s.data[s.data.length - 1];
+    return last && last.meta ? last.meta.id : null;
+  }
+
 
   function removeSegmSeries(segmId) {
     for (const [k] of state.seriesMap) if (k.includes(`:${segmId}:`)) state.seriesMap.delete(k);
@@ -256,23 +269,26 @@
   }
 
   async function streamRight(segmId) {
-    if (state.streaming.get(segmId)) return;
-    state.streaming.set(segmId, true);
-    try {
-      const seg = state.segms.find(s => s.id === segmId); if (!seg) return;
-      while (state.selectedSegmIds.has(segmId)) {
-        const from = (seg.loadedMaxId || seg.start_id) + 1;
-        if (from > seg.end_id) break;
-        const chunk = await getSegmTicksChunk(segmId, from, state.chunk);
-        if (!chunk.length) break;
-        seg.loadedMaxId = chunk[chunk.length-1].id;
-        appendTickSeries(segmId, chunk); // zoom preserved inside
-        await new Promise(r => setTimeout(r, 40));
-      }
-    } finally {
-      state.streaming.delete(segmId);
+  if (state.streaming.get(segmId)) return;
+  state.streaming.set(segmId, true);
+  try {
+    const seg = state.segms.find(s => s.id === segmId); if (!seg) return;
+    while (state.selectedSegmIds.has(segmId)) {
+      const lastId = getLastDrawnId(segmId) ?? seg.start_id;
+      const from = lastId + 1;
+      if (from > seg.end_id) break;
+
+      const chunk = await getSegmTicksChunk(segmId, from, state.chunk);
+      if (!chunk.length) break;
+
+      appendTickSeries(segmId, chunk); // zoom preserved inside
+      await new Promise(r => setTimeout(r, 40)); // keep UI responsive
     }
+  } finally {
+    state.streaming.delete(segmId);
   }
+}
+
 
   async function loadSegmLayers(segmId) {
     if (!state.selectedTables.size) return;
