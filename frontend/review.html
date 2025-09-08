@@ -184,6 +184,21 @@
     chart = echarts.init(qs('#chart'));
     option = baseOption();
     chart.setOption(option);
+    chart.on('dataZoom', ()=>{
+      const zr = chart.getModel().getComponent('dataZoom').getRange();
+      const startIdx = Math.floor(zr[0] / 100 * ticks.length);
+      const endIdx   = Math.ceil(zr[1] / 100 * ticks.length);
+      const slice = ticks.slice(startIdx, endIdx+1);
+      const vals = slice.map(t=>t.mid).filter(v=>v!=null);
+      if(vals.length){
+        const min = Math.min(...vals), max = Math.max(...vals);
+        const pad = Math.max(0.5, (max-min)*0.05);
+        chart.setOption({
+          yAxis: { min: min-pad, max: max+pad }
+        });
+      }
+    });
+
   }
 
   function baseOption(){
