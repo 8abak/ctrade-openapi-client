@@ -93,9 +93,17 @@ def sqlvw_query(query: str = Query(...)):
 # ---------------------- New SQL console endpoints ---------------------
 
 @app.get("/api/sql/tables")
-@app.get("/api/tables")  # alias
 def api_sql_tables():
-    return sqlvw_tables()
+    conn = get_conn()
+    with dict_cur(conn) as cur:
+        cur.execute("""
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema='public' AND table_type='BASE TABLE'
+            ORDER BY table_name
+        """)
+        return [r["table_name"] for r in cur.fetchall()]
+
 
 @app.get("/api/sql")
 def api_sql_get(q: str = ""):
