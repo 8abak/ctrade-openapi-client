@@ -1,67 +1,83 @@
-<!doctype html>
+<!-- PATH: frontend/review.html -->
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>ML Review — Price-Action Segments</title>
+  <meta charset="utf-8" />
+  <title>ML Review — Segments & Layers</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    :root { color-scheme: dark; }
-    body { margin:0; background:#0d1117; color:#c9d1d9; font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif; }
-    header { display:flex; align-items:center; gap:.75rem; padding:.5rem .75rem; border-bottom:1px solid #30363d; }
-    header .spacer { flex:1; }
-    #run { appearance:none; background:#1f6feb; color:#fff; border:0; border-radius:10px; padding:.4rem .7rem; font-weight:600; cursor:pointer; }
-    #run:disabled { opacity:.6; cursor:not-allowed; }
-    #runStat { color:#8b949e; font-size:12px; }
-    main { display:grid; grid-template-columns: 380px 1fr; gap:0; height: calc(100vh - 50px); }
-    #left { border-right:1px solid #30363d; overflow:auto; }
-    #chart { height:100%; }
-    table { width:100%; border-collapse:collapse; }
-    thead th { position:sticky; top:0; background:#0d1117; border-bottom:1px solid #30363d; padding:.4rem .5rem; font-weight:600; text-align:left; }
-    tbody td { border-bottom:1px solid #161b22; padding:.35rem .5rem; }
-    tbody tr { cursor:pointer; }
-    tbody tr:hover { background:#161b22; }
-    .controls { position:absolute; left:400px; bottom:10px; display:flex; gap:16px; }
-    .controls label { user-select:none; }
-    #seginfo { padding:.35rem .75rem; border-top:1px solid #30363d; font-size:13px; color:#8b949e; }
+    :root{
+      --bg:#0f172a; --panel:#0b1220; --text:#e5e7eb; --muted:#94a3b8; --accent:#2563eb;
+      --btn:#1f2937; --btn2:#374151; --chip:#111827; --ok:#16a34a; --warn:#f59e0b;
+    }
+    html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font:14px/1.4 ui-sans-serif,system-ui,Segoe UI,Roboto,Inter}
+    .wrap{display:grid;grid-template-columns:280px 1fr;grid-template-rows:auto 1fr;gap:8px;height:100%}
+    header{grid-column:1/3;display:flex;gap:8px;align-items:center;padding:8px 12px;background:#0b1220;position:sticky;top:0;z-index:2}
+    header .sp{flex:1}
+    .left{display:grid;grid-template-rows:auto 1fr auto;gap:8px;background:var(--panel);padding:8px}
+    .card{background:#0e1627;border:1px solid #1e293b;border-radius:10px}
+    .card h3{margin:0;padding:8px 10px;border-bottom:1px solid #1e293b;color:#cbd5e1;font-weight:600}
+    .card .body{padding:8px;max-height:38vh;overflow:auto}
+    .card .list{max-height:calc(100% - 38px);overflow:auto}
+    .segm-row{display:grid;grid-template-columns:28px 84px 84px 52px 1fr;gap:6px;padding:6px 8px;border-bottom:1px dashed #1e293b;align-items:center;cursor:pointer}
+    .segm-row:hover{background:#0b1220}
+    .segm-row input{margin:0}
+    .chips{display:flex;flex-wrap:wrap;gap:6px}
+    .chip{background:var(--chip);border:1px solid #1f2937;border-radius:999px;padding:2px 8px;color:#cbd5e1}
+    button{background:var(--btn);color:var(--text);border:1px solid #1f2937;border-radius:8px;padding:6px 10px;cursor:pointer}
+    button.secondary{background:var(--btn2)}
+    button:disabled{opacity:.6;cursor:not-allowed}
+    #chart{height:100%;width:100%}
+    .footer{display:flex;gap:8px;align-items:center;justify-content:space-between;padding:8px}
+    .small{color:var(--muted);font-size:12px}
+    input[type="number"], select{background:#0b1220;border:1px solid #1f2937;border-radius:6px;color:var(--text);padding:4px 6px}
+    .tbl-check{display:grid;grid-template-columns:1fr 60px;gap:6px;align-items:center}
+    .tbl-check label{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   </style>
-  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
 </head>
 <body>
-  <header>
-    <button id="run">▶ Clean</button>
-    <span id="runStat">idle</span>
-    <span class="spacer"></span>
-    <div style="display:flex; gap:16px; align-items:center; margin-right:.5rem;">
-      <span style="display:inline-flex; align-items:center; gap:6px;"><span style="width:10px;height:10px;background:#3b82f6;display:inline-block"></span> mid</span>
-      <span style="display:inline-flex; align-items:center; gap:6px;"><span style="width:10px;height:10px;background:#10b981;display:inline-block"></span> smooth</span>
-      <span style="display:inline-flex; align-items:center; gap:6px;"><span style="width:10px;height:10px;background:#eab308;display:inline-block"></span> bigm</span>
-      <span style="display:inline-flex; align-items:center; gap:6px;"><span style="width:10px;height:10px;background:#ef4444;display:inline-block"></span> smal</span>
-      <span style="display:inline-flex; align-items:center; gap:6px;"><span style="width:10px;height:10px;background:#94a3b8;display:inline-block"></span> pred</span>
-    </div>
-  </header>
+  <div class="wrap">
+    <header>
+      <strong>Review</strong>
+      <span class="sp"></span>
+      <label>Chunk size
+        <input id="chunk" type="number" min="500" max="20000" step="500" value="2000">
+      </label>
+      <button id="btnReload" class="secondary">Reload</button>
+    </header>
 
-  <main>
-    <section id="left">
-      <table id="journal">
-        <thead>
-          <tr>
-            <th style="width:70px;">ID</th>
-            <th style="width:152px;">Time</th>
-            <th style="width:70px;">Dur(s)</th>
-            <th style="width:60px;">Preds</th>
-            <th style="width:60px;">Ratio</th>
-            <th style="width:50px;">Dir</th>
-            <th style="width:70px;">Ticks</th>
-          </tr>
-        </thead>
-        <tbody></tbody>
-      </table>
-      <div id="seginfo">Segment: —</div>
-    </section>
+    <aside class="left">
+      <div class="card">
+        <h3>Segments</h3>
+        <div class="body small">Select one or more segments. Data loads from the beginning of each, then adds older ticks to the left until complete.</div>
+        <div id="segmList" class="list"></div>
+      </div>
 
-    <section id="chart"></section>
-  </main>
+      <div class="card">
+        <h3>Layers</h3>
+        <div class="body" id="tblList">
+          <!-- tables with a sensible schema get listed here (unchecked by default) -->
+        </div>
+      </div>
 
+      <div class="card">
+        <h3>Controls</h3>
+        <div class="footer">
+          <div class="chips" id="stat"></div>
+          <div>
+            <button id="btnLoadMore" title="Load more (older) ticks for selected segments">Load more</button>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <main class="card" style="display:grid;grid-template-rows:auto 1fr">
+      <h3>Chart</h3>
+      <div id="chart"></div>
+    </main>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
   <script src="./review-core.js"></script>
 </body>
 </html>

@@ -331,6 +331,116 @@ def api_segms(limit: int = 200):
             r["ratio"] = float(r["ratio"])
     return rows
 
+# --- ADD: paged ticks for a segment (load from beginning in chunks) ---
+@app.get("/api/segm/ticks")
+def api_segm_ticks(id: int = Query(...), from_: Optional[int] = Query(None, alias="from"), limit: int = 2000):
+    """
+    Return up to {limit} ticks for segm id, starting at 'from' (tick id) going forward.
+    If 'from' is omitted, starts from the segment's start_id.
+    """
+    limit = max(100, min(limit, 20000))
+    conn = get_conn()
+    ts_col, mid_expr, (has_bid, has_ask) = _ts_mid_cols(conn)
+    bid_sel = ", bid" if has_bid else ""
+    ask_sel = ", ask" if has_ask else ""
+
+    with dict_cur(conn) as cur:
+        cur.execute("SELECT start_id, end_id FROM segm WHERE id=%s", (id,))
+        sg = cur.fetchone()
+        if not sg:
+            raise HTTPException(404, "segm not found")
+        start_id, end_id = int(sg["start_id"]), int(sg["end_id"])
+        from_id = int(from_ or start_id)
+
+        cur.execute(
+            f"""
+            SELECT id, {ts_col} AS ts, {mid_expr} AS mid{bid_sel}{ask_sel}
+            FROM ticks
+            WHERE id BETWEEN %s AND %s AND id >= %s
+            ORDER BY id ASC
+            LIMIT %s
+            """,
+            (start_id, end_id, from_id, limit),
+        )
+        rows = cur.fetchall()
+        for r in rows:
+            if isinstance(r.get("mid"), Decimal): r["mid"] = float(r["mid"])
+            if has_bid and isinstance(r.get("bid"), Decimal): r["bid"] = float(r["bid"])
+            if has_ask and isinstance(r.get("ask"), Decimal): r["ask"] = float(r["ask"])
+            r["spread"] = (r.get("ask") - r.get("bid")) if (has_bid and has_ask and r.get("ask") is not None and r.get("bid") is not None) else None
+            r["ts"] = r["ts"].isoformat()
+        return rows
+
+# --- ADD: generic per-segment layer fetch for arbitrary tables ---------
+@app.get("/api/segm/layers")
+def api_segm_layers(id: int = Query(...), tables: str = Query(...)):
+    """
+    Fetch rows from requested tables for a given segment id.
+    Heuristics:
+      - If table has 'segm_id': filter WHERE segm_id = id
+      - Else if it has start_id/end_id: filter by overlapping [start_id,end_id]
+      - Else if it has timestamp columns a_ts/b_ts/start_ts/end_ts: filter by ts range
+    Returns {'layers': {table: [rows...]}}
+    """
+    names = [t.strip() for t in (tables or "").split(",") if t.strip()]
+    if not names:
+        return {"layers": {}}
+
+    conn = get_conn()
+    with dict_cur(conn) as cur:
+        cur.execute("SELECT start_id, end_id, start_ts, end_ts FROM segm WHERE id=%s", (id,))
+        sg = cur.fetchone()
+        if not sg:
+            raise HTTPException(404, "segm not found")
+
+        def table_info(name: str):
+            cur.execute("""
+                SELECT column_name FROM information_schema.columns
+                WHERE table_schema='public' AND table_name=%s
+            """, (name,))
+            return [r["column_name"] for r in cur.fetchall()]
+
+        layers = {}
+        for t in names:
+            cols = table_info(t)
+            if not cols:
+                layers[t] = []  # silently skip unknown
+                continue
+
+            # choose filter
+            if "segm_id" in cols:
+                q = f"SELECT * FROM {t} WHERE segm_id=%s ORDER BY 1"
+                cur.execute(q, (id,))
+            elif "start_id" in cols and "end_id" in cols:
+                q = f"""
+                    SELECT * FROM {t}
+                    WHERE NOT (end_id < %s OR start_id > %s)
+                    ORDER BY 1
+                """
+                cur.execute(q, (sg["start_id"], sg["end_id"]))
+            elif any(c in cols for c in ("a_ts","b_ts","start_ts","end_ts")):
+                q = f"""
+                    SELECT * FROM {t}
+                    WHERE COALESCE(start_ts, a_ts, b_ts, end_ts) BETWEEN %s AND %s
+                    ORDER BY 1
+                """
+                cur.execute(q, (sg["start_ts"], sg["end_ts"]))
+            else:
+                # last resort: return empty to avoid dumping huge unrelated tables
+                layers[t] = []
+                continue
+
+            rows = cur.fetchall()
+            # best-effort JSON normalization of common numeric/time columns
+            for r in rows:
+                for k,v in list(r.items()):
+                    if isinstance(v, Decimal): r[k] = float(v)
+                    elif isinstance(v, (datetime, date)): r[k] = v.isoformat()
+            layers[t] = rows
+
+        return {"layers": layers}
+
+
 # full data for a single segment id
 @app.get("/api/segm")
 def api_segm(id: int = Query(...)):

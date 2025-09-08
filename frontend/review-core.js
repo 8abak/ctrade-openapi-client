@@ -1,291 +1,255 @@
-// Review page wired to existing backend routes in backend/main.py (no assumptions).
-// Uses: GET /api/segm?id=... (present) and the list loader you already wired.
-// Change: draw "smal" using markLine (not a 'lines' series) to avoid ECharts crash.
+// PATH: frontend/review-core.js
+(() => {
+  const el = (id) => document.getElementById(id);
 
-const API = '/api';
-
-// DOM refs
-const journalBody = document.querySelector('#journal tbody');
-const runBtn   = document.getElementById('run');
-const runStat  = document.getElementById('runStat');
-const segInfo  = document.getElementById('seginfo');
-const chart    = echarts.init(document.getElementById('chart'));
-
-let currentSeg = null;
-
-// -------------------- utils --------------------
-function fmt2(x){ return (x===null||x===undefined||isNaN(+x)) ? '' : (+x).toFixed(2); }
-function ensureArray(v){ return Array.isArray(v) ? v : (v ? [v] : []); }
-
-// -------------------- list segments (use your /api/segm/recent or SQL passthrough) --------------------
-async function fetchRecentSegm(limit = 200) {
-  // prefer your native route (you added it)
-  try {
-    const r = await fetch(`${API}/segm/recent?limit=${limit}`);
-    if (r.ok) return await r.json();
-  } catch(_) { /* ignore and fall back */ }
-
-  // fallback via SQL view you already have in main.py: GET /sqlvw/query?query=...
-  const q = encodeURIComponent(`
-    SELECT id, start_id, end_id, start_ts, end_ts, dir, span, len
-    FROM segm
-    ORDER BY id DESC
-    LIMIT ${Math.max(1, Math.min(limit, 500))}
-  `.trim());
-  const r2 = await fetch(`/sqlvw/query?query=${q}`);
-  if (!r2.ok) throw new Error(`segm list failed: ${r2.status}`);
-  return await r2.json();
-}
-
-async function loadSegmList() {
-  const rows = await fetchRecentSegm(200);
-  journalBody.innerHTML = '';
-  for (const s of rows) {
-    const tr = document.createElement('tr');
-    const durSec = Math.max(0, (new Date(s.end_ts) - new Date(s.start_ts)) / 1000) | 0;
-    tr.innerHTML = `
-      <td>${s.id}</td>
-      <td>${new Date(s.start_ts).toLocaleString()}</td>
-      <td>${durSec}</td>
-      <td>${''}</td>
-      <td>${fmt2(s.span)}</td>
-      <td>${s.dir ?? ''}</td>
-      <td>${s.len ?? ''}</td>
-    `;
-    tr.addEventListener('click', () => loadSegment(s.id));
-    journalBody.appendChild(tr);
-  }
-  segInfo.textContent = 'Segment: —';
-}
-
-// -------------------- chart scaffolding (keeps your styling) --------------------
-function setupChart(){
-  chart.setOption({
-    backgroundColor:'#0d1117',
-    animation:false,
-    tooltip:{
-      trigger:'axis',
-      axisPointer:{type:'line'},
-      formatter:(params)=>{
-        const midP = params.find(p=>p.seriesName==='mid');
-        const d = midP?.data?.meta;
-        if (!d) return '';
-        const dt = new Date(d.ts);
-        const lines = [
-          `${d.id}`,
-          `${dt.toLocaleDateString()} ${dt.toLocaleTimeString()}`,
-          `mid: ${fmt2(d.mid)}`
-        ];
-        if (d.smooth!==undefined) lines.push(`smooth: ${fmt2(d.smooth)}`);
-        return lines.join('<br/>');
-      }
-    },
-    grid:{left:56,right:24,top:24,bottom:56},
-    xAxis:{ type:'time', axisLabel:{color:'#c9d1d9'}, axisLine:{lineStyle:{color:'#30363d'}}, axisPointer:{show:true} },
-    yAxis:{ type:'value', scale:true, minInterval:1, splitNumber:8,
-      axisLabel:{color:'#c9d1d9', formatter:(v)=> String(Math.round(v))},
-      splitLine:{lineStyle:{color:'#30363d'}}
-    },
-    dataZoom:[
-      {type:'inside', xAxisIndex:0, filterMode:'weakFilter'},
-      {type:'slider', xAxisIndex:0, bottom:8}
+  // --- ECharts setup ---------------------------------------------------
+  const chart = echarts.init(el('chart'));
+  const opt = {
+    animation: false,
+    backgroundColor: '#0f172a',
+    grid: { left: 40, right: 18, top: 18, bottom: 28 },
+    tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
+    dataZoom: [
+      { type: 'inside', zoomOnMouseWheel: true },
+      { type: 'slider', height: 18 }
     ],
-    series:[
-      {name:'mid',    type:'line', showSymbol:false, lineStyle:{width:1.3}, data:[]},
-      {name:'smooth', type:'line', showSymbol:false, lineStyle:{width:2, opacity:.8}, data:[]},
-      // big movements shaded
-      {name:'bigm',   type:'line', data:[], markArea:{itemStyle:{color:'rgba(234,179,8,0.18)'}, data:[]}},
-      // NEW: small moves drawn as markLine on a helper empty series
-      {name:'smalLines', type:'line', showSymbol:false, data:[],
-        markLine:{silent:true, symbol:['none','none'],
-          lineStyle:{width:2, color:'#ef4444'}, data:[]}
+    xAxis: { type: 'time', axisLabel: { color: '#cbd5e1' } },
+    yAxis: {
+      type: 'value',
+      scale: true,
+      axisLabel: {
+        color: '#cbd5e1',
+        formatter: (v) => (typeof v === 'number' ? v.toFixed(2) : v) // stick to real numbers like live.html
       },
-      // predictions
-      {name:'pred',   type:'scatter', symbolSize:10, data:[],
-        label:{show:true, formatter:(p)=> p.data?.p?.hit===true?'✓':(p.data?.p?.hit===false?'✗':'?')}
-      }
-    ]
-  });
-}
+      splitLine: { lineStyle: { color: '#233047' } }
+    },
+    series: []
+  };
+  chart.setOption(opt);
 
-function rollingMean(arr, n){
-  const out = new Array(arr.length).fill(null);
-  if (arr.length===0) return out;
-  n = Math.max(1, Math.min(n, arr.length));
-  let sum=0;
-  for (let i=0;i<arr.length;i++){
-    sum += arr[i];
-    if (i>=n) sum -= arr[i-n];
-    out[i] = i>=n-1 ? sum / n : arr[i];
+  // --- State -----------------------------------------------------------
+  const state = {
+    chunk: 2000,
+    segms: [],           // [{id,start_id,end_id,..., loadedFromId}]
+    selectedSegmIds: new Set(),
+    selectedTables: new Set(), // user-chosen overlay tables
+    seriesMap: new Map() // key -> series object
+  };
+
+  // --- Helpers ---------------------------------------------------------
+  function fmtTs(s) { return new Date(s); }
+  function chip(txt) {
+    const d = document.createElement('div'); d.className = 'chip'; d.textContent = txt; return d;
   }
-  return out;
-}
-
-function mapTicksForSeries(ticks){
-  const mids = ticks.map(t=>+t.mid);
-  const smooth = rollingMean(mids, Math.min(100, Math.max(50, Math.floor(ticks.length*0.1))));
-  const midSeries    = ticks.map((t,i)=>({ value:[new Date(t.ts), +t.mid], meta:{...t, smooth:smooth[i]} }));
-  const smoothSeries = ticks.map((t,i)=>({ value:[new Date(t.ts), smooth[i]] }));
-  return {midSeries, smoothSeries};
-}
-
-// ---- helper: index by time so we can map ts→mid for lines/marks
-function makeTimeIndex(ticks){
-  const pairs = ticks.map(t=>[+new Date(t.ts), +t.mid]).sort((a,b)=>a[0]-b[0]);
-  function yAt(ts){
-    if (!pairs.length) return null;
-    const x = +new Date(ts);
-    // binary search nearest
-    let lo=0, hi=pairs.length-1, best=pairs[0];
-    while (lo<=hi){
-      const m=(lo+hi)>>1, dx=pairs[m][0]-x;
-      if (Math.abs(dx) < Math.abs(best[0]-x)) best=pairs[m];
-      if (dx===0) break;
-      if (dx<0) lo=m+1; else hi=m-1;
-    }
-    return best[1];
+  function setStat() {
+    const S = el('stat'); S.innerHTML = '';
+    S.appendChild(chip(`segms: ${state.selectedSegmIds.size}`));
+    S.appendChild(chip(`tables: ${state.selectedTables.size}`));
   }
-  return { yAt };
-}
+  function seriesKey(kind, segmId, extra='') { return `${kind}:${segmId}:${extra}`; }
 
-// ---- build visuals from your backend shapes ----
-// small moves: backend returns {a_ts, b_ts, ...}
-function buildSmallMarkLines(smal, idx){
-  const data = [];
-  for (const s of ensureArray(smal)){
-    const a = s?.a_ts, b = s?.b_ts;
-    if (!a || !b) continue;
-    const y1 = idx.yAt(a), y2 = idx.yAt(b);
-    if (y1==null || y2==null) continue;
-    data.push([{coord:[new Date(a), +y1]}, {coord:[new Date(b), +y2]}]);
+  // --- API -------------------------------------------------------------
+  async function api(url) {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(await r.text());
+    return r.json();
   }
-  return data;
-}
+  const getSegms = (limit=400) => api(`/api/segm/recent?limit=${limit}`);
+  const getSegmTicksChunk = (id, fromId, limit) =>
+    api(`/api/segm/ticks?id=${id}&from=${fromId}&limit=${limit}`);
+  const getSegmLayers = (id, tablesCSV) =>
+    api(`/api/segm/layers?id=${id}&tables=${encodeURIComponent(tablesCSV)}`);
+  const listTables = () => api(`/api/sql/tables`); // alias exists as /api/tables
 
-function buildBigAreas(bigm){
-  const areas = [];
-  for (const b of ensureArray(bigm)){
-    const a=b?.a_ts, c=b?.b_ts;
-    if (!a || !c) continue;
-    areas.push([{xAxis:new Date(a)}, {xAxis:new Date(c)}]);
-  }
-  return areas;
-}
-
-function buildPredScatter(pred, idx){
-  const dots = [];
-  for (const p of ensureArray(pred)){
-    const x = p?.at_ts ? new Date(p.at_ts) : null;
-    if (!x) continue;
-    const y = idx.yAt(p.at_ts);
-    if (y==null) continue;
-    dots.push({
-      value:[x, +y],
-      p,
-      itemStyle:{ color: p?.hit===true ? '#2ea043' : (p?.hit===false ? '#f85149' : '#8b949e') },
-      symbol: p?.hit==null ? 'circle' : (p?.hit ? 'triangle' : 'rect')
-    });
-  }
-  return dots;
-}
-
-// -------------------- fetch & draw a single segment --------------------
-async function loadSegment(segmId){
-  try{
-    const r = await fetch(`${API}/segm?id=${segmId}`);
-    if (!r.ok) throw new Error(`segm ${segmId} fetch failed: ${r.status}`);
-    const data = await r.json();
-
-    data.smal  = Array.isArray(data.smal)  ? data.smal  : [];
-    data.bigm  = Array.isArray(data.bigm)  ? data.bigm  : [];
-    data.pred  = Array.isArray(data.pred)  ? data.pred  : [];
-    data.level = Array.isArray(data.level) ? data.level : [];
-
-
-    const ticks = Array.isArray(data.ticks) ? data.ticks : [];
-    const {midSeries, smoothSeries} = mapTicksForSeries(ticks);
-    const timeIdx = makeTimeIndex(ticks);
-
-    const bigAreas  = buildBigAreas (data.bigm || []);
-    const predDots  = buildPredScatter(data.pred || [], timeIdx);
-    const smalLines = buildSmallMarkLines(data.smal || [], timeIdx);
-
-    chart.clear();
-    chart.setOption({
-      series: [
-        {name:'mid',        data: midSeries},
-        {name:'smooth',     data: smoothSeries},
-        {name:'bigm',       data: [], markArea:{itemStyle:{color:'rgba(234,179,8,0.18)'}, data: bigAreas}},
-        {name:'smalLines',  data: [], markLine:{silent:true, symbol:['none','none'], lineStyle:{width:2, color:'#ef4444'}, data: smalLines}},
-        {name:'pred',       data: predDots}
-      ]
-    });
-
-    // horizontal levels (your shape: {price, kind, ts, [used_at_ts]})
-    if (ticks.length && Array.isArray(data.level)){
-      const xStart = new Date(ticks[0].ts);
-      const xEnd   = new Date(ticks[ticks.length-1].ts);
-      const levelData = [];
-      for (const L of data.level){
-        const used = !!L.used_at_ts;
-        levelData.push([{coord:[xStart, +L.price]}, {coord:[xEnd, +L.price]}]);
-      }
-      chart.setOption({
-        series: [
-          {}, {}, {}, {},
-          { // add a second markLine layer on the pred series to keep UI simple
-            name:'pred',
-            markLine:{silent:true, symbol:['none','none'],
-              lineStyle:{type:'dashed', width:1, color:'#8b949e'},
-              data: levelData
-            }
-          }
-        ]
+  // --- UI: segments list ----------------------------------------------
+  async function populateSegms() {
+    const rows = await getSegms(800);
+    state.segms = rows.map(r => ({ ...r, loadedFromId: r.start_id })); // nothing loaded yet
+    const host = el('segmList'); host.innerHTML = '';
+    rows.forEach(r => {
+      const row = document.createElement('div');
+      row.className = 'segm-row';
+      row.innerHTML = `
+        <input type="checkbox" data-id="${r.id}"/>
+        <div class="small">${r.start_id}</div>
+        <div class="small">${r.end_id}</div>
+        <div class="small">${r.dir}</div>
+        <div class="small">${new Date(r.start_ts).toLocaleString()}</div>`;
+      row.querySelector('input').addEventListener('change', (e) => {
+        if (e.target.checked) state.selectedSegmIds.add(r.id);
+        else state.selectedSegmIds.delete(r.id);
+        setStat();
+        // initial load for this segm
+        if (e.target.checked) initialLoadSegm(r.id).catch(console.error);
+        else removeSegmSeries(r.id);
       });
+      host.appendChild(row);
+    });
+  }
+
+  function removeSegmSeries(segmId) {
+    // remove all series for this segm
+    for (const [k] of state.seriesMap) {
+      if (k.includes(`:${segmId}:`)) {
+        state.seriesMap.delete(k);
+      }
+    }
+    chart.setOption({ series: [...state.seriesMap.values()] }, { replaceMerge: ['series'] });
+  }
+
+  // --- UI: table list (layers) ----------------------------------------
+  async function populateTables() {
+    const tables = await listTables();
+    const host = el('tblList'); host.innerHTML = '';
+    // ignore obvious system/large raw tables; keep user ones visible
+    const blacklist = new Set(['ticks']); // we always draw ticks as base
+    tables.filter(t => !blacklist.has(t)).forEach(t => {
+      const row = document.createElement('div'); row.className = 'tbl-check';
+      const id = `tbl_${t}`;
+      row.innerHTML = `
+        <label for="${id}">${t}</label>
+        <input id="${id}" type="checkbox" data-t="${t}" />
+      `;
+      row.querySelector('input').addEventListener('change', async (e) => {
+        const name = e.target.dataset.t;
+        if (e.target.checked) state.selectedTables.add(name);
+        else state.selectedTables.delete(name);
+        setStat();
+        // reload layers for currently selected segms
+        for (const segmId of state.selectedSegmIds) {
+          await loadSegmLayers(segmId);
+        }
+      });
+      host.appendChild(row);
+    });
+  }
+
+  // --- Loading logic ---------------------------------------------------
+  async function initialLoadSegm(segmId) {
+    const seg = state.segms.find(s => s.id === segmId);
+    if (!seg) return;
+
+    // base ticks: first chunk from segment start
+    const ticks = await getSegmTicksChunk(segmId, seg.start_id, state.chunk);
+    seg.loadedFromId = (ticks.length ? ticks[0].id : seg.start_id); // earliest in this chunk
+    addOrUpdateTickSeries(segmId, ticks);
+
+    // overlays
+    await loadSegmLayers(segmId);
+    chart.resize();
+  }
+
+  async function loadMore() {
+    const tasks = [];
+    for (const segmId of state.selectedSegmIds) {
+      const seg = state.segms.find(s => s.id === segmId);
+      if (!seg) continue;
+      const from = Math.max(seg.start_id, (seg.loadedFromId || seg.start_id) - 1_000_000); // guard
+      const nextFrom = Math.max(seg.start_id, (seg.loadedFromId || seg.start_id) - state.chunk);
+      if (nextFrom >= seg.loadedFromId) continue; // nothing to do
+      tasks.push((async () => {
+        const chunk = await getSegmTicksChunk(segmId, nextFrom, state.chunk);
+        if (chunk.length) {
+          seg.loadedFromId = chunk[0].id;
+          prependTickSeries(segmId, chunk);
+        }
+      })());
+    }
+    await Promise.all(tasks);
+  }
+
+  async function loadSegmLayers(segmId) {
+    if (!state.selectedTables.size) return;
+    const tablesCSV = [...state.selectedTables].join(',');
+    const payload = await getSegmLayers(segmId, tablesCSV);
+    Object.entries(payload.layers || {}).forEach(([tname, rows]) => {
+      addOrUpdateLayerSeries(segmId, tname, rows);
+    });
+  }
+
+  // --- Chart series builders ------------------------------------------
+  function addOrUpdateTickSeries(segmId, ticks) {
+    const k = seriesKey('ticks', segmId);
+    const data = ticks.map(r => [fmtTs(r.ts), r.mid]);
+    const s = {
+      id: k, name: `mid #${segmId}`, type: 'line',
+      showSymbol: false, sampling: 'lttb', large: true,
+      data
+    };
+    state.seriesMap.set(k, s);
+    chart.setOption({ series: [...state.seriesMap.values()] }, { replaceMerge: ['series'] });
+  }
+  function prependTickSeries(segmId, ticks) {
+    const k = seriesKey('ticks', segmId);
+    const s = state.seriesMap.get(k); if (!s) return addOrUpdateTickSeries(segmId, ticks);
+    const more = ticks.map(r => [fmtTs(r.ts), r.mid]);
+    s.data = more.concat(s.data);
+    chart.setOption({ series: [...state.seriesMap.values()] }, { replaceMerge: ['series'] });
+  }
+
+  function addOrUpdateLayerSeries(segmId, table, rows) {
+    // Special shapes:
+    // - atr1: has start_ts/end_ts and span/dir -> draw as step segments
+    // - bigm/smal: a_id/b_id or a_ts/b_ts -> draw as segment overlays
+    // - level: draw as horizontal markers
+    const key = seriesKey(table, segmId);
+    let series;
+
+    if (table === 'atr1') {
+      // convert each leg into [ [ts, price], [ts, price] ] segments
+      const segs = [];
+      rows.forEach(r => {
+        segs.push([[fmtTs(r.start_ts), r.start_mid ?? null], [fmtTs(r.end_ts), r.end_mid ?? null]]);
+      });
+      series = {
+        id: key, name: `atr1 #${segmId}`, type: 'lines',
+        polyline: false, coordinateSystem: 'cartesian2d',
+        lineStyle: { width: 1.5 },
+        effect: { show: false },
+        data: segs.map(([a,b]) => ({ coords: [a, b] }))
+      };
+    } else if (table === 'level') {
+      series = {
+        id: key, name: `level #${segmId}`, type: 'scatter',
+        symbolSize: 6,
+        data: rows.map(r => [fmtTs(r.ts), r.price])
+      };
+    } else if (table === 'bigm' || table === 'smal' || table === 'pred') {
+      const segs = rows.map(r => ({
+        coords: [[fmtTs(r.a_ts || r.start_ts), r.a_mid ?? r.a_price ?? r.price ?? null],
+                 [fmtTs(r.b_ts || r.end_ts),   r.b_mid ?? r.b_price ?? r.price ?? null]]
+      }));
+      series = {
+        id: key, name: `${table} #${segmId}`, type: 'lines', lineStyle: { width: 2 }, data: segs
+      };
+    } else {
+      // generic fallback: time+value columns if present
+      const guess = rows.map(r => [fmtTs(r.ts || r.a_ts || r.start_ts || r.time || r.created_at),
+                                   r.mid ?? r.value ?? r.price ?? r.span ?? null]).filter(x => x[0] && x[1] != null);
+      series = {
+        id: key, name: `${table} #${segmId}`, type: 'line', showSymbol:false, data: guess
+      };
     }
 
-    const s = data.segm ?? {};
-    const statsLine = ticks.length
-      ? `Segment #${s.id ?? segmId} | ticks ${s.start_id ?? ''}..${s.end_id ?? ''} | ${s.dir ?? ''} span=${fmt2(s.span)} | small=${(data.smal||[]).length} big=${(data.bigm||[]).length} preds=${(data.pred||[]).length}`
-      : `Segment #${s.id ?? segmId} — no ticks returned`;
-    segInfo.textContent = statsLine;
-    currentSeg = s;
-
-  } catch (err){
-    console.error(err);
-    runStat.textContent = 'segment load error';
-    segInfo.textContent = `Segment ${segmId}: failed to load`;
+    state.seriesMap.set(key, series);
+    chart.setOption({ series: [...state.seriesMap.values()] }, { replaceMerge: ['series'] });
   }
-}
 
-// -------------------- Clean button (local clear only) --------------------
-function clearReviewChart() {
-  try {
-    chart.clear();
-    currentSeg = null;
-    segInfo.textContent = 'Segment: —';
-    runStat.textContent = 'cleared';
-  } catch (e) {
-    runStat.textContent = 'clear failed';
-    console.error('clearReviewChart error:', e);
-  } finally {
-    setTimeout(()=> runStat.textContent='idle', 900);
-  }
-}
-
-runBtn?.addEventListener('click', (e) => {
-  e.preventDefault();
-  clearReviewChart();
-});
-
-// -------------------- boot --------------------
-function boot(){
-  chart.resize();
-  setupChart();
-  loadSegmList().catch(err => {
-    console.error(err);
-    runStat.textContent = 'segm list error';
+  // --- Wire up ---------------------------------------------------------
+  el('btnReload').addEventListener('click', async () => {
+    state.chunk = Math.max(500, Math.min(20000, Number(el('chunk').value||2000)));
+    state.seriesMap.clear();
+    chart.setOption({ series: [] });
+    await populateSegms();
+    await populateTables();
+    setStat();
   });
-}
-boot();
-window.addEventListener('resize', ()=>chart.resize());
+  el('btnLoadMore').addEventListener('click', () => loadMore().catch(console.error));
+
+  // initial
+  el('chunk').value = String(state.chunk);
+  el('btnReload').click();
+
+  // responsive
+  window.addEventListener('resize', () => chart.resize());
+})();
