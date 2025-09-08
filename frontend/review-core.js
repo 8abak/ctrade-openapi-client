@@ -1,134 +1,184 @@
 // frontend/review-core.js
-// Review page wired to backend/main.py routes. SAFE single-file version.
-// Restores segm list, keeps segment click -> load, and adds:
-// - Smart Y auto-fit to visible X window (with padding)
-// - "No thinning" and "Show ticks" toggles
-// - ATR (atr1) on right axis, shown if present in ticks or separately loaded
-// - Chunk-based thinning remains; "No thinning" disables pixel sampling
-// Does NOT change your routes. Uses /api/segm/recent (if present) with a SQL fallback,
-// and /api/segm?id=...
+// Restores the Segments panel with checkboxes (multi-select) + smart chart.
+// Routes used (unchanged): 
+//   GET /api/segm/recent?limit=200
+//   GET /api/segm?id=<segmId>
+// Also reads Chunk input and respects "Load more" buttons you already have.
 
 (() => {
-  // ---------- DOM helpers (defensive selectors so we don't "lose" the list) ----------
   const qs  = (s, r=document) => r.querySelector(s);
   const qsa = (s, r=document) => Array.from(r.querySelectorAll(s));
 
-  // likely ids in your page (we try several)
-  const segmTableBody =
-      qs('#journal tbody') ||
-      qs('#segmTable tbody') ||
-      qs('.segm-table tbody') ||
-      createFallbackSegmTable();
+  const API = '/api';
 
-  const segInfo  = qs('#seginfo') || ensureInfoLine();
-  const chunkInp = qs('#chunkInput') || qs('input[name="chunk"]');
-  const chartEl  = qs('#reviewChart') || qs('#chart');
+  // ------- DOM -------
+  const chunkInput = qs('#chunkInput') || qs('input[name="chunk"]');
+  const chartEl    = qs('#reviewChart') || qs('#chart');
+  if (!chartEl || !window.echarts) return;
 
-  if (!chartEl) {
-    console.error('review-core: chart element not found (#reviewChart or #chart).');
-    return;
+  // Build/ensure Segments panel (left)
+  let segWrap = qs('#segments') || qs('.segments-panel');
+  if (!segWrap) {
+    segWrap = document.createElement('div');
+    segWrap.id = 'segments';
+    const leftCol = qs('#leftCol') || qs('.left-col') || document.body;
+    leftCol.appendChild(segWrap);
   }
 
-  const API = '/api';
-  const chart = echarts.init(chartEl);
+  // Header + table
+  segWrap.innerHTML = `
+    <div class="segm-header" style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+      <strong>Segments</strong>
+      <span style="opacity:.7;font-size:.9em">(Select segments, then pick layers e.g., <b>ticks</b>, <b>atr1</b>)</span>
+    </div>
+    <div class="segm-scroll" style="max-height:40vh;overflow:auto;border:1px solid rgba(255,255,255,.08);border-radius:6px;">
+      <table id="segmTable" class="segm-table" style="width:100%;border-collapse:collapse">
+        <thead style="position:sticky;top:0;background:#0f1620">
+          <tr>
+            <th style="padding:6px 8px;width:36px"></th>
+            <th style="padding:6px 8px">ID</th>
+            <th style="padding:6px 8px">Start TS</th>
+            <th style="padding:6px 8px">Duration(s)</th>
+            <th style="padding:6px 8px">Dir</th>
+            <th style="padding:6px 8px">Span</th>
+            <th style="padding:6px 8px">Len</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div id="seginfo" style="margin-top:6px;opacity:.85">Segment: —</div>
+  `;
+  const segmTableBody = segWrap.querySelector('tbody');
+  const segInfo = qs('#seginfo');
 
-  // ---------- State ----------
+  // ------- State -------
+  const chart = echarts.init(chartEl);
   const State = {
     chunk: 2000,
     noThinning: false,
     showTicks: true,
-    lastSegm: null,       // last loaded segm object from /api/segm?id=...
-    xMin: null,           // current X window min (ms) if focused/zoomed
-    xMax: null            // current X window max (ms)
+    selectedIds: new Set(),           // segm IDs checked
+    segmCache: new Map(),             // id -> { segm, ticks, bigm, smal, pred }
+    xMin: null, xMax: null
   };
 
-  // ---------- Fallback small scaffolding if page lacks a table/info ----------
-  function createFallbackSegmTable() {
-    const wrap = document.createElement('div');
-    wrap.style.margin = '8px 0';
-    wrap.innerHTML = `
-      <table id="segmTable" class="segm-table">
-        <thead>
-          <tr>
-            <th>ID</th><th>Start TS</th><th>Duration(s)</th><th>Dir</th><th>Span</th><th>Len</th>
-          </tr>
-        </thead>
-        <tbody></tbody>
-      </table>`;
-    const host = qs('#segments') || qs('.segments-panel') || document.body;
-    host.appendChild(wrap);
-    return wrap.querySelector('tbody');
-  }
-
-  function ensureInfoLine() {
-    const el = document.createElement('div');
-    el.id = 'seginfo';
-    el.style.margin = '6px 0';
-    el.textContent = 'Segment: —';
-    const host = qs('#review') || document.body;
-    host.appendChild(el);
-    return el;
-  }
-
-  // ---------- Utils ----------
-  const fmt2 = (x) =>
-    x === null || x === undefined || isNaN(+x) ? '' : (+x).toFixed(2);
-
-  function ensureArray(v) { return Array.isArray(v) ? v : (v ? [v] : []); }
+  // ------- Helpers -------
+  const fmt2 = (x) => (x==null || isNaN(+x)) ? '' : (+x).toFixed(2);
 
   function thin(arr, n) {
     if (!arr || arr.length <= n) return arr || [];
     const stride = Math.ceil(arr.length / n);
     const out = [];
     for (let i = 0; i < arr.length; i += stride) out.push(arr[i]);
-    if (arr.length && out[out.length - 1] !== arr[arr.length - 1]) out.push(arr[arr.length - 1]);
+    if (arr.length && out[out.length-1] !== arr[arr.length-1]) out.push(arr[arr.length-1]);
     return out;
   }
 
-  // ---------- Fetch segm list ----------
-  async function fetchRecentSegm(limit = 200) {
-    // Prefer native route, fall back to SQL viewer (keeps your previous behavior).
-    try {
-      const r = await fetch(`${API}/segm/recent?limit=${Math.max(1, Math.min(limit, 500))}`);
-      if (r.ok) return await r.json();
-    } catch { /* ignore */ }
-
-    const q = encodeURIComponent(`
-      SELECT id, start_id, end_id, start_ts, end_ts, dir, span, len
-      FROM segm ORDER BY id DESC
-      LIMIT ${Math.max(1, Math.min(limit, 500))}
-    `.trim());
-    const r2 = await fetch(`/sqlvw/query?query=${q}`);
-    if (!r2.ok) throw new Error(`segm list failed: ${r2.status}`);
-    return await r2.json();
+  function mapTicksForSeries(ticks) {
+    return (ticks||[]).map(t => ({ value: [new Date(t.ts), +t.mid], meta: t }));
+  }
+  function extractAtrFromTicks(ticks) {
+    const out = [];
+    for (const t of (ticks||[])) {
+      const v = (t.atr1 != null ? t.atr1 : t.atr);
+      if (v != null) out.push([new Date(t.ts), +v]);
+    }
+    return out;
   }
 
+  function makeTimeIndex(ticks) {
+    const pairs = (ticks||[]).map(t => [+new Date(t.ts), +t.mid]).sort((a,b)=>a[0]-b[0]);
+    function yAt(ts) {
+      if (!pairs.length) return null;
+      const x = +new Date(ts);
+      let lo=0, hi=pairs.length-1, best=pairs[0];
+      while (lo<=hi) {
+        const m=(lo+hi)>>1, dx=pairs[m][0]-x;
+        if (Math.abs(dx)<Math.abs(best[0]-x)) best=pairs[m];
+        if (dx===0) break;
+        if (dx<0) lo=m+1; else hi=m-1;
+      }
+      return best[1];
+    }
+    return { yAt };
+  }
+
+  function extent(series, xMin, xMax) {
+    let lo=Infinity, hi=-Infinity, got=false;
+    for (const item of series||[]) {
+      const p = Array.isArray(item) ? item : item.value;
+      if (!p) continue;
+      const x = +p[0], y = +p[1];
+      if (xMin!=null && x < xMin) continue;
+      if (xMax!=null && x > xMax) continue;
+      if (y < lo) lo=y;
+      if (y > hi) hi=y;
+      got = true;
+    }
+    if (!got) return null;
+    if (lo===hi) { const pad=Math.max(1e-6,Math.abs(hi)*0.001); lo-=pad; hi+=pad; }
+    const pad=(hi-lo)*0.08;
+    return [lo-pad, hi+pad];
+  }
+
+  // ------- Fetch -------
+  async function fetchSegmList(limit=200) {
+    const r = await fetch(`${API}/segm/recent?limit=${Math.max(1,Math.min(limit,500))}`);
+    if (!r.ok) throw new Error('segm list failed');
+    return r.json();
+  }
+  async function fetchSegm(id) {
+    if (State.segmCache.has(id)) return State.segmCache.get(id);
+    const r = await fetch(`${API}/segm?id=${id}`);
+    if (!r.ok) throw new Error(`segm ${id} failed`);
+    const data = await r.json();
+    State.segmCache.set(id, data);
+    return data;
+  }
+
+  // ------- UI: build segments table with checkboxes -------
   async function loadSegmList() {
-    const rows = await fetchRecentSegm(200);
+    const rows = await fetchSegmList(200);
     segmTableBody.innerHTML = '';
     for (const s of rows) {
       const tr = document.createElement('tr');
-      const durSec = Math.max(0, (new Date(s.end_ts) - new Date(s.start_ts)) / 1000) | 0;
-      tr.setAttribute('data-start', s.start_ts);
-      tr.setAttribute('data-end', s.end_ts);
+      tr.dataset.start = s.start_ts;
+      tr.dataset.end   = s.end_ts;
+      const durSec = Math.max(0, (new Date(s.end_ts) - new Date(s.start_ts))/1000) | 0;
+
       tr.innerHTML = `
-        <td>${s.id}</td>
-        <td>${new Date(s.start_ts).toLocaleString()}</td>
-        <td>${durSec}</td>
-        <td>${s.dir ?? ''}</td>
-        <td>${fmt2(s.span)}</td>
-        <td>${s.len ?? ''}</td>
+        <td style="padding:6px 8px">
+          <input type="checkbox" class="segm-check" data-id="${s.id}">
+        </td>
+        <td style="padding:6px 8px">${s.id}</td>
+        <td style="padding:6px 8px">${new Date(s.start_ts).toLocaleString()}</td>
+        <td style="padding:6px 8px">${durSec}</td>
+        <td style="padding:6px 8px">${s.dir ?? ''}</td>
+        <td style="padding:6px 8px">${fmt2(s.span)}</td>
+        <td style="padding:6px 8px">${s.len ?? ''}</td>
       `;
-      tr.addEventListener('click', () => {
-        focusWindow(s.start_ts, s.end_ts);   // x focus first (so y can fit nicely)
-        loadSegment(s.id);
+
+      // row click focuses window (doesn't toggle checkbox)
+      tr.addEventListener('click', (ev) => {
+        if (ev.target.closest('input[type=checkbox]')) return; // ignore clicks on checkbox itself
+        focusWindow(s.start_ts, s.end_ts);
       });
+
+      // checkbox controls selection
+      tr.querySelector('.segm-check').addEventListener('change', async (ev) => {
+        const id = Number(ev.target.dataset.id);
+        if (ev.target.checked) State.selectedIds.add(id);
+        else State.selectedIds.delete(id);
+        await reloadChartForSelection();
+      });
+
       segmTableBody.appendChild(tr);
     }
     segInfo.textContent = 'Segment: —';
   }
 
-  // ---------- Chart setup ----------
+  // ------- Chart base option -------
   function setupChart() {
     chart.setOption({
       backgroundColor: '#0d1117',
@@ -141,177 +191,33 @@
           const d = midP?.data?.meta;
           if (!d) return '';
           const dt = new Date(d.ts);
-          const lines = [
-            `${dt.toLocaleDateString()} ${dt.toLocaleTimeString()}`,
-            `id: ${d.id}`,
-            `mid: ${fmt2(d.mid)}`
-          ];
-          return lines.join('<br/>');
+          return `${dt.toLocaleDateString()} ${dt.toLocaleTimeString()}<br/>id: ${d.id}<br/>mid: ${fmt2(d.mid)}`;
         }
       },
       grid: { left: 56, right: 48, top: 24, bottom: 56 },
-      xAxis: [{ type: 'time', axisPointer: { show: true } }],
+      xAxis: [{ type: 'time', axisPointer: { show: true }, min: 'dataMin', max: 'dataMax' }],
       yAxis: [
         { type: 'value', scale: true, name: 'Price', axisLabel: { formatter: v => (+v).toFixed(2) } },
-        { type: 'value', scale: true, name: 'ATR', position: 'right', axisLabel: { formatter: v => (+v).toFixed(4) } }
+        { type: 'value', scale: true, name: 'ATR',   axisLabel: { formatter: v => (+v).toFixed(4) }, position: 'right' }
       ],
       dataZoom: [
         { type: 'inside', throttle: 0 },
         { type: 'slider', height: 20 }
       ],
+      legend: { show: true },
       series: [
-        // base mid line (toggleable)
-        { name: 'mid', type: 'line', showSymbol: false, yAxisIndex: 0, data: [], large: true, largeThreshold: 200000, sampling: 'lttb' },
-        // ATR line (right axis). Only visible if we load data for it.
-        { name: 'atr1', type: 'line', showSymbol: false, yAxisIndex: 1, data: [], large: true, largeThreshold: 200000, sampling: 'lttb', lineStyle: { width: 1.5 } },
-        // Big moves shading
-        { name: 'bigm', type: 'line', data: [], markArea: { itemStyle: { color: 'rgba(234,179,8,0.18)' }, data: [] } },
-        // Small moves as red connecting lines
-        { name: 'smal', type: 'line', showSymbol: false, data: [], markLine: { silent: true, symbol: ['none','none'], lineStyle: { width: 2 }, data: [] } },
-        // Predictions as scatter (✓/✗ in label if present)
-        { name: 'pred', type: 'scatter', symbolSize: 10, data: [], label: { show: true, formatter: (p)=> p.data?.p?.hit===true?'✓':(p.data?.p?.hit===false?'✗':'') } }
+        { name:'mid',  type:'line', yAxisIndex:0, showSymbol:false, data:[], large:true, largeThreshold:200000, sampling:'lttb' },
+        { name:'atr1', type:'line', yAxisIndex:1, showSymbol:false, data:[], large:true, largeThreshold:200000, sampling:'lttb', lineStyle:{width:1.5} },
+        { name:'bigm', type:'line', data:[], markArea:{ itemStyle:{ color:'rgba(234,179,8,0.18)' }, data:[] } },
+        { name:'smal', type:'line', showSymbol:false, data:[], markLine:{ silent:true, symbol:['none','none'], data:[] } },
+        { name:'pred', type:'scatter', symbolSize:10, data:[], label:{ show:true, formatter:(p)=> p.data?.p?.hit===true?'✓':(p.data?.p?.hit===false?'✗':'') } }
       ]
     });
 
-    // Refit Y when the user zooms/pans
     chart.on('dataZoom', refitYAxes);
+    window.addEventListener('resize', () => { chart.resize(); refitYAxes(); });
   }
 
-  // ---------- Data mappers ----------
-  function makeTimeIndex(ticks) {
-    const pairs = ticks.map(t => [+new Date(t.ts), +t.mid]).sort((a, b) => a[0] - b[0]);
-    function yAt(ts) {
-      if (!pairs.length) return null;
-      const x = +new Date(ts);
-      let lo = 0, hi = pairs.length - 1, best = pairs[0];
-      while (lo <= hi) {
-        const m = (lo + hi) >> 1, dx = pairs[m][0] - x;
-        if (Math.abs(dx) < Math.abs(best[0] - x)) best = pairs[m];
-        if (dx === 0) break;
-        if (dx < 0) lo = m + 1; else hi = m - 1;
-      }
-      return best[1];
-    }
-    return { yAt };
-  }
-
-  function mapTicksForSeries(ticks) {
-    const pts = ticks.map(t => ({
-      value: [new Date(t.ts), +t.mid],
-      meta: t
-    }));
-    return pts;
-    // (If you want a rolling mean again, we can add it back, but keeping it simple/fast here)
-  }
-
-  function buildBigAreas(bigm) {
-    const areas = [];
-    for (const b of ensureArray(bigm)) {
-      const a = b?.a_ts, c = b?.b_ts;
-      if (!a || !c) continue;
-      areas.push([{ xAxis: new Date(a) }, { xAxis: new Date(c) }]);
-    }
-    return areas;
-  }
-
-  function buildSmallMarkLines(smal, idx) {
-    const data = [];
-    for (const s of ensureArray(smal)) {
-      const a = s?.a_ts, b = s?.b_ts;
-      if (!a || !b) continue;
-      const y1 = idx.yAt(a), y2 = idx.yAt(b);
-      if (y1 == null || y2 == null) continue;
-      data.push([{ coord: [new Date(a), +y1] }, { coord: [new Date(b), +y2] }]);
-    }
-    return data;
-  }
-
-  function buildPredScatter(pred, idx) {
-    const dots = [];
-    for (const p of ensureArray(pred)) {
-      const x = p?.at_ts ? new Date(p.at_ts) : null;
-      if (!x) continue;
-      const y = idx.yAt(p.at_ts);
-      if (y == null) continue;
-      dots.push({
-        value: [x, +y],
-        p,
-        itemStyle: {
-          color: p?.hit === true ? '#2ea043' : (p?.hit === false ? '#f85149' : '#8b949e')
-        },
-        symbol: p?.hit == null ? 'circle' : (p?.hit ? 'triangle' : 'rect')
-      });
-    }
-    return dots;
-  }
-
-  // Try to extract ATR from ticks (tick.atr1 or tick.atr)
-  function extractAtrFromTicks(ticks) {
-    const arr = [];
-    for (const t of ensureArray(ticks)) {
-      const v = (t.atr1 != null ? t.atr1 : t.atr);
-      if (v == null) continue;
-      arr.push([new Date(t.ts), +v]);
-    }
-    return arr;
-  }
-
-  // ---------- Load a single segment ----------
-  async function loadSegment(segmId) {
-    try {
-      const r = await fetch(`${API}/segm?id=${segmId}`);
-      if (!r.ok) throw new Error(`segm ${segmId} fetch failed: ${r.status}`);
-      const data = await r.json();
-
-      const ticks = Array.isArray(data.ticks) ? data.ticks : [];
-      const midSeries = mapTicksForSeries(ticks);
-      const timeIdx   = makeTimeIndex(ticks);
-
-      // series data
-      const bigAreas  = buildBigAreas(data.bigm || []);
-      const smalLines = buildSmallMarkLines(data.smal || [], timeIdx);
-      const predDots  = buildPredScatter(data.pred || [], timeIdx);
-
-      // ATR values (from ticks if present)
-      let atrSeries = extractAtrFromTicks(ticks);
-
-      // Draw
-      const midData  = State.noThinning ? midSeries : thin(midSeries, State.chunk);
-      const atrData  = State.noThinning ? atrSeries : thin(atrSeries, State.chunk);
-
-      // keep current X window if already focused; otherwise use segm bounds
-      const xMin = State.xMin != null ? State.xMin : (ticks[0] ? +new Date(ticks[0].ts) : null);
-      const xMax = State.xMax != null ? State.xMax : (ticks[ticks.length - 1] ? +new Date(ticks[ticks.length - 1].ts) : null);
-
-      chart.setOption({
-        xAxis: [{ min: xMin ?? 'dataMin', max: xMax ?? 'dataMax' }],
-        series: [
-          { name: 'mid',  data: State.showTicks ? midData : [] , sampling: State.noThinning ? undefined : 'lttb' },
-          { name: 'atr1', data: atrData, yAxisIndex: 1, sampling: State.noThinning ? undefined : 'lttb' },
-          { name: 'bigm', data: [], markArea: { itemStyle: { color: 'rgba(234,179,8,0.18)' }, data: bigAreas } },
-          { name: 'smal', data: [], markLine: { silent: true, symbol: ['none','none'], data: smalLines } },
-          { name: 'pred', data: predDots }
-        ]
-      }, true);
-
-      // Stats line
-      const s = data.segm ?? {};
-      const statsLine = ticks.length
-        ? `Segment #${s.id ?? segmId} | ticks ${s.start_id ?? ''}..${s.end_id ?? ''} | ${s.dir ?? ''} span=${fmt2(s.span)} | small=${(data.smal||[]).length} big=${(data.bigm||[]).length} preds=${(data.pred||[]).length}`
-        : `Segment #${s.id ?? segmId} — no ticks returned`;
-      segInfo.textContent = statsLine;
-
-      State.lastSegm = s;
-
-      // After drawing, fit Y to the *visible* X window
-      refitYAxes();
-    } catch (err) {
-      console.error(err);
-      segInfo.textContent = `Segment ${segmId}: failed to load`;
-    }
-  }
-
-  // ---------- Smart Y auto-fit ----------
   function currentXRange() {
     const opt = chart.getOption();
     const xa = opt?.xAxis?.[0];
@@ -320,53 +226,119 @@
     return [mn, mx];
   }
 
-  function extent(seriesData, xMin, xMax) {
-    let lo = Infinity, hi = -Infinity, found = false;
-    for (const item of seriesData || []) {
-      const [x, y] = item.value || item; // support [x,y] or {value:[x,y]}
-      if (xMin != null && x < xMin) continue;
-      if (xMax != null && x > xMax) continue;
-      if (y < lo) lo = y;
-      if (y > hi) hi = y;
-      found = true;
-    }
-    if (!found) return null;
-    if (lo === hi) { const p = Math.max(1e-6, Math.abs(hi) * 0.001); lo -= p; hi += p; }
-    const pad = (hi - lo) * 0.08;
-    return [lo - pad, hi + pad];
-  }
-
   function refitYAxes() {
     const opt = chart.getOption();
     const [xMin, xMax] = currentXRange();
-
     const series = opt?.series || [];
-    const mid = series.find(s => s.name === 'mid' && Array.isArray(s.data))?.data || [];
-    const atr = series.find(s => String(s.name).toLowerCase() === 'atr1' && Array.isArray(s.data))?.data || [];
 
-    const leftExt  = State.showTicks ? extent(mid, xMin, xMax) : null;
-    const rightExt = atr.length ? extent(atr, xMin, xMax) : null;
+    const mid = series.find(s => s.name==='mid')?.data || [];
+    const atr = series.find(s => s.name==='atr1')?.data || [];
+
+    const left  = extent(mid, xMin, xMax);
+    const right = extent(atr, xMin, xMax);
 
     const yAxis = opt.yAxis || [{type:'value',scale:true},{type:'value',scale:true,position:'right'}];
-    if (leftExt)  { yAxis[0].min = leftExt[0];  yAxis[0].max = leftExt[1];  yAxis[0].name='Price'; yAxis[0].axisLabel={formatter:v=>(+v).toFixed(2)}; }
-    if (rightExt) { yAxis[1] = yAxis[1] || {type:'value',scale:true,position:'right'}; yAxis[1].min = rightExt[0]; yAxis[1].max = rightExt[1]; yAxis[1].name='ATR'; yAxis[1].axisLabel={formatter:v=>(+v).toFixed(4)}; }
+    if (left)  { yAxis[0].min = left[0];  yAxis[0].max = left[1];  yAxis[0].name='Price'; yAxis[0].axisLabel={formatter:v=>(+v).toFixed(2)}; }
+    if (right) { yAxis[1].min = right[0]; yAxis[1].max = right[1]; yAxis[1].name='ATR';   yAxis[1].axisLabel={formatter:v=>(+v).toFixed(4)}; }
 
     chart.setOption({ yAxis }, false);
   }
 
-  // ---------- Focus helpers ----------
   function focusWindow(startTs, endTs) {
     const s = isFinite(+startTs) ? +startTs : Date.parse(startTs);
-    const e = isFinite(+endTs) ? +endTs : Date.parse(endTs);
+    const e = isFinite(+endTs)   ? +endTs   : Date.parse(endTs);
     if (!isFinite(s) || !isFinite(e)) return;
     State.xMin = s; State.xMax = e;
-    chart.setOption({ xAxis: [{ min: s, max: e }] });
+    chart.setOption({ xAxis: [{ min:s, max:e }] });
     refitYAxes();
   }
 
-  // ---------- UI toggles (non-invasive) ----------
+  // ------- Build/merge data for current selection -------
+  async function reloadChartForSelection() {
+    // Limit to a sensible number to avoid overload on mobile
+    const ids = Array.from(State.selectedIds).slice(0, 5);
+
+    // Fetch & cache
+    const segms = [];
+    for (const id of ids) segms.push(await fetchSegm(id));
+
+    // Merge ticks/atr/preds/small/big
+    const allTicks = [];
+    const allAtr   = [];
+    const areas    = [];
+    const lines    = [];
+    const dots     = [];
+
+    for (const d of segms) {
+      const ticks = d.ticks || [];
+      allTicks.push(...mapTicksForSeries(ticks));
+      allAtr.push(...extractAtrFromTicks(ticks));
+
+      // decorations
+      const idx = makeTimeIndex(ticks);
+      // big moves
+      for (const b of (d.bigm || [])) {
+        if (b?.a_ts && b?.b_ts) areas.push([{xAxis:new Date(b.a_ts)}, {xAxis:new Date(b.b_ts)}]);
+      }
+      // small moves
+      for (const s of (d.smal || [])) {
+        if (!(s?.a_ts && s?.b_ts)) continue;
+        const y1 = idx.yAt(s.a_ts), y2 = idx.yAt(s.b_ts);
+        if (y1==null || y2==null) continue;
+        lines.push([{coord:[new Date(s.a_ts), +y1]}, {coord:[new Date(s.b_ts), +y2]}]);
+      }
+      // predictions
+      for (const p of (d.pred || [])) {
+        const x = p?.at_ts ? new Date(p.at_ts) : null;
+        if (!x) continue;
+        const y = idx.yAt(p.at_ts);
+        if (y==null) continue;
+        dots.push({
+          value:[x, +y],
+          p,
+          itemStyle:{ color: p?.hit===true?'#2ea043' : (p?.hit===false?'#f85149':'#8b949e') },
+          symbol: p?.hit==null? 'circle' : (p?.hit? 'triangle':'rect')
+        });
+      }
+    }
+
+    // Thinning (chunk) or no-thinning
+    const midData = State.noThinning ? allTicks : thin(allTicks, State.chunk);
+    const atrData = State.noThinning ? allAtr   : thin(allAtr,   State.chunk);
+
+    // X window: if user focused, keep; else auto
+    let xMin = State.xMin, xMax = State.xMax;
+    if (xMin==null || xMax==null) {
+      const full = [...midData, ...atrData];
+      if (full.length) {
+        full.sort((a,b)=> (Array.isArray(a)?a[0]:a.value[0]) - (Array.isArray(b)?b[0]:b.value[0]));
+        const first = Array.isArray(full[0]) ? full[0][0] : full[0].value[0];
+        const last  = Array.isArray(full[full.length-1]) ? full[full.length-1][0] : full[full.length-1].value[0];
+        xMin = first; xMax = last;
+      }
+    }
+
+    chart.setOption({
+      xAxis: [{ min: xMin ?? 'dataMin', max: xMax ?? 'dataMax' }],
+      series: [
+        { name:'mid',  data: State.showTicks ? midData : [], sampling: State.noThinning ? undefined : 'lttb' },
+        { name:'atr1', data: atrData, yAxisIndex:1, sampling: State.noThinning ? undefined : 'lttb' },
+        { name:'bigm', data: [], markArea: { itemStyle:{color:'rgba(234,179,8,0.18)'}, data: areas } },
+        { name:'smal', data: [], markLine: { silent:true, symbol:['none','none'], data: lines } },
+        { name:'pred', data: dots }
+      ]
+    }, true);
+
+    // Info line
+    segInfo.textContent = ids.length
+      ? `Selected segm: ${ids.join(', ')}`
+      : 'Segment: —';
+
+    refitYAxes();
+  }
+
+  // ------- Toggles -------
   function mountToggles() {
-    // mount into the "Layers:" row if present; otherwise append near chart
     const host = qs('.layers-row') || qs('#layersRow') || qs('.layers') || qs('#review') || document.body;
 
     if (!qs('#toggleNoThin')) {
@@ -376,11 +348,9 @@
       host.appendChild(label);
       label.firstElementChild.addEventListener('change', () => {
         State.noThinning = !!qs('#toggleNoThin').checked;
-        // just reload the current segm view with sampling updated
-        if (State.lastSegm?.id) loadSegment(State.lastSegm.id);
+        reloadChartForSelection();
       });
     }
-
     if (!qs('#toggleShowTicks')) {
       const label = document.createElement('label');
       label.style.marginLeft = '12px';
@@ -388,39 +358,32 @@
       host.appendChild(label);
       label.firstElementChild.addEventListener('change', () => {
         State.showTicks = !!qs('#toggleShowTicks').checked;
-        if (State.lastSegm?.id) loadSegment(State.lastSegm.id);
+        reloadChartForSelection();
       });
     }
   }
 
-  function wireChunkInput() {
-    if (!chunkInp) return;
+  function wireChunk() {
+    if (!chunkInput) return;
     const apply = () => {
-      const v = +chunkInp.value;
+      const v = +chunkInput.value;
       if (v > 0 && Number.isFinite(v)) {
         State.chunk = v;
-        if (!State.noThinning && State.lastSegm?.id) loadSegment(State.lastSegm.id);
+        if (!State.noThinning) reloadChartForSelection();
       }
     };
-    chunkInp.addEventListener('change', apply);
-    // initialize
+    chunkInput.addEventListener('change', apply);
     apply();
   }
 
-  // ---------- Boot ----------
+  // ------- Boot -------
   async function boot() {
     setupChart();
     mountToggles();
-    wireChunkInput();
+    wireChunk();
     await loadSegmList();
-    // resize hooks
-    window.addEventListener('resize', () => {
-      chart.resize();
-      refitYAxes();
-    });
   }
 
-  // Start
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
     setTimeout(boot, 0);
   } else {
