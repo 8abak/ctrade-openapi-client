@@ -120,8 +120,13 @@
     wrap.style.display='inline-flex'; wrap.style.alignItems='center'; wrap.style.gap='.35rem';
     const cb = document.createElement('input');
     cb.type='checkbox'; cb.value=id; cb.checked = checked;
-    cb.addEventListener('change', ()=>{
-      if(cb.checked) ACTIVE.add(id); else ACTIVE.delete(id);
+    cb.addEventListener('change', async ()=>{
+      if(cb.checked){
+        ACTIVE.add(id);
+        await loadLabelTable(id, fromId, toId);
+      } else {
+        ACTIVE.delete(id);
+      }
       render();
     });
     const span = document.createElement('span'); span.textContent = label;
@@ -162,6 +167,14 @@
       $start.value = s;
     }catch(e){ /* ignore */ }
     await discoverLabelTables();
+    // recalculate min/max
+    $labels.innerHTML = '';
+    for(const t of labelTables){
+      const defaultOn = ['atr1','bigm','smal','pred'].includes(t);
+      const cb = makeToggle(t, t, defaultOn);
+      $labels.appendChild(cb);
+      if(defaultOn) loadLabelTable(t, fromId, toId); // preload defaults
+    }
     // Setup base toggles
     $base.innerHTML = '';
     $base.appendChild(makeToggle('mid', 'mid', true));
@@ -229,6 +242,20 @@
     toId = nextTo;
     render();
   }
+
+  async function loadLabelTable(tbl, from, to){
+    const q = `SELECT * FROM ${tbl} WHERE tickid BETWEEN ${from} AND ${to} ORDER BY tickid`;
+    const res = await API.sql(q);
+    const rows = res.rows || [];
+    const pts = [];
+    for(const r of rows){
+      const idx = idToIndex.get(r.tickid);
+      const y   = idToMid.get(r.tickid);
+      if(idx!=null && y!=null) pts.push({ idx,y,raw:r });
+    }
+    labelData.set(tbl, pts);
+  }
+
 
   function buildTickState(prev, newly){
     // Keep order ascending by id, no thinning
