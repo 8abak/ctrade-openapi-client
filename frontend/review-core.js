@@ -132,19 +132,34 @@
     return [new Date(first).getTime(), new Date(last).getTime()];
   }
 
+  function getAllTicksExtent() {
+    let minT = Infinity, maxT = -Infinity;
+    for (const [k, s] of state.seriesMap) {
+      if (!k.startsWith('ticks:') || !s || !s.data || !s.data.length) continue;
+      const firstVal = s.data[0].value?.[0];
+      const lastVal  = s.data[s.data.length - 1].value?.[0];
+      const f = +new Date(firstVal);
+      const l = +new Date(lastVal);
+      if (isFinite(f) && f < minT) minT = f;
+      if (isFinite(l) && l > maxT) maxT = l;
+    }
+    return (isFinite(minT) && isFinite(maxT)) ? [minT, maxT] : null;
+  }
+
+
   function getZoomWindowValues() {
     const opt = chart.getOption();
     const dz = (opt.dataZoom && opt.dataZoom.length) ? opt.dataZoom[0] : null;
-    const extent = getTicksExtent();
+    const extent = getAllTicksExtent();
     if (!dz || !extent) return null;
 
-    // If we already have absolute values, keep them
     if (dz.startValue != null && dz.endValue != null) {
-      return [new Date(dz.startValue).getTime(), new Date(dz.endValue).getTime()];
+      const s = +new Date(dz.startValue), e = +new Date(dz.endValue);
+      return (isFinite(s) && isFinite(e)) ? [s, e] : null;
     }
-    // Otherwise convert percent → absolute using current extent
+    // convert percent → absolute using current extent
     const [minT, maxT] = extent;
-    const span = maxT - minT || 1;
+    const span = Math.max(1, maxT - minT);
     const pStart = (dz.start ?? 0) / 100;
     const pEnd   = (dz.end   ?? 100) / 100;
     const absStart = Math.round(minT + pStart * span);
@@ -152,16 +167,19 @@
     return [absStart, absEnd];
   }
 
+
   function applyZoomWindowValues(absStart, absEnd) {
-    if (absStart == null || absEnd == null) return;
-    // Reapply using startValue/endValue so new data on either side won't move the window
+    if (!isFinite(absStart) || !isFinite(absEnd)) return;
+    const sISO = new Date(absStart).toISOString();
+    const eISO = new Date(absEnd).toISOString();
     chart.setOption({
       dataZoom: [
-        { id: 'dzIn', startValue: new Date(absStart).toISOString(), endValue: new Date(absEnd).toISOString() },
-        { id: 'dzSl', startValue: new Date(absStart).toISOString(), endValue: new Date(absEnd).toISOString() }
+        { id: 'dzIn', startValue: sISO, endValue: eISO },
+        { id: 'dzSl', startValue: sISO, endValue: eISO }
       ]
     });
   }
+
 
   // Helper to convert a tick record to a point for ECharts
   function toPoint(r) {
@@ -170,10 +188,11 @@
 
   // ---------------- Series ops (now preserving window) ----------------
   function setSeriesPreserveWindow() {
-    const zw = getZoomWindowValues();        // capture absolute window
+    const zw = getZoomWindowValues();           // absolute [start,end] in ms
     chart.setOption({ series: [...state.seriesMap.values()] }, { replaceMerge: ['series'] });
-    if (zw) applyZoomWindowValues(zw[0], zw[1]); // restore same window
+    if (zw) applyZoomWindowValues(zw[0], zw[1]); // keep exactly the same window
   }
+
 
   function addOrUpdateTickSeries(segmId, ticks) {
     const k = keyS('ticks', segmId);
