@@ -13,7 +13,6 @@
       axisPointer: { type: 'cross' },
       formatter: (params) => {
         if (!params || !params.length) return '';
-        // prefer the base tick series item for metadata
         const base = params.find(p => (p.seriesId || '').startsWith('ticks:')) || params[0];
         const d = base && base.data ? base.data : null;
         const ts = d ? new Date(d[0]) : (params[0].axisValueLabel);
@@ -22,7 +21,6 @@
         const dt = new Date(ts);
         const date = dt.toLocaleDateString(); const time = dt.toLocaleTimeString();
         let lines = [`<b>${date} ${time}</b>`, `id: ${id}`, `mid: ${mid}`];
-        // include overlay lines values if they have numeric
         params.forEach(p => {
           if ((p.seriesId || '').startsWith('ticks:')) return;
           if (typeof p.value === 'number') lines.push(`${p.seriesName}: ${p.value}`);
@@ -31,9 +29,10 @@
         return lines.join('<br/>');
       }
     },
+    // IMPORTANT: give dataZoom entries IDs so we can target them
     dataZoom: [
-      { type: 'inside', zoomOnMouseWheel: true },
-      { type: 'slider', height: 18 }
+      { id: 'dzIn',  type: 'inside', zoomOnMouseWheel: true },
+      { id: 'dzSl',  type: 'slider', height: 18 }
     ],
     xAxis: { type: 'time', axisLabel: { color: '#cbd5e1' } },
     yAxis: {
@@ -51,22 +50,22 @@
     selectedSegmIds: new Set(),
     selectedTables: new Set(), // overlay tables
     seriesMap: new Map(),      // key -> series
-    streaming: new Map()       // segmId -> boolean (background right-stream in progress)
+    streaming: new Map()       // segmId -> boolean
   };
 
   const keyS = (type, segmId, name='') => `${type}:${segmId}:${name}`;
 
   // ---------------- API helpers ----------------
   async function api(url) { const r = await fetch(url); if (!r.ok) throw new Error(await r.text()); return r.json(); }
-  const listTables = () => api('/api/sql/tables');     // alias /api/tables is fine too
+  const listTables = () => api('/api/sql/tables');
   const getSegms = (limit=600) => api(`/api/segm/recent?limit=${limit}`);
   const getSegmTicksChunk = (id, fromId, limit) => api(`/api/segm/ticks?id=${id}&from=${fromId}&limit=${limit}`);
   const getSegmLayers = (id, tablesCSV) => api(`/api/segm/layers?id=${id}&tables=${encodeURIComponent(tablesCSV)}`);
 
-  // ---------------- UI: labels bar ----------------
+  // ---------------- Labels bar ----------------
   async function populateLabelsBar() {
     const tables = await listTables();
-    const blacklist = new Set(['ticks']); // we draw ticks anyway
+    const blacklist = new Set(['ticks']);
     const host = $('labelsGroup'); host.innerHTML = '';
     tables.filter(t => !blacklist.has(t)).forEach(t => {
       const box = document.createElement('label');
@@ -77,14 +76,13 @@
         const name = e.target.dataset.t;
         if (e.target.checked) state.selectedTables.add(name);
         else state.selectedTables.delete(name);
-        // refresh overlays for currently selected segms
         for (const segmId of state.selectedSegmIds) await loadSegmLayers(segmId);
       });
       host.appendChild(box);
     });
   }
 
-  // ---------------- UI: segm list ----------------
+  // ---------------- Segm list ----------------
   function durationHM(aTs, bTs) {
     const ms = Math.max(0, (new Date(bTs) - new Date(aTs)));
     const m = Math.floor(ms / 60000);
@@ -97,7 +95,6 @@
     state.segms = rows.map(r => ({ ...r, loadedMaxId: null }));
     const host = $('segmList'); host.innerHTML = '';
 
-    // header row
     const hdr = document.createElement('div');
     hdr.className = 'segm-row small';
     hdr.style.position = 'sticky'; hdr.style.top = '0'; hdr.style.background = '#0b1220'; hdr.style.zIndex = '2';
@@ -124,52 +121,89 @@
     });
   }
 
-  // ---------------- Series ops ----------------
-  function setSeries() {
-    const currentZoom = chart.getOption().dataZoom || null; // preserve zoom
-    chart.setOption({ series: [...state.seriesMap.values()] }, { replaceMerge: ['series'] });
-    if (currentZoom) chart.setOption({ dataZoom: currentZoom.map(z => ({...z})) });
+  // ---------------- Zoom preservation (absolute values) ----------------
+  function getTicksExtent() {
+    // Use the first ticks series as the extent reference
+    const ticksSeries = [...state.seriesMap.values()].find(s => (s.id||'').startsWith('ticks:'));
+    if (!ticksSeries || !ticksSeries.data || !ticksSeries.data.length) return null;
+    const first = ticksSeries.data[0][0];
+    const last  = ticksSeries.data[ticksSeries.data.length-1][0];
+    return [new Date(first).getTime(), new Date(last).getTime()];
   }
+
+  function getZoomWindowValues() {
+    const opt = chart.getOption();
+    const dz = (opt.dataZoom && opt.dataZoom.length) ? opt.dataZoom[0] : null;
+    const extent = getTicksExtent();
+    if (!dz || !extent) return null;
+
+    // If we already have absolute values, keep them
+    if (dz.startValue != null && dz.endValue != null) {
+      return [new Date(dz.startValue).getTime(), new Date(dz.endValue).getTime()];
+    }
+    // Otherwise convert percent → absolute using current extent
+    const [minT, maxT] = extent;
+    const span = maxT - minT || 1;
+    const pStart = (dz.start ?? 0) / 100;
+    const pEnd   = (dz.end   ?? 100) / 100;
+    const absStart = Math.round(minT + pStart * span);
+    const absEnd   = Math.round(minT + pEnd   * span);
+    return [absStart, absEnd];
+  }
+
+  function applyZoomWindowValues(absStart, absEnd) {
+    if (absStart == null || absEnd == null) return;
+    // Reapply using startValue/endValue so new data on either side won't move the window
+    chart.setOption({
+      dataZoom: [
+        { id: 'dzIn', startValue: new Date(absStart).toISOString(), endValue: new Date(absEnd).toISOString() },
+        { id: 'dzSl', startValue: new Date(absStart).toISOString(), endValue: new Date(absEnd).toISOString() }
+      ]
+    });
+  }
+
+  // ---------------- Series ops (now preserving window) ----------------
+  function setSeriesPreserveWindow() {
+    const zw = getZoomWindowValues();        // capture absolute window
+    chart.setOption({ series: [...state.seriesMap.values()] }, { replaceMerge: ['series'] });
+    if (zw) applyZoomWindowValues(zw[0], zw[1]); // restore same window
+  }
+
   function addOrUpdateTickSeries(segmId, ticks) {
     const k = keyS('ticks', segmId);
-    const data = ticks.map(r => {
-      const d = [r.ts, r.mid];
-      d.__id = r.id;                 // stash id for tooltip
-      return d;
-    });
-    const s = {
-      id: k, name: `mid #${segmId}`, type: 'line',
-      showSymbol: false, sampling: 'lttb', large: true, data
-    };
+    const data = ticks.map(r => { const d=[r.ts, r.mid]; d.__id=r.id; return d; });
+    const s = { id: k, name: `mid #${segmId}`, type: 'line', showSymbol:false, sampling:'lttb', large:true, data };
     state.seriesMap.set(k, s);
-    setSeries();
+    setSeriesPreserveWindow();
   }
+
   function appendTickSeries(segmId, ticks) {
     const k = keyS('ticks', segmId);
     const s = state.seriesMap.get(k);
     if (!s) return addOrUpdateTickSeries(segmId, ticks);
     const more = ticks.map(r => { const d=[r.ts, r.mid]; d.__id=r.id; return d; });
     s.data = s.data.concat(more);
-    setSeries();
+    setSeriesPreserveWindow();
   }
+
   function prependTickSeries(segmId, ticks) {
     const k = keyS('ticks', segmId);
     const s = state.seriesMap.get(k);
     if (!s) return addOrUpdateTickSeries(segmId, ticks);
     const more = ticks.map(r => { const d=[r.ts, r.mid]; d.__id=r.id; return d; });
     s.data = more.concat(s.data);
-    setSeries();
+    setSeriesPreserveWindow();
   }
+
   function removeSegmSeries(segmId) {
     for (const [k] of state.seriesMap) if (k.includes(`:${segmId}:`)) state.seriesMap.delete(k);
-    setSeries();
+    setSeriesPreserveWindow();
   }
 
   function addOrUpdateLayerSeries(segmId, table, rows) {
     const key = keyS('layer', segmId, table);
     let series;
     if (table === 'atr1') {
-      // draw legs as 'lines' segments
       const segs = rows.map(r => ({
         coords: [
           [r.start_ts, r.start_mid ?? r.a_mid ?? null],
@@ -193,38 +227,36 @@
       series = { id:key, name:`${table} #${segmId}`, type:'line', showSymbol:false, data:guess };
     }
     state.seriesMap.set(key, series);
-    setSeries();
+    setSeriesPreserveWindow();
   }
 
   // ---------------- Load logic ----------------
   async function initialLoadSegm(segmId) {
     const seg = state.segms.find(s => s.id === segmId); if (!seg) return;
-    // first chunk from the start
     const first = await getSegmTicksChunk(segmId, seg.start_id, state.chunk);
     if (first.length) {
       seg.loadedMaxId = first[first.length-1].id;
       addOrUpdateTickSeries(segmId, first);
       await loadSegmLayers(segmId);
-      // start background stream to the RIGHT (no zoom change)
-      streamRight(segmId).catch(console.error);
+      streamRight(segmId).catch(console.error); // background, preserves window each append
     }
   }
+
   async function loadMoreLeft() {
     for (const segmId of state.selectedSegmIds) {
       const seg = state.segms.find(s => s.id === segmId); if (!seg) continue;
-      // we currently store only loadedMaxId for right; for left we always fetch older than the earliest drawn point
       const k = keyS('ticks', segmId); const s = state.seriesMap.get(k);
       if (!s || !s.data || !s.data.length) continue;
-      // earliest id we have:
       const earliestId = s.data[0].__id ?? seg.start_id;
       const from = Math.max(seg.start_id, earliestId - state.chunk);
       if (from >= earliestId) continue;
       const chunk = await getSegmTicksChunk(segmId, from, state.chunk);
-      if (chunk.length) prependTickSeries(segmId, chunk);
+      if (chunk.length) prependTickSeries(segmId, chunk); // zoom preserved inside
     }
   }
+
   async function streamRight(segmId) {
-    if (state.streaming.get(segmId)) return; // already streaming
+    if (state.streaming.get(segmId)) return;
     state.streaming.set(segmId, true);
     try {
       const seg = state.segms.find(s => s.id === segmId); if (!seg) return;
@@ -234,20 +266,19 @@
         const chunk = await getSegmTicksChunk(segmId, from, state.chunk);
         if (!chunk.length) break;
         seg.loadedMaxId = chunk[chunk.length-1].id;
-        appendTickSeries(segmId, chunk);
-        // tiny pause to keep UI responsive
+        appendTickSeries(segmId, chunk); // zoom preserved inside
         await new Promise(r => setTimeout(r, 40));
       }
     } finally {
       state.streaming.delete(segmId);
     }
   }
+
   async function loadSegmLayers(segmId) {
     if (!state.selectedTables.size) return;
     const tablesCSV = [...state.selectedTables].join(',');
     const payload = await getSegmLayers(segmId, tablesCSV);
     for (const [tname, rows] of Object.entries(payload.layers || {})) {
-      // normalize iso for chart + keep numeric
       rows.forEach(r => { if (r.start_ts) r.start_ts = new Date(r.start_ts).toISOString();
                           if (r.end_ts)   r.end_ts   = new Date(r.end_ts).toISOString();
                           if (r.a_ts)     r.a_ts     = new Date(r.a_ts).toISOString();
