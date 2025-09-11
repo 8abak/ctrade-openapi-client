@@ -1,8 +1,5 @@
 // ===== live.js =====
-const {
-  fetchJSON, makeChart, priceLineSeries, ticksToLine, legsToPath
-} = window.ChartCore;
-
+const Core = window.ChartCore;
 const el = (id) => document.getElementById(id);
 
 let chart;
@@ -38,18 +35,18 @@ function atTail() {
 function onZoom() { followTail = atTail(); }
 
 // Data helpers
-function lastId() { return ticks.length ? ticks[ticks.length - 1].id : 0; }
+function lastId()  { return ticks.length ? ticks[ticks.length - 1].id : 0; }
 function firstId() { return ticks.length ? ticks[0].id : 0; }
 function trimToWindow() {
   if (ticks.length > windowSize) ticks = ticks.slice(ticks.length - windowSize);
 }
 
 async function loadInitial() {
-  const latest = await fetchJSON('/api/ticks/latest');
+  const latest = await Core.fetchJSON('/api/ticks/latest');
   if (!latest?.id) return;
 
   const from = Math.max(1, latest.id - windowSize + 1);
-  const arr = await fetchJSON(`/api/ticks?from_id=${from}&to_id=${latest.id}`);
+  const arr = await Core.fetchJSON(`/api/ticks?from_id=${from}&to_id=${latest.id}`);
   ticks = arr.sort((a,b)=>a.id-b.id);
   await refreshZigs();
   redraw();
@@ -61,7 +58,7 @@ async function loadLeft(n) {
   const to   = firstId() - 1;
   if (to < from) return;
 
-  const older = await fetchJSON(`/api/ticks?from_id=${from}&to_id=${to}`);
+  const older = await Core.fetchJSON(`/api/ticks?from_id=${from}&to_id=${to}`);
   older.sort((a,b)=>a.id-b.id);
   ticks = older.concat(ticks);
   trimToWindow();
@@ -73,7 +70,7 @@ async function refreshZigs() {
   if (!ticks.length) return;
   const from = firstId();
   const to   = lastId();
-  const z = await fetchJSON(`/api/zigzag?from_id=${from}&to_id=${to}`);
+  const z = await Core.fetchJSON(`/api/zigzag?from_id=${from}&to_id=${to}`);
   legsMin = z.filter(r=>r.kind==='min');
   legsMid = z.filter(r=>r.kind==='mid');
   legsMax = z.filter(r=>r.kind==='max');
@@ -83,14 +80,14 @@ function redraw() {
   const s = [];
 
   // Ticks -> lines
-  if (el('chkAsk').checked) s.push(priceLineSeries('ask', ticksToLine(ticks,'ask'), 10));
-  if (el('chkMid').checked) s.push(priceLineSeries('mid', ticksToLine(ticks,'mid'), 11));
-  if (el('chkBid').checked) s.push(priceLineSeries('bid', ticksToLine(ticks,'bid'), 12));
+  if (el('chkAsk').checked) s.push(Core.priceLineSeries('ask', Core.ticksToLine(ticks,'ask'), 10));
+  if (el('chkMid').checked) s.push(Core.priceLineSeries('mid', Core.ticksToLine(ticks,'mid'), 11));
+  if (el('chkBid').checked) s.push(Core.priceLineSeries('bid', Core.ticksToLine(ticks,'bid'), 12));
 
   // Zigzags -> lines (no scatter)
-  if (el('chkMin').checked) s.push(priceLineSeries('min', legsToPath(legsMin), 20));
-  if (el('chkZMid').checked) s.push(priceLineSeries('mid(zig)', legsToPath(legsMid), 21));
-  if (el('chkMax').checked) s.push(priceLineSeries('max', legsToPath(legsMax), 22));
+  if (el('chkMin').checked)  s.push(Core.priceLineSeries('min',     Core.legsToPath(legsMin), 20));
+  if (el('chkZMid').checked) s.push(Core.priceLineSeries('mid(zig)',Core.legsToPath(legsMid), 21));
+  if (el('chkMax').checked)  s.push(Core.priceLineSeries('max',     Core.legsToPath(legsMax), 22));
 
   chart.setOption({ series: s }, true);
 
@@ -100,7 +97,7 @@ function redraw() {
 async function liveLoop() {
   try {
     if (!paused) {
-      const t = await fetchJSON('/api/ticks/latest');
+      const t = await Core.fetchJSON('/api/ticks/latest');
       if (t?.id && (!ticks.length || t.id > lastId())) {
         ticks.push(t);
         trimToWindow();
@@ -117,7 +114,7 @@ async function liveLoop() {
 
 function init() {
   wireUI();
-  chart = makeChart(document.getElementById('chart'));
+  chart = Core.makeChart(document.getElementById('chart'));
   chart.on('dataZoom', onZoom);
   loadInitial().then(()=>liveLoop());
 }
