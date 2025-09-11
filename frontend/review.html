@@ -1,308 +1,379 @@
-<!doctype html>
+<!-- PATH: frontend/review.html -->
+<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8" />
-<title>Review</title>
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<style>
-  :root { --bg:#0b1622; --fg:#d7e1ea; --mut:#8fa1b3; --grid:#243447; --axis:#5f7287;
-          --mid:#9db4ff; --bid:#8bd6ff; --ask:#a8ffb5; --micro:#ffd166; --medi:#ef476f; --maxi:#06d6a0; }
-  html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);font:14px/1.4 system-ui,Segoe UI,Roboto,Helvetica,Arial;}
-  .topbar{display:flex;gap:.75rem;align-items:center;padding:.5rem .75rem;border-bottom:1px solid var(--grid);position:sticky;top:0;background:rgba(11,22,34,.96);z-index:20}
-  .topbar input{width:110px;background:#0e1b29;border:1px solid #294058;border-radius:6px;color:var(--fg);padding:.4rem .5rem}
-  .btn{background:#12263a;border:1px solid #2d4a61;border-radius:8px;color:var(--fg);padding:.45rem .75rem;cursor:pointer}
-  .btn:hover{background:#163048}
-  .hint{margin-left:auto;color:var(--mut)}
-  .legend{display:flex;gap:1rem;align-items:center;padding:.35rem .75rem;border-bottom:1px solid var(--grid)}
-  .legend label{display:inline-flex;gap:.4rem;align-items:center;cursor:pointer}
-  .chip{display:inline-block;width:.8rem;height:.8rem;border-radius:50%}
-  .chip.mid{background:var(--mid)} .chip.bid{background:var(--bid)} .chip.ask{background:var(--ask)}
-  .chip.micro{background:var(--micro)} .chip.medi{background:var(--medi)} .chip.maxi{background:var(--maxi)}
-  #chart{height:calc(100vh - 132px)}
-  svg{width:100%;height:100%;display:block}
-  .axis path,.axis line{stroke:var(--axis)}
-  .grid line{stroke:var(--grid)}
-  .line{fill:none;stroke-width:1.5px}
-  .line.mid{stroke:var(--mid)} .line.bid{stroke:var(--bid)} .line.ask{stroke:var(--ask)}
-  .zig.micro{stroke:var(--micro)} .zig.medi{stroke:var(--medi)} .zig.maxi{stroke:var(--maxi)}
-  .tooltip{position:absolute;pointer-events:none;background:#0f1f2f;border:1px solid #2d4a61;border-radius:8px;padding:.5rem .6rem;color:var(--fg);box-shadow:0 8px 24px rgba(0,0,0,.35)}
-  .crosshair line{stroke:#6a7f94;stroke-dasharray:4 4}
-  .status{padding:.35rem .75rem;border-top:1px solid #213447;background:#0e1a27;color:#9ec3ff;font-size:12px}
-  .status b{color:#ffd166}
-  .status .err{color:#ffb4b4}
-</style>
+  <meta charset="utf-8" />
+  <title>Review</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+  <style>
+    :root{--bg:#0f172a;--panel:#111827;--muted:#9ca3af;--text:#e5e7eb;--hl:#334155;--accent:#1f2937}
+    html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,Helvetica,Arial}
+    .bar{display:flex;gap:.75rem;align-items:center;padding:.6rem .9rem;border-bottom:1px solid var(--hl);background:var(--panel);position:sticky;top:0;z-index:10}
+    .bar label{color:var(--muted)}
+    .bar input[type=number]{width:120px;padding:.4rem .5rem;background:#0b1220;color:var(--text);border:1px solid var(--hl);border-radius:.4rem}
+    .btn{background:var(--accent);color:var(--text);border:1px solid var(--hl);border-radius:.45rem;padding:.45rem .8rem;cursor:pointer}
+    .btn:active{transform:translateY(1px)}
+    .row{display:flex;gap:.75rem;align-items:center;flex-wrap:wrap;padding:.45rem .9rem;border-bottom:1px solid var(--hl);background:#0d1424}
+    .group{display:flex;gap:.6rem;align-items:center;flex-wrap:wrap;padding:.25rem .5rem;border-radius:.4rem;background:rgba(255,255,255,.02)}
+    .tag{color:var(--muted);font-weight:600;margin-right:.25rem}
+    #chart{height:calc(100vh - 128px);width:100vw}
+    @media (max-width:720px){ #chart{height:calc(100vh - 150px)} }
+  </style>
 </head>
 <body>
-  <div class="topbar">
-    <label>Start ID <input id="startId" type="number" value="1" /></label>
-    <label>Chunk size <input id="chunk" type="number" value="2000" /></label>
+  <div class="bar">
+    <label for="startId">Start ID</label>
+    <input id="startId" type="number" min="1" step="1" value="1"/>
+    <label for="chunkSize">Chunk size</label>
+    <input id="chunkSize" type="number" min="100" step="100" value="2000"/>
     <button id="btnLoad" class="btn">Load</button>
     <button id="btnMore" class="btn">Load more (right)</button>
-    <div class="hint">Legend toggles below • Zoom: <b>Shift+wheel</b> • Pan: <b>wheel</b></div>
+    <span style="margin-left:auto;color:var(--muted)">Legend toggles below • Zoom: <b>Shift+wheel</b> • Pan: <b>wheel</b></span>
   </div>
-  <div class="legend" id="legend"></div>
+
+  <div class="row">
+    <span class="tag">Layers:</span>
+    <div class="group" id="baseLayers"></div>
+    <div class="group" id="labelLayers"></div>
+  </div>
+
   <div id="chart"></div>
-  <div class="tooltip" id="tip" style="display:none"></div>
-  <div class="status" id="status">Ready.</div>
 
-<!-- d3 FIRST -->
-<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
 <script>
-/* -------------- status line -------------- */
-const setStatus = (html) => document.getElementById('status').innerHTML = html;
-
-/* -------------- helpers -------------- */
-const $ = s => document.querySelector(s);
-const niceInt = d3.format("~d");
-const fmtDT = ts => { const d=new Date(ts); return {date:d.toLocaleDateString(), time:d.toLocaleTimeString()}; };
-
-/* -------------- endpoint auto-fallback -------------- */
-async function fetchFirstOK(urls, label){
-  let lastErr, lastUrl;
-  for (const u of urls){
-    lastUrl = u;
-    try {
-      const r = await fetch(u);
-      if (!r.ok) { lastErr = new Error(`HTTP ${r.status}`); continue; }
-      const j = await r.json();
-      setStatus(`<b>${label}</b> ✓ ${u}`);
-      return j;
-    } catch(e){
-      lastErr = e;
-    }
-  }
-  setStatus(`<b>${label}</b> <span class="err">failed</span> — tried: ${urls.map(x=>`<code>${x}</code>`).join(', ')}`);
-  throw lastErr || new Error('No endpoint matched');
-}
-
-// candidate patterns
-const ticksURLs = (start,limit) => [
-  `/api/ticks?start=${start}&limit=${limit}`,
-  `/ticks?start=${start}&limit=${limit}`,
-  `/api/ticks?from=${start}&limit=${limit}`,
-  `/ticks?from=${start}&limit=${limit}`,
-  `/data/ticks?start=${start}&limit=${limit}`,
-  `/data/ticks?from=${start}&limit=${limit}`,
-];
-const tablesURLs = [
-  `/api/tables`,
-  `/tables`,
-  `/api/labels/tables`,
-  `/labels/tables`,
-  `/data/tables`,
-];
-const labelsURLs = (table,fromId,toId) => [
-  `/api/labels?table=${encodeURIComponent(table)}&from=${fromId}&to=${toId}`,
-  `/labels?table=${encodeURIComponent(table)}&from=${fromId}&to=${toId}`,
-  `/api/labels/${encodeURIComponent(table)}?from=${fromId}&to=${toId}`,
-  `/labels/${encodeURIComponent(table)}?from=${fromId}&to=${toId}`,
-  `/api/labels?table=${encodeURIComponent(table)}&start_id=${fromId}&end_id=${toId}`,
-  `/labels?table=${encodeURIComponent(table)}&start_id=${fromId}&end_id=${toId}`,
-  `/data/labels?table=${encodeURIComponent(table)}&from=${fromId}&to=${toId}`,
-];
-
-async function fetchTicks(start, limit){ return fetchFirstOK(ticksURLs(start,limit), 'ticks'); }
-async function fetchTables(){
-  const arr = await fetchFirstOK(tablesURLs, 'tables');
-  if (Array.isArray(arr) && typeof arr[0]==='string') return arr.filter(n=>n!=='ticks');
-  if (Array.isArray(arr) && arr[0]?.name) return arr.map(x=>x.name).filter(n=>n!=='ticks');
-  return [];
-}
-async function fetchLabelsWindow(table,fromId,toId){ return fetchFirstOK(labelsURLs(table,fromId,toId), `labels:${table}`); }
-
-/* -------------- state -------------- */
-let ticks=[], ticksMap=new Map();
-let loadedFrom=null, loadedTo=null, zoomX=null;
-let layersMeta={};   // {name:{type:'tick'|'zig',active:true}}
-let zigData={};      // {name:[{start_id,end_id,start_ts,end_ts,...}]}
-const COLORS={ mid:'var(--mid)', bid:'var(--bid)', ask:'var(--ask)', micro:'var(--micro)', medi:'var(--medi)', maxi:'var(--maxi)' };
-
-/* -------------- data mechanics -------------- */
-function indexTicks(arr){ for(const t of arr) ticksMap.set(t.id,t); }
-function updateLoadedBounds(){ if (ticks.length){ loadedFrom=ticks[0].id; loadedTo=ticks[ticks.length-1].id; } }
-
-async function doLoad(startId, chunk){
-  const arr = await fetchTicks(startId, chunk);
-  if (!Array.isArray(arr) || !arr.length){ setStatus('<span class="err">No ticks returned</span>'); return; }
-  ticks=arr; ticksMap=new Map(); indexTicks(arr); updateLoadedBounds();
-  await refreshZigsForWindow();
-  zoomX=[loadedFrom,loadedTo];
-  render();
-}
-
-async function doLoadMoreRight(){
-  if (loadedTo==null) return;
-  const chunk=+$('#chunk').value||2000;
-  const arr=await fetchTicks(loadedTo+1, chunk);
-  if (!arr.length) return;
-  ticks=ticks.concat(arr); indexTicks(arr); updateLoadedBounds();
-  const keep0=Math.round(zoomX?.[0]??loadedFrom); const keep1=Math.round(zoomX?.[1]??loadedTo);
-  await refreshZigsForWindow();
-  zoomX=[keep0,keep1];
-  render();
-}
-
-async function initLayers(){
-  layersMeta={ mid:{type:'tick',active:true}, bid:{type:'tick',active:true}, ask:{type:'tick',active:true} };
-  try{
-    const names=await fetchTables();
-    const fromId=loadedFrom??1, toId=loadedTo??(fromId+5000);
-    for (const name of names){
-      try{
-        const rows=await fetchLabelsWindow(name, fromId, toId);
-        const isZig = rows.length && ['start_id','end_id','start_ts','end_ts'].every(k=>k in rows[0]);
-        layersMeta[name]={type:isZig?'zig':'tick',active:isZig};
-        if (isZig) zigData[name]=rows;
-      }catch(_){}
-    }
-  }catch(_){}
-  buildLegend();
-}
-
-function buildLegend(){
-  const c=$('#legend'); c.innerHTML='';
-  for (const name of Object.keys(layersMeta)){
-    const meta=layersMeta[name];
-    const label=document.createElement('label');
-    const chk=document.createElement('input'); chk.type='checkbox'; chk.checked=!!meta.active;
-    chk.addEventListener('change', async ()=>{ meta.active=chk.checked; await refreshZigsForWindow(); render(); });
-    const chip=document.createElement('span'); chip.className='chip '+name;
-    label.appendChild(chk); label.appendChild(chip); label.appendChild(document.createTextNode(' '+name));
-    c.appendChild(label);
-  }
-}
-
-async function refreshZigsForWindow(){
-  const fromId=loadedFrom??1, toId=loadedTo??(fromId+5000);
-  for (const name of Object.keys(layersMeta)){
-    if (layersMeta[name].type!=='zig' || !layersMeta[name].active) continue;
-    try { zigData[name]=await fetchLabelsWindow(name, fromId, toId); } catch(_){}
-  }
-}
-
-/* -------------- chart -------------- */
-const svg=d3.select('#chart').append('svg');
-const gMain=svg.append('g'), gGrid=gMain.append('g').attr('class','grid');
-const gXAxis=gMain.append('g').attr('class','axis'), gYAxis=gMain.append('g').attr('class','axis');
-const gLines=gMain.append('g').attr('clip-path','url(#clip)'), gZigs=gMain.append('g').attr('clip-path','url(#clip)');
-const gCross=gMain.append('g').attr('class','crosshair');
-const defs=svg.append('defs'); defs.append('clipPath').attr('id','clip').append('rect');
-
-let x=d3.scaleLinear(), y=d3.scaleLinear();
-let xAxis=d3.axisBottom(x).tickFormat(niceInt), yAxis=d3.axisLeft(y).ticks(8).tickFormat(niceInt);
-
-function layout(){ const {width,height}=svg.node().getBoundingClientRect();
-  const m={t:18,r:26,b:34,l:48}, w=width-m.l-m.r, h=height-m.t-m.b;
-  gMain.attr('transform',`translate(${m.l},${m.t})`); gXAxis.attr('transform',`translate(0,${h})`);
-  defs.select('#clip rect').attr('width',w).attr('height',h); return {m,w,h}; }
-function domainX(){ if(!ticks.length) return [0,1]; return zoomX||[ticks[0].id,ticks[ticks.length-1].id]; }
-function computeYExtent(){
-  const [x0,x1]=domainX(); const vals=[];
-  for(const k of ['mid','bid','ask']) if (layersMeta[k]?.active) for(const t of ticks) if(t.id>=x0&&t.id<=x1&&t[k]!=null) vals.push(t[k]);
-  for(const name of Object.keys(layersMeta)){
-    if(layersMeta[name]?.type!=='zig'||!layersMeta[name]?.active) continue;
-    for(const leg of (zigData[name]||[])){
-      const a=ticksMap.get(leg.start_id), b=ticksMap.get(leg.end_id);
-      if(a&&a.id>=x0&&a.id<=x1&&a.mid!=null) vals.push(a.mid);
-      if(b&&b.id>=x0&&b.id<=x1&&b.mid!=null) vals.push(b.mid);
-    }
-  }
-  if(!vals.length) return [0,1];
-  let mi=Math.min(...vals), ma=Math.max(...vals), pad=Math.max(0.25,(ma-mi)*0.05);
-  return [Math.floor(mi-pad), Math.ceil(ma+pad)];
-}
-
-function render(){
-  const {w,h}=layout(); const [x0,x1]=domainX(); x.domain([x0,x1]).range([0,w]);
-  const [y0,y1]=computeYExtent(); y.domain([y0,y1]).range([h,0]).nice();
-
-  gGrid.selectAll('g.vert').data(x.ticks(8)).join(
-    e=>e.append('g').attr('class','vert').append('line').attr('y1',0).attr('y2',h).attr('stroke','var(--grid)'),
-    u=>u, x=>x.remove()).attr('transform',d=>`translate(${x(d)},0)`);
-  gGrid.selectAll('g.horz').data(y.ticks(8)).join(
-    e=>e.append('g').attr('class','horz').append('line').attr('x1',0).attr('x2',w).attr('stroke','var(--grid)'),
-    u=>u, x=>x.remove()).attr('transform',d=>`translate(0,${y(d)})`);
-  gXAxis.call(xAxis); gYAxis.call(yAxis);
-
-  const lineGen=k=>d3.line().x(d=>x(d.id)).y(d=>y(d[k])).defined(d=>d[k]!=null);
-  for(const k of ['mid','bid','ask']){
-    const on=layersMeta[k]?.active; const sel=gLines.selectAll(`path.line.${k}`).data(on?[ticks]:[]);
-    sel.enter().append('path').attr('class',`line ${k}`).attr('stroke',COLORS[k])
-      .merge(sel).attr('fill','none').attr('d', lineGen(k)(ticks));
-    sel.exit().remove();
-  }
-
-  const names=Object.keys(layersMeta).filter(n=>layersMeta[n]?.type==='zig'&&layersMeta[n].active);
-  const join=gZigs.selectAll('path.zig').data(names,d=>d);
-  join.enter().append('path').attr('class',d=>`zig ${d}`).attr('fill','none').attr('stroke-width',1.8)
-      .attr('stroke',d=>COLORS[d]||'#bbb').merge(join)
-      .attr('d', name=>{
-        const legs=(zigData[name]||[]).slice().sort((a,b)=>a.start_id-b.start_id);
-        const p=d3.path(); let started=false;
-        for(const leg of legs){ const a=ticksMap.get(leg.start_id), b=ticksMap.get(leg.end_id); if(!a||!b) continue;
-          const Ax=x(a.id), Ay=y(a.mid); const Bx=x(b.id), By=y(b.mid);
-          if(!started){ p.moveTo(Ax,Ay); started=true; } p.lineTo(Bx,By);
-        }
-        return started ? p.toString() : null;
-      });
-  join.exit().remove();
-
-  drawCrosshair(w,h);
-}
-
-function drawCrosshair(w,h){
-  const tip=$('#tip');
-  svg.on('mousemove', ev=>{
-    if (!ticks.length) return;
-    const pt=d3.pointer(ev, svg.node()); const xpix=pt[0]-48; const idG=Math.round(x.invert(Math.max(0,Math.min(w,xpix))));
-    let t=ticksMap.get(idG); if(!t){ const arr=ticks.map(d=>d.id); const i=d3.bisector(d=>d).center(arr,idG); t=ticks[i]; }
-    if(!t) return; const {date,time}=fmtDT(t.timestamp);
-    let html=`<div><b>ID:</b> ${t.id} &nbsp; <b>Date:</b> ${date} &nbsp; <b>Time:</b> ${time}</div>`;
-    for(const k of ['mid','bid','ask']) if(layersMeta[k]?.active && t[k]!=null) html+=`<div>${k}: <b>${t[k]}</b></div>`;
-    tip.innerHTML=html; tip.style.display='block'; tip.style.left=(ev.clientX+14)+'px'; tip.style.top=(ev.clientY+14)+'px';
-    gCross.selectAll('*').remove(); const cy=t.mid!=null?y(t.mid):t.ask!=null?y(t.ask):t.bid!=null?y(t.bid):null;
-    if(cy!=null){ const cx=x(t.id); gCross.append('line').attr('x1',cx).attr('x2',cx).attr('y1',0).attr('y2',h);
-                  gCross.append('line').attr('x1',0).attr('x2',w).attr('y1',cy).attr('y2',cy); }
-  }).on('mouseleave',()=>{ gCross.selectAll('*').remove(); tip.style.display='none'; });
-}
-
-/* -------------- zoom/pan -------------- */
 (function(){
-  svg.node().addEventListener('wheel', (e)=>{
-    if (!ticks.length) return; e.preventDefault();
-    const {w}=layout(); const [xmin,xmax]=domainX(); const span=xmax-xmin;
-    const mouseX=d3.pointer(e, svg.node())[0]-48; const focal=x.invert(Math.max(0,Math.min(w,mouseX)));
-    if (e.shiftKey){
-      const factor=Math.exp(-e.deltaY*0.0015);
-      let nmin=focal-(focal-xmin)*factor, nmax=focal+(xmax-focal)*factor;
-      nmin=Math.max(loadedFrom, Math.min(nmin,nmax-1)); nmax=Math.min(loadedTo, Math.max(nmax,nmin+1));
-      zoomX=[Math.round(nmin),Math.round(nmax)];
-    } else {
-      const k=e.deltaY!==0?e.deltaY:e.deltaX; const shift=Math.round(k*span/120/6);
-      let nmin=Math.max(loadedFrom, xmin+shift), nmax=Math.min(loadedTo, xmax+shift);
-      if(nmax-nmin<1) nmax=nmin+1; zoomX=[nmin,nmax];
+  const qs = s => document.querySelector(s);
+
+  // ---- API (read-only) ----
+  const API = {
+    lastId: () => fetch('/ticks/lastid').then(r=>r.json()),
+    ticksRange: (a,b) => fetch(`/api/ticks?from_id=${a}&to_id=${b}`).then(r=>r.json()),
+    sql: q => fetch(`/api/sql?q=${encodeURIComponent(q)}`).then(r=>r.json()),
+  };
+
+  // ---- State ----
+  let chart, option;
+  let fromId=1, toId=1, chunk=2000;
+  let ticks=[]; let idToIndex=new Map(); let idToMid=new Map();
+  let hasBid=false, hasAsk=false;
+
+  const ACTIVE=new Set(['mid']);
+  const labelTablesInfo=new Map(); // table -> {kind:'point'|'range'}
+  const pointData=new Map();       // table -> [{idx,y,raw}]
+  const rangeData=new Map();       // table -> [{startId,endId,raw}]
+  const zigPattern = /^(atr\d*|zig|zz)/i; // treat as zigzag line if name matches
+
+  // ---- UI ----
+  const $start=qs('#startId'), $chunk=qs('#chunkSize');
+  qs('#btnLoad').addEventListener('click', ()=>doLoad(true));
+  qs('#btnMore').addEventListener('click', ()=>doMore());
+
+  // ---- Zoom helpers ----
+  function getZoomPercents(){
+    const opt=chart.getOption(); const dz=(opt.dataZoom && opt.dataZoom[0])||{};
+    const startP = typeof dz.start === 'number' ? dz.start : 0;
+    const endP   = typeof dz.end   === 'number' ? dz.end   : 100;
+    return {startP,endP};
+  }
+  function getZoomIds(){
+    if(!ticks.length) return {startId:null,endId:null};
+    const {startP,endP}=getZoomPercents();
+    const n=ticks.length, s=Math.max(0,Math.floor(startP/100*n)), e=Math.min(n-1,Math.ceil(endP/100*n));
+    return { startId: ticks[s].id, endId: ticks[e].id };
+  }
+  function restoreZoomByIds(startId,endId){
+    if(startId==null||endId==null) return;
+    const sIdx = idToIndex.get(startId) ?? 0;
+    const eIdx = idToIndex.get(endId)   ?? (ticks.length-1);
+    const sP=(sIdx/ticks.length)*100, eP=(eIdx/ticks.length)*100;
+    chart.setOption({ dataZoom:[{start:sP,end:eP},{start:sP,end:eP}] });
+  }
+
+  // ---- Discover label tables (point & range) ----
+  async function discoverLabelTables(){
+    // Point labels: tickid
+    const qPoint = `
+      SELECT DISTINCT table_name
+      FROM information_schema.columns
+      WHERE table_schema='public' AND column_name='tickid'
+      ORDER BY table_name`;
+    const pointRes = await API.sql(qPoint);
+    for(const r of (pointRes.rows||[])){
+      if(r.table_name==='ticks') continue;
+      labelTablesInfo.set(r.table_name, {kind:'point'});
     }
-    render();
-  }, {passive:false});
-})();
+    // Range labels: start_id & end_id
+    const qRange = `
+      SELECT t.table_name
+      FROM information_schema.columns t
+      WHERE t.table_schema='public' AND t.column_name IN ('start_id','end_id')
+      GROUP BY t.table_name
+      HAVING COUNT(DISTINCT t.column_name)=2
+      ORDER BY t.table_name`;
+    const rangeRes = await API.sql(qRange);
+    for(const r of (rangeRes.rows||[])){
+      labelTablesInfo.set(r.table_name, {kind:'range'});
+    }
 
-/* -------------- UI -------------- */
-document.getElementById('btnLoad').addEventListener('click', async ()=>{
-  try{
-    await doLoad(+$('#startId').value||1, +$('#chunk').value||2000);
-    await initLayers(); render();
-  }catch(e){ setStatus('<span class="err">Load failed (see console)</span>'); console.error(e); }
-});
-document.getElementById('btnMore').addEventListener('click', async ()=>{
-  try{ await doLoadMoreRight(); }catch(e){ setStatus('<span class="err">Load more failed</span>'); }
-});
+    const $labels=qs('#labelLayers'); $labels.innerHTML='';
+    const defaultOn = new Set(['atr1','bigm','smal','pred','segm']);
+    for(const [tbl,info] of labelTablesInfo){
+      if(tbl==='ticks') continue;
+      const node = makeToggle(tbl, tbl, defaultOn.has(tbl), true);
+      $labels.appendChild(node);
+      if(defaultOn.has(tbl)) ACTIVE.add(tbl);
+    }
+  }
 
-/* -------------- first run -------------- */
-(async function(){
-  try{
-    await doLoad(+$('#startId').value||1, +$('#chunk').value||2000);
-    await initLayers(); render();
-  }catch(e){ setStatus('<span class="err">Initial load failed</span>'); console.error(e); }
+  // ---- Toggles ----
+  function makeToggle(id,label,checked=false,isLabel=false){
+    const wrap=document.createElement('label');
+    wrap.style.display='inline-flex'; wrap.style.gap='.35rem'; wrap.style.alignItems='center';
+    const cb=document.createElement('input'); cb.type='checkbox'; cb.checked=checked; cb.value=id;
+    const span=document.createElement('span'); span.textContent=label;
+    wrap.append(cb,span);
+
+    cb.addEventListener('change', async ()=>{
+      // preserve current view
+      const {startId,endId}=getZoomIds();
+      const currentYAxis = chart.getOption().yAxis?.[0] || {};
+
+      if(cb.checked){
+        ACTIVE.add(id);
+        if(isLabel){
+          const info = labelTablesInfo.get(id);
+          if(info?.kind==='point')  await loadPointTable(id, fromId, toId);
+          if(info?.kind==='range')  await loadRangeTable(id, fromId, toId);
+        }
+      }else{
+        ACTIVE.delete(id);
+      }
+      render({preserveZoomIds:{startId,endId}, preserveYAxis:currentYAxis});
+    });
+    return wrap;
+  }
+
+  // ---- Initial setup ----
+  async function loadInitial(){
+    try{
+      const info=await API.lastId();
+      const last=Number(info.lastId||info.lastid||0);
+      const c   =Number($chunk.value||2000);
+      $start.value=Math.max(1,last-c+1);
+    }catch(e){}
+
+    // base layer toggles
+    const $base=qs('#baseLayers'); $base.innerHTML='';
+    $base.appendChild(makeToggle('mid','mid',true,false));
+    $base.appendChild(makeToggle('bid','bid',false,false));
+    $base.appendChild(makeToggle('ask','ask',false,false));
+
+    await discoverLabelTables();
+
+    // chart
+    chart=echarts.init(qs('#chart'));
+    option={
+      backgroundColor:getComputedStyle(document.body).backgroundColor,
+      animation:false,
+      grid:{left:64,right:24,top:68,bottom:42},
+      legend:{top:8,textStyle:{color:'#d1d5db'}},
+      tooltip:{trigger:'axis',axisPointer:{type:'cross'},confine:true,formatter:tooltipHTML},
+      xAxis:{type:'category',data:[],axisLine:{lineStyle:{color:'#475569'}},axisLabel:{color:'#cbd5e1'}},
+      yAxis:{type:'value',scale:true,axisLine:{lineStyle:{color:'#475569'}},
+             axisLabel:{color:'#cbd5e1',formatter:v=>Math.round(v)},splitLine:{lineStyle:{color:'#1f2937'}}},
+      dataZoom:[
+        {type:'inside',zoomOnMouseWheel:'shift',moveOnMouseWheel:true,moveOnMouseMove:true,preventDefaultMouseMove:true},
+        {type:'slider',bottom:8}
+      ],
+      series:[]
+    };
+    chart.setOption(option);
+    chart.on('dataZoom', adjustYAxisToView);
+  }
+
+  // ---- Tooltip ----
+  function tooltipHTML(params){
+    if(!params?.length) return '';
+    const i=params[0].dataIndex; const t=ticks[i]; if(!t) return '';
+    const dt=new Date(t.ts);
+    const lines=[`<div><b>ID:</b> ${t.id} &nbsp; <b>Date:</b> ${dt.toLocaleDateString()} &nbsp; <b>Time:</b> ${dt.toLocaleTimeString()}</div>`];
+    if(ACTIVE.has('mid')) lines.push(`<div>mid: <b>${t.mid}</b></div>`);
+    if(ACTIVE.has('bid') && hasBid && t.bid!=null) lines.push(`<div>bid: <b>${t.bid}</b></div>`);
+    if(ACTIVE.has('ask') && hasAsk && t.ask!=null) lines.push(`<div>ask: <b>${t.ask}</b></div>`);
+    for(const p of params){
+      if(p.seriesType==='scatter' && Array.isArray(p.data)){
+        const raw=p.data[2]; if(!raw) continue;
+        const obj={...raw}; delete obj.tickid;
+        lines.push(`<div>${p.seriesName}: <code>${JSON.stringify(obj)}</code></div>`);
+      }
+    }
+    return lines.join('');
+  }
+
+  // ---- Build tick state ----
+  function buildTickState(prev,newly){
+    ticks=(prev||[]).concat(newly||[]);
+    idToIndex=new Map(); idToMid=new Map(); hasBid=false; hasAsk=false;
+    ticks.forEach((r,i)=>{
+      idToIndex.set(r.id,i); idToMid.set(r.id,r.mid);
+      if(r.bid!=null) hasBid=true; if(r.ask!=null) hasAsk=true;
+      if(typeof r.ts!=='string' && r.ts?.toISOString) r.ts=r.ts.toISOString();
+    });
+  }
+
+  // ---- Load label data ----
+  async function loadPointTable(tbl,a,b){
+    const q=`SELECT * FROM ${tbl} WHERE tickid BETWEEN ${a} AND ${b} ORDER BY tickid`;
+    const res=await API.sql(q); const rows=res.rows||[];
+    const pts=[];
+    for(const r of rows){
+      const idx=idToIndex.get(r.tickid), y=idToMid.get(r.tickid);
+      if(idx!=null && y!=null) pts.push({idx,y,raw:r});
+    }
+    pointData.set(tbl, pts);
+  }
+  async function loadRangeTable(tbl,a,b){
+    // overlap with [a,b]
+    const q=`SELECT * FROM ${tbl} WHERE start_id <= ${b} AND end_id >= ${a} ORDER BY start_id, end_id`;
+    const res=await API.sql(q); const rows=res.rows||[];
+    const segs=[];
+    for(const r of rows){
+      // Keep raw starts/ends, but also clip to current data window for plotting
+      segs.push({ startId:Number(r.start_id), endId:Number(r.end_id), raw:r });
+    }
+    rangeData.set(tbl, segs);
+  }
+  async function loadAllActiveLabels(a,b){
+    const jobs=[];
+    for(const [tbl,info] of labelTablesInfo){
+      if(!ACTIVE.has(tbl)) continue;
+      if(info.kind==='point') jobs.push(loadPointTable(tbl,a,b));
+      if(info.kind==='range') jobs.push(loadRangeTable(tbl,a,b));
+    }
+    await Promise.all(jobs);
+  }
+
+  // ---- Load & More ----
+  async function doLoad(reset=true){
+    fromId=Number($start.value||1);
+    chunk =Number($chunk.value||2000);
+    toId  =fromId + chunk - 1;
+
+    const t=await API.ticksRange(fromId,toId);
+    buildTickState(reset?[]:ticks, t);
+    await loadAllActiveLabels(fromId,toId);
+    render();            // draw
+    adjustYAxisToView(); // fit once on explicit load
+  }
+  async function doMore(){
+    if(!ticks.length) return;
+    const {startId,endId}=getZoomIds();
+
+    const nextFrom=toId+1, nextTo=toId+chunk;
+    const t=await API.ticksRange(nextFrom,nextTo);
+    buildTickState(ticks, t);
+    await loadAllActiveLabels(nextFrom,nextTo);
+    toId=nextTo;
+
+    render({preserveZoomIds:{startId,endId}}); // keep x/y as-is
+  }
+
+  // ---- Build ZigZag line points for a range table ----
+  function makeZigPoints(tbl){
+    const segs=(rangeData.get(tbl)||[]).slice().sort((a,b)=>a.startId-b.startId);
+    const pts=[];
+    for(const s of segs){
+      const sIdx=idToIndex.get(s.startId), eIdx=idToIndex.get(s.endId);
+      const sY=idToMid.get(s.startId),     eY=idToMid.get(s.endId);
+      if(sIdx!=null && sY!=null) pts.push([sIdx, sY]);
+      if(eIdx!=null && eY!=null) pts.push([eIdx, eY]);
+    }
+    // sort by x and dedupe consecutive identical x
+    pts.sort((a,b)=>a[0]-b[0]);
+    const dedup=[];
+    for(const p of pts){
+      if(!dedup.length || dedup[dedup.length-1][0]!==p[0]) dedup.push(p);
+      else dedup[dedup.length-1]=p; // keep last for same index
+    }
+    return dedup;
+  }
+
+  // ---- Render ----
+  function render(opts={}){
+    const preserve = opts.preserveZoomIds || null;
+    const preserveYAxis = opts.preserveYAxis || null;
+
+    const series=[];
+    // base lines
+    if(ACTIVE.has('mid')) series.push({name:'mid',type:'line',showSymbol:false,data:ticks.map(t=>t.mid)});
+    if(ACTIVE.has('bid') && hasBid) series.push({name:'bid',type:'line',showSymbol:false,data:ticks.map(t=>t.bid)});
+    if(ACTIVE.has('ask') && hasAsk) series.push({name:'ask',type:'line',showSymbol:false,data:ticks.map(t=>t.ask)});
+
+    // point layers
+    for(const [tbl,info] of labelTablesInfo){
+      if(info.kind!=='point' || !ACTIVE.has(tbl)) continue;
+      const pts=pointData.get(tbl)||[];
+      series.push({name:tbl,type:'scatter',symbolSize:7,data:pts.map(p=>[p.idx,p.y,p.raw])});
+    }
+    // range layers
+    for(const [tbl,info] of labelTablesInfo){
+      if(info.kind!=='range' || !ACTIVE.has(tbl)) continue;
+
+      if(zigPattern.test(tbl)){ // draw as zigzag line
+        const pts = makeZigPoints(tbl);
+        series.push({
+          name: tbl, type:'line', showSymbol:true, symbolSize:5, connectNulls:false,
+          data: pts
+        });
+      }else{ // generic band
+        const segs=rangeData.get(tbl)||[];
+        const areas = segs.map(s => [
+          { name: tbl, xAxis: String(s.startId) },
+          { xAxis: String(s.endId) }
+        ]);
+        series.push({
+          name: tbl, type:'line', showSymbol:false, data: [],
+          markArea:{ silent:false, itemStyle:{opacity:0.12}, data: areas }
+        });
+      }
+    }
+
+    chart.setOption(
+      {
+        xAxis:{ data: ticks.map(t=>String(t.id)) },
+        series,
+        legend:{ data: series.map(s=>s.name) },
+        ...(preserveYAxis ? { yAxis:{ min:preserveYAxis.min, max:preserveYAxis.max } } : {})
+      },
+      { replaceMerge:['series','legend'], lazyUpdate:false }
+    );
+    if(preserve){ restoreZoomByIds(preserve.startId,preserve.endId); }
+  }
+
+  // ---- Y fit to current zoom ----
+  function adjustYAxisToView(){
+    if(!ticks.length) return;
+    const {startP,endP}=getZoomPercents();
+    const n=ticks.length, s=Math.max(0,Math.floor(startP/100*n)), e=Math.min(n-1,Math.ceil(endP/100*n));
+    const slice=ticks.slice(s,e+1);
+    const vals=[];
+    if(ACTIVE.has('mid')) vals.push(...slice.map(t=>t.mid).filter(v=>v!=null));
+    if(ACTIVE.has('bid')) vals.push(...slice.map(t=>t.bid).filter(v=>v!=null));
+    if(ACTIVE.has('ask')) vals.push(...slice.map(t=>t.ask).filter(v=>v!=null));
+    if(!vals.length) return;
+    const min=Math.min(...vals), max=Math.max(...vals), pad=Math.max(0.5,(max-min)*0.05);
+    chart.setOption({ yAxis:{ min:min-pad, max:max+pad }});
+  }
+
+  // ---- Boot ----
+  (async function(){
+    // base toggles first
+    const $base=qs('#baseLayers'); $base.innerHTML='';
+    $base.appendChild(makeToggle('mid','mid',true,false));
+    $base.appendChild(makeToggle('bid','bid',false,false));
+    $base.appendChild(makeToggle('ask','ask',false,false));
+    await loadInitial();
+  })();
 })();
 </script>
 </body>
