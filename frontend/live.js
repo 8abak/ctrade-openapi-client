@@ -5,33 +5,33 @@ const el = (id) => document.getElementById(id);
 let chart;
 let paused = false;
 let windowSize = 2000;
-let ticks = [];                   // ascending by id
+let ticks = [];
 let legsMin = [], legsMid = [], legsMax = [];
-let followTail = true;            // autoscroll only if we're at right edge
+let followTail = true;
 
 function wireUI() {
   el('btnPause').onclick = () => {
     paused = !paused;
     el('btnPause').textContent = paused ? 'Resume' : 'Pause';
   };
-
   el('selWindow').onchange = () => {
     windowSize = +el('selWindow').value;
     trimToWindow();
     redraw();
   };
-
-  el('btnLeft').onclick = async () => {
-    await loadLeft(2000);
-  };
+  el('btnLeft').onclick = async () => { await loadLeft(2000); };
 }
 
-function atTail() {
-  const opt = chart.getOption();
-  const dz = (opt.dataZoom && opt.dataZoom[0]) || null;
-  return !dz || dz.end >= 99.5;
+function safeAtTail() {
+  try {
+    const opt = chart.getOption();
+    const dz = (opt.dataZoom && opt.dataZoom[0]) || null;
+    return !dz || dz.end >= 99.5;
+  } catch {
+    return true;
+  }
 }
-function onZoom() { followTail = atTail(); }
+function onZoom() { followTail = safeAtTail(); }
 
 function lastId()  { return ticks.length ? ticks[ticks.length - 1].id : 0; }
 function firstId() { return ticks.length ? ticks[0].id : 0; }
@@ -75,8 +75,9 @@ async function refreshZigs() {
 }
 
 function redraw() {
-  const s = [];
+  if (!chart) return;
 
+  const s = [];
   if (el('chkAsk').checked) s.push(Core.priceLineSeries('ask', Core.ticksToLine(ticks,'ask'), 10));
   if (el('chkMid').checked) s.push(Core.priceLineSeries('mid', Core.ticksToLine(ticks,'mid'), 11));
   if (el('chkBid').checked) s.push(Core.priceLineSeries('bid', Core.ticksToLine(ticks,'bid'), 12));
@@ -85,12 +86,8 @@ function redraw() {
   if (el('chkZMid').checked) s.push(Core.priceLineSeries('mid(zig)', Core.legsToPath(legsMid), 21));
   if (el('chkMax').checked)  s.push(Core.priceLineSeries('max',      Core.legsToPath(legsMax), 22));
 
-  try {
-    chart.setOption({ series: s }, true);
-    if (followTail) chart.dispatchAction({ type: 'dataZoom', end: 100 });
-  } catch (e) {
-    console.error('setOption failed', e);
-  }
+  chart.setOption({ series: s }, true);
+  if (followTail) chart.dispatchAction({ type: 'dataZoom', end: 100 });
 }
 
 async function liveLoop() {

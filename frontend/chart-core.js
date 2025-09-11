@@ -32,6 +32,7 @@
       backgroundColor: '#0b1220',
       animation: false,
       grid: { left: 50, right: 20, top: 40, bottom: 70 },
+
       tooltip: {
         trigger: 'axis',
         axisPointer: { type: 'line' },
@@ -40,20 +41,23 @@
         borderColor: '#333',
         textStyle: { color: '#d8d8d8', fontSize: 12 },
       },
-      xAxis: {
+
+      // IMPORTANT: declare axes as arrays so index 0 always exists
+      xAxis: [{
         type: 'value',
         minInterval: 1,
         scale: true,
         axisLine: { lineStyle: { color: '#8a93a6' } },
         axisLabel: { color: '#cfd5e1' },
-      },
-      yAxis: {
+      }],
+      yAxis: [{
         type: 'value',
         scale: true,
         axisLine: { lineStyle: { color: '#8a93a6' } },
         splitLine: { lineStyle: { color: 'rgba(255,255,255,0.08)' } },
         axisLabel: { color: '#cfd5e1', formatter: (v) => Math.round(v) },
-      },
+      }],
+
       dataZoom: [
         { type: 'inside', throttle: 50 },
         { type: 'slider', bottom: 30, height: 18 }
@@ -67,7 +71,8 @@
     return {
       name,
       type: 'line',
-      xAxisIndex: 0, yAxisIndex: 0,
+      xAxisIndex: 0,
+      yAxisIndex: 0,
       data,
       showSymbol: false,
       connectNulls: true,
