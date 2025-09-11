@@ -48,60 +48,14 @@
   <div id="wrap"><div id="chart"></div></div>
 
   <script>
-    // ---------------- Config ----------------
-    // If needed, you can hardcode paths here (kept blank to use /api/*).
-    const API_BASE = ""; // e.g. "/api"
+    // ---------- CONFIG ----------
+    const API_BASE = "";                 // keep default /api/*
+    const PADDING  = 1000;               // pad window to catch boundary ticks for labels
     const route = (p) => `${API_BASE}${p}`;
-
-    // ---------------- Utilities ----------------
     const $ = (s)=>document.querySelector(s);
-    const pretty = (x)=> typeof x==='string' ? x : JSON.stringify(x, null, 2);
-    function setBusy(on){ document.body.style.cursor = on ? 'progress' : 'default'; }
-    function readControls(){ startId = +$('#startId').value; chunkSize = +$('#chunk').value; endId = startId + chunkSize - 1; }
+    const pretty = (x)=> typeof x==='string' ? x : JSON.stringify(x,null,2);
 
-    async function fetchTry(url, init){
-      const r = await fetch(url, init);
-      const text = await r.text();
-      let body;
-      try { body = text ? JSON.parse(text) : null; } catch { body = text; }
-      if(!r.ok) { const msg = (body && (body.detail || body.message)) || r.statusText; throw new Error(`${r.status} : ${url}\n${pretty(body)||msg}`); }
-      return body;
-    }
-
-    // Smart tick fetcher: tries multiple shapes until one succeeds.
-    async function fetchTicksSmart(sId, eId, n){
-      const tries = [
-        route(`/api/ticks?start_id=${sId}&end_id=${eId}`),
-        route(`/api/ticks?start=${sId}&end=${eId}`),
-        route(`/api/ticks?start_id=${sId}&limit=${n}`),
-        route(`/api/ticks?start=${sId}&limit=${n}`),
-        route(`/api/ticks?offset=${sId}&limit=${n}`),
-        route(`/api/ticks/range?start_id=${sId}&end_id=${eId}`),
-        route(`/api/ticks/range?start=${sId}&end=${eId}`),
-        route(`/api/ticks?from_id=${sId}&to_id=${eId}`),
-        route(`/api/ticks?from=${sId}&to=${eId}`),
-      ];
-      let lastErr;
-      for(const u of tries){
-        try { return await fetchTry(u); } catch(e){ lastErr = e; }
-      }
-      throw lastErr || new Error("No ticks endpoint succeeded");
-    }
-
-    async function fetchLabelsSmart(kind, sId, eId){
-      const tries = [
-        route(`/api/${kind}?start_id=${sId}&end_id=${eId}`),
-        route(`/api/${kind}?start=${sId}&end=${eId}`),
-        route(`/api/${kind}/range?start_id=${sId}&end_id=${eId}`),
-        route(`/api/${kind}/range?start=${sId}&end=${eId}`),
-      ];
-      for(const u of tries){
-        try { return await fetchTry(u); } catch(e){ /* try next; labels can be empty */ }
-      }
-      return [];
-    }
-
-    // ---------------- State ----------------
+    // ---------- STATE ----------
     let startId = +$('#startId').value;
     let chunkSize = +$('#chunk').value;
     let endId = startId + chunkSize - 1;
@@ -121,55 +75,117 @@
       series:[]
     });
 
-    function priceLine(name, data, width=1){ return { name, type:'line', showSymbol:false, smooth:0, lineStyle:{width}, data }; }
+    // ---------- UTILS ----------
+    function setBusy(on){ document.body.style.cursor = on ? 'progress' : 'default'; }
+    function readControls(){ startId = +$('#startId').value; chunkSize = +$('#chunk').value; endId = startId + chunkSize - 1; }
+    async function fetchTry(url){
+      const r = await fetch(url);
+      const text = await r.text();
+      let body; try{ body = text ? JSON.parse(text) : null; } catch{ body = text; }
+      if(!r.ok){ const msg = (body && (body.detail||body.message)) || r.statusText; throw new Error(`${r.status} : ${url}\n${pretty(body)||msg}`); }
+      return body;
+    }
 
-    // Convert label rows to zigzag segments (the requested change)
-    function buildZigzagFromLabels(rows, name){
+    // Robust tick fetch
+    async function fetchTicksSmart(sId,eId,n){
+      const tries = [
+        route(`/api/ticks?start_id=${sId}&end_id=${eId}`),
+        route(`/api/ticks?start=${sId}&end=${eId}`),
+        route(`/api/ticks?start_id=${sId}&limit=${n}`),
+        route(`/api/ticks?start=${sId}&limit=${n}`),
+        route(`/api/ticks?offset=${sId}&limit=${n}`),
+        route(`/api/ticks/range?start_id=${sId}&end_id=${eId}`),
+        route(`/api/ticks/range?start=${sId}&end=${eId}`)
+      ];
+      let lastErr;
+      for(const u of tries){ try{ return await fetchTry(u); } catch(e){ lastErr=e; } }
+      throw lastErr || new Error("No ticks endpoint succeeded");
+    }
+
+    // Label fetch (best-effort)
+    async function fetchLabels(kind, sId, eId){
+      const tries = [
+        route(`/api/${kind}?start_id=${sId}&end_id=${eId}`),
+        route(`/api/${kind}?start=${sId}&end=${eId}`),
+        route(`/api/${kind}/range?start_id=${sId}&end_id=${eId}`),
+        route(`/api/${kind}/range?start=${sId}&end=${eId}`),
+      ];
+      for(const u of tries){ try{ return await fetchTry(u); } catch(_){} }
+      return [];
+    }
+
+    function priceLine(name, data, w=1){ return { name, type:'line', showSymbol:false, smooth:0, lineStyle:{width:w}, data }; }
+
+    // Decode many possible column names
+    function pick(obj, names){
+      for(const k of names){ if(obj[k]!==undefined && obj[k]!==null) return obj[k]; }
+      return null;
+    }
+
+    // Convert label rows to zigzag segments (IDs -> ts/price via tickMap; or directly use ts/price if provided)
+    function buildZigzag(rows, name){
       const pts=[];
       for(const r of rows){
-        let t1 = r.start_ts ?? r.start_time ?? null;
-        let t2 = r.end_ts   ?? r.end_time   ?? null;
-        let p1 = r.start_price ?? null;
-        let p2 = r.end_price   ?? null;
-        const sid = r.start_id ?? r.startId ?? r.sid ?? r.start_tick_id;
-        const eid = r.end_id   ?? r.endId   ?? r.eid ?? r.end_tick_id;
+        // id aliases
+        const sid = pick(r, ['start_id','startId','sid','s_id','from_id','fromId','start_tick_id','startTickId']);
+        const eid = pick(r, ['end_id','endId','eid','e_id','to_id','toId','end_tick_id','endTickId']);
+        // time aliases
+        let t1 = pick(r, ['start_ts','start_time','startTime','ts_start','time_start']);
+        let t2 = pick(r, ['end_ts','end_time','endTime','ts_end','time_end']);
+        // price aliases
+        let p1 = pick(r, ['start_price','price_start','p_start','s_price']);
+        let p2 = pick(r, ['end_price','price_end','p_end','e_price']);
 
-        if((!t1 || p1==null) && sid && tickMap.has(sid)){ const t = tickMap.get(sid); t1=t.ts; p1=(t.mid ?? t.price ?? t.bid ?? t.ask); }
-        if((!t2 || p2==null) && eid && tickMap.has(eid)){ const t = tickMap.get(eid); t2=t.ts; p2=(t.mid ?? t.price ?? t.bid ?? t.ask); }
+        // derive from tickMap if missing
+        if((!t1 || p1==null) && sid && tickMap.has(sid)){ const t=tickMap.get(sid); t1=t.ts; p1=(t.mid ?? t.price ?? t.bid ?? t.ask); }
+        if((!t2 || p2==null) && eid && tickMap.has(eid)){ const t=tickMap.get(eid); t2=t.ts; p2=(t.mid ?? t.price ?? t.bid ?? t.ask); }
 
         if(t1 && t2 && p1!=null && p2!=null){ pts.push([t1,p1],[t2,p2],[null,null]); }
       }
-      return { name, type:'line', connectNulls:false, showSymbol:true, symbolSize:4,
-               lineStyle:{ width: name==='maxi'?2 : name==='medi'?1.5 : 1.2 }, emphasis:{disabled:true}, z:10, data:pts };
+      console.log(`[zig] ${name}: built ${pts.length/3} segments from ${rows.length} rows`);
+      return {
+        name, type:'line', connectNulls:false, showSymbol:true, symbolSize:4,
+        lineStyle:{ width: name==='maxi'?2 : name==='medi'?1.5 : 1.2 },
+        emphasis:{ disabled:true }, z:10, data:pts
+      };
     }
 
-    async function loadTicksRange(sId, eId, n, append=false){
-      const rows = await fetchTicksSmart(sId, eId, n);
+    async function loadTicksRange(sId,eId,n,append=false){
+      const rows = await fetchTicksSmart(sId,eId,n);
       if(!append){ tickMap.clear(); midSeries=[]; bidSeries=[]; askSeries=[]; }
       for(const r of rows){
-        const id  = r.id ?? r.tick_id ?? r.tickid ?? r.tickId;
-        const ts  = r.ts ?? r.time ?? r.timestamp;
-        const mid = r.mid ?? r.price ?? null;
-        const bid = r.bid ?? null;
-        const ask = r.ask ?? r.offer ?? null;
-        if(id!=null && ts!=null){ tickMap.set(id, { ts, mid, bid, ask, price: mid ?? bid ?? ask }); }
+        const id  = pick(r,['id','tick_id','tickId','tickid']);
+        const ts  = pick(r,['ts','time','timestamp']);
+        const mid = pick(r,['mid','price']);
+        const bid = pick(r,['bid']);
+        const ask = pick(r,['ask','offer']);
+        if(id!=null && ts!=null){ tickMap.set(id,{ts,mid,bid,ask,price:mid??bid??ask}); }
         if(ts!=null){ if(mid!=null) midSeries.push([ts,mid]); if(bid!=null) bidSeries.push([ts,bid]); if(ask!=null) askSeries.push([ts,ask]); }
       }
+      console.log(`[ticks] loaded ${rows.length} | map size ${tickMap.size}`);
     }
 
     async function renderAll(){
       readControls(); setBusy(true);
       try{
-        await loadTicksRange(startId, endId, chunkSize, false);
+        // pad both ticks and labels so label endpoints near edges still work
+        const sPad = Math.max(1, startId - PADDING);
+        const ePad = endId + PADDING;
+
+        // ticks
+        await loadTicksRange(sPad, ePad, (ePad - sPad + 1), false);
 
         const series=[];
         if($('#layMid').checked && midSeries.length) series.push(priceLine('mid', midSeries, 1.4));
         if($('#layBid').checked && bidSeries.length) series.push(priceLine('bid', bidSeries, 1));
         if($('#layAsk').checked && askSeries.length) series.push(priceLine('ask', askSeries, 1));
 
+        // labels -> zigzag
         const wants = [['maxi','#layMaxi'],['medi','#layMedi'],['micro','#layMicro']].filter(([_,sel])=>$(sel).checked);
-        const labelResults = await Promise.all(wants.map(([k])=>fetchLabelsSmart(k, startId, endId).then(rows=>[k,rows])));
-        for(const [name,rows] of labelResults){ series.push(buildZigzagFromLabels(rows||[], name)); }
+        const results = await Promise.all(wants.map(([k])=>fetchLabels(k, sPad, ePad).then(rows=>[k,rows])));
+        // diagnostics
+        for(const [k,rows] of results){ console.log(`[labels] ${k}: rows=${rows.length}`, rows[0]||'(empty)'); }
+        for(const [k,rows] of results){ series.push(buildZigzag(rows||[], k)); }
 
         chart.setOption({ series }, { replaceMerge:['series'] });
       }catch(err){
@@ -180,19 +196,23 @@
 
     async function loadMoreRight(){
       readControls();
-      const oldEnd=endId, moreStart=oldEnd+1;
-      endId = oldEnd + chunkSize;
+      const oldEnd=endId; const moreStart=oldEnd+1; endId = oldEnd + chunkSize;
+
       setBusy(true);
       try{
-        await loadTicksRange(moreStart, endId, chunkSize, true);
+        const sPad = Math.max(1, moreStart - PADDING);
+        const ePad = endId + PADDING;
+
+        await loadTicksRange(sPad, ePad, (ePad - sPad + 1), true);
 
         const series=[];
         if($('#layMid').checked) series.push(priceLine('mid', midSeries, 1.4));
         if($('#layBid').checked) series.push(priceLine('bid', bidSeries, 1));
         if($('#layAsk').checked) series.push(priceLine('ask', askSeries, 1));
+
         const wants = [['maxi','#layMaxi'],['medi','#layMedi'],['micro','#layMicro']].filter(([_,sel])=>$(sel).checked);
-        const labelResults = await Promise.all(wants.map(([k])=>fetchLabelsSmart(k, startId, endId).then(rows=>[k,rows])));
-        for(const [name,rows] of labelResults){ series.push(buildZigzagFromLabels(rows||[], name)); }
+        const results = await Promise.all(wants.map(([k])=>fetchLabels(k, sPad, ePad).then(rows=>[k,rows])));
+        for(const [k,rows] of results){ series.push(buildZigzag(rows||[], k)); }
 
         chart.setOption({ series }, { replaceMerge:['series'] });
       }catch(err){
