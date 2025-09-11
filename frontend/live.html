@@ -1,53 +1,33 @@
-# PATH: frontend/live.html
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8"/>
-  <title>Live Tick Chart</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta charset="utf-8" />
+  <title>Live</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
   <style>
-    :root{--bg:#0d1117; --panel:#161b22; --muted:#30363d; --text:#c9d1d9; --sub:#8b949e}
-    *{box-sizing:border-box}
-    body{margin:0;background:var(--bg);color:var(--text);font:14px/1.4 ui-sans-serif,system-ui}
-    header{padding:10px;border-bottom:1px solid var(--muted);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-    button{background:var(--panel);color:var(--text);border:1px solid var(--muted);padding:6px 10px;border-radius:8px;cursor:pointer}
-    input,select,label{background:var(--panel);color:var(--text);border:1px solid var(--muted);border-radius:8px;padding:6px}
-    label{display:inline-flex;align-items:center;gap:6px}
-    #chart{height:calc(100vh - 56px)}
-    .legend{position:absolute;top:8px;right:12px;display:flex;gap:10px;font-size:12px}
-    .legend span{display:inline-flex;gap:6px;align-items:center}
-    .dot{width:10px;height:10px;border-radius:2px;display:inline-block}
-    .mid{background:#79c0ff}
-    .smooth{background:#a5d6a7}
-    .pred{background:#60a5fa}
-    .smal{background:#ef4444}
-    .bigm{background:#eab308}
-    .level{background:#8b949e}
+    :root{--bg:#0d1117;--panel:#111827;--ink:#e5e7eb;--muted:#94a3b8}
+    html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font:14px system-ui,Segoe UI,Roboto,Helvetica,Arial}
+    .bar{display:flex;gap:.75rem;align-items:center;padding:.6rem .8rem;background:var(--panel)}
+    .bar button{background:#1f2a44;border:1px solid #334155;color:var(--ink);padding:.45rem .7rem;border-radius:8px;cursor:pointer}
+    .layers{display:flex;gap:.6rem;align-items:center;margin-left:auto}
+    .layers label{color:#9ca3af}
+    #chart{position:fixed;inset:56px 0 0 0}
   </style>
 </head>
 <body>
-  <header>
-    <button id="toggle">Pause</button>
-    <label>Window
-      <select id="win">
-        <option value="2000">2k</option>
-        <option value="5000">5k</option>
-        <option value="10000">10k</option>
-        <option value="20000">20k</option>
-      </select>
-    </label>
-    <label>Jump to tick <input id="jump" type="number" placeholder="id" style="width:140px"></label>
-    <button id="go">Go</button>
-
-    <label><input type="checkbox" id="ckPred" checked>Pred</label>
-    <label><input type="checkbox" id="ckLevels" checked>Levels</label>
-    <label><input type="checkbox" id="ckSmals">Small</label>
-    <label><input type="checkbox" id="ckBigm">Big</label>
-  </header>
-
+  <div class="bar">
+    <button id="pause">Pause</button>
+    <div class="layers">
+      <label><input id="ask"     type="checkbox"> ask</label>
+      <label><input id="midp"    type="checkbox" checked> mid</label>
+      <label><input id="bid"     type="checkbox"> bid</label>
+      <label><input id="minzz"   type="checkbox" checked> min</label>
+      <label><input id="midzz"   type="checkbox" checked> mid</label>
+      <label><input id="maxzz"   type="checkbox" checked> max</label>
+    </div>
+  </div>
   <div id="chart"></div>
-
-  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
-  <script src="./live-core.js"></script>
+  <script type="module" src="./live.js"></script>
 </body>
 </html>
