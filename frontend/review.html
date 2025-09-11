@@ -125,6 +125,68 @@
     }
   }
 
+  async function loadLabels(layerName) {
+    const resp = await fetch(`/api/${layerName}?start=${startId}&end=${endId}`);
+    const data = await resp.json();
+
+    if (!data || data.length === 0) return [];
+
+    // Convert label zones into zigzag points
+    let zigzag = [];
+    for (let d of data) {
+      if (d.start_id && d.end_id && d.start_ts && d.end_ts) {
+        zigzag.push({
+          name: layerName,
+          coords: [
+            [d.start_ts, d.start_price],
+            [d.end_ts, d.end_price]
+          ]
+        });
+      }
+    }
+    return zigzag;
+  }
+
+  async function renderLabels() {
+    let series = [];
+
+    if (document.querySelector("#micro").checked) {
+      const micro = await loadLabels("micro");
+      series.push({
+        name: "micro",
+        type: "line",
+        data: micro.flatMap(z => z.coords),
+        showSymbol: true,
+        lineStyle: { width: 1.2, color: "#ff4d4d" },
+      });
+    }
+
+    if (document.querySelector("#medi").checked) {
+      const medi = await loadLabels("medi");
+      series.push({
+        name: "medi",
+        type: "line",
+        data: medi.flatMap(z => z.coords),
+        showSymbol: true,
+        lineStyle: { width: 1.5, color: "#ffaa00" },
+      });
+    }
+
+    if (document.querySelector("#maxi").checked) {
+      const maxi = await loadLabels("maxi");
+      series.push({
+        name: "maxi",
+        type: "line",
+        data: maxi.flatMap(z => z.coords),
+        showSymbol: true,
+        lineStyle: { width: 2, color: "#00ff66" },
+      });
+    }
+
+    chart.setOption({ series: [...chart.getOption().series, ...series] });
+  }
+
+
   // ---- Toggles ----
   function makeToggle(id,label,checked=false,isLabel=false){
     const wrap=document.createElement('label');
