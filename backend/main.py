@@ -117,50 +117,51 @@ def api_sql_get(q: str = ""):
         cur.execute(q)
         return {"rows": _jsonable(cur.fetchall())}
 
-@app.get("/api/zigzag")
-def api_get_zigzag(
-    from_id: int = Query(..., alias="from_id"),
-    to_id: int = Query(..., alias="to_id"),
-) -> List[Dict]:
-    """
-    Return zigzag segments between from_id and to_id.
-    Each row should include:
-      start_id, end_id, start_ts, end_ts, start_price, end_price
-    """
-    sql = """
-        SELECT
-            start_id,
-            end_id,
-            start_ts,
-            end_ts,
-            start_price,
-            end_price
-        FROM zigzag_moves
-        WHERE start_id >= %s AND end_id <= %s
-        ORDER BY start_id
-    """
-    conn = get_conn()
-    with dict_cur(conn) as cur:
-        cur.execute(sql, (from_id, to_id))     # <-- use (?, ?) for SQLite
-        rows = cur.fetchall()
-    return rows
-# ------------------ END: Zigzag API route ----------------------
+
 
 # --- ADD: helper to get latest tick (id + time + prices)
 @app.get("/api/ticks/latest")
 def api_ticks_latest():
     conn = get_conn()
+    ts_col, mid_expr, (has_bid, has_ask) = _ts_mid_cols(conn)
+
+    bid_sel = ", bid" if has_bid else ""
+    ask_sel = ", ask" if has_ask else ""
+
     with dict_cur(conn) as cur:
-        cur.execute("""
+        cur.execute(
+            f"""
             SELECT id,
-                   COALESCE(ts, "timestamp") AS ts,
-                   mid, bid, ask
+                   {ts_col} AS ts,
+                   {mid_expr} AS mid
+                   {bid_sel}
+                   {ask_sel}
             FROM ticks
             ORDER BY id DESC
             LIMIT 1
-        """)
+            """
+        )
         row = cur.fetchone()
-    return row or {}
+
+    if not row:
+        return {}
+
+    # normalize numerics to float and timestamp to ISO (same style as your other tick routes)
+    if isinstance(row.get("mid"), Decimal):
+        row["mid"] = float(row["mid"])
+    if has_bid and isinstance(row.get("bid"), Decimal):
+        row["bid"] = float(row["bid"])
+    if has_ask and isinstance(row.get("ask"), Decimal):
+        row["ask"] = float(row["ask"])
+
+    row["spread"] = (
+        (row.get("ask") - row.get("bid"))
+        if (has_bid and has_ask and row.get("ask") is not None and row.get("bid") is not None)
+        else None
+    )
+    row["ts"] = row["ts"].isoformat()
+
+    return row
 
 # --- ADD: unified zigzag fetcher (min/mid/max) by id window
 from typing import Optional
@@ -169,32 +170,49 @@ from fastapi import Query
 @app.get("/api/zigzag")
 def api_zz(
     from_id: int = Query(..., alias="from_id"),
-    to_id:   int = Query(..., alias="to_id"),
+    to_id: int = Query(..., alias="to_id"),
     kind: Optional[str] = Query(None, pattern="^(min|mid|max)$")  # optional filter
 ):
     conn = get_conn()
     with dict_cur(conn) as cur:
         if kind in ("min", "mid", "max"):
-            cur.execute(f"""
-                SELECT start_id,end_id,start_ts,end_ts,start_price,end_price,dir,span,len,
-                       '{kind}' AS kind
+            cur.execute(
+                f"""
+                SELECT start_id, end_id, start_ts, end_ts,
+                       start_price::float AS start_price,
+                       end_price::float   AS end_price,
+                       dir,
+                       span::float        AS span,
+                       len,
+                       '{kind}'           AS kind
                 FROM {kind}
                 WHERE NOT (end_id < %s OR start_id > %s)
                 ORDER BY start_id
-            """, (from_id, to_id))
+                """,
+                (from_id, to_id),
+            )
             rows = cur.fetchall()
         else:
-            cur.execute("""
-                SELECT start_id,end_id,start_ts,end_ts,start_price,end_price,dir,span,len,'min' AS kind
+            cur.execute(
+                """
+                SELECT start_id, end_id, start_ts, end_ts,
+                       start_price::float, end_price::float,
+                       dir, span::float, len, 'min' AS kind
                   FROM min WHERE NOT (end_id < %s OR start_id > %s)
                 UNION ALL
-                SELECT start_id,end_id,start_ts,end_ts,start_price,end_price,dir,span,len,'mid' AS kind
+                SELECT start_id, end_id, start_ts, end_ts,
+                       start_price::float, end_price::float,
+                       dir, span::float, len, 'mid' AS kind
                   FROM mid WHERE NOT (end_id < %s OR start_id > %s)
                 UNION ALL
-                SELECT start_id,end_id,start_ts,end_ts,start_price,end_price,dir,span,len,'max' AS kind
+                SELECT start_id, end_id, start_ts, end_ts,
+                       start_price::float, end_price::float,
+                       dir, span::float, len, 'max' AS kind
                   FROM max WHERE NOT (end_id < %s OR start_id > %s)
                 ORDER BY start_id
-            """, (from_id, to_id, from_id, to_id, from_id, to_id))
+                """,
+                (from_id, to_id, from_id, to_id, from_id, to_id),
+            )
             rows = cur.fetchall()
     return rows
 
