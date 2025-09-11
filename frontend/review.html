@@ -18,16 +18,16 @@
   .chip{display:inline-block;width:.8rem;height:.8rem;border-radius:50%}
   .chip.mid{background:var(--mid)} .chip.bid{background:var(--bid)} .chip.ask{background:var(--ask)}
   .chip.micro{background:var(--micro)} .chip.medi{background:var(--medi)} .chip.maxi{background:var(--maxi)}
-  #chart{height:calc(100vh - 104px)} /* header + legend */
+  #chart{height:calc(100vh - 104px)}
   svg{width:100%;height:100%;display:block}
   .axis path,.axis line{stroke:var(--axis)}
   .grid line{stroke:var(--grid)}
   .line{fill:none;stroke-width:1.5px}
   .line.mid{stroke:var(--mid)} .line.bid{stroke:var(--bid)} .line.ask{stroke:var(--ask)}
   .zig.micro{stroke:var(--micro)} .zig.medi{stroke:var(--medi)} .zig.maxi{stroke:var(--maxi)}
-  .brush .selection{fill:#3a93ff25;stroke:#3a93ff}
   .tooltip{position:absolute;pointer-events:none;background:#0f1f2f;border:1px solid #2d4a61;border-radius:8px;padding:.5rem .6rem;color:var(--fg);box-shadow:0 8px 24px rgba(0,0,0,.35)}
   .crosshair line{stroke:#6a7f94;stroke-dasharray:4 4}
+  .toast{position:fixed;right:12px;bottom:12px;background:#1a2a3d;border:1px solid #334c66;color:#ffb4b4;padding:.5rem .7rem;border-radius:8px;display:none;z-index:50}
 </style>
 </head>
 <body>
@@ -41,405 +41,332 @@
   <div class="legend" id="legend"></div>
   <div id="chart"></div>
   <div class="tooltip" id="tip" style="display:none"></div>
+  <div class="toast" id="toast"></div>
 
+<!-- d3 FIRST -->
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
 <script>
-/* ====== small helpers ====== */
-const $ = sel => document.querySelector(sel);
-const fmtDT = ts => {
-  const d = new Date(ts);
-  const date = d.toLocaleDateString();
-  const time = d.toLocaleTimeString();
-  return {date,time};
-};
+/* ===================== helpers ===================== */
+const $ = s => document.querySelector(s);
 const niceInt = d3.format("~d");
+const showToast = (msg) => { const t=$('#toast'); t.textContent=msg; t.style.display='block'; setTimeout(()=>t.style.display='none', 4500); };
+const fmtDT = ts => { const d=new Date(ts); return {date:d.toLocaleDateString(), time:d.toLocaleTimeString()}; };
 
-/* ====== state ====== */
-let ticks = [];                 // [{id,timestamp,mid,bid,ask}]
-let ticksMap = new Map();       // id -> tick
-let loadedFrom = null, loadedTo = null; // id bounds
-let zoomX = null;               // [id0, id1] for current zoom window
-let layersMeta = {};            // {name:{type:'tick'|'zig', active:true}}
-let zigData = {};               // {table:[{start_id,end_id}]}
-let activeLayers = new Set(['mid','bid','ask']); // defaults
-
-/* ====== configuration ====== */
-const COLOR = { mid:'var(--mid)', bid:'var(--bid)', ask:'var(--ask)', micro:'var(--micro)', medi:'var(--medi)', maxi:'var(--maxi)' };
-
-/* ====== API (uses your existing endpoints) ======
-   We keep the same signatures you’ve been using:
-   - /api/ticks?start=ID&limit=N
-   - /api/labels?table=NAME&from=ID&to=ID  (returns rows for that id window)
-   - /api/tables  -> [{name}]  (we’ll probe each to detect zig schema)
-*/
-async function api(path, params={}) {
-  const url = new URL(path, location.origin);
-  Object.entries(params).forEach(([k,v])=> url.searchParams.set(k, v));
-  const r = await fetch(url);
-  if(!r.ok) throw new Error(await r.text());
-  return r.json();
-}
-
-async function fetchTicks(startId, limit) {
-  const data = await api('/api/ticks', {start:startId, limit});
-  return data; // [{id,timestamp,mid,bid,ask}]
-}
-
-async function fetchTableWindow(table, fromId, toId) {
-  // Works for any label table. We’ll classify as zig if it has the 4 columns.
-  const rows = await api('/api/labels', {table, from:fromId, to:toId});
-  return rows;
-}
-
-async function fetchTables() {
-  // Return array like [{name:'ticks'}, {name:'micro'} ...], we’ll filter out 'ticks'
-  const t = await api('/api/tables');
-  return t.map(x=>x.name).filter(n => n!=='ticks');
-}
-
-/* ====== load mechanics ====== */
-function indexTicks(arr) {
-  for (const t of arr) ticksMap.set(t.id, t);
-}
-function updateLoadedBounds() {
-  if (ticks.length) {
-    loadedFrom = ticks[0].id;
-    loadedTo = ticks[ticks.length-1].id;
-  } else {
-    loadedFrom = loadedTo = null;
-  }
-}
-
-async function doLoad(startId, chunk) {
-  const arr = await fetchTicks(startId, chunk);
-  ticks = arr;
-  indexTicks(arr);
-  updateLoadedBounds();
-  // refresh labels window
-  await refreshZigsForCurrentWindow();
-  // default zoom to loaded range
-  zoomX = [loadedFrom, loadedTo];
-  render();
-}
-
-async function doLoadMoreRight() {
-  if (loadedTo == null) return;
-  const chunk = +$('#chunk').value || 2000;
-  const arr = await fetchTicks(loadedTo+1, chunk);
-  if (!arr.length) return;
-
-  ticks = ticks.concat(arr);
-  indexTicks(arr);
-  updateLoadedBounds();
-
-  // Ask user for current zoom bounds, keep same window
-  const cur0 = Math.round(zoomX?.[0] ?? loadedFrom);
-  const cur1 = Math.round(zoomX?.[1] ?? loadedTo);
-  await refreshZigsForCurrentWindow();
-  zoomX = [cur0, cur1];
-  render();
-}
-
-/* ====== detect layers (tick vs zig) and build legend ====== */
-async function initLayers() {
-  const names = await fetchTables();
-  // Built-ins:
-  layersMeta = {
-    mid:{type:'tick', active:true},
-    bid:{type:'tick', active:true},
-    ask:{type:'tick', active:true}
-  };
-  // Probe each table by fetching a tiny window to see if it’s zig-schema
-  const probeFrom = (loadedFrom ?? 1);
-  const probeTo   = (loadedTo ?? (probeFrom+5000));
-  for (const name of names) {
+/* ===================== endpoint auto-detect ===================== */
+async function tryJSON(urls) {
+  let lastErr;
+  for (const u of urls) {
     try {
-      const rows = await fetchTableWindow(name, probeFrom, probeTo);
-      const isZig = rows.length && ['start_id','end_id','start_ts','end_ts']
-        .every(k => Object.prototype.hasOwnProperty.call(rows[0], k));
-      layersMeta[name] = {type: isZig ? 'zig' : 'tick', active: isZig}; // auto-enable zigs
-      if (isZig) zigData[name] = rows;
-    } catch(e) {
-      console.warn('table probe failed', name, e);
-    }
+      const r = await fetch(u);
+      if (r.ok) return await r.json();
+    } catch (e) { lastErr=e; }
   }
+  throw lastErr || new Error('No endpoint matched');
+}
+
+// Candidate builders
+const ticksURLs = (start,limit) => [
+  `/api/ticks?start=${start}&limit=${limit}`,
+  `/ticks?start=${start}&limit=${limit}`,
+  `/api/ticks?from=${start}&limit=${limit}`,
+  `/ticks?from=${start}&limit=${limit}`,
+];
+const tablesURLs = [
+  `/api/tables`,
+  `/tables`,
+  `/api/labels/tables`,
+  `/labels/tables`,
+];
+const labelsURLs = (table,fromId,toId) => [
+  `/api/labels?table=${encodeURIComponent(table)}&from=${fromId}&to=${toId}`,
+  `/labels?table=${encodeURIComponent(table)}&from=${fromId}&to=${toId}`,
+  `/api/labels/${encodeURIComponent(table)}?from=${fromId}&to=${toId}`,
+  `/labels/${encodeURIComponent(table)}?from=${fromId}&to=${toId}`,
+  `/api/labels?table=${encodeURIComponent(table)}&start_id=${fromId}&end_id=${toId}`,
+  `/labels?table=${encodeURIComponent(table)}&start_id=${fromId}&end_id=${toId}`,
+];
+
+/* ===================== app state ===================== */
+let ticks = [];
+let ticksMap = new Map();
+let loadedFrom = null, loadedTo = null;
+let zoomX = null;
+let layersMeta = {}; // { mid:{type:'tick',active:true}, ..., micro:{type:'zig',active:true}}
+let zigData = {};    // { table:[{start_id,end_id,...}] }
+
+const COLORS = { mid:'var(--mid)', bid:'var(--bid)', ask:'var(--ask)', micro:'var(--micro)', medi:'var(--medi)', maxi:'var(--maxi)' };
+
+/* ===================== data fetchers (auto-fallback) ===================== */
+async function fetchTicks(start, limit){ return tryJSON(ticksURLs(start,limit)); }
+async function fetchTables(){
+  const arr = await tryJSON(tablesURLs);
+  // Normalize to array of names
+  if (!arr) return [];
+  if (Array.isArray(arr) && typeof arr[0]==='string') return arr.filter(n=>n!=='ticks');
+  if (Array.isArray(arr) && arr[0]?.name) return arr.map(x=>x.name).filter(n=>n!=='ticks');
+  return [];
+}
+async function fetchLabelsWindow(table, fromId, toId){
+  return tryJSON(labelsURLs(table,fromId,toId));
+}
+
+/* ===================== load mechanics ===================== */
+function indexTicks(arr){ for(const t of arr) ticksMap.set(t.id, t); }
+function updateLoadedBounds(){ if (ticks.length){ loadedFrom=ticks[0].id; loadedTo=ticks[ticks.length-1].id; } }
+
+async function doLoad(startId, chunk){
+  try{
+    const arr = await fetchTicks(startId, chunk);
+    if (!Array.isArray(arr) || !arr.length){ showToast('No ticks returned'); return; }
+    ticks = arr; ticksMap = new Map(); indexTicks(arr); updateLoadedBounds();
+    await refreshZigsForWindow();
+    zoomX = [loadedFrom, loadedTo];
+    render();
+  }catch(e){ console.error(e); showToast('Load failed'); }
+}
+
+async function doLoadMoreRight(){
+  if (loadedTo==null) return;
+  const chunk = +$('#chunk').value||2000;
+  try{
+    const arr = await fetchTicks(loadedTo+1, chunk);
+    if (!arr.length) return;
+    ticks = ticks.concat(arr); indexTicks(arr); updateLoadedBounds();
+    const keep0 = Math.round(zoomX?.[0] ?? loadedFrom);
+    const keep1 = Math.round(zoomX?.[1] ?? loadedTo);
+    await refreshZigsForWindow();
+    zoomX=[keep0,keep1];
+    render();
+  }catch(e){ console.error(e); showToast('Load more failed'); }
+}
+
+/* ===================== layers / legend ===================== */
+async function initLayers(){
+  layersMeta = {
+    mid:{type:'tick',active:true},
+    bid:{type:'tick',active:true},
+    ask:{type:'tick',active:true},
+  };
+  try{
+    const names = await fetchTables();
+    const fromId = loadedFrom ?? 1, toId = loadedTo ?? (fromId+5000);
+    for (const name of names){
+      try{
+        const rows = await fetchLabelsWindow(name, fromId, toId);
+        const isZig = rows.length && ['start_id','end_id','start_ts','end_ts'].every(k => k in rows[0]);
+        layersMeta[name] = {type: isZig ? 'zig' : 'tick', active: isZig}; // auto-enable zig
+        if (isZig) zigData[name] = rows;
+      }catch(e){ /* ignore non-readable tables */ }
+    }
+  }catch(e){ console.warn('tables probe failed', e); }
   buildLegend();
 }
 
-function buildLegend() {
-  const c = $('#legend'); c.innerHTML = '';
-  const order = Object.keys(layersMeta); // mid,bid,ask, then dynamic
-  for (const name of order) {
+function buildLegend(){
+  const c = $('#legend'); c.innerHTML='';
+  for (const name of Object.keys(layersMeta)){
     const meta = layersMeta[name];
-    const label = document.createElement('label');
-    const chk = document.createElement('input');
-    chk.type = 'checkbox';
-    chk.checked = !!meta.active;
-    chk.addEventListener('change', async () => {
+    const label=document.createElement('label');
+    const chk=document.createElement('input'); chk.type='checkbox'; chk.checked=!!meta.active;
+    chk.addEventListener('change', async ()=>{
       meta.active = chk.checked;
-      // keep zoom window; don’t auto reset
-      await refreshZigsForCurrentWindow();
+      await refreshZigsForWindow();
       render();
     });
-    const chip = document.createElement('span');
-    chip.className = 'chip ' + name;
-    label.appendChild(chk);
-    label.appendChild(chip);
-    label.appendChild(document.createTextNode(' ' + name));
+    const chip=document.createElement('span'); chip.className='chip '+name;
+    label.appendChild(chk); label.appendChild(chip); label.appendChild(document.createTextNode(' '+name));
     c.appendChild(label);
   }
 }
 
-/* ====== zig window refresh ====== */
-async function refreshZigsForCurrentWindow() {
-  // Update zigData for active zig layers within the currently loaded id bounds
-  const fromId = loadedFrom ?? 1;
-  const toId   = loadedTo ?? (fromId + 5000);
-  const names = Object.keys(layersMeta).filter(n => layersMeta[n].type==='zig');
-  for (const name of names) {
-    if (!layersMeta[name].active) continue;
-    try {
-      zigData[name] = await fetchTableWindow(name, fromId, toId);
-    } catch(e) {
-      console.warn('zig fetch failed', name, e);
-    }
+async function refreshZigsForWindow(){
+  const fromId = loadedFrom ?? 1, toId = loadedTo ?? (fromId+5000);
+  const zigs = Object.keys(layersMeta).filter(n=>layersMeta[n].type==='zig' && layersMeta[n].active);
+  for (const name of zigs){
+    try{ zigData[name] = await fetchLabelsWindow(name, fromId, toId); }
+    catch(e){ console.warn('zig fetch failed', name, e); }
   }
 }
 
-/* ====== chart ====== */
+/* ===================== chart ===================== */
 const svg = d3.select('#chart').append('svg');
 const gMain = svg.append('g');
 const gGrid = gMain.append('g').attr('class','grid');
 const gXAxis = gMain.append('g').attr('class','axis');
 const gYAxis = gMain.append('g').attr('class','axis');
-const gLines = gMain.append('g').attr('clip-path','url(#clip)');
-const gZigs  = gMain.append('g').attr('clip-path','url(#clip)');
-const gCross = gMain.append('g').attr('class','crosshair');
+const gLines= gMain.append('g').attr('clip-path','url(#clip)');
+const gZigs = gMain.append('g').attr('clip-path','url(#clip)');
+const gCross= gMain.append('g').attr('class','crosshair');
 
 const defs = svg.append('defs');
 defs.append('clipPath').attr('id','clip').append('rect');
 
-const brushG = gMain.append('g').attr('class','brush');
-
-let x = d3.scaleLinear();   // id
-let y = d3.scaleLinear();   // price
+let x = d3.scaleLinear();
+let y = d3.scaleLinear();
 let xAxis = d3.axisBottom(x).tickFormat(niceInt);
 let yAxis = d3.axisLeft(y).ticks(8).tickFormat(niceInt);
 
-function layout() {
-  const {width, height} = svg.node().getBoundingClientRect();
-  const m = {t:18, r:26, b:34, l:48};
-  const w = width - m.l - m.r;
-  const h = height - m.t - m.b;
-  gMain.attr('transform', `translate(${m.l},${m.t})`);
-  gXAxis.attr('transform', `translate(0,${h})`);
-  defs.select('#clip rect').attr('width', w).attr('height', h);
+function layout(){
+  const {width,height} = svg.node().getBoundingClientRect();
+  const m={t:18,r:26,b:34,l:48}, w=width-m.l-m.r, h=height-m.t-m.b;
+  gMain.attr('transform',`translate(${m.l},${m.t})`);
+  gXAxis.attr('transform',`translate(0,${h})`);
+  defs.select('#clip rect').attr('width',w).attr('height',h);
   return {m,w,h};
 }
-
-function domainX() {
-  if (!ticks.length) return [0,1];
-  if (zoomX) return zoomX;
+function domainX(){
+  if(!ticks.length) return [0,1];
+  if(zoomX) return zoomX;
   return [ticks[0].id, ticks[ticks.length-1].id];
 }
-
-function computeYExtent() {
+function computeYExtent(){
   const [x0,x1] = domainX();
-  const series = [];
-
-  // tick series
-  for (const key of ['mid','bid','ask']) {
-    if (layersMeta[key]?.active) {
-      for (const t of ticks) if (t.id>=x0 && t.id<=x1 && t[key]!=null) series.push(t[key]);
+  const vals=[];
+  for (const k of ['mid','bid','ask']){
+    if (layersMeta[k]?.active){
+      for (const t of ticks){ if (t.id>=x0 && t.id<=x1 && t[k]!=null) vals.push(t[k]); }
     }
   }
-
-  // zig series: take endpoints’ mid (safe & cheap)
-  for (const name of Object.keys(layersMeta)) {
+  for (const name of Object.keys(layersMeta)){
     if (layersMeta[name]?.type!=='zig' || !layersMeta[name]?.active) continue;
     const legs = zigData[name]||[];
-    for (const leg of legs) {
-      const a = ticksMap.get(leg.start_id), b = ticksMap.get(leg.end_id);
-      if (a && b && a.id>=x0 && a.id<=x1 || b && b.id>=x0 && b.id<=x1) {
-        if (a?.mid!=null) series.push(a.mid);
-        if (b?.mid!=null) series.push(b.mid);
-      }
+    for (const leg of legs){
+      const a=ticksMap.get(leg.start_id), b=ticksMap.get(leg.end_id);
+      if (a&&a.id>=x0&&a.id<=x1 && a.mid!=null) vals.push(a.mid);
+      if (b&&b.id>=x0&&b.id<=x1 && b.mid!=null) vals.push(b.mid);
     }
   }
-
-  if (!series.length) return [0,1];
-  let min = Math.min(...series), max = Math.max(...series);
-  // pad a touch
-  const pad = Math.max(0.25, (max-min)*0.05);
-  min = Math.floor(min - pad);
-  max = Math.ceil (max + pad);
-  return [min, max];
+  if(!vals.length) return [0,1];
+  let min=Math.min(...vals), max=Math.max(...vals);
+  const pad=Math.max(0.25,(max-min)*0.05);
+  min=Math.floor(min-pad); max=Math.ceil(max+pad);
+  return [min,max];
 }
 
-function render() {
+function render(){
   const {w,h} = layout();
   const [x0,x1] = domainX();
   x.domain([x0,x1]).range([0,w]);
-
   const [y0,y1] = computeYExtent();
   y.domain([y0,y1]).range([h,0]).nice();
 
-  // grid + axes
+  // grid
   gGrid.selectAll('g.vert').data(x.ticks(8)).join(
-    enter => enter.append('g').attr('class','vert')
-      .append('line').attr('y1',0).attr('y2',h).attr('stroke','var(--grid)'),
-    update => update,
-    exit => exit.remove()
-  ).attr('transform', d=>`translate(${x(d)},0)`);
+    e=>e.append('g').attr('class','vert').append('line').attr('y1',0).attr('y2',h).attr('stroke','var(--grid)'),
+    u=>u, x=>x.remove()
+  ).attr('transform',d=>`translate(${x(d)},0)`);
   gGrid.selectAll('g.horz').data(y.ticks(8)).join(
-    enter => enter.append('g').attr('class','horz')
-      .append('line').attr('x1',0).attr('x2',w).attr('stroke','var(--grid)'),
-    update => update,
-    exit => exit.remove()
-  ).attr('transform', d=>`translate(0,${y(d)})`);
-  gXAxis.call(xAxis);
-  gYAxis.call(yAxis);
+    e=>e.append('g').attr('class','horz').append('line').attr('x1',0).attr('x2',w).attr('stroke','var(--grid)'),
+    u=>u, x=>x.remove()
+  ).attr('transform',d=>`translate(0,${y(d)})`);
+  gXAxis.call(xAxis); gYAxis.call(yAxis);
 
-  // TICK LINES
-  const lineGen = key => d3.line()
-    .x(d=>x(d.id))
-    .y(d=>y(d[key]))
-    .defined(d=>d[key]!=null);
-
-  for (const key of ['mid','bid','ask']) {
-    const on = layersMeta[key]?.active;
-    const sel = gLines.selectAll(`path.line.${key}`).data(on?[ticks]:[]);
-    sel.enter().append('path').attr('class',`line ${key}`)
-        .attr('stroke',COLOR[key]).merge(sel)
-        .attr('d', lineGen(key)(ticks));
+  // tick lines
+  const lineGen = k=> d3.line().x(d=>x(d.id)).y(d=>y(d[k])).defined(d=>d[k]!=null);
+  for (const k of ['mid','bid','ask']){
+    const on = layersMeta[k]?.active;
+    const sel = gLines.selectAll(`path.line.${k}`).data(on?[ticks]:[]);
+    sel.enter().append('path').attr('class',`line ${k}`).attr('stroke',COLORS[k])
+        .merge(sel).attr('fill','none').attr('d', lineGen(k)(ticks));
     sel.exit().remove();
   }
 
-  // ZIG LINES (polyline through leg endpoints)
-  const zigNames = Object.keys(layersMeta).filter(n => layersMeta[n]?.type==='zig');
-  const zigJoin = gZigs.selectAll('path.zig').data(
-    zigNames.filter(n=>layersMeta[n].active).map(n => ({name:n, legs:(zigData[n]||[]).slice().sort((a,b)=>a.start_id-b.start_id)})),
-    d => d.name
-  );
+  // zig polylines
+  const zigNames = Object.keys(layersMeta).filter(n=>layersMeta[n]?.type==='zig' && layersMeta[n].active);
+  const join = gZigs.selectAll('path.zig').data(zigNames, d=>d);
+  join.enter().append('path').attr('class',d=>`zig ${d}`).attr('fill','none').attr('stroke-width',1.8)
+      .attr('stroke',d=>COLORS[d]||'#bbb')
+      .merge(join)
+      .attr('d', name => {
+        const legs=(zigData[name]||[]).slice().sort((a,b)=>a.start_id-b.start_id);
+        const pts=[];
+        for (const leg of legs){
+          const a=ticksMap.get(leg.start_id), b=ticksMap.get(leg.end_id);
+          if (!a||!b) continue;
+          pts.push([x(a.id), y(a.mid)]);
+          pts.push([x(b.id), y(b.mid)]);
+        }
+        if (!pts.length) return null;
+        const p=d3.path(); p.moveTo(pts[0][0],pts[0][1]);
+        for (let i=1;i<pts.length;i++) p.lineTo(pts[i][0],pts[i][1]);
+        return p.toString();
+      });
+  join.exit().remove();
 
-  zigJoin.enter().append('path')
-    .attr('class', d=>`zig ${d.name}`)
-    .attr('fill','none')
-    .attr('stroke-width',1.8)
-    .attr('stroke', d=>COLOR[d.name]||'#bbb')
-    .merge(zigJoin)
-    .attr('d', d => {
-      const pts = [];
-      for (const leg of d.legs) {
-        const a = ticksMap.get(leg.start_id);
-        const b = ticksMap.get(leg.end_id);
-        if (!a || !b) continue;
-        pts.push([x(a.id), y(a.mid)]);
-        pts.push([x(b.id), y(b.mid)]);
-      }
-      if (!pts.length) return null;
-      const p = d3.path();
-      p.moveTo(pts[0][0], pts[0][1]);
-      for (let i=1;i<pts.length;i++) p.lineTo(pts[i][0], pts[i][1]);
-      return p.toString();
-    });
-
-  zigJoin.exit().remove();
-
-  // Crosshair + tooltip
   drawCrosshair(w,h);
 }
 
 function drawCrosshair(w,h){
-  const tip = $('#tip');
-  const onMove = (ev) => {
-    const pt = d3.pointer(ev);
-    const idGuess = Math.round(x.invert(pt[0]));
+  const tip=$('#tip');
+  svg.on('mousemove', ev=>{
+    if (!ticks.length) return;
+    const pt=d3.pointer(ev, svg.node());
+    const xpix = pt[0]-48; // approx left margin
+    const idGuess = Math.round(x.invert(Math.max(0,Math.min(w,xpix))));
     let t = ticksMap.get(idGuess);
-    if (!t) {
-      // find nearest by id
-      const ids = d3.bisector(d=>d).center;
-      const arr = ticks.map(d=>d.id);
-      const idx = ids(arr, idGuess);
-      t = ticks[idx];
+    if (!t){
+      const arr=ticks.map(d=>d.id);
+      const i=d3.bisector(d=>d).center(arr, idGuess);
+      t=ticks[i];
     }
     if (!t) return;
-    const {date,time} = fmtDT(t.timestamp);
-    let html = `<div><b>ID:</b> ${t.id} &nbsp; <b>Date:</b> ${date} &nbsp; <b>Time:</b> ${time}</div>`;
-    for (const key of ['mid','bid','ask']) {
-      if (layersMeta[key]?.active && t[key]!=null) html += `<div>${key}: <b>${t[key]}</b></div>`;
-    }
-    tip.innerHTML = html;
-    tip.style.display = 'block';
-    tip.style.left = (ev.clientX + 14) + 'px';
-    tip.style.top  = (ev.clientY + 14) + 'px';
-
-    // crosshair
-    const cx = x(t.id), cy = (t.mid!=null? y(t.mid) : (t.ask!=null? y(t.ask) : (t.bid!=null? y(t.bid) : null)));
+    const {date,time}=fmtDT(t.timestamp);
+    let html=`<div><b>ID:</b> ${t.id} &nbsp; <b>Date:</b> ${date} &nbsp; <b>Time:</b> ${time}</div>`;
+    for (const k of ['mid','bid','ask']) if (layersMeta[k]?.active && t[k]!=null) html+=`<div>${k}: <b>${t[k]}</b></div>`;
+    tip.innerHTML=html; tip.style.display='block'; tip.style.left=(ev.clientX+14)+'px'; tip.style.top=(ev.clientY+14)+'px';
     gCross.selectAll('*').remove();
-    if (cy!=null) {
-      gCross.append('line').attr('x1',cx).attr('x2',cx).attr('y1',0).attr('y2',h);
-      gCross.append('line').attr('x1',0).attr('x2',w).attr('y1',cy).attr('y2',cy);
-    }
-  };
-  const onLeave = ()=>{ gCross.selectAll('*').remove(); tip.style.display='none'; };
-  svg.on('mousemove', onMove).on('mouseleave', onLeave);
+    const cy=t.mid!=null?y(t.mid):t.ask!=null?y(t.ask):t.bid!=null?y(t.bid):null;
+    if (cy!=null){ const cx=x(t.id); gCross.append('line').attr('x1',cx).attr('x2',cx).attr('y1',0).attr('y2',h);
+                   gCross.append('line').attr('x1',0).attr('x2',w).attr('y1',cy).attr('y2',cy); }
+  }).on('mouseleave',()=>{ gCross.selectAll('*').remove(); $('#tip').style.display='none'; });
 }
 
-/* ====== zoom & brush ====== */
-(function initZoom(){
-  // Wheel pan; Shift+wheel zoom around cursor
+/* ===================== zoom/pan ===================== */
+(function(){
   svg.node().addEventListener('wheel', (e)=>{
     if (!ticks.length) return;
     e.preventDefault();
-    const [xmin,xmax] = domainX();
-    const span = xmax-xmin;
-    const mouseX = d3.pointer(e, svg.node())[0] - (layout().m.l);
-    const focal = x.invert(Math.max(0,Math.min(layout().w, mouseX)));
-    if (e.shiftKey) {
-      // zoom
-      const factor = Math.exp(-e.deltaY * 0.0015);
-      let newMin = focal - (focal - xmin) * factor;
-      let newMax = focal + (xmax - focal) * factor;
-      // clamp
-      newMin = Math.max(loadedFrom, Math.min(newMin, newMax-1));
-      newMax = Math.min(loadedTo,   Math.max(newMax, newMin+1));
-      zoomX = [Math.round(newMin), Math.round(newMax)];
+    const {w}=layout();
+    const [xmin,xmax]=domainX(); const span=xmax-xmin;
+    const mouseX=d3.pointer(e, svg.node())[0]-48;
+    const focal=x.invert(Math.max(0,Math.min(w,mouseX)));
+    if (e.shiftKey){
+      const factor=Math.exp(-e.deltaY*0.0015);
+      let newMin=focal-(focal-xmin)*factor;
+      let newMax=focal+(xmax-focal)*factor;
+      newMin=Math.max(loadedFrom, Math.min(newMin,newMax-1));
+      newMax=Math.min(loadedTo,   Math.max(newMax,newMin+1));
+      zoomX=[Math.round(newMin),Math.round(newMax)];
     } else {
-      // pan
-      const k = e.deltaY!==0 ? e.deltaY : e.deltaX;
-      const shift = Math.round(k * span / 120 / 6);
-      let newMin = Math.max(loadedFrom, xmin + shift);
-      let newMax = Math.min(loadedTo,   xmax + shift);
-      if (newMax - newMin < 1) newMax = newMin + 1;
-      zoomX = [newMin, newMax];
+      const k=e.deltaY!==0?e.deltaY:e.deltaX;
+      const shift=Math.round(k*span/120/6);
+      let newMin=Math.max(loadedFrom, xmin+shift);
+      let newMax=Math.min(loadedTo,   xmax+shift);
+      if (newMax-newMin<1) newMax=newMin+1;
+      zoomX=[newMin,newMax];
     }
     render();
   }, {passive:false});
 })();
 
-/* ====== wire UI ====== */
+/* ===================== wire UI ===================== */
 $('#btnLoad').addEventListener('click', async ()=>{
-  const start = +$('#startId').value || 1;
-  const chunk = +$('#chunk').value || 2000;
+  const start=+$('#startId').value||1;
+  const chunk=+$('#chunk').value||2000;
   await doLoad(start, chunk);
-  await initLayers(); // (re)detect available tables after first load
-  render();
-});
-
-$('#btnMore').addEventListener('click', async ()=>{
-  await doLoadMoreRight();
-});
-
-/* ====== first mount ====== */
-(async function first(){
-  // initial load
-  await doLoad(+$('#startId').value || 1, +$('#chunk').value || 2000);
   await initLayers();
   render();
+});
+$('#btnMore').addEventListener('click', async ()=>{ await doLoadMoreRight(); });
+
+/* ===================== first-run ===================== */
+(async function(){
+  try{
+    await doLoad(+$('#startId').value||1, +$('#chunk').value||2000);
+    await initLayers();
+    render();
+  }catch(e){ console.error(e); showToast('Initial load failed'); }
 })();
 </script>
-
-<!-- d3 (standalone) -->
-<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
 </body>
 </html>
