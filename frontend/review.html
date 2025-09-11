@@ -4,10 +4,9 @@
   <meta charset="utf-8" />
   <title>ML Review — Price-Action Segments</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <!-- ECharts -->
   <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
   <style>
-    :root{--bg:#0f172a;--panel:#111827;--ink:#e5e7eb;--muted:#94a3b8;--accent:#60a5fa}
+    :root{--bg:#0f172a;--panel:#111827;--ink:#e5e7eb;--muted:#94a3b8}
     html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font:14px/1.4 system-ui,Segoe UI,Roboto,Helvetica,Arial}
     .toolbar{display:flex;gap:.75rem;align-items:center;padding:.6rem .8rem;background:var(--panel);position:sticky;top:0;z-index:2}
     .toolbar input[type="number"]{width:110px;background:#0b1220;border:1px solid #22304a;border-radius:8px;color:var(--ink);padding:.35rem .5rem}
@@ -51,232 +50,226 @@
   </div>
 
   <script>
-    // ---- Config ----
-    const API = {
-      ticks:  (s, e) => `/api/ticks?start=${s}&end=${e}`,
-      maxi:   (s, e) => `/api/maxi?start=${s}&end=${e}`,
-      medi:   (s, e) => `/api/medi?start=${s}&end=${e}`,
-      micro:  (s, e) => `/api/micro?start=${s}&end=${e}`,
-    };
+    // ----------- helpers -----------
+    const $ = s => document.querySelector(s);
+    function setBusy(on){ document.body.style.cursor = on ? 'progress' : 'default'; }
+    function readControls(){
+      startId = Number($('#startId').value);
+      chunkSize = Number($('#chunk').value);
+      endId = startId + chunkSize - 1;
+    }
+    async function fetchWithBody(url, init){
+      const r = await fetch(url, init);
+      const txt = await r.text();
+      let payload = null;
+      try { payload = txt ? JSON.parse(txt) : null; } catch { payload = txt; }
+      if(!r.ok) {
+        const msg = typeof payload === 'string' ? payload : (payload && (payload.detail || payload.message)) || r.statusText;
+        throw new Error(`${r.status} : ${url}\n${msg ?? ''}`);
+      }
+      return payload;
+    }
 
-    // ---- State ----
-    let startId   = Number(document.getElementById('startId').value);
-    let chunkSize = Number(document.getElementById('chunk').value);
+    // Try several query param shapes (some backends expect start_id/end_id, others start/end)
+    async function fetchTicksSmart(sId, eId){
+      const urls = [
+        `/api/ticks?start_id=${sId}&end_id=${eId}`,
+        `/api/ticks?start=${sId}&end=${eId}`,
+        `/api/ticks/range?start_id=${sId}&end_id=${eId}`,
+        `/api/ticks?from=${sId}&to=${eId}`
+      ];
+      let lastErr = null;
+      for(const u of urls){
+        try { return await fetchWithBody(u); }
+        catch(e){ lastErr = e; /* try next */ }
+      }
+      throw lastErr ?? new Error('No ticks endpoint succeeded.');
+    }
+
+    async function fetchLabelsSmart(kind, sId, eId){
+      // Keep your original route first, then common fallbacks
+      const urls = [
+        `/api/${kind}?start_id=${sId}&end_id=${eId}`,
+        `/api/${kind}?start=${sId}&end=${eId}`,
+        `/api/${kind}/range?start_id=${sId}&end_id=${eId}`
+      ];
+      let lastErr = null;
+      for(const u of urls){
+        try { return await fetchWithBody(u); }
+        catch(e){ lastErr = e; }
+      }
+      // If label route truly doesn't exist, just return empty (page should still work)
+      console.warn(`Label fetch failed for ${kind}:`, lastErr?.message || lastErr);
+      return [];
+    }
+
+    // ----------- state -----------
+    let startId   = Number($('#startId').value);
+    let chunkSize = Number($('#chunk').value);
     let endId     = startId + chunkSize - 1;
 
-    // tickId → { ts, mid, bid, ask }
-    const tickMap = new Map();
-    let midSeries = []; // [ [ts, mid], ... ]
-    let bidSeries = [];
-    let askSeries = [];
+    const tickMap = new Map(); // tickId -> { ts, mid, bid, ask, price }
+    let midSeries = [], bidSeries = [], askSeries = [];
 
-    // ECharts setup
     const chart = echarts.init(document.getElementById('chart'));
-    const baseOption = {
-      darkMode: true,
-      animation: false,
-      tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
-      grid: { left: 60, right: 20, top: 30, bottom: 110 },
-      dataZoom: [
-        { type: 'inside', filterMode: 'none' },
-        { type: 'slider', bottom: 60, height: 32 },
-      ],
-      xAxis: { type: 'time', axisLabel:{color:'#9ca3af'} },
-      yAxis: { type: 'value', scale: true, axisLabel:{color:'#9ca3af'} },
-      series: []
-    };
-    chart.setOption(baseOption);
+    chart.setOption({
+      darkMode:true, animation:false,
+      tooltip:{ trigger:'axis', axisPointer:{ type:'cross' } },
+      grid:{ left:60, right:20, top:30, bottom:110 },
+      dataZoom:[ {type:'inside', filterMode:'none'}, {type:'slider', bottom:60, height:32} ],
+      xAxis:{ type:'time', axisLabel:{color:'#9ca3af'} },
+      yAxis:{ type:'value', scale:true, axisLabel:{color:'#9ca3af'} },
+      series:[]
+    });
 
-    // Helpers
-    const $ = sel => document.querySelector(sel);
-    function setBusy(on) { document.body.style.cursor = on ? 'progress' : 'default'; }
-
-    function readControls() {
-      startId   = Number($('#startId').value);
-      chunkSize = Number($('#chunk').value);
-      endId     = startId + chunkSize - 1;
+    function priceLine(name, data, width=1){
+      return { name, type:'line', showSymbol:false, smooth:0, lineStyle:{width}, data };
     }
 
-    async function fetchJson(url) {
-      const r = await fetch(url);
-      if (!r.ok) throw new Error(`${r.status} ${r.statusText}: ${url}`);
-      return r.json();
-    }
-
-    // Build zigzag series points by concatenating small 2-point segments separated with nulls.
-    // Accepts label items with either (start_id,end_id) or (start_ts,end_ts).
-    // If we only have IDs, look up ts/price from tickMap.
-    function buildZigzagFromLabels(labelRows, color, name) {
+    // Turn label rows into zigzag segments. Accepts either id-based or timestamp-based rows.
+    function buildZigzagFromLabels(rows, name){
       const pts = [];
-      for (const row of labelRows) {
-        // Try explicit timestamps first
-        let t1 = row.start_ts ?? row.start_time ?? null;
-        let t2 = row.end_ts   ?? row.end_time   ?? null;
-        let p1 = row.start_price ?? null;
-        let p2 = row.end_price   ?? null;
+      for(const r of rows){
+        let t1 = r.start_ts ?? r.start_time ?? null;
+        let t2 = r.end_ts   ?? r.end_time   ?? null;
+        let p1 = r.start_price ?? null;
+        let p2 = r.end_price   ?? null;
 
-        // If we have ids, derive from tickMap (mid price)
-        if ((!t1 || p1 == null) && row.start_id && tickMap.has(row.start_id)) {
-          const t = tickMap.get(row.start_id);
-          t1 = t.ts;
-          p1 = (t.mid ?? t.price ?? t.bid ?? t.ask);
+        // Derive from ids if needed
+        const sid = r.start_id ?? r.startId ?? r.sid ?? r.start_tick_id;
+        const eid = r.end_id   ?? r.endId   ?? r.eid ?? r.end_tick_id;
+
+        if((!t1 || p1==null) && sid && tickMap.has(sid)){
+          const t = tickMap.get(sid);
+          t1 = t.ts; p1 = (t.mid ?? t.price ?? t.bid ?? t.ask);
         }
-        if ((!t2 || p2 == null) && row.end_id && tickMap.has(row.end_id)) {
-          const t = tickMap.get(row.end_id);
-          t2 = t.ts;
-          p2 = (t.mid ?? t.price ?? t.bid ?? t.ask);
+        if((!t2 || p2==null) && eid && tickMap.has(eid)){
+          const t = tickMap.get(eid);
+          t2 = t.ts; p2 = (t.mid ?? t.price ?? t.bid ?? t.ask);
         }
 
-        if (t1 && t2 && p1 != null && p2 != null) {
-          pts.push([t1, p1], [t2, p2], [null, null]); // null breaks the line (separate segments)
+        if(t1 && t2 && p1!=null && p2!=null){
+          pts.push([t1,p1],[t2,p2],[null,null]); // null separates segments
         }
       }
       return {
         name,
-        type: 'line',
-        connectNulls: false,
-        showSymbol: true,
-        symbolSize: 4,
-        lineStyle: { width: name==='maxi'?2 : name==='medi'?1.5:1.2 },
-        emphasis: { disabled: true },
-        data: pts
+        type:'line',
+        connectNulls:false,
+        showSymbol:true,
+        symbolSize:4,
+        lineStyle:{ width: name==='maxi'?2 : name==='medi'?1.5 : 1.2 },
+        emphasis:{ disabled:true },
+        z:10,
+        data:pts
       };
     }
 
-    function priceLine(name, data, width=1) {
-      return {
-        name, type:'line', showSymbol:false, smooth:0, lineStyle:{width},
-        data
-      };
-    }
-
-    async function loadTicksRange(s, e, append=false) {
-      const rows = await fetchJson(API.ticks(s, e));
-      if (!append) {
-        tickMap.clear();
-        midSeries = []; bidSeries = []; askSeries = [];
-      }
-      for (const r of rows) {
-        // Accept any of: id, ts/time, mid, bid, ask, price
+    async function loadTicksRange(sId, eId, append=false){
+      const rows = await fetchTicksSmart(sId, eId);
+      if(!append){ tickMap.clear(); midSeries=[]; bidSeries=[]; askSeries=[]; }
+      for(const r of rows){
         const id  = r.id ?? r.tick_id ?? r.tickid ?? r.tickId;
         const ts  = r.ts ?? r.time ?? r.timestamp;
         const mid = r.mid ?? r.price ?? null;
         const bid = r.bid ?? null;
         const ask = r.ask ?? r.offer ?? null;
-        if (id != null && ts != null) {
+        if(id!=null && ts!=null){
           tickMap.set(id, { ts, mid, bid, ask, price: mid ?? bid ?? ask });
         }
-        if (ts != null) {
-          if (mid != null) midSeries.push([ts, mid]);
-          if (bid != null) bidSeries.push([ts, bid]);
-          if (ask != null) askSeries.push([ts, ask]);
+        if(ts!=null){
+          if(mid!=null) midSeries.push([ts, mid]);
+          if(bid!=null) bidSeries.push([ts, bid]);
+          if(ask!=null) askSeries.push([ts, ask]);
         }
       }
     }
 
-    async function renderAll() {
-      readControls();
-      setBusy(true);
+    async function renderAll(){
+      readControls(); setBusy(true);
+      try{
+        await loadTicksRange(startId, endId, false);
 
-      // --- ticks
-      await loadTicksRange(startId, endId, /*append*/false);
-      const series = [];
-      if ($('#layMid').checked && midSeries.length) series.push(priceLine('mid', midSeries, 1.4));
-      if ($('#layBid').checked && bidSeries.length) series.push(priceLine('bid', bidSeries, 1));
-      if ($('#layAsk').checked && askSeries.length) series.push(priceLine('ask', askSeries, 1));
+        const series = [];
+        if($('#layMid').checked && midSeries.length) series.push(priceLine('mid', midSeries, 1.4));
+        if($('#layBid').checked && bidSeries.length) series.push(priceLine('bid', bidSeries, 1));
+        if($('#layAsk').checked && askSeries.length) series.push(priceLine('ask', askSeries, 1));
 
-      // --- labels AS ZIGZAG (this is the only behavioral change)
-      const wantMaxi = $('#layMaxi').checked;
-      const wantMedi = $('#layMedi').checked;
-      const wantMicro= $('#layMicro').checked;
+        const wantMaxi = $('#layMaxi').checked;
+        const wantMedi = $('#layMedi').checked;
+        const wantMicro= $('#layMicro').checked;
 
-      // fetch in parallel if any requested
-      const jobs = [];
-      if (wantMaxi) jobs.push(fetchJson(API.maxi(startId, endId)).then(rows => ['maxi', rows]));
-      if (wantMedi) jobs.push(fetchJson(API.medi(startId, endId)).then(rows => ['medi', rows]));
-      if (wantMicro)jobs.push(fetchJson(API.micro(startId, endId)).then(rows => ['micro',rows]));
+        const jobs = [];
+        if(wantMaxi) jobs.push(fetchLabelsSmart('maxi', startId, endId).then(rows=>['maxi',rows]));
+        if(wantMedi) jobs.push(fetchLabelsSmart('medi', startId, endId).then(rows=>['medi',rows]));
+        if(wantMicro)jobs.push(fetchLabelsSmart('micro',startId, endId).then(rows=>['micro',rows]));
 
-      const results = await Promise.allSettled(jobs);
-      for (const r of results) {
-        if (r.status !== 'fulfilled') continue;
-        const [name, rows] = r.value;
-        // choose a distinct width; color is theme-driven (we won't hardcode colors)
-        const zig = buildZigzagFromLabels(rows || [], null, name);
-        // Slight z-order: draw on top of price
-        zig.z = 10;
-        series.push(zig);
+        const results = await Promise.allSettled(jobs);
+        for(const r of results){
+          if(r.status!=='fulfilled') continue;
+          const [name, rows] = r.value;
+          series.push(buildZigzagFromLabels(rows||[], name));
+        }
+
+        chart.setOption({ series }, { replaceMerge:['series'] });
+      } catch(err){
+        alert('Load failed: ' + err.message);
+        console.error(err);
+      } finally{
+        setBusy(false);
       }
-
-      chart.setOption({ series }, { replaceMerge: ['series'] });
-      setBusy(false);
     }
 
-    async function loadMoreRight() {
+    async function loadMoreRight(){
       readControls();
       const oldEnd = endId;
       const moreStart = oldEnd + 1;
       endId = oldEnd + chunkSize;
+
       setBusy(true);
-      await loadTicksRange(moreStart, endId, /*append*/true);
+      try{
+        await loadTicksRange(moreStart, endId, true);
 
-      const existing = chart.getOption().series || [];
-      const merged = [];
+        const current = chart.getOption().series || [];
+        const keep = current.filter(s => !['mid','bid','ask','maxi','medi','micro'].includes(s.name));
 
-      // Update price lines
-      const midIdx = existing.findIndex(s => s.name === 'mid');
-      const bidIdx = existing.findIndex(s => s.name === 'bid');
-      const askIdx = existing.findIndex(s => s.name === 'ask');
-      if ($('#layMid').checked) {
-        const s = priceLine('mid', midSeries, 1.4); s.z = 1;
-        if (midIdx >= 0) existing[midIdx] = s; else existing.push(s);
+        if($('#layMid').checked) keep.push(priceLine('mid', midSeries, 1.4));
+        if($('#layBid').checked) keep.push(priceLine('bid', bidSeries, 1));
+        if($('#layAsk').checked) keep.push(priceLine('ask', askSeries, 1));
+
+        const wantMaxi = $('#layMaxi').checked;
+        const wantMedi = $('#layMedi').checked;
+        const wantMicro= $('#layMicro').checked;
+
+        const jobs = [];
+        if(wantMaxi) jobs.push(fetchLabelsSmart('maxi', startId, endId).then(rows=>['maxi',rows]));
+        if(wantMedi) jobs.push(fetchLabelsSmart('medi', startId, endId).then(rows=>['medi',rows]));
+        if(wantMicro)jobs.push(fetchLabelsSmart('micro',startId, endId).then(rows=>['micro',rows]));
+        const results = await Promise.allSettled(jobs);
+        for(const r of results){
+          if(r.status!=='fulfilled') continue;
+          const [name, rows] = r.value;
+          keep.push(buildZigzagFromLabels(rows||[], name));
+        }
+
+        chart.setOption({ series: keep }, { replaceMerge:['series'] });
+      } catch(err){
+        alert('Load failed: ' + err.message);
+        console.error(err);
+      } finally{
+        setBusy(false);
       }
-      if ($('#layBid').checked) {
-        const s = priceLine('bid', bidSeries, 1); s.z = 1;
-        if (bidIdx >= 0) existing[bidIdx] = s; else existing.push(s);
-      }
-      if ($('#layAsk').checked) {
-        const s = priceLine('ask', askSeries, 1); s.z = 1;
-        if (askIdx >= 0) existing[askIdx] = s; else existing.push(s);
-      }
-
-      // Re-fetch labels for the new tail, then rebuild zigzags covering the whole viewport
-      const wantMaxi = $('#layMaxi').checked;
-      const wantMedi = $('#layMedi').checked;
-      const wantMicro= $('#layMicro').checked;
-
-      const jobs = [];
-      if (wantMaxi) jobs.push(fetchJson(API.maxi(startId, endId)).then(rows => ['maxi', rows]));
-      if (wantMedi) jobs.push(fetchJson(API.medi(startId, endId)).then(rows => ['medi', rows]));
-      if (wantMicro)jobs.push(fetchJson(API.micro(startId, endId)).then(rows => ['micro',rows]));
-      const results = await Promise.allSettled(jobs);
-
-      // Remove any prior label series
-      const filtered = existing.filter(s => !['maxi','medi','micro'].includes(s.name));
-      for (const r of results) {
-        if (r.status !== 'fulfilled') continue;
-        const [name, rows] = r.value;
-        const zig = buildZigzagFromLabels(rows || [], null, name);
-        zig.z = 10;
-        filtered.push(zig);
-      }
-
-      chart.setOption({ series: filtered }, { replaceMerge: ['series'] });
-      setBusy(false);
     }
 
-    // Events
+    // UI events
     $('#btnLoad').addEventListener('click', renderAll);
     $('#btnMoreRight').addEventListener('click', loadMoreRight);
     ['#layMid','#layBid','#layAsk','#layMaxi','#layMedi','#layMicro'].forEach(id=>{
       $(id).addEventListener('change', renderAll);
     });
 
-    // Initial render
-    renderAll().catch(err => {
-      console.error(err);
-      setBusy(false);
-      alert('Load failed: ' + err.message);
-    });
+    // first paint
+    renderAll();
   </script>
 </body>
 </html>
