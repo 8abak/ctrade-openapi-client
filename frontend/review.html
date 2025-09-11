@@ -48,13 +48,21 @@
   <div id="wrap"><div id="chart"></div></div>
 
   <script>
-    // ------------ CONFIG ------------
+    // ---- helpers/config ----
     const $ = s => document.querySelector(s);
-    const PADDING = 800; // pad to cover label boundary ids
+    const PADDING = 800; // pad so label boundary ids resolve
     function setBusy(on){ document.body.style.cursor = on ? 'progress' : 'default'; }
     function readControls(){ startId = +$('#startId').value; chunkSize = +$('#chunk').value; endId = startId + chunkSize - 1; }
+    async function fetchJson(url){
+      const r = await fetch(url);
+      const t = await r.text();
+      let body; try{ body = t ? JSON.parse(t) : null } catch { body = t }
+      if(!r.ok) throw new Error(`${r.status} : ${url}\n${typeof body==='string'?body:JSON.stringify(body)}`);
+      return body;
+    }
+    function pick(o, names){ for(const k of names){ if(o[k]!=null) return o[k]; } return null; }
 
-    // ------------ STATE ------------
+    // ---- state ----
     let startId = +$('#startId').value;
     let chunkSize = +$('#chunk').value;
     let endId = startId + chunkSize - 1;
@@ -74,65 +82,12 @@
       series:[]
     });
 
-    // ------------ FETCH (STRICT) ------------
-    // Use only the shapes we've seen working: start_id/end_id or start/limit.
-    async function fetchJson(url){
-      const r = await fetch(url);
-      const t = await r.text();
-      let body; try{ body = t ? JSON.parse(t) : null; } catch{ body = t; }
-      if(!r.ok) throw new Error(`${r.status} : ${url}\n${typeof body==='string'?body:JSON.stringify(body)}`);
-      return body;
-    }
+    // ---- backend I/O (STRICT to from_id/to_id) ----
+    const ticksURL   = (f,t)=> `/api/ticks?from_id=${f}&to_id=${t}`;
+    const labelsURL  = (k,f,t)=> `/api/${k}?from_id=${f}&to_id=${t}`;
 
-    async function fetchTicks(sId, eId){
-      const n = (eId - sId + 1);
-      const tries = [
-        `/api/ticks?start_id=${sId}&end_id=${eId}`,
-        `/api/ticks?start=${sId}&limit=${n}`
-      ];
-      let lastErr;
-      for(const u of tries){ try{ return await fetchJson(u); } catch(e){ lastErr = e; } }
-      throw lastErr || new Error('ticks endpoint not found');
-    }
-
-    async function fetchLabels(kind, sId, eId){
-      const tries = [
-        `/api/${kind}?start_id=${sId}&end_id=${eId}`,
-        `/api/${kind}?start=${sId}&end=${eId}`
-      ];
-      for(const u of tries){ try{ return await fetchJson(u); } catch(e){} }
-      return [];
-    }
-
-    // ------------ RENDER ------------
-    function priceLine(name, data, w=1){ return { name, type:'line', showSymbol:false, smooth:0, lineStyle:{width:w}, data }; }
-
-    function pick(o, names){ for(const k of names){ if(o[k]!=null) return o[k]; } return null; }
-
-    // build zigzag segments for maxi/medi/micro
-    function buildZigzag(rows, name){
-      const pts=[];
-      for(const r of rows){
-        const sid = pick(r, ['start_id','startId','sid','from_id','start_tick_id']);
-        const eid = pick(r, ['end_id','endId','eid','to_id','end_tick_id']);
-        let t1 = pick(r, ['start_ts','start_time']);
-        let t2 = pick(r, ['end_ts','end_time']);
-        let p1 = pick(r, ['start_price','price_start']);
-        let p2 = pick(r, ['end_price','price_end']);
-
-        if((!t1 || p1==null) && sid && tickMap.has(sid)){ const t=tickMap.get(sid); t1=t.ts; p1=(t.mid ?? t.price ?? t.bid ?? t.ask); }
-        if((!t2 || p2==null) && eid && tickMap.has(eid)){ const t=tickMap.get(eid); t2=t.ts; p2=(t.mid ?? t.price ?? t.bid ?? t.ask); }
-
-        if(t1 && t2 && p1!=null && p2!=null){ pts.push([t1,p1],[t2,p2],[null,null]); }
-      }
-      return {
-        name, type:'line', connectNulls:false, showSymbol:true, symbolSize:4,
-        lineStyle:{ width: name==='maxi'?2 : name==='medi'?1.5 : 1.2 }, emphasis:{disabled:true}, z:10, data:pts
-      };
-    }
-
-    async function loadTicksRange(sId, eId, append=false){
-      const rows = await fetchTicks(sId, eId);
+    async function loadTicksRange(fId, tId, append=false){
+      const rows = await fetchJson(ticksURL(fId, tId));
       if(!append){ tickMap.clear(); midSeries=[]; bidSeries=[]; askSeries=[]; }
       for(const r of rows){
         const id  = pick(r,['id','tick_id','tickId','tickid']);
@@ -144,14 +99,44 @@
         if(ts!=null){ if(mid!=null) midSeries.push([ts,mid]); if(bid!=null) bidSeries.push([ts,bid]); if(ask!=null) askSeries.push([ts,ask]); }
       }
     }
+    async function loadLabels(kind, fId, tId){
+      try { return await fetchJson(labelsURL(kind, fId, tId)); }
+      catch { return []; } // labels optional
+    }
 
+    // ---- zigzag builder (maxi/medi/micro) ----
+    function buildZigzag(rows, name){
+      const pts=[];
+      for(const r of rows){
+        const sid = pick(r,['start_id','startId','sid','from_id','start_tick_id']);
+        const eid = pick(r,['end_id','endId','eid','to_id','end_tick_id']);
+        let t1 = pick(r,['start_ts','start_time']);
+        let t2 = pick(r,['end_ts','end_time']);
+        let p1 = pick(r,['start_price','price_start']);
+        let p2 = pick(r,['end_price','price_end']);
+
+        if((!t1 || p1==null) && sid && tickMap.has(sid)){ const t=tickMap.get(sid); t1=t.ts; p1=(t.mid ?? t.price ?? t.bid ?? t.ask); }
+        if((!t2 || p2==null) && eid && tickMap.has(eid)){ const t=tickMap.get(eid); t2=t.ts; p2=(t.mid ?? t.price ?? t.bid ?? t.ask); }
+
+        if(t1 && t2 && p1!=null && p2!=null){ pts.push([t1,p1],[t2,p2],[null,null]); }
+      }
+      return {
+        name, type:'line', connectNulls:false, showSymbol:true, symbolSize:4,
+        lineStyle:{ width: name==='maxi'?2 : name==='medi'?1.5 : 1.2 },
+        emphasis:{ disabled:true }, z:10, data:pts
+      };
+    }
+
+    function priceLine(name, data, w=1){ return { name, type:'line', showSymbol:false, smooth:0, lineStyle:{width:w}, data }; }
+
+    // ---- render ----
     async function renderAll(){
       readControls(); setBusy(true);
       try{
-        const sPad = Math.max(1, startId - PADDING);
-        const ePad = endId + PADDING;
+        const fPad = Math.max(1, startId - PADDING);
+        const tPad = endId + PADDING;
 
-        await loadTicksRange(sPad, ePad, false);
+        await loadTicksRange(fPad, tPad, false);
 
         const series=[];
         if($('#layMid').checked && midSeries.length) series.push(priceLine('mid', midSeries, 1.4));
@@ -159,14 +144,16 @@
         if($('#layAsk').checked && askSeries.length) series.push(priceLine('ask', askSeries, 1));
 
         const wants = [['maxi','#layMaxi'],['medi','#layMedi'],['micro','#layMicro']].filter(([_,sel])=>$(sel).checked);
-        const labelResults = await Promise.all(wants.map(([k])=>fetchLabels(k, sPad, ePad).then(rows=>[k,rows])));
-        for(const [name,rows] of labelResults){ series.push(buildZigzag(rows||[], name)); }
+        const result = await Promise.all(wants.map(([k])=>loadLabels(k, fPad, tPad).then(rows=>[k,rows])));
+        for(const [k,rows] of result){ series.push(buildZigzag(rows||[], k)); }
 
         chart.setOption({ series }, { replaceMerge:['series'] });
-      }catch(err){
-        alert('Load failed: '+err.message);
+      } catch(err){
+        alert('Load failed: ' + err.message);
         console.error(err);
-      }finally{ setBusy(false); }
+      } finally {
+        setBusy(false);
+      }
     }
 
     async function loadMoreRight(){
@@ -175,10 +162,10 @@
       endId = oldEnd + chunkSize;
       setBusy(true);
       try{
-        const sPad = Math.max(1, moreStart - PADDING);
-        const ePad = endId + PADDING;
+        const fPad = Math.max(1, moreStart - PADDING);
+        const tPad = endId + PADDING;
 
-        await loadTicksRange(sPad, ePad, true);
+        await loadTicksRange(fPad, tPad, true);
 
         const series=[];
         if($('#layMid').checked) series.push(priceLine('mid', midSeries, 1.4));
@@ -186,20 +173,24 @@
         if($('#layAsk').checked) series.push(priceLine('ask', askSeries, 1));
 
         const wants = [['maxi','#layMaxi'],['medi','#layMedi'],['micro','#layMicro']].filter(([_,sel])=>$(sel).checked);
-        const labelResults = await Promise.all(wants.map(([k])=>fetchLabels(k, sPad, ePad).then(rows=>[k,rows])));
-        for(const [name,rows] of labelResults){ series.push(buildZigzag(rows||[], name)); }
+        const result = await Promise.all(wants.map(([k])=>loadLabels(k, fPad, tPad).then(rows=>[k,rows])));
+        for(const [k,rows] of result){ series.push(buildZigzag(rows||[], k)); }
 
         chart.setOption({ series }, { replaceMerge:['series'] });
-      }catch(err){
-        alert('Load failed: '+err.message);
+      } catch(err){
+        alert('Load failed: ' + err.message);
         console.error(err);
-      }finally{ setBusy(false); }
+      } finally {
+        setBusy(false);
+      }
     }
 
+    // UI
     $('#btnLoad').addEventListener('click', renderAll);
     $('#btnMoreRight').addEventListener('click', loadMoreRight);
     ['#layMid','#layBid','#layAsk','#layMaxi','#layMedi','#layMicro'].forEach(id=>$(id).addEventListener('change', renderAll));
 
+    // initial
     renderAll();
   </script>
 </body>
