@@ -1,442 +1,282 @@
-<!-- PATH: frontend/review.html -->
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Review</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>ML Review — Price-Action Segments</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- ECharts -->
   <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
   <style>
-    :root{--bg:#0f172a;--panel:#111827;--muted:#9ca3af;--text:#e5e7eb;--hl:#334155;--accent:#1f2937}
-    html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,Helvetica,Arial}
-    .bar{display:flex;gap:.75rem;align-items:center;padding:.6rem .9rem;border-bottom:1px solid var(--hl);background:var(--panel);position:sticky;top:0;z-index:10}
-    .bar label{color:var(--muted)}
-    .bar input[type=number]{width:120px;padding:.4rem .5rem;background:#0b1220;color:var(--text);border:1px solid var(--hl);border-radius:.4rem}
-    .btn{background:var(--accent);color:var(--text);border:1px solid var(--hl);border-radius:.45rem;padding:.45rem .8rem;cursor:pointer}
-    .btn:active{transform:translateY(1px)}
-    .row{display:flex;gap:.75rem;align-items:center;flex-wrap:wrap;padding:.45rem .9rem;border-bottom:1px solid var(--hl);background:#0d1424}
-    .group{display:flex;gap:.6rem;align-items:center;flex-wrap:wrap;padding:.25rem .5rem;border-radius:.4rem;background:rgba(255,255,255,.02)}
-    .tag{color:var(--muted);font-weight:600;margin-right:.25rem}
-    #chart{height:calc(100vh - 128px);width:100vw}
-    @media (max-width:720px){ #chart{height:calc(100vh - 150px)} }
+    :root{--bg:#0f172a;--panel:#111827;--ink:#e5e7eb;--muted:#94a3b8;--accent:#60a5fa}
+    html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font:14px/1.4 system-ui,Segoe UI,Roboto,Helvetica,Arial}
+    .toolbar{display:flex;gap:.75rem;align-items:center;padding:.6rem .8rem;background:var(--panel);position:sticky;top:0;z-index:2}
+    .toolbar input[type="number"]{width:110px;background:#0b1220;border:1px solid #22304a;border-radius:8px;color:var(--ink);padding:.35rem .5rem}
+    .toolbar button{background:#1f2a44;border:1px solid #334155;color:var(--ink);padding:.45rem .7rem;border-radius:8px;cursor:pointer}
+    .toolbar button:hover{border-color:#4b5563}
+    .layers{display:flex;align-items:center;gap:.65rem}
+    .layers label{display:inline-flex;align-items:center;gap:.3rem;color:var(--muted)}
+    .legend{padding:.3rem .8rem;color:var(--muted)}
+    #wrap{height:calc(100% - 92px);display:flex;flex-direction:column}
+    #chart{flex:1 1 auto;min-height:380px}
+    .note{font-size:12px;color:var(--muted)}
   </style>
 </head>
 <body>
-  <div class="bar">
-    <label for="startId">Start ID</label>
-    <input id="startId" type="number" min="1" step="1" value="1"/>
-    <label for="chunkSize">Chunk size</label>
-    <input id="chunkSize" type="number" min="100" step="100" value="2000"/>
-    <button id="btnLoad" class="btn">Load</button>
-    <button id="btnMore" class="btn">Load more (right)</button>
-    <span style="margin-left:auto;color:var(--muted)">Legend toggles below • Zoom: <b>Shift+wheel</b> • Pan: <b>wheel</b></span>
+  <div class="toolbar">
+    <div>
+      <div class="note">Start ID</div>
+      <input id="startId" type="number" value="1" step="1" />
+    </div>
+    <div>
+      <div class="note">Chunk size</div>
+      <input id="chunk" type="number" value="2000" step="100" />
+    </div>
+    <button id="btnLoad">Load</button>
+    <button id="btnMoreRight">Load more (right)</button>
+    <div class="layers">
+      <span class="note">Layers:</span>
+      <label><input id="layMid" type="checkbox" checked /> mid</label>
+      <label><input id="layBid" type="checkbox" /> bid</label>
+      <label><input id="layAsk" type="checkbox" /> ask</label>
+      <label><input id="layMaxi" type="checkbox" /> maxi</label>
+      <label><input id="layMedi" type="checkbox" /> medi</label>
+      <label><input id="layMicro" type="checkbox" checked /> micro</label>
+    </div>
   </div>
 
-  <div class="row">
-    <span class="tag">Layers:</span>
-    <div class="group" id="baseLayers"></div>
-    <div class="group" id="labelLayers"></div>
+  <div class="legend">Legend toggles below • Zoom: <b>Shift + wheel</b> • Pan: <b>wheel</b></div>
+
+  <div id="wrap">
+    <div id="chart"></div>
   </div>
 
-  <div id="chart"></div>
-
-<script>
-(function(){
-  const qs = s => document.querySelector(s);
-
-  // ---- API (read-only) ----
-  const API = {
-    lastId: () => fetch('/ticks/lastid').then(r=>r.json()),
-    ticksRange: (a,b) => fetch(`/api/ticks?from_id=${a}&to_id=${b}`).then(r=>r.json()),
-    sql: q => fetch(`/api/sql?q=${encodeURIComponent(q)}`).then(r=>r.json()),
-  };
-
-  // ---- State ----
-  let chart, option;
-  let fromId=1, toId=1, chunk=2000;
-  let ticks=[]; let idToIndex=new Map(); let idToMid=new Map();
-  let hasBid=false, hasAsk=false;
-
-  const ACTIVE=new Set(['mid']);
-  const labelTablesInfo=new Map(); // table -> {kind:'point'|'range'}
-  const pointData=new Map();       // table -> [{idx,y,raw}]
-  const rangeData=new Map();       // table -> [{startId,endId,raw}]
-  const zigPattern = /^(atr\d*|zig|zz)/i; // treat as zigzag line if name matches
-
-  // ---- UI ----
-  const $start=qs('#startId'), $chunk=qs('#chunkSize');
-  qs('#btnLoad').addEventListener('click', ()=>doLoad(true));
-  qs('#btnMore').addEventListener('click', ()=>doMore());
-
-  // ---- Zoom helpers ----
-  function getZoomPercents(){
-    const opt=chart.getOption(); const dz=(opt.dataZoom && opt.dataZoom[0])||{};
-    const startP = typeof dz.start === 'number' ? dz.start : 0;
-    const endP   = typeof dz.end   === 'number' ? dz.end   : 100;
-    return {startP,endP};
-  }
-  function getZoomIds(){
-    if(!ticks.length) return {startId:null,endId:null};
-    const {startP,endP}=getZoomPercents();
-    const n=ticks.length, s=Math.max(0,Math.floor(startP/100*n)), e=Math.min(n-1,Math.ceil(endP/100*n));
-    return { startId: ticks[s].id, endId: ticks[e].id };
-  }
-  function restoreZoomByIds(startId,endId){
-    if(startId==null||endId==null) return;
-    const sIdx = idToIndex.get(startId) ?? 0;
-    const eIdx = idToIndex.get(endId)   ?? (ticks.length-1);
-    const sP=(sIdx/ticks.length)*100, eP=(eIdx/ticks.length)*100;
-    chart.setOption({ dataZoom:[{start:sP,end:eP},{start:sP,end:eP}] });
-  }
-
-  // ---- Discover label tables (point & range) ----
-  async function discoverLabelTables(){
-    // Point labels: tickid
-    const qPoint = `
-      SELECT DISTINCT table_name
-      FROM information_schema.columns
-      WHERE table_schema='public' AND column_name='tickid'
-      ORDER BY table_name`;
-    const pointRes = await API.sql(qPoint);
-    for(const r of (pointRes.rows||[])){
-      if(r.table_name==='ticks') continue;
-      labelTablesInfo.set(r.table_name, {kind:'point'});
-    }
-    // Range labels: start_id & end_id
-    const qRange = `
-      SELECT t.table_name
-      FROM information_schema.columns t
-      WHERE t.table_schema='public' AND t.column_name IN ('start_id','end_id')
-      GROUP BY t.table_name
-      HAVING COUNT(DISTINCT t.column_name)=2
-      ORDER BY t.table_name`;
-    const rangeRes = await API.sql(qRange);
-    for(const r of (rangeRes.rows||[])){
-      labelTablesInfo.set(r.table_name, {kind:'range'});
-    }
-
-    const $labels=qs('#labelLayers'); $labels.innerHTML='';
-    const defaultOn = new Set(['atr1','bigm','smal','pred','segm']);
-    for(const [tbl,info] of labelTablesInfo){
-      if(tbl==='ticks') continue;
-      const node = makeToggle(tbl, tbl, defaultOn.has(tbl), true);
-      $labels.appendChild(node);
-      if(defaultOn.has(tbl)) ACTIVE.add(tbl);
-    }
-  }
-
-  async function loadLabels(layerName) {
-    const resp = await fetch(`/api/${layerName}?start=${startId}&end=${endId}`);
-    const data = await resp.json();
-
-    if (!data || data.length === 0) return [];
-
-    // Convert label zones into zigzag points
-    let zigzag = [];
-    for (let d of data) {
-      if (d.start_id && d.end_id && d.start_ts && d.end_ts) {
-        zigzag.push({
-          name: layerName,
-          coords: [
-            [d.start_ts, d.start_price],
-            [d.end_ts, d.end_price]
-          ]
-        });
-      }
-    }
-    return zigzag;
-  }
-
-  async function renderLabels() {
-    let series = [];
-
-    if (document.querySelector("#micro").checked) {
-      const micro = await loadLabels("micro");
-      series.push({
-        name: "micro",
-        type: "line",
-        data: micro.flatMap(z => z.coords),
-        showSymbol: true,
-        lineStyle: { width: 1.2, color: "#ff4d4d" },
-      });
-    }
-
-    if (document.querySelector("#medi").checked) {
-      const medi = await loadLabels("medi");
-      series.push({
-        name: "medi",
-        type: "line",
-        data: medi.flatMap(z => z.coords),
-        showSymbol: true,
-        lineStyle: { width: 1.5, color: "#ffaa00" },
-      });
-    }
-
-    if (document.querySelector("#maxi").checked) {
-      const maxi = await loadLabels("maxi");
-      series.push({
-        name: "maxi",
-        type: "line",
-        data: maxi.flatMap(z => z.coords),
-        showSymbol: true,
-        lineStyle: { width: 2, color: "#00ff66" },
-      });
-    }
-
-    chart.setOption({ series: [...chart.getOption().series, ...series] });
-  }
-
-
-  // ---- Toggles ----
-  function makeToggle(id,label,checked=false,isLabel=false){
-    const wrap=document.createElement('label');
-    wrap.style.display='inline-flex'; wrap.style.gap='.35rem'; wrap.style.alignItems='center';
-    const cb=document.createElement('input'); cb.type='checkbox'; cb.checked=checked; cb.value=id;
-    const span=document.createElement('span'); span.textContent=label;
-    wrap.append(cb,span);
-
-    cb.addEventListener('change', async ()=>{
-      // preserve current view
-      const {startId,endId}=getZoomIds();
-      const currentYAxis = chart.getOption().yAxis?.[0] || {};
-
-      if(cb.checked){
-        ACTIVE.add(id);
-        if(isLabel){
-          const info = labelTablesInfo.get(id);
-          if(info?.kind==='point')  await loadPointTable(id, fromId, toId);
-          if(info?.kind==='range')  await loadRangeTable(id, fromId, toId);
-        }
-      }else{
-        ACTIVE.delete(id);
-      }
-      render({preserveZoomIds:{startId,endId}, preserveYAxis:currentYAxis});
-    });
-    return wrap;
-  }
-
-  // ---- Initial setup ----
-  async function loadInitial(){
-    try{
-      const info=await API.lastId();
-      const last=Number(info.lastId||info.lastid||0);
-      const c   =Number($chunk.value||2000);
-      $start.value=Math.max(1,last-c+1);
-    }catch(e){}
-
-    // base layer toggles
-    const $base=qs('#baseLayers'); $base.innerHTML='';
-    $base.appendChild(makeToggle('mid','mid',true,false));
-    $base.appendChild(makeToggle('bid','bid',false,false));
-    $base.appendChild(makeToggle('ask','ask',false,false));
-
-    await discoverLabelTables();
-
-    // chart
-    chart=echarts.init(qs('#chart'));
-    option={
-      backgroundColor:getComputedStyle(document.body).backgroundColor,
-      animation:false,
-      grid:{left:64,right:24,top:68,bottom:42},
-      legend:{top:8,textStyle:{color:'#d1d5db'}},
-      tooltip:{trigger:'axis',axisPointer:{type:'cross'},confine:true,formatter:tooltipHTML},
-      xAxis:{type:'category',data:[],axisLine:{lineStyle:{color:'#475569'}},axisLabel:{color:'#cbd5e1'}},
-      yAxis:{type:'value',scale:true,axisLine:{lineStyle:{color:'#475569'}},
-             axisLabel:{color:'#cbd5e1',formatter:v=>Math.round(v)},splitLine:{lineStyle:{color:'#1f2937'}}},
-      dataZoom:[
-        {type:'inside',zoomOnMouseWheel:'shift',moveOnMouseWheel:true,moveOnMouseMove:true,preventDefaultMouseMove:true},
-        {type:'slider',bottom:8}
-      ],
-      series:[]
+  <script>
+    // ---- Config ----
+    const API = {
+      ticks:  (s, e) => `/api/ticks?start=${s}&end=${e}`,
+      maxi:   (s, e) => `/api/maxi?start=${s}&end=${e}`,
+      medi:   (s, e) => `/api/medi?start=${s}&end=${e}`,
+      micro:  (s, e) => `/api/micro?start=${s}&end=${e}`,
     };
-    chart.setOption(option);
-    chart.on('dataZoom', adjustYAxisToView);
-  }
 
-  // ---- Tooltip ----
-  function tooltipHTML(params){
-    if(!params?.length) return '';
-    const i=params[0].dataIndex; const t=ticks[i]; if(!t) return '';
-    const dt=new Date(t.ts);
-    const lines=[`<div><b>ID:</b> ${t.id} &nbsp; <b>Date:</b> ${dt.toLocaleDateString()} &nbsp; <b>Time:</b> ${dt.toLocaleTimeString()}</div>`];
-    if(ACTIVE.has('mid')) lines.push(`<div>mid: <b>${t.mid}</b></div>`);
-    if(ACTIVE.has('bid') && hasBid && t.bid!=null) lines.push(`<div>bid: <b>${t.bid}</b></div>`);
-    if(ACTIVE.has('ask') && hasAsk && t.ask!=null) lines.push(`<div>ask: <b>${t.ask}</b></div>`);
-    for(const p of params){
-      if(p.seriesType==='scatter' && Array.isArray(p.data)){
-        const raw=p.data[2]; if(!raw) continue;
-        const obj={...raw}; delete obj.tickid;
-        lines.push(`<div>${p.seriesName}: <code>${JSON.stringify(obj)}</code></div>`);
+    // ---- State ----
+    let startId   = Number(document.getElementById('startId').value);
+    let chunkSize = Number(document.getElementById('chunk').value);
+    let endId     = startId + chunkSize - 1;
+
+    // tickId → { ts, mid, bid, ask }
+    const tickMap = new Map();
+    let midSeries = []; // [ [ts, mid], ... ]
+    let bidSeries = [];
+    let askSeries = [];
+
+    // ECharts setup
+    const chart = echarts.init(document.getElementById('chart'));
+    const baseOption = {
+      darkMode: true,
+      animation: false,
+      tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
+      grid: { left: 60, right: 20, top: 30, bottom: 110 },
+      dataZoom: [
+        { type: 'inside', filterMode: 'none' },
+        { type: 'slider', bottom: 60, height: 32 },
+      ],
+      xAxis: { type: 'time', axisLabel:{color:'#9ca3af'} },
+      yAxis: { type: 'value', scale: true, axisLabel:{color:'#9ca3af'} },
+      series: []
+    };
+    chart.setOption(baseOption);
+
+    // Helpers
+    const $ = sel => document.querySelector(sel);
+    function setBusy(on) { document.body.style.cursor = on ? 'progress' : 'default'; }
+
+    function readControls() {
+      startId   = Number($('#startId').value);
+      chunkSize = Number($('#chunk').value);
+      endId     = startId + chunkSize - 1;
+    }
+
+    async function fetchJson(url) {
+      const r = await fetch(url);
+      if (!r.ok) throw new Error(`${r.status} ${r.statusText}: ${url}`);
+      return r.json();
+    }
+
+    // Build zigzag series points by concatenating small 2-point segments separated with nulls.
+    // Accepts label items with either (start_id,end_id) or (start_ts,end_ts).
+    // If we only have IDs, look up ts/price from tickMap.
+    function buildZigzagFromLabels(labelRows, color, name) {
+      const pts = [];
+      for (const row of labelRows) {
+        // Try explicit timestamps first
+        let t1 = row.start_ts ?? row.start_time ?? null;
+        let t2 = row.end_ts   ?? row.end_time   ?? null;
+        let p1 = row.start_price ?? null;
+        let p2 = row.end_price   ?? null;
+
+        // If we have ids, derive from tickMap (mid price)
+        if ((!t1 || p1 == null) && row.start_id && tickMap.has(row.start_id)) {
+          const t = tickMap.get(row.start_id);
+          t1 = t.ts;
+          p1 = (t.mid ?? t.price ?? t.bid ?? t.ask);
+        }
+        if ((!t2 || p2 == null) && row.end_id && tickMap.has(row.end_id)) {
+          const t = tickMap.get(row.end_id);
+          t2 = t.ts;
+          p2 = (t.mid ?? t.price ?? t.bid ?? t.ask);
+        }
+
+        if (t1 && t2 && p1 != null && p2 != null) {
+          pts.push([t1, p1], [t2, p2], [null, null]); // null breaks the line (separate segments)
+        }
+      }
+      return {
+        name,
+        type: 'line',
+        connectNulls: false,
+        showSymbol: true,
+        symbolSize: 4,
+        lineStyle: { width: name==='maxi'?2 : name==='medi'?1.5:1.2 },
+        emphasis: { disabled: true },
+        data: pts
+      };
+    }
+
+    function priceLine(name, data, width=1) {
+      return {
+        name, type:'line', showSymbol:false, smooth:0, lineStyle:{width},
+        data
+      };
+    }
+
+    async function loadTicksRange(s, e, append=false) {
+      const rows = await fetchJson(API.ticks(s, e));
+      if (!append) {
+        tickMap.clear();
+        midSeries = []; bidSeries = []; askSeries = [];
+      }
+      for (const r of rows) {
+        // Accept any of: id, ts/time, mid, bid, ask, price
+        const id  = r.id ?? r.tick_id ?? r.tickid ?? r.tickId;
+        const ts  = r.ts ?? r.time ?? r.timestamp;
+        const mid = r.mid ?? r.price ?? null;
+        const bid = r.bid ?? null;
+        const ask = r.ask ?? r.offer ?? null;
+        if (id != null && ts != null) {
+          tickMap.set(id, { ts, mid, bid, ask, price: mid ?? bid ?? ask });
+        }
+        if (ts != null) {
+          if (mid != null) midSeries.push([ts, mid]);
+          if (bid != null) bidSeries.push([ts, bid]);
+          if (ask != null) askSeries.push([ts, ask]);
+        }
       }
     }
-    return lines.join('');
-  }
 
-  // ---- Build tick state ----
-  function buildTickState(prev,newly){
-    ticks=(prev||[]).concat(newly||[]);
-    idToIndex=new Map(); idToMid=new Map(); hasBid=false; hasAsk=false;
-    ticks.forEach((r,i)=>{
-      idToIndex.set(r.id,i); idToMid.set(r.id,r.mid);
-      if(r.bid!=null) hasBid=true; if(r.ask!=null) hasAsk=true;
-      if(typeof r.ts!=='string' && r.ts?.toISOString) r.ts=r.ts.toISOString();
+    async function renderAll() {
+      readControls();
+      setBusy(true);
+
+      // --- ticks
+      await loadTicksRange(startId, endId, /*append*/false);
+      const series = [];
+      if ($('#layMid').checked && midSeries.length) series.push(priceLine('mid', midSeries, 1.4));
+      if ($('#layBid').checked && bidSeries.length) series.push(priceLine('bid', bidSeries, 1));
+      if ($('#layAsk').checked && askSeries.length) series.push(priceLine('ask', askSeries, 1));
+
+      // --- labels AS ZIGZAG (this is the only behavioral change)
+      const wantMaxi = $('#layMaxi').checked;
+      const wantMedi = $('#layMedi').checked;
+      const wantMicro= $('#layMicro').checked;
+
+      // fetch in parallel if any requested
+      const jobs = [];
+      if (wantMaxi) jobs.push(fetchJson(API.maxi(startId, endId)).then(rows => ['maxi', rows]));
+      if (wantMedi) jobs.push(fetchJson(API.medi(startId, endId)).then(rows => ['medi', rows]));
+      if (wantMicro)jobs.push(fetchJson(API.micro(startId, endId)).then(rows => ['micro',rows]));
+
+      const results = await Promise.allSettled(jobs);
+      for (const r of results) {
+        if (r.status !== 'fulfilled') continue;
+        const [name, rows] = r.value;
+        // choose a distinct width; color is theme-driven (we won't hardcode colors)
+        const zig = buildZigzagFromLabels(rows || [], null, name);
+        // Slight z-order: draw on top of price
+        zig.z = 10;
+        series.push(zig);
+      }
+
+      chart.setOption({ series }, { replaceMerge: ['series'] });
+      setBusy(false);
+    }
+
+    async function loadMoreRight() {
+      readControls();
+      const oldEnd = endId;
+      const moreStart = oldEnd + 1;
+      endId = oldEnd + chunkSize;
+      setBusy(true);
+      await loadTicksRange(moreStart, endId, /*append*/true);
+
+      const existing = chart.getOption().series || [];
+      const merged = [];
+
+      // Update price lines
+      const midIdx = existing.findIndex(s => s.name === 'mid');
+      const bidIdx = existing.findIndex(s => s.name === 'bid');
+      const askIdx = existing.findIndex(s => s.name === 'ask');
+      if ($('#layMid').checked) {
+        const s = priceLine('mid', midSeries, 1.4); s.z = 1;
+        if (midIdx >= 0) existing[midIdx] = s; else existing.push(s);
+      }
+      if ($('#layBid').checked) {
+        const s = priceLine('bid', bidSeries, 1); s.z = 1;
+        if (bidIdx >= 0) existing[bidIdx] = s; else existing.push(s);
+      }
+      if ($('#layAsk').checked) {
+        const s = priceLine('ask', askSeries, 1); s.z = 1;
+        if (askIdx >= 0) existing[askIdx] = s; else existing.push(s);
+      }
+
+      // Re-fetch labels for the new tail, then rebuild zigzags covering the whole viewport
+      const wantMaxi = $('#layMaxi').checked;
+      const wantMedi = $('#layMedi').checked;
+      const wantMicro= $('#layMicro').checked;
+
+      const jobs = [];
+      if (wantMaxi) jobs.push(fetchJson(API.maxi(startId, endId)).then(rows => ['maxi', rows]));
+      if (wantMedi) jobs.push(fetchJson(API.medi(startId, endId)).then(rows => ['medi', rows]));
+      if (wantMicro)jobs.push(fetchJson(API.micro(startId, endId)).then(rows => ['micro',rows]));
+      const results = await Promise.allSettled(jobs);
+
+      // Remove any prior label series
+      const filtered = existing.filter(s => !['maxi','medi','micro'].includes(s.name));
+      for (const r of results) {
+        if (r.status !== 'fulfilled') continue;
+        const [name, rows] = r.value;
+        const zig = buildZigzagFromLabels(rows || [], null, name);
+        zig.z = 10;
+        filtered.push(zig);
+      }
+
+      chart.setOption({ series: filtered }, { replaceMerge: ['series'] });
+      setBusy(false);
+    }
+
+    // Events
+    $('#btnLoad').addEventListener('click', renderAll);
+    $('#btnMoreRight').addEventListener('click', loadMoreRight);
+    ['#layMid','#layBid','#layAsk','#layMaxi','#layMedi','#layMicro'].forEach(id=>{
+      $(id).addEventListener('change', renderAll);
     });
-  }
 
-  // ---- Load label data ----
-  async function loadPointTable(tbl,a,b){
-    const q=`SELECT * FROM ${tbl} WHERE tickid BETWEEN ${a} AND ${b} ORDER BY tickid`;
-    const res=await API.sql(q); const rows=res.rows||[];
-    const pts=[];
-    for(const r of rows){
-      const idx=idToIndex.get(r.tickid), y=idToMid.get(r.tickid);
-      if(idx!=null && y!=null) pts.push({idx,y,raw:r});
-    }
-    pointData.set(tbl, pts);
-  }
-  async function loadRangeTable(tbl,a,b){
-    // overlap with [a,b]
-    const q=`SELECT * FROM ${tbl} WHERE start_id <= ${b} AND end_id >= ${a} ORDER BY start_id, end_id`;
-    const res=await API.sql(q); const rows=res.rows||[];
-    const segs=[];
-    for(const r of rows){
-      // Keep raw starts/ends, but also clip to current data window for plotting
-      segs.push({ startId:Number(r.start_id), endId:Number(r.end_id), raw:r });
-    }
-    rangeData.set(tbl, segs);
-  }
-  async function loadAllActiveLabels(a,b){
-    const jobs=[];
-    for(const [tbl,info] of labelTablesInfo){
-      if(!ACTIVE.has(tbl)) continue;
-      if(info.kind==='point') jobs.push(loadPointTable(tbl,a,b));
-      if(info.kind==='range') jobs.push(loadRangeTable(tbl,a,b));
-    }
-    await Promise.all(jobs);
-  }
-
-  // ---- Load & More ----
-  async function doLoad(reset=true){
-    fromId=Number($start.value||1);
-    chunk =Number($chunk.value||2000);
-    toId  =fromId + chunk - 1;
-
-    const t=await API.ticksRange(fromId,toId);
-    buildTickState(reset?[]:ticks, t);
-    await loadAllActiveLabels(fromId,toId);
-    render();            // draw
-    adjustYAxisToView(); // fit once on explicit load
-  }
-  async function doMore(){
-    if(!ticks.length) return;
-    const {startId,endId}=getZoomIds();
-
-    const nextFrom=toId+1, nextTo=toId+chunk;
-    const t=await API.ticksRange(nextFrom,nextTo);
-    buildTickState(ticks, t);
-    await loadAllActiveLabels(nextFrom,nextTo);
-    toId=nextTo;
-
-    render({preserveZoomIds:{startId,endId}}); // keep x/y as-is
-  }
-
-  // ---- Build ZigZag line points for a range table ----
-  function makeZigPoints(tbl){
-    const segs=(rangeData.get(tbl)||[]).slice().sort((a,b)=>a.startId-b.startId);
-    const pts=[];
-    for(const s of segs){
-      const sIdx=idToIndex.get(s.startId), eIdx=idToIndex.get(s.endId);
-      const sY=idToMid.get(s.startId),     eY=idToMid.get(s.endId);
-      if(sIdx!=null && sY!=null) pts.push([sIdx, sY]);
-      if(eIdx!=null && eY!=null) pts.push([eIdx, eY]);
-    }
-    // sort by x and dedupe consecutive identical x
-    pts.sort((a,b)=>a[0]-b[0]);
-    const dedup=[];
-    for(const p of pts){
-      if(!dedup.length || dedup[dedup.length-1][0]!==p[0]) dedup.push(p);
-      else dedup[dedup.length-1]=p; // keep last for same index
-    }
-    return dedup;
-  }
-
-  // ---- Render ----
-  function render(opts={}){
-    const preserve = opts.preserveZoomIds || null;
-    const preserveYAxis = opts.preserveYAxis || null;
-
-    const series=[];
-    // base lines
-    if(ACTIVE.has('mid')) series.push({name:'mid',type:'line',showSymbol:false,data:ticks.map(t=>t.mid)});
-    if(ACTIVE.has('bid') && hasBid) series.push({name:'bid',type:'line',showSymbol:false,data:ticks.map(t=>t.bid)});
-    if(ACTIVE.has('ask') && hasAsk) series.push({name:'ask',type:'line',showSymbol:false,data:ticks.map(t=>t.ask)});
-
-    // point layers
-    for(const [tbl,info] of labelTablesInfo){
-      if(info.kind!=='point' || !ACTIVE.has(tbl)) continue;
-      const pts=pointData.get(tbl)||[];
-      series.push({name:tbl,type:'scatter',symbolSize:7,data:pts.map(p=>[p.idx,p.y,p.raw])});
-    }
-    // range layers
-    for(const [tbl,info] of labelTablesInfo){
-      if(info.kind!=='range' || !ACTIVE.has(tbl)) continue;
-
-      if(zigPattern.test(tbl)){ // draw as zigzag line
-        const pts = makeZigPoints(tbl);
-        series.push({
-          name: tbl, type:'line', showSymbol:true, symbolSize:5, connectNulls:false,
-          data: pts
-        });
-      }else{ // generic band
-        const segs=rangeData.get(tbl)||[];
-        const areas = segs.map(s => [
-          { name: tbl, xAxis: String(s.startId) },
-          { xAxis: String(s.endId) }
-        ]);
-        series.push({
-          name: tbl, type:'line', showSymbol:false, data: [],
-          markArea:{ silent:false, itemStyle:{opacity:0.12}, data: areas }
-        });
-      }
-    }
-
-    chart.setOption(
-      {
-        xAxis:{ data: ticks.map(t=>String(t.id)) },
-        series,
-        legend:{ data: series.map(s=>s.name) },
-        ...(preserveYAxis ? { yAxis:{ min:preserveYAxis.min, max:preserveYAxis.max } } : {})
-      },
-      { replaceMerge:['series','legend'], lazyUpdate:false }
-    );
-    if(preserve){ restoreZoomByIds(preserve.startId,preserve.endId); }
-  }
-
-  // ---- Y fit to current zoom ----
-  function adjustYAxisToView(){
-    if(!ticks.length) return;
-    const {startP,endP}=getZoomPercents();
-    const n=ticks.length, s=Math.max(0,Math.floor(startP/100*n)), e=Math.min(n-1,Math.ceil(endP/100*n));
-    const slice=ticks.slice(s,e+1);
-    const vals=[];
-    if(ACTIVE.has('mid')) vals.push(...slice.map(t=>t.mid).filter(v=>v!=null));
-    if(ACTIVE.has('bid')) vals.push(...slice.map(t=>t.bid).filter(v=>v!=null));
-    if(ACTIVE.has('ask')) vals.push(...slice.map(t=>t.ask).filter(v=>v!=null));
-    if(!vals.length) return;
-    const min=Math.min(...vals), max=Math.max(...vals), pad=Math.max(0.5,(max-min)*0.05);
-    chart.setOption({ yAxis:{ min:min-pad, max:max+pad }});
-  }
-
-  // ---- Boot ----
-  (async function(){
-    // base toggles first
-    const $base=qs('#baseLayers'); $base.innerHTML='';
-    $base.appendChild(makeToggle('mid','mid',true,false));
-    $base.appendChild(makeToggle('bid','bid',false,false));
-    $base.appendChild(makeToggle('ask','ask',false,false));
-    await loadInitial();
-  })();
-})();
-</script>
+    // Initial render
+    renderAll().catch(err => {
+      console.error(err);
+      setBusy(false);
+      alert('Load failed: ' + err.message);
+    });
+  </script>
 </body>
 </html>
