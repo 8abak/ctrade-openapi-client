@@ -1,71 +1,89 @@
-// ===== Shared helpers for Live/Review =====
-export const $ = (s, root=document) => root.querySelector(s);
+// ===== chart-core.js =====
 
-export function makeChart(dom){
-  const c = echarts.init(dom);
-  c.setOption({
-    darkMode: true, animation: false,
-    backgroundColor: '#0d1117',
-    grid: { left: 56, right: 18, top: 26, bottom: 100 },
-    tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
-    xAxis: { type: 'time', axisLabel: { color: '#9ca3af' } },
+// Utilities
+async function fetchJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${r.status} : ${url}`);
+  return r.json();
+}
+
+// ----- Data transforms -----
+function ticksToLine(ticks, key) {
+  // ticks: [{id, mid, bid, ask, ...}]
+  const out = [];
+  for (const t of ticks) {
+    const v = t[key];
+    if (v !== null && v !== undefined) out.push([t.id, v]);
+  }
+  return out;
+}
+
+function legsToPath(legs) {
+  // legs: [{start_id, end_id, start_price, end_price, ...}]
+  const out = [];
+  for (const r of legs) {
+    out.push([r.start_id, r.start_price]);
+    out.push([r.end_id,   r.end_price]);
+  }
+  return out;
+}
+
+// ----- ECharts boilerplate -----
+function makeChart(dom) {
+  const chart = echarts.init(dom, null, { renderer: 'canvas' });
+  chart.setOption({
+    backgroundColor: '#0b1220',
+    animation: false,
+    grid: { left: 50, right: 20, top: 40, bottom: 70 },
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'line' },
+      confine: true,
+      backgroundColor: 'rgba(20,20,20,0.95)',
+      borderColor: '#333',
+      textStyle: { color: '#d8d8d8', fontSize: 12 },
+      valueFormatter: (v) => (v == null ? '' : String(v))
+    },
+    xAxis: {
+      type: 'value',
+      axisLine: { lineStyle: { color: '#8a93a6' } },
+      axisLabel: { color: '#cfd5e1' },
+      minInterval: 1
+    },
     yAxis: {
-      type: 'value', scale: true, minInterval: 1, splitNumber: 8,
-      axisLabel: { color: '#9ca3af', formatter: v => String(Math.round(v)) },
-      splitLine: { lineStyle: { color: '#263241' } }
+      type: 'value',
+      axisLine: { lineStyle: { color: '#8a93a6' } },
+      splitLine: { lineStyle: { color: 'rgba(255,255,255,0.08)' } },
+      axisLabel: { color: '#cfd5e1', formatter: (v) => Math.round(v) }
     },
     dataZoom: [
-      { type: 'inside', filterMode: 'none' },
-      { type: 'slider', bottom: 56, height: 30 }
+      { type: 'inside', throttle: 50 },
+      { type: 'slider', bottom: 30, height: 18 }
     ],
+    legend: { show: false },
     series: []
   });
-  return c;
+  return chart;
 }
 
-export function priceSeries(name, data, width=1.4){
-  return { name, type: 'line', showSymbol: false, smooth: 0, lineStyle: { width }, data };
-}
-
-export function rowsToZigzag(rows, name){
-  const pts = [];
-  for(const r of rows || []){
-    if(r.start_ts && r.end_ts && r.start_price != null && r.end_price != null){
-      pts.push([r.start_ts, r.start_price], [r.end_ts, r.end_price], [null, null]);
-    }
-  }
+function priceLineSeries(name, data, z) {
   return {
     name,
     type: 'line',
-    connectNulls: false,
-    showSymbol: true,
-    symbolSize: 4,
-    emphasis: { disabled: true },
-    z: 20,
-    lineStyle: { width: name==='max' ? 2 : name==='mid' ? 1.6 : 1.2 },
-    data: pts
+    data,
+    showSymbol: false,
+    connectNulls: true,
+    smooth: 0.15,
+    lineStyle: { width: 1.5 },
+    z
   };
 }
 
-export async function j(url){
-  const r = await fetch(url);
-  const t = await r.text();
-  let b; try{ b = t ? JSON.parse(t) : null; }catch{ b = t; }
-  if(!r.ok) throw new Error(`${r.status} : ${url}\n${typeof b==='string'?b:JSON.stringify(b)}`);
-  return b;
-}
-
-// Keep viewport unless user is at far right ~98%+
-export function keepOrFollowRight(chart, afterUpdate){
-  const dz = chart.getOption().dataZoom?.[1];
-  const end = dz ? dz.end : 100;
-  const follow = end == null || end > 98;
-  afterUpdate();
-  if(follow){
-    const opt = chart.getOption();
-    if(opt.dataZoom && opt.dataZoom[1]){
-      opt.dataZoom[1].end = 100;
-      chart.setOption({ dataZoom: opt.dataZoom }, { replaceMerge: ['dataZoom'] });
-    }
-  }
-}
+// ----- Exported helpers for pages -----
+window.ChartCore = {
+  fetchJSON,
+  makeChart,
+  priceLineSeries,
+  ticksToLine,
+  legsToPath,
+};

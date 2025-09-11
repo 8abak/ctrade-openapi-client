@@ -1,33 +1,46 @@
 <!doctype html>
-<html lang="en">
+<html>
 <head>
   <meta charset="utf-8" />
   <title>Live</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
   <style>
-    :root{--bg:#0d1117;--panel:#111827;--ink:#e5e7eb;--muted:#94a3b8}
-    html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font:14px system-ui,Segoe UI,Roboto,Helvetica,Arial}
-    .bar{display:flex;gap:.75rem;align-items:center;padding:.6rem .8rem;background:var(--panel)}
-    .bar button{background:#1f2a44;border:1px solid #334155;color:var(--ink);padding:.45rem .7rem;border-radius:8px;cursor:pointer}
-    .layers{display:flex;gap:.6rem;align-items:center;margin-left:auto}
-    .layers label{color:#9ca3af}
-    #chart{position:fixed;inset:56px 0 0 0}
+    html, body { height: 100%; margin: 0; background:#0b1220; color:#cfd5e1; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+    #topbar { display:flex; gap:.75rem; align-items:center; padding:.6rem .8rem; position:sticky; top:0; background:rgba(11,18,32,.95); border-bottom:1px solid rgba(255,255,255,.06); z-index:10; }
+    #chart { position: absolute; inset: 44px 0 0 0; }
+    label { user-select:none; }
+    input[type=checkbox] { transform: translateY(1px); }
+    .sep { width:1px; height:24px; background:rgba(255,255,255,.1); margin:0 .25rem; }
+    button, select { background:#182131; color:#e7ecf5; border:1px solid rgba(255,255,255,.15); border-radius:6px; padding:.35rem .6rem; }
+    button:hover { background:#1d273a; cursor:pointer; }
   </style>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5"></script>
 </head>
 <body>
-  <div class="bar">
-    <button id="pause">Pause</button>
-    <div class="layers">
-      <label><input id="ask"     type="checkbox"> ask</label>
-      <label><input id="midp"    type="checkbox" checked> mid</label>
-      <label><input id="bid"     type="checkbox"> bid</label>
-      <label><input id="minzz"   type="checkbox" checked> min</label>
-      <label><input id="midzz"   type="checkbox" checked> mid</label>
-      <label><input id="maxzz"   type="checkbox" checked> max</label>
-    </div>
+  <div id="topbar">
+    <button id="btnPause">Pause</button>
+    <button id="btnLeft">Load&nbsp;left</button>
+    <label>Window
+      <select id="selWindow">
+        <option value="2000">2k</option>
+        <option value="5000">5k</option>
+        <option value="10000">10k</option>
+        <option value="20000">20k</option>
+      </select>
+    </label>
+    <div class="sep"></div>
+    <label><input type="checkbox" id="chkAsk"> ask</label>
+    <label><input type="checkbox" id="chkMid" checked> mid</label>
+    <label><input type="checkbox" id="chkBid"> bid</label>
+    <div class="sep"></div>
+    <label><input type="checkbox" id="chkMin" checked> min</label>
+    <label><input type="checkbox" id="chkZMid" checked> mid</label>
+    <label><input type="checkbox" id="chkMax" checked> max</label>
   </div>
   <div id="chart"></div>
-  <script type="module" src="./live.js"></script>
+
+  <!-- core & page js -->
+  <script src="./chart-core.js"></script>
+  <script src="./live.js"></script>
 </body>
 </html>

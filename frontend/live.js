@@ -1,97 +1,125 @@
-import { $, makeChart, priceSeries, rowsToZigzag, j, keepOrFollowRight } from './chart-core.js';
+// ===== live.js =====
+const {
+  fetchJSON, makeChart, priceLineSeries, ticksToLine, legsToPath
+} = window.ChartCore;
 
-const chart = makeChart($('#chart'));
-const WINDOW = 2000;
+const el = (id) => document.getElementById(id);
+
+let chart;
 let paused = false;
+let windowSize = 2000;
+let ticks = [];                   // ascending by id
+let legsMin = [], legsMid = [], legsMax = [];
+let followTail = true;            // autoscroll only if we're at right edge
 
-let lastId = 0;
-let midData=[], bidData=[], askData=[];
+// UI
+function wireUI() {
+  el('btnPause').onclick = () => {
+    paused = !paused;
+    el('btnPause').textContent = paused ? 'Resume' : 'Pause';
+  };
 
-function trimToWindow(){
-  const maxN = WINDOW + 200; // small cushion for zooming
-  if(midData.length > maxN) midData = midData.slice(-WINDOW);
-  if(bidData.length > maxN) bidData = bidData.slice(-WINDOW);
-  if(askData.length > maxN) askData = askData.slice(-WINDOW);
+  el('selWindow').onchange = () => {
+    windowSize = +el('selWindow').value;
+    trimToWindow();
+    redraw();
+  };
+
+  el('btnLeft').onclick = async () => {
+    await loadLeft(2000);
+  };
 }
 
-async function initialLoad(){
-  const last = await j('/api/ticks/latest');
-  if(!last?.id) return;
-  lastId = last.id;
-  const start = Math.max(1, lastId - WINDOW + 1);
-  await pullTicks(start, lastId, false);
-  await renderAll(start, lastId);
+function atTail() {
+  const opt = chart.getOption();
+  const dz = (opt.dataZoom && opt.dataZoom[0]) || null;
+  return !dz || dz.end >= 99.5;
+}
+function onZoom() { followTail = atTail(); }
+
+// Data helpers
+function lastId() { return ticks.length ? ticks[ticks.length - 1].id : 0; }
+function firstId() { return ticks.length ? ticks[0].id : 0; }
+function trimToWindow() {
+  if (ticks.length > windowSize) ticks = ticks.slice(ticks.length - windowSize);
 }
 
-async function pullTicks(fromId, toId, append=true){
-  const rows = await j(`/api/ticks?from_id=${fromId}&to_id=${toId}`);
-  if(!append){ midData=[]; bidData=[]; askData=[]; }
-  for(const r of rows){
-    const t = r.ts ?? r.timestamp;
-    if(t==null) continue;
-    if(r.mid != null) midData.push([t, r.mid]);
-    if(r.bid != null) bidData.push([t, r.bid]);
-    if(r.ask != null) askData.push([t, r.ask]);
-  }
+async function loadInitial() {
+  const latest = await fetchJSON('/api/ticks/latest');
+  if (!latest?.id) return;
+
+  const from = Math.max(1, latest.id - windowSize + 1);
+  const arr = await fetchJSON(`/api/ticks?from_id=${from}&to_id=${latest.id}`);
+  ticks = arr.sort((a,b)=>a.id-b.id);
+  await refreshZigs();
+  redraw();
+}
+
+async function loadLeft(n) {
+  if (!ticks.length) return;
+  const from = Math.max(1, firstId() - n);
+  const to   = firstId() - 1;
+  if (to < from) return;
+
+  const older = await fetchJSON(`/api/ticks?from_id=${from}&to_id=${to}`);
+  older.sort((a,b)=>a.id-b.id);
+  ticks = older.concat(ticks);
   trimToWindow();
+  await refreshZigs();
+  redraw();
 }
 
-async function fetchZigs(fromId, toId){
-  const rows = await j(`/api/zigzag?from_id=${fromId}&to_id=${toId}`);
-  return {
-    min: rows.filter(r=>r.kind==='min'),
-    mid: rows.filter(r=>r.kind==='mid'),
-    max: rows.filter(r=>r.kind==='max')
-  };
+async function refreshZigs() {
+  if (!ticks.length) return;
+  const from = firstId();
+  const to   = lastId();
+  const z = await fetchJSON(`/api/zigzag?from_id=${from}&to_id=${to}`);
+  legsMin = z.filter(r=>r.kind==='min');
+  legsMid = z.filter(r=>r.kind==='mid');
+  legsMax = z.filter(r=>r.kind==='max');
 }
 
-async function renderAll(fromId, toId){
-  const z = await fetchZigs(fromId, toId);
-  const update = () => {
-    const series = [];
-    if($('#midp').checked && midData.length) series.push(priceSeries('mid', midData, 1.4));
-    if($('#bid').checked  && bidData.length) series.push(priceSeries('bid', bidData, 1.0));
-    if($('#ask').checked  && askData.length) series.push(priceSeries('ask', askData, 1.0));
-    if($('#minzz').checked) series.push(rowsToZigzag(z.min, 'min'));
-    if($('#midzz').checked) series.push(rowsToZigzag(z.mid, 'mid'));
-    if($('#maxzz').checked) series.push(rowsToZigzag(z.max, 'max'));
-    chart.setOption({ series }, { replaceMerge: ['series'] });
-  };
-  keepOrFollowRight(chart, update);
+function redraw() {
+  const s = [];
+
+  // Ticks -> lines
+  if (el('chkAsk').checked) s.push(priceLineSeries('ask', ticksToLine(ticks,'ask'), 10));
+  if (el('chkMid').checked) s.push(priceLineSeries('mid', ticksToLine(ticks,'mid'), 11));
+  if (el('chkBid').checked) s.push(priceLineSeries('bid', ticksToLine(ticks,'bid'), 12));
+
+  // Zigzags -> lines (no scatter)
+  if (el('chkMin').checked) s.push(priceLineSeries('min', legsToPath(legsMin), 20));
+  if (el('chkZMid').checked) s.push(priceLineSeries('mid(zig)', legsToPath(legsMid), 21));
+  if (el('chkMax').checked) s.push(priceLineSeries('max', legsToPath(legsMax), 22));
+
+  chart.setOption({ series: s }, true);
+
+  if (followTail) chart.dispatchAction({ type: 'dataZoom', end: 100 });
 }
 
-async function tickLoop(){
-  if(paused) return;
-  try{
-    // ask for the newest id, then fetch any gap since lastId
-    const last = await j('/api/ticks/latest');
-    if(last?.id && last.id > lastId){
-      const from = lastId + 1;
-      const to   = last.id;
-      await pullTicks(from, to, true);
-      lastId = to;
-
-      const fromWin = Math.max(1, lastId - WINDOW + 1);
-      await renderAll(fromWin, lastId);
+async function liveLoop() {
+  try {
+    if (!paused) {
+      const t = await fetchJSON('/api/ticks/latest');
+      if (t?.id && (!ticks.length || t.id > lastId())) {
+        ticks.push(t);
+        trimToWindow();
+        await refreshZigs();
+        redraw();
+      }
     }
-  }catch(err){
-    console.error(err);
+  } catch (e) {
+    console.error('live tick error', e);
+  } finally {
+    setTimeout(liveLoop, 900);
   }
 }
 
-$('#pause').addEventListener('click', () => {
-  paused = !paused;
-  $('#pause').textContent = paused ? 'Resume' : 'Pause';
-});
+function init() {
+  wireUI();
+  chart = makeChart(document.getElementById('chart'));
+  chart.on('dataZoom', onZoom);
+  loadInitial().then(()=>liveLoop());
+}
 
-['#ask','#midp','#bid','#minzz','#midzz','#maxzz'].forEach(id => $(id).addEventListener('change', async () => {
-  if(lastId){
-    const fromWin = Math.max(1, lastId - WINDOW + 1);
-    await renderAll(fromWin, lastId);
-  }
-}));
-
-// Start everything
-await initialLoad();
-// light polling; adjust if you want tighter updates
-setInterval(tickLoop, 750);
+window.addEventListener('load', init);
