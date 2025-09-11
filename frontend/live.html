@@ -5,41 +5,37 @@
   <title>Live</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    html, body { height: 100%; margin: 0; background:#0b1220; color:#cfd5e1; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
-    #topbar { display:flex; gap:.75rem; align-items:center; padding:.6rem .8rem; position:sticky; top:0; background:rgba(11,18,32,.95); border-bottom:1px solid rgba(255,255,255,.06); z-index:10; }
-    #chart { position: absolute; inset: 44px 0 0 0; }
+    html, body { height: 100%; margin: 0; background:#0b1220; color:#cfd5e1; font:14px system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    .toolbar { display:flex; gap:8px; align-items:center; padding:10px; }
+    #chart { height: calc(100vh - 56px); width: 100vw; }
     label { user-select:none; }
-    input[type=checkbox] { transform: translateY(1px); }
-    .sep { width:1px; height:24px; background:rgba(255,255,255,.1); margin:0 .25rem; }
-    button, select { background:#182131; color:#e7ecf5; border:1px solid rgba(255,255,255,.15); border-radius:6px; padding:.35rem .6rem; }
-    button:hover { background:#1d273a; cursor:pointer; }
+    input, select, button { background:#111829; color:#cfd5e1; border:1px solid #2a3350; border-radius:6px; padding:6px 8px; }
+    button { cursor:pointer; }
   </style>
-  <script src="https://cdn.jsdelivr.net/npm/echarts@5"></script>
 </head>
 <body>
-  <div id="topbar">
+  <div class="toolbar">
     <button id="btnPause">Pause</button>
-    <button id="btnLeft">Load&nbsp;left</button>
+    <button id="btnLeft">Load left</button>
     <label>Window
       <select id="selWindow">
-        <option value="2000">2k</option>
+        <option value="1000">1k</option>
+        <option value="2000" selected>2k</option>
         <option value="5000">5k</option>
         <option value="10000">10k</option>
-        <option value="20000">20k</option>
       </select>
     </label>
-    <div class="sep"></div>
-    <label><input type="checkbox" id="chkAsk"> ask</label>
-    <label><input type="checkbox" id="chkMid" checked> mid</label>
-    <label><input type="checkbox" id="chkBid"> bid</label>
-    <div class="sep"></div>
-    <label><input type="checkbox" id="chkMin" checked> min</label>
-    <label><input type="checkbox" id="chkZMid" checked> mid</label>
-    <label><input type="checkbox" id="chkMax" checked> max</label>
+    <label><input id="chkAsk" type="checkbox" /> ask</label>
+    <label><input id="chkMid" type="checkbox" checked /> mid</label>
+    <label><input id="chkBid" type="checkbox" /> bid</label>
+    <label><input id="chkMin" type="checkbox" checked /> min</label>
+    <label><input id="chkZMid" type="checkbox" checked /> mid</label>
+    <label><input id="chkMax" type="checkbox" checked /> max</label>
   </div>
+
   <div id="chart"></div>
 
-  <!-- core & page js -->
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5"></script>
   <script src="./chart-core.js"></script>
   <script src="./live.js"></script>
 </body>

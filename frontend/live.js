@@ -9,7 +9,6 @@ let ticks = [];                   // ascending by id
 let legsMin = [], legsMid = [], legsMax = [];
 let followTail = true;            // autoscroll only if we're at right edge
 
-// UI
 function wireUI() {
   el('btnPause').onclick = () => {
     paused = !paused;
@@ -34,7 +33,6 @@ function atTail() {
 }
 function onZoom() { followTail = atTail(); }
 
-// Data helpers
 function lastId()  { return ticks.length ? ticks[ticks.length - 1].id : 0; }
 function firstId() { return ticks.length ? ticks[0].id : 0; }
 function trimToWindow() {
@@ -79,19 +77,20 @@ async function refreshZigs() {
 function redraw() {
   const s = [];
 
-  // Ticks -> lines
   if (el('chkAsk').checked) s.push(Core.priceLineSeries('ask', Core.ticksToLine(ticks,'ask'), 10));
   if (el('chkMid').checked) s.push(Core.priceLineSeries('mid', Core.ticksToLine(ticks,'mid'), 11));
   if (el('chkBid').checked) s.push(Core.priceLineSeries('bid', Core.ticksToLine(ticks,'bid'), 12));
 
-  // Zigzags -> lines (no scatter)
-  if (el('chkMin').checked)  s.push(Core.priceLineSeries('min',     Core.legsToPath(legsMin), 20));
-  if (el('chkZMid').checked) s.push(Core.priceLineSeries('mid(zig)',Core.legsToPath(legsMid), 21));
-  if (el('chkMax').checked)  s.push(Core.priceLineSeries('max',     Core.legsToPath(legsMax), 22));
+  if (el('chkMin').checked)  s.push(Core.priceLineSeries('min',      Core.legsToPath(legsMin), 20));
+  if (el('chkZMid').checked) s.push(Core.priceLineSeries('mid(zig)', Core.legsToPath(legsMid), 21));
+  if (el('chkMax').checked)  s.push(Core.priceLineSeries('max',      Core.legsToPath(legsMax), 22));
 
-  chart.setOption({ series: s }, true);
-
-  if (followTail) chart.dispatchAction({ type: 'dataZoom', end: 100 });
+  try {
+    chart.setOption({ series: s }, true);
+    if (followTail) chart.dispatchAction({ type: 'dataZoom', end: 100 });
+  } catch (e) {
+    console.error('setOption failed', e);
+  }
 }
 
 async function liveLoop() {
@@ -116,6 +115,7 @@ function init() {
   wireUI();
   chart = Core.makeChart(document.getElementById('chart'));
   chart.on('dataZoom', onZoom);
+  window.addEventListener('resize', () => chart && chart.resize());
   loadInitial().then(()=>liveLoop());
 }
 
