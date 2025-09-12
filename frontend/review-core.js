@@ -172,6 +172,13 @@
     setStatus('loading…');
     const rows = await fetchRange(startId, size);
     const added = appendTicks(rows);
+    if (state.x.length && state.x.length === rows.length) {
+      await seedLabelAnchors(state.x[0]);    // NEW on first chunk
+    }
+    if (rows.length) {
+      await fetchLabelsFrom(state.x[0], state.x.length);
+      keepRightWithView();
+    }
     if(added){
       await fetchLabelsFrom(state.x[0], state.x.length);
       keepRightWithView();

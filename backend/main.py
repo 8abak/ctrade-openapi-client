@@ -353,6 +353,14 @@ def api_labels_range(
             (name,),
         )
         cols = {r["column_name"] for r in cur.fetchall()}
+        id_col = (
+            "tick_id" if "tick_id" in cols else
+            ("start_id" if "start_id" in cols else
+            ("id" if "id" in cols else None))
+        )
+        if not id_col:
+            return []
+
 
     id_col = "tick_id" if "tick_id" in cols else ("id" if "id" in cols else None)
     if not id_col:
@@ -360,9 +368,15 @@ def api_labels_range(
         return []
 
     # value candidates in priority order
-    val_col = "value" if "value" in cols else ("price" if "price" in cols else ("mid" if "mid" in cols else None))
+    val_col = (
+        "value" if "value" in cols else
+        ("start_price" if "start_price" in cols else
+        ("price" if "price" in cols else
+        ("mid" if "mid" in cols else None)))
+    )
     if not val_col:
         return []
+
 
     # If label table lacks timestamp, we’ll derive ts by joining ticks
     has_ts = ts_col in cols
@@ -401,6 +415,83 @@ def api_labels_range(
         if isinstance(r.get("ts"), (datetime, date)):
             r["ts"] = r["ts"].isoformat()
     return rows
+
+@app.get("/api/labels/{name}/prev")
+def api_labels_prev(name: str, before_id: int = Query(...)):
+    """
+    Return the single most recent label row at or before `before_id`.
+    Schema-tolerant over id_col (tick_id|start_id|id) and value col (value|start_price|price|mid).
+    """
+    name = name.lower()
+    if name not in ("min", "mid", "max"):
+        raise HTTPException(400, "name must be one of: min, mid, max")
+
+    conn = get_conn()
+    if not _table_exists(conn, name):
+        return {}
+
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema='public' AND table_name=%s
+            """,
+            (name,),
+        )
+        cols = {r["column_name"] for r in cur.fetchall()}
+
+    id_col = (
+        "tick_id" if "tick_id" in cols else
+        ("start_id" if "start_id" in cols else
+         ("id" if "id" in cols else None))
+    )
+    if not id_col:
+        return {}
+
+    val_col = (
+        "value" if "value" in cols else
+        ("start_price" if "start_price" in cols else
+         ("price" if "price" in cols else
+          ("mid" if "mid" in cols else None)))
+    )
+    if not val_col:
+        return {}
+
+    ts_col, _, _ = _ts_mid_cols(conn)
+    has_ts = ts_col in cols
+
+    with dict_cur(conn) as cur:
+        if has_ts:
+            cur.execute(
+                f"""
+                SELECT {id_col} AS id, {ts_col} AS ts, {val_col} AS value
+                FROM {name}
+                WHERE {id_col} <= %s
+                ORDER BY {id_col} DESC
+                LIMIT 1
+                """,
+                (before_id,),
+            )
+        else:
+            cur.execute(
+                f"""
+                SELECT t.id, t.{ts_col} AS ts, lb.{val_col} AS value
+                FROM {name} lb
+                JOIN ticks t ON t.id = lb.{id_col}
+                WHERE lb.{id_col} <= %s
+                ORDER BY lb.{id_col} DESC
+                LIMIT 1
+                """,
+                (before_id,),
+            )
+        row = cur.fetchone() or {}
+
+    if row:
+        if isinstance(row.get("value"), Decimal): row["value"] = float(row["value"])
+        row["ts"] = row["ts"].isoformat() if isinstance(row.get("ts"), (datetime, date)) else row.get("ts")
+    return row
+
 
 @app.get("/ticks/lastid")
 def ticks_lastid():

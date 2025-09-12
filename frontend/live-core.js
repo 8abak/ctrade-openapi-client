@@ -39,14 +39,14 @@
       scale: false
     };
   }
-  function mkLine(name, key, color, connect = false) {
+  function mkLine(name, key, color, connect=false) {
     return {
-      name, type: 'line', showSymbol: false, smooth: false,
-      data: state[key], itemStyle: { color },
-      lineStyle: { color, width: 1.6 },
-      connectNulls: connect,   // true for labels so sparse points connect across gaps
+        name, type:'line', showSymbol: true, symbolSize: 4, smooth:false,
+        data: state[key], itemStyle:{ color }, lineStyle:{ color, width:1.6 },
+        connectNulls: connect
     };
   }
+
   function baseOption() {
     return {
       backgroundColor: '#0b0f14',
@@ -99,6 +99,28 @@
     const [start, end] = currentIndexWindow();
     if (start != null && end != null) state.viewSize = Math.max(1, end - start + 1);
   });
+
+  async function seedLabelAnchors(windowStartId) {
+    // Fetch last label <= windowStartId for each series
+    const [mx, md, mn] = await Promise.allSettled([
+        fetchJSON(`/api/labels/max/prev?before_id=${windowStartId}`),
+        fetchJSON(`/api/labels/mid/prev?before_id=${windowStartId}`),
+        fetchJSON(`/api/labels/min/prev?before_id=${windowStartId}`)
+    ]);
+    const firstIdx = 0;
+    if (mx.status==='fulfilled' && mx.value && mx.value.value != null) state.max_lbl[firstIdx] = +mx.value.value;
+    if (md.status==='fulfilled' && md.value && md.value.value != null) state.mid_lbl[firstIdx] = +md.value.value;
+    if (mn.status==='fulfilled' && mn.value && mn.value.value != null) state.min_lbl[firstIdx] = +mn.value.value;
+    // push into chart
+    chart.setOption({
+        series: [
+        { name:'Max (labels)', data: state.max_lbl },
+        { name:'Mid (labels)', data: state.mid_lbl },
+        { name:'Min (labels)', data: state.min_lbl }
+        ]
+    }, { lazyUpdate:true });
+    }
+
 
   // ----- Utility -----
   async function fetchJSON(url) { const r = await fetch(url); if (!r.ok) throw new Error(await r.text()); return r.json(); }
