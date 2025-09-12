@@ -589,6 +589,153 @@ def ticks_range(start: int, end: int, limit: int = 200000):
 def api_ticks(from_id: int, to_id: int):
     return ticks_range(from_id, to_id, 200000)
 
+# --- HELPERS: tolerant column detection for label tables (min/mid/max) ---
+def _label_cols(conn, table: str):
+    with dict_cur(conn) as cur:
+        cur.execute("""
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema='public' AND table_name=%s
+        """, (table,))
+        cols = {r["column_name"] for r in cur.fetchall()}
+
+    id_col = (
+        "id" if "id" in cols else
+        ("tick_id" if "tick_id" in cols else
+         ("start_id" if "start_id" in cols else None))
+    )
+    start_id_col = "start_id" if "start_id" in cols else (id_col if id_col != "id" else None)
+    end_id_col = (
+        "end_id" if "end_id" in cols else
+        ("stop_id" if "stop_id" in cols else None)
+    )
+    price_col = (
+        "value" if "value" in cols else
+        ("start_price" if "start_price" in cols else
+         ("price" if "price" in cols else
+          ("mid" if "mid" in cols else None)))
+    )
+    end_price_col = (
+        "end_price" if "end_price" in cols else
+        ("stop_price" if "stop_price" in cols else None)
+    )
+
+    ts_col, _, _ = _ts_mid_cols(conn)
+    return {
+        "id_col": id_col,
+        "start_id_col": start_id_col,
+        "end_id_col": end_id_col,
+        "price_col": price_col,
+        "end_price_col": end_price_col,
+        "ts_col": ts_col,
+        "has_ts": ts_col in cols,
+    }
+
+def _ticks_last_id(conn):
+    with dict_cur(conn) as cur:
+        cur.execute("SELECT max(id) AS last FROM ticks")
+        r = cur.fetchone()
+    return r["last"] or 0
+
+def _row_to_float(v):
+    return float(v) if isinstance(v, Decimal) else v
+
+def _resolve_max_segment(conn, row, cols):
+    """Given a 'max' row, compute a normalized segment {id,start_id,end_id,...}."""
+    id_col = cols["id_col"]
+    sid = row.get(cols["start_id_col"]) if cols["start_id_col"] else None
+    if sid is None:
+        # fall back: start_id equals row's id/tick_id
+        sid = row.get(id_col)
+    eid = row.get(cols["end_id_col"]) if cols["end_id_col"] else None
+    price = row.get(cols["price_col"])
+    eprice = row.get(cols["end_price_col"]) if cols["end_price_col"] else None
+
+    # If end_id is missing, derive from next row or latest tick
+    if eid is None:
+        with dict_cur(conn) as cur:
+            cur.execute(
+                f"SELECT {cols['start_id_col'] or id_col} AS sid_next "
+                f"FROM max WHERE {id_col} > %s ORDER BY {id_col} ASC LIMIT 1",
+                (row[id_col],)
+            )
+            rn = cur.fetchone()
+        if rn and rn.get("sid_next"):
+            eid = rn["sid_next"] - 1
+        else:
+            eid = _ticks_last_id(conn)
+
+    # Add timestamps from ticks
+    ts_col = cols["ts_col"]
+    with dict_cur(conn) as cur:
+        cur.execute(f"SELECT {ts_col} AS ts FROM ticks WHERE id=%s", (sid,))
+        srow = cur.fetchone()
+        cur.execute(f"SELECT {ts_col} AS ts FROM ticks WHERE id=%s", (eid,))
+        erow = cur.fetchone()
+
+    return {
+        "id": row[id_col],
+        "start_id": sid,
+        "end_id": eid,
+        "start_price": _row_to_float(price),
+        "end_price": _row_to_float(eprice) if eprice is not None else None,
+        "start_ts": srow["ts"].isoformat() if srow and srow.get("ts") else None,
+        "end_ts": erow["ts"].isoformat() if erow and erow.get("ts") else None,
+    }
+
+# --- NEW: get last max segment ---
+@app.get("/api/maxline/last")
+def api_maxline_last():
+    conn = get_conn()
+    if not _table_exists(conn, "max"):
+        return {}
+    cols = _label_cols(conn, "max")
+    id_col = cols["id_col"]
+    if not id_col:
+        return {}
+    with dict_cur(conn) as cur:
+        cur.execute(f"SELECT * FROM max ORDER BY {id_col} DESC LIMIT 1")
+        row = cur.fetchone()
+    if not row:
+        return {}
+    return _resolve_max_segment(conn, row, cols)
+
+# --- NEW: get max segment by its row id (not tick id) ---
+@app.get("/api/maxline/by_id")
+def api_maxline_by_id(id: int = Query(...)):
+    conn = get_conn()
+    if not _table_exists(conn, "max"):
+        raise HTTPException(404, "max table not found")
+    cols = _label_cols(conn, "max")
+    id_col = cols["id_col"]
+    if not id_col:
+        raise HTTPException(400, "cannot detect id column on max")
+    with dict_cur(conn) as cur:
+        cur.execute(f"SELECT * FROM max WHERE {id_col}=%s", (id,))
+        row = cur.fetchone()
+    if not row:
+        raise HTTPException(404, f"max id {id} not found")
+    return _resolve_max_segment(conn, row, cols)
+
+# --- NEW: next max row id after a given row id (for 'Load More') ---
+@app.get("/api/maxline/next")
+def api_maxline_next(after_id: int = Query(...)):
+    conn = get_conn()
+    if not _table_exists(conn, "max"):
+        return {}
+    cols = _label_cols(conn, "max")
+    id_col = cols["id_col"]
+    if not id_col:
+        return {}
+    with dict_cur(conn) as cur:
+        cur.execute(
+            f"SELECT {id_col} AS id FROM max WHERE {id_col} > %s ORDER BY {id_col} ASC LIMIT 1",
+            (after_id,)
+        )
+        row = cur.fetchone()
+    return {"id": row["id"]} if row else {}
+
+
 
 # -------------------- Review: segments & per-segment ------------------
 
