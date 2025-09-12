@@ -1,4 +1,6 @@
 (() => {
+  const DEFAULT_CHUNK = 20000;  // balanced chunk size
+
   const el = document.getElementById('chart');
   const chart = echarts.init(el, null, { renderer: 'canvas' });
 
@@ -8,14 +10,17 @@
   };
 
   const state = {
-    x:[], ts:[], ask:[], bid:[], mid_tick:[],
-    max_lbl:[], mid_lbl:[], min_lbl:[], rightmostId:0
+    x:[], ts:[],
+    ask:[], bid:[], mid_tick:[],
+    max_lbl:[], mid_lbl:[], min_lbl:[],
+    rightmostId:0,
+    viewSize: 3000,
+    labelsLoadedUntil: { max: 0, mid: 0, min: 0 },
   };
 
   function yAxisInt(){ return {
     type:'value',
-    min:(e)=>Math.floor(e.min),
-    max:(e)=>Math.ceil(e.max),
+    min:(e)=>Math.floor(e.min), max:(e)=>Math.ceil(e.max),
     interval:1, minInterval:1,
     axisLabel:{ color:'#9ca3af', formatter:(v)=>Number.isInteger(v)?v:'' },
     axisLine:{ lineStyle:{ color:'#1f2937' } },
@@ -23,9 +28,9 @@
     scale:false
   };}
 
-  function mkLine(name,key,color){
+  function mkLine(name,key,color,connect=false){
     return { name, type:'line', showSymbol:false, smooth:false,
-      data:state[key], itemStyle:{ color }, lineStyle:{ color, width:1.6 }, connectNulls:false };
+      data:state[key], itemStyle:{ color }, lineStyle:{ color, width:1.6 }, connectNulls:connect };
   }
 
   function baseOption(){
@@ -33,8 +38,7 @@
       backgroundColor:'#0b0f14', animation:false,
       grid:{ left:42, right:18, top:10, bottom:28 },
       tooltip:{
-        trigger:'axis', axisPointer:{ type:'line' },
-        backgroundColor:'rgba(17,24,39,.95)',
+        trigger:'axis', axisPointer:{ type:'line' }, backgroundColor:'rgba(17,24,39,.95)',
         formatter:(params)=>{
           if(!params||!params.length) return '';
           const i=params[0].dataIndex, id=state.x[i], ts=state.ts[i]||'';
@@ -47,49 +51,57 @@
         }
       },
       xAxis:{ type:'category', data:state.x,
-        axisLabel:{ color:'#9ca3af' },
-        axisLine:{ lineStyle:{ color:'#1f2937' } },
+        axisLabel:{ color:'#9ca3af' }, axisLine:{ lineStyle:{ color:'#1f2937' } },
         splitLine:{ show:true, lineStyle:{ color:'rgba(148,163,184,0.08)' } },
       },
       yAxis: yAxisInt(),
       dataZoom:[{ type:'inside' },{ type:'slider', height:16, bottom:4 }],
       series:[
-        mkLine('Ask','ask',COLORS.ask),
-        mkLine('Mid (ticks)','mid_tick',COLORS.mid_tick),
-        mkLine('Bid','bid',COLORS.bid),
-        mkLine('Max (labels)','max_lbl',COLORS.max_lbl),
-        mkLine('Mid (labels)','mid_lbl',COLORS.mid_lbl),
-        mkLine('Min (labels)','min_lbl',COLORS.min_lbl),
+        mkLine('Ask','ask',COLORS.ask,false),
+        mkLine('Mid (ticks)','mid_tick',COLORS.mid_tick,false),
+        mkLine('Bid','bid',COLORS.bid,false),
+        mkLine('Max (labels)','max_lbl',COLORS.max_lbl,true),
+        mkLine('Mid (labels)','mid_lbl',COLORS.mid_lbl,true),
+        mkLine('Min (labels)','min_lbl',COLORS.min_lbl,true),
       ]
     };
   }
   chart.setOption(baseOption(), { notMerge:true, lazyUpdate:true });
 
-  function pinnedRight(){ const dz=chart.getOption().dataZoom?.[0]; if(!dz) return false; return (dz.end??100) > 99.5; }
-  function stickToRight(){ chart.dispatchAction({ type:'dataZoom', start:100, end:100 }); }
+  // Update remembered view when pinned-right and user zooms
+  chart.on('dataZoom', () => {
+    if (!pinnedRight()) return;
+    const [s,e]=currentIndexWindow();
+    if (s!=null && e!=null) state.viewSize = Math.max(1, e - s + 1);
+  });
 
-  function setSeriesVisibility(){
-    const boxes=document.querySelectorAll('input[type=checkbox][data-series]');
-    const show={}; boxes.forEach(b=>show[b.dataset.series]=b.checked);
-    const opt=chart.getOption();
-    opt.series.forEach(s=>{
-      const key=keyFromName(s.name); s.data=state[key];
-      const vis=show[key]; s.itemStyle.opacity=vis?1:0; s.lineStyle.opacity=vis?1:0;
-    });
-    chart.setOption(opt,{ notMerge:true, lazyUpdate:true });
+  function pinnedRight(){
+    const dz=chart.getOption().dataZoom?.[0]; if(!dz) return false;
+    if (dz.endValue != null) { const last = state.x.length ? state.x.length - 1 : 0; return dz.endValue >= last; }
+    return (dz.end ?? 100) > 99.5;
   }
-  document.querySelectorAll('input[type=checkbox][data-series]')
-    .forEach(cb=>cb.addEventListener('change', setSeriesVisibility));
-  function keyFromName(n){
-    if(n==='Ask')return'ask'; if(n==='Bid')return'bid'; if(n==='Mid (ticks)')return'mid_tick';
-    if(n==='Max (labels)')return'max_lbl'; if(n==='Mid (labels)')return'mid_lbl'; if(n==='Min (labels)')return'min_lbl';
+  function currentIndexWindow(){
+    const dz=chart.getOption().dataZoom?.[0];
+    if(!dz) return [null,null];
+    if(dz.startValue!=null && dz.endValue!=null) return [dz.startValue, dz.endValue];
+    const len=state.x.length;
+    const s=Math.floor(((dz.start??0)/100)*(len-1));
+    const e=Math.floor(((dz.end??100)/100)*(len-1));
+    return [s,e];
+  }
+  function keepRightWithView(){
+    const n=Math.max(1, state.viewSize);
+    const len=state.x.length;
+    const endVal=Math.max(0, len-1);
+    const startVal=Math.max(0, endVal-n+1);
+    chart.dispatchAction({ type:'dataZoom', startValue:startVal, endValue:endVal });
   }
 
   async function fetchJSON(u){ const r=await fetch(u); if(!r.ok) throw new Error(await r.text()); return r.json(); }
-  function setStatus(s){ document.getElementById('status').textContent=s; }
+  function setStatus(s){ const el=document.getElementById('status'); if(el) el.textContent=s; }
 
   function appendTicks(rows){
-    if(!rows||!rows.length) return;
+    if(!rows||!rows.length) return 0;
     const atRight=pinnedRight();
     for(const r of rows){
       state.x.push(r.id);
@@ -107,18 +119,39 @@
         {name:'Max (labels)',data:state.max_lbl},{name:'Mid (labels)',data:state.mid_lbl},{name:'Min (labels)',data:state.min_lbl},
       ]
     },{ lazyUpdate:true });
-    if(atRight) stickToRight();
+    if(atRight) keepRightWithView();
+    return rows.length;
   }
 
   function overlayLabels(rows,key){
     if(!rows||!rows.length) return;
     const map=new Map(state.x.map((id,i)=>[id,i])); const arr=state[key];
-    for(const r of rows){ const i=map.get(r.id); if(i!=null) arr[i]=(r.value!=null?+r.value:null); }
+    for(const r of rows){
+      const id = r.id ?? r.tick_id ?? r.start_id;
+      const val = (r.value ?? r.price ?? r.mid ?? r.start_price);
+      if(id==null || val==null) continue;
+      const i=map.get(id); if(i!=null) arr[i]=+val;
+    }
     chart.setOption({
       series:[
         {name:'Max (labels)',data:state.max_lbl},{name:'Mid (labels)',data:state.mid_lbl},{name:'Min (labels)',data:state.min_lbl},
       ]
     },{ lazyUpdate:true });
+  }
+
+  async function fetchLabelsFrom(startId, limit){
+    const lim=Math.max(limit,1000);
+    const [mx,md,mn]=await Promise.allSettled([
+      fetchJSON(`/api/labels/max/range?start_id=${startId}&limit=${lim}`),
+      fetchJSON(`/api/labels/mid/range?start_id=${startId}&limit=${lim}`),
+      fetchJSON(`/api/labels/min/range?start_id=${startId}&limit=${lim}`),
+    ]);
+    if(mx.status==='fulfilled') overlayLabels(mx.value,'max_lbl');
+    if(md.status==='fulfilled') overlayLabels(md.value,'mid_lbl');
+    if(mn.status==='fulfilled') overlayLabels(mn.value,'min_lbl');
+    state.labelsLoadedUntil.max = Math.max(state.labelsLoadedUntil.max, state.rightmostId);
+    state.labelsLoadedUntil.mid = Math.max(state.labelsLoadedUntil.mid, state.rightmostId);
+    state.labelsLoadedUntil.min = Math.max(state.labelsLoadedUntil.min, state.rightmostId);
   }
 
   async function fetchRange(startId, size){
@@ -129,11 +162,8 @@
       `/api/ticks/latestN?limit=${size}`,
       `/api/ticks/after?since_id=${Math.max(0,startId-1)}&limit=${size}`
     ];
-    for (const u of tryUrls) {
-      try {
-        const rows = await fetchJSON(u);
-        if (Array.isArray(rows) && rows.length) return rows;
-      } catch { /* next */ }
+    for(const u of tryUrls){
+      try{ const rows=await fetchJSON(u); if(Array.isArray(rows)&&rows.length) return rows; }catch{}
     }
     return [];
   }
@@ -141,31 +171,33 @@
   async function loadChunk(startId, size){
     setStatus('loading…');
     const rows = await fetchRange(startId, size);
-    appendTicks(rows);
-    if(rows.length){
-      await Promise.all([
-        fetchJSON(`/api/labels/max/range?start_id=${state.x[0]}&limit=${state.x.length}`).then(r=>overlayLabels(r,'max_lbl')).catch(()=>{}),
-        fetchJSON(`/api/labels/mid/range?start_id=${state.x[0]}&limit=${state.x.length}`).then(r=>overlayLabels(r,'mid_lbl')).catch(()=>{}),
-        fetchJSON(`/api/labels/min/range?start_id=${state.x[0]}&limit=${state.x.length}`).then(r=>overlayLabels(r,'min_lbl')).catch(()=>{}),
-      ]);
+    const added = appendTicks(rows);
+    if(added){
+      await fetchLabelsFrom(state.x[0], state.x.length);
+      keepRightWithView();
     }
-    setSeriesVisibility();
-    setStatus(`loaded ${rows.length}`);
+    setStatus(`loaded ${added}`);
   }
 
+  // UI
+  function valNum(id, fallback){ const v=parseInt(document.getElementById(id).value||`${fallback}`,10); return Number.isFinite(v)?v:fallback; }
+
   document.getElementById('btnLoad').addEventListener('click', async ()=>{
-    const startId = parseInt(document.getElementById('startId').value||'1',10);
-    const size = parseInt(document.getElementById('chunkSize').value||'20000',10);
-    Object.assign(state,{ x:[], ts:[], ask:[], bid:[], mid_tick:[], max_lbl:[], mid_lbl:[], min_lbl:[], rightmostId:0 });
+    const startId = valNum('startId', 1);
+    const size = valNum('chunkSize', DEFAULT_CHUNK);
+    Object.assign(state,{
+      x:[], ts:[], ask:[], bid:[], mid_tick:[],
+      max_lbl:[], mid_lbl:[], min_lbl:[],
+      rightmostId:0, viewSize: 3000,
+      labelsLoadedUntil:{ max:0, mid:0, min:0 }
+    });
     chart.clear(); chart.setOption(baseOption(),{ notMerge:true });
     await loadChunk(startId, size);
   });
 
   document.getElementById('btnMore').addEventListener('click', async ()=>{
     if(!state.rightmostId) return;
-    const size = parseInt(document.getElementById('chunkSize').value||'20000',10);
-    await loadChunk(state.rightmostId+1, size);
+    const size = valNum('chunkSize', DEFAULT_CHUNK);
+    await loadChunk(state.rightmostId + 1, size);
   });
-
-  // empty until user loads a range
 })();
