@@ -1,42 +1,54 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Live</title>
+  <title>Live – Six Price Lines</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    html, body { height: 100%; margin: 0; background:#0b1220; color:#cfd5e1; font:14px system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
-    .toolbar { display:flex; gap:8px; align-items:center; padding:10px; }
-    #chart { height: calc(100vh - 56px); width: 100vw; }
-    label { user-select:none; }
-    input, select, button { background:#111829; color:#cfd5e1; border:1px solid #2a3350; border-radius:6px; padding:6px 8px; }
-    button { cursor:pointer; }
+    :root { color-scheme: dark; }
+    body {
+      margin: 0; background: #0b0f14; color: #e5e7eb; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    }
+    header, .controls {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 14px; border-bottom: 1px solid #1f2937;
+    }
+    h1 { margin: 0; font-size: 16px; font-weight: 600; }
+    #legend { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+    .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; margin-right: 6px; }
+    label.toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; }
+    .toolbar { display: flex; align-items: center; gap: 8px; }
+    button, input[type="checkbox"] {
+      cursor: pointer;
+    }
+    #chart { width: 100vw; height: calc(100vh - 96px); }
+    small#status { opacity: .7; }
   </style>
 </head>
 <body>
-  <div class="toolbar">
-    <button id="btnPause">Pause</button>
-    <button id="btnLeft">Load left</button>
-    <label>Window
-      <select id="selWindow">
-        <option value="1000">1k</option>
-        <option value="2000" selected>2k</option>
-        <option value="5000">5k</option>
-        <option value="10000">10k</option>
-      </select>
-    </label>
-    <label><input id="chkAsk" type="checkbox" /> ask</label>
-    <label><input id="chkMid" type="checkbox" checked /> mid</label>
-    <label><input id="chkBid" type="checkbox" /> bid</label>
-    <label><input id="chkMin" type="checkbox" checked /> min</label>
-    <label><input id="chkZMid" type="checkbox" checked /> mid</label>
-    <label><input id="chkMax" type="checkbox" checked /> max</label>
+  <header>
+    <h1>Live · Six Price Lines</h1>
+    <div id="legend">
+      <label class="toggle"><span class="swatch" style="background:#FF6B6B"></span><input type="checkbox" data-series="ask" checked> Ask</label>
+      <label class="toggle"><span class="swatch" style="background:#FFD166"></span><input type="checkbox" data-series="mid_tick" checked> Mid (ticks)</label>
+      <label class="toggle"><span class="swatch" style="background:#4ECDC4"></span><input type="checkbox" data-series="bid" checked> Bid</label>
+      <label class="toggle"><span class="swatch" style="background:#A78BFA"></span><input type="checkbox" data-series="max_lbl" checked> Max (labels)</label>
+      <label class="toggle"><span class="swatch" style="background:#60A5FA"></span><input type="checkbox" data-series="mid_lbl" checked> Mid (labels)</label>
+      <label class="toggle"><span class="swatch" style="background:#34D399"></span><input type="checkbox" data-series="min_lbl" checked> Min (labels)</label>
+    </div>
+  </header>
+
+  <div class="controls">
+    <div class="toolbar">
+      <button id="btnLoadNew">Load New Ticks</button>
+      <label class="toggle"><input type="checkbox" id="autoFetch"> Auto-fetch</label>
+    </div>
+    <small id="status">idle</small>
   </div>
 
   <div id="chart"></div>
 
-  <script src="https://cdn.jsdelivr.net/npm/echarts@5"></script>
-  <script src="./chart-core.js"></script>
-  <script src="./live.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+  <script src="./live-core.js"></script>
 </body>
 </html>

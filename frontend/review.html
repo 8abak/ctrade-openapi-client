@@ -2,36 +2,52 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Review</title>
+  <title>Review – Six Price Lines</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
   <style>
-    :root{--bg:#0d1117;--panel:#111827;--ink:#e5e7eb;--muted:#94a3b8}
-    html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font:14px system-ui,Segoe UI,Roboto,Helvetica,Arial}
-    .bar{display:flex;gap:.75rem;align-items:center;padding:.6rem .8rem;background:var(--panel);position:sticky;top:0;z-index:2}
-    .bar input[type="number"]{width:120px;background:#0b1220;border:1px solid #22304a;border-radius:8px;color:var(--ink);padding:.35rem .5rem}
-    .bar button{background:#1f2a44;border:1px solid #334155;color:var(--ink);padding:.45rem .7rem;border-radius:8px;cursor:pointer}
-    .layers{display:flex;gap:.6rem;align-items:center;margin-left:auto}
-    .layers label{color:#9ca3af}
-    #chart{position:fixed;inset:70px 0 0 0}
+    :root { color-scheme: dark; }
+    body { margin: 0; background: #0b0f14; color: #e5e7eb; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    header, .controls {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 14px; border-bottom: 1px solid #1f2937;
+    }
+    h1 { margin: 0; font-size: 16px; font-weight: 600; }
+    #legend { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+    .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; margin-right: 6px; }
+    label.toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; }
+    .toolbar { display: flex; align-items: center; gap: 8px; }
+    input[type="number"] { width: 120px; background: #0f172a; color: #e5e7eb; border: 1px solid #1f2937; border-radius: 6px; padding: 6px 8px; }
+    button { cursor: pointer; }
+    #chart { width: 100vw; height: calc(100vh - 96px); }
+    small#status { opacity: .7; }
   </style>
 </head>
 <body>
-  <div class="bar">
-    <label>Start ID <input id="startId" type="number" value="1"></label>
-    <label>Chunk <input id="chunk" type="number" value="2000"></label>
-    <button id="load">Load</button>
-    <button id="moreR">Load more (right)</button>
-    <div class="layers">
-      <label><input id="ask"     type="checkbox"> ask</label>
-      <label><input id="midp"    type="checkbox" checked> mid</label>
-      <label><input id="bid"     type="checkbox"> bid</label>
-      <label><input id="minzz"   type="checkbox" checked> min</label>
-      <label><input id="midzz"   type="checkbox" checked> mid</label>
-      <label><input id="maxzz"   type="checkbox" checked> max</label>
+  <header>
+    <h1>Review · Six Price Lines</h1>
+    <div id="legend">
+      <label class="toggle"><span class="swatch" style="background:#FF6B6B"></span><input type="checkbox" data-series="ask" checked> Ask</label>
+      <label class="toggle"><span class="swatch" style="background:#FFD166"></span><input type="checkbox" data-series="mid_tick" checked> Mid (ticks)</label>
+      <label class="toggle"><span class="swatch" style="background:#4ECDC4"></span><input type="checkbox" data-series="bid" checked> Bid</label>
+      <label class="toggle"><span class="swatch" style="background:#A78BFA"></span><input type="checkbox" data-series="max_lbl" checked> Max (labels)</label>
+      <label class="toggle"><span class="swatch" style="background:#60A5FA"></span><input type="checkbox" data-series="mid_lbl" checked> Mid (labels)</label>
+      <label class="toggle"><span class="swatch" style="background:#34D399"></span><input type="checkbox" data-series="min_lbl" checked> Min (labels)</label>
     </div>
+  </header>
+
+  <div class="controls">
+    <div class="toolbar">
+      <label>Start ID <input type="number" id="startId" value="1" min="1"></label>
+      <label>Chunk Size <input type="number" id="chunkSize" value="10000" min="100" max="200000"></label>
+      <button id="btnLoad">Load</button>
+      <button id="btnMore">Load More</button>
+    </div>
+    <small id="status">idle</small>
   </div>
+
   <div id="chart"></div>
-  <script type="module" src="./review.js"></script>
+
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+  <script src="./review-core.js"></script>
 </body>
 </html>

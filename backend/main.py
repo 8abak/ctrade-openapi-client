@@ -270,6 +270,137 @@ def api_sql_exec(
         raise HTTPException(400, detail=f"{type(e).__name__}: {e}")
 
 # ----------------------- Tick data (kept/compat) ----------------------
+# --- ADD: last-N ticks for live bootstrap (safe alias around /ticks/recent) ---
+@app.get("/api/ticks/latestN")
+def api_ticks_latestN(limit: int = 10000):
+    limit = max(1, min(limit, 20000))
+    return ticks_recent(limit)
+
+# --- ADD: incremental ticks strictly AFTER a given id (for live polling) ---
+@app.get("/api/ticks/after")
+def api_ticks_after(since_id: int, limit: int = 5000):
+    limit = max(1, min(limit, 20000))
+    conn = get_conn()
+    ts_col, mid_expr, (has_bid, has_ask) = _ts_mid_cols(conn)
+    bid_sel = ", bid" if has_bid else ""
+    ask_sel = ", ask" if has_ask else ""
+    with dict_cur(conn) as cur:
+        cur.execute(
+            f"""
+            SELECT id, {ts_col} AS ts, {mid_expr} AS mid{bid_sel}{ask_sel}
+            FROM ticks
+            WHERE id > %s
+            ORDER BY id ASC
+            LIMIT %s
+            """,
+            (since_id, limit),
+        )
+        rows = cur.fetchall()
+    # normalize
+    for r in rows:
+        if isinstance(r.get("mid"), Decimal): r["mid"] = float(r["mid"])
+        if has_bid and isinstance(r.get("bid"), Decimal): r["bid"] = float(r["bid"])
+        if has_ask and isinstance(r.get("ask"), Decimal): r["ask"] = float(r["ask"])
+        r["spread"] = (
+            (r.get("ask") - r.get("bid"))
+            if (has_bid and has_ask and r.get("ask") is not None and r.get("bid") is not None)
+            else None
+        )
+        r["ts"] = r["ts"].isoformat()
+    return rows
+
+# --- ADD: generic label fetcher for min/mid/max as per-tick lines ---
+def _table_exists(conn, name: str) -> bool:
+    with dict_cur(conn) as cur:
+        cur.execute(
+            "select 1 from information_schema.tables where table_schema='public' and table_name=%s",
+            (name,),
+        )
+        return cur.fetchone() is not None
+
+@app.get("/api/labels/{name}/range")
+def api_labels_range(
+    name: str,
+    start_id: int = Query(...),
+    limit: int = Query(20000, ge=1, le=20000),
+):
+    """
+    Returns rows for label tables (min|mid|max) as [{id, ts, value}].
+    - Tolerates schema differences:
+        * id column can be 'id' or 'tick_id'
+        * value column can be 'value' or 'price' (or 'mid' as fallback)
+        * timestamp column is auto-detected with detect_ts_col()
+    - Returns [] if table doesn't exist.
+    """
+    name = name.lower()
+    if name not in ("min", "mid", "max"):
+        raise HTTPException(400, "name must be one of: min, mid, max")
+
+    conn = get_conn()
+    if not _table_exists(conn, name):
+        return []  # gracefully handle empty/missing label tables
+
+    ts_col, _, _ = _ts_mid_cols(conn)
+
+    # Probe columns
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema='public' AND table_name=%s
+            """,
+            (name,),
+        )
+        cols = {r["column_name"] for r in cur.fetchall()}
+
+    id_col = "tick_id" if "tick_id" in cols else ("id" if "id" in cols else None)
+    if not id_col:
+        # best-effort: bail out safely
+        return []
+
+    # value candidates in priority order
+    val_col = "value" if "value" in cols else ("price" if "price" in cols else ("mid" if "mid" in cols else None))
+    if not val_col:
+        return []
+
+    # If label table lacks timestamp, we’ll derive ts by joining ticks
+    has_ts = ts_col in cols
+
+    with dict_cur(conn) as cur:
+        if has_ts:
+            cur.execute(
+                f"""
+                SELECT {id_col} AS id, {ts_col} AS ts, {val_col} AS value
+                FROM {name}
+                WHERE {id_col} >= %s
+                ORDER BY {id_col} ASC
+                LIMIT %s
+                """,
+                (start_id, limit),
+            )
+        else:
+            # join ticks to get ts (safe if ticks is big; indexed on id)
+            cur.execute(
+                f"""
+                SELECT t.id, t.{ts_col} AS ts, lb.{val_col} AS value
+                FROM {name} lb
+                JOIN ticks t ON t.id = lb.{id_col}
+                WHERE lb.{id_col} >= %s
+                ORDER BY lb.{id_col} ASC
+                LIMIT %s
+                """,
+                (start_id, limit),
+            )
+        rows = cur.fetchall()
+
+    # normalize
+    for r in rows:
+        if isinstance(r.get("value"), Decimal):
+            r["value"] = float(r["value"])
+        if isinstance(r.get("ts"), (datetime, date)):
+            r["ts"] = r["ts"].isoformat()
+    return rows
 
 @app.get("/ticks/lastid")
 def ticks_lastid():
