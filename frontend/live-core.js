@@ -1,225 +1,248 @@
-(() => {
-  const INIT_CAP = 60000;    // keep at most this many points in memory
-  const VIEW_DEFAULT = 3000; // visible points when pinned-right
+// PATH: frontend/live-core.js
+// Live chart anchored to the latest MAX leg start_id.
+// - draws mid line from start_id → now (chunked load + SSE updates)
+// - overlays the max leg as a separate line (start_ts→end_ts)
+// - keeps your dark theme, integer y-grid, rich tooltip
+// - provides "Load more ←" that never goes earlier than the anchor
 
-  const el = document.getElementById('chart');
-  const chart = echarts.init(el, null, { renderer: 'canvas' });
+const API = '/api';
+const chart = echarts.init(document.getElementById('chart'));
 
-  const COLORS = {
-    ask: '#FF6B6B', mid_tick: '#FFD166', bid: '#4ECDC4',
-    max_lbl: '#A78BFA', mid_lbl: '#60A5FA', min_lbl: '#34D399',
-  };
+// --- state ---
+let rows = [];                 // [{id, ts, mid, bid?, ask?, spread?}]
+let preds = [];                // [{at_ts, hit, dir, ...}]
+let paused = false;
+let win = 10000;               // visible window hint (doesn't force zoom)
+let anchorStartId = null;      // start_id of the last MAX leg
+let anchorEndId = null;        // end_id of that leg (for the overlay)
+let maxlineData = [];          // [[ts,price],[ts,price]]
+let initialLoadedCount = 0;    // used to keep the anchor body in memory
+const CHUNK = 5000;
 
-  const state = {
-    x:[], ts:[], ask:[], bid:[], mid_tick:[],
-    max_lbl:[], mid_lbl:[], min_lbl:[],
-    lastId: 0,
-    viewSize: VIEW_DEFAULT,
-    seg: null, // {id,start_id,end_id,...}
-    fetching: false,
-    labelsCursor: { max: 0, mid: 0, min: 0 }, // last fetched label start id
-  };
+// --- UI bindings ---
+document.getElementById('toggle').onclick = () => {
+  paused = !paused;
+  document.getElementById('toggle').textContent = paused ? 'Resume' : 'Pause';
+};
+document.getElementById('win').onchange = (e) => {
+  win = +e.target.value;
+  rebuildSeries();
+};
+document.getElementById('go').onclick = jumpToTick;
+document.getElementById('labels').addEventListener('change', (e) => {
+  chart.setOption({ series: [ {}, {}, { label:{show:e.target.checked} } ] });
+});
+document.getElementById('showMax').addEventListener('change', (e) => {
+  chart.setOption({ series: [ {}, { show: e.target.checked }, {} ] });
+});
+document.getElementById('moreLeft').onclick = loadMoreLeft;
+window.addEventListener('resize', () => chart.resize());
 
-  // ---------- chart option ----------
-  function yAxisInt(){ return {
-    type:'value', min:(e)=>Math.floor(e.min), max:(e)=>Math.ceil(e.max),
-    interval:1, minInterval:1, scale:false,
-    axisLabel:{ color:'#9ca3af', formatter:(v)=>Number.isInteger(v)?v:'' },
-    axisLine:{ lineStyle:{ color:'#1f2937' } },
-    splitLine:{ show:true, lineStyle:{ color:'rgba(148,163,184,0.08)' } },
-  };}
+// --- chart setup ---
+function setupChart(){
+  chart.setOption({
+    backgroundColor:'#0d1117',
+    animation:false,
+    tooltip:{
+      trigger:'axis',
+      axisPointer:{type:'line'},
+      formatter:(params)=>{
+        const p = params.find(x=>x.seriesName==='mid') || params[0];
+        const d = p && p.data ? p.data.meta : null;
+        if (!d) return '';
+        const dt = new Date(d.ts);
+        const date = dt.toLocaleDateString();
+        const time = dt.toLocaleTimeString();
+        const here = preds.filter(x=>x.at_ts && new Date(x.at_ts).getTime() === new Date(d.ts).getTime());
+        const labelsHere = here.map(x=>`pred:${x.dir} ${x.hit===true?'✓':x.hit===false?'✗':'?'}`);
+        const fmt = (v)=> (v===null || v===undefined) ? '' : (+v).toFixed(2);
+        const lines = [
+          `id: ${d.id}`,
+          `${date} ${time}`,
+          `mid: ${fmt(d.mid)}`,
+          `bid: ${fmt(d.bid)}`,
+          `ask: ${fmt(d.ask)}`,
+          `spread: ${fmt(d.spread)}`
+        ];
+        if (labelsHere.length) lines.push(`labels: ${labelsHere.join(', ')}`);
+        return lines.join('<br/>');
+      }
+    },
+    grid:{left:48,right:24,top:24,bottom:48},
+    xAxis:{ type:'time', axisLabel:{color:'#c9d1d9'}, axisLine:{lineStyle:{color:'#30363d'}}, axisPointer:{show:true} },
+    yAxis:{
+      type:'value', scale:true, minInterval:1, splitNumber:8,
+      axisLabel:{color:'#c9d1d9', formatter:(v)=> String(Math.round(v))},
+      splitLine:{lineStyle:{color:'#30363d'}}, axisPointer:{show:false}
+    },
+    dataZoom:[
+      {type:'inside', xAxisIndex:0, filterMode:'weakFilter'},
+      {type:'slider', xAxisIndex:0, bottom:6}
+    ],
+    series:[
+      { // 0: mid
+        name:'mid', type:'line', showSymbol:false, lineStyle:{width:1.5}, data:[]
+      },
+      { // 1: max leg overlay (two points)
+        name:'max', type:'line', showSymbol:false, lineStyle:{width:2.5, type:'dashed'}, data:[], z:5
+      },
+      { // 2: prediction markers (optional)
+        name:'pred', type:'scatter', symbolSize:10, data:[],
+        label:{show:false, formatter:(p)=> p.data?.p?.hit===true?'✓':(p.data?.p?.hit===false?'✗':'?')}
+      }
+    ]
+  });
+}
 
-  function mkLine(name,key,color,connect=false){
-    return { name, type:'line', showSymbol:true, symbolSize:3.5, smooth:false,
-      data:state[key], itemStyle:{ color }, lineStyle:{ color, width:1.6 }, connectNulls:connect };
-  }
+// --- series builders ---
+function rebuildSeries(){
+  // Keep a reasonable right-side window for perf, but never drop below anchor body.
+  let dataRows = rows;
+  if (rows.length > win * 2) dataRows = rows.slice(-win * 2);
 
-  function baseOption(){
-    return {
-      backgroundColor:'#0b0f14', animation:false,
-      grid:{ left:42, right:18, top:10, bottom:28 },
-      tooltip:{ trigger:'axis', axisPointer:{type:'line'}, backgroundColor:'rgba(17,24,39,.95)',
-        formatter:(ps)=>{
-          if(!ps?.length) return '';
-          const i=ps[0].dataIndex, id=state.x[i], ts=state.ts[i]||'';
-          const dt=ts?new Date(ts):null, d=dt?`${dt.toLocaleDateString()} ${dt.toLocaleTimeString()}`:'(no time)';
-          const out=[`<div><b>ID</b>: ${id}</div><div><b>Time</b>: ${d}</div><hr>`];
-          for(const p of ps) if(p.value!=null) out.push(`<div><span style="display:inline-block;width:8px;height:8px;background:${p.color};margin-right:6px;border-radius:2px"></span>${p.seriesName}: ${p.value}</div>`);
-          return out.join('');
-        }},
-      xAxis:{ type:'category', data:state.x,
-        axisLabel:{ color:'#9ca3af' }, axisLine:{ lineStyle:{ color:'#1f2937' } },
-        splitLine:{ show:true, lineStyle:{ color:'rgba(148,163,184,0.08)' } } },
-      yAxis: yAxisInt(),
-      dataZoom:[{type:'inside'},{type:'slider',height:16,bottom:4}],
-      series:[
-        mkLine('Ask','ask',COLORS.ask,false),
-        mkLine('Mid (ticks)','mid_tick',COLORS.mid_tick,false),
-        mkLine('Bid','bid',COLORS.bid,false),
-        mkLine('Max (labels)','max_lbl',COLORS.max_lbl,true),
-        mkLine('Mid (labels)','mid_lbl',COLORS.mid_lbl,true),
-        mkLine('Min (labels)','min_lbl',COLORS.min_lbl,true),
-      ]
-    };
-  }
-  chart.setOption(baseOption(), { notMerge:true });
-  chart.on('dataZoom', () => { if(!pinnedRight()) return; const [s,e]=idxWindow(); if(s!=null&&e!=null) state.viewSize=Math.max(1,e-s+1); });
+  const midData = dataRows.map(r => ({ value:[new Date(r.ts), r.mid], meta:r }));
+  chart.setOption({
+    series: [
+      { data: midData },
+      { data: maxlineData, show: document.getElementById('showMax').checked },
+      { data: buildPredScatter(dataRows) }
+    ]
+  });
+}
 
-  // ---------- utils ----------
-  async function j(url){ const r=await fetch(url); if(!r.ok) throw new Error(await r.text()); return r.json(); }
-  function status(t){ const el=document.getElementById('status'); if(el) el.textContent=t; }
-  function pinnedRight(){ const dz=chart.getOption().dataZoom?.[0]; if(!dz) return true; if(dz.endValue!=null){ const last=state.x.length?state.x.length-1:0; return dz.endValue>=last; } return (dz.end??100)>99.5; }
-  function idxWindow(){ const dz=chart.getOption().dataZoom?.[0]; if(!dz) return [null,null]; if(dz.startValue!=null) return [dz.startValue,dz.endValue]; const n=state.x.length; return [Math.floor(((dz.start??0)/100)*(n-1)), Math.floor(((dz.end??100)/100)*(n-1))]; }
-  function keepRight(){ const n=Math.max(1,state.viewSize); const len=state.x.length; const e=Math.max(0,len-1), s=Math.max(0,e-n+1); chart.dispatchAction({type:'dataZoom',startValue:s,endValue:e}); }
-
-  // ---------- append ----------
-  function cap(){
-    if(state.x.length<=INIT_CAP) return;
-    const cut=state.x.length-INIT_CAP;
-    for(const k of ['x','ts','ask','bid','mid_tick','max_lbl','mid_lbl','min_lbl']) state[k].splice(0,cut);
-  }
-  function appendTicks(rows){
-    if(!rows?.length) return 0;
-    const atRight=pinnedRight();
-    for(const r of rows){
-      state.x.push(r.id); state.ts.push(r.ts||null);
-      state.mid_tick.push(r.mid!=null?+r.mid:null);
-      state.ask.push(r.ask!=null?+r.ask:null);
-      state.bid.push(r.bid!=null?+r.bid:null);
-      state.max_lbl.push(null); state.mid_lbl.push(null); state.min_lbl.push(null);
-      state.lastId=r.id;
-    }
-    cap();
-    chart.setOption({
-      xAxis:{ data:state.x }, yAxis:yAxisInt(),
-      series:[
-        {name:'Ask',data:state.ask},{name:'Mid (ticks)',data:state.mid_tick},{name:'Bid',data:state.bid},
-        {name:'Max (labels)',data:state.max_lbl},{name:'Mid (labels)',data:state.mid_lbl},{name:'Min (labels)',data:state.min_lbl},
-      ]
-    },{lazyUpdate:true});
-    if(atRight) keepRight();
-    return rows.length;
-  }
-
-  function overlayLabelChunk(rows,key){
-    if(!rows?.length) return;
-    const idx = new Map(state.x.map((id,i)=>[id,i]));
-    const arr = state[key];
-    for(const r of rows){
-      const id = r.id ?? r.tick_id ?? r.start_id;
-      const val = r.value ?? r.start_price ?? r.price ?? r.mid;
-      if(id==null || val==null) continue;
-      const i = idx.get(id); if(i!=null) arr[i]=+val;
-    }
-    chart.setOption({ series:[
-      {name:'Max (labels)',data:state.max_lbl},
-      {name:'Mid (labels)',data:state.mid_lbl},
-      {name:'Min (labels)',data:state.min_lbl},
-    ]},{lazyUpdate:true});
-  }
-
-  async function fetchLabelsWindow(startId, endId){
-    let cursor = startId;
-    while(cursor <= endId){
-      const lim = Math.min(20000, endId - cursor + 1);
-      const [mx,md,mn] = await Promise.allSettled([
-        j(`/api/labels/max/range?start_id=${cursor}&limit=${lim}`),
-        j(`/api/labels/mid/range?start_id=${cursor}&limit=${lim}`),
-        j(`/api/labels/min/range?start_id=${cursor}&limit=${lim}`),
-      ]);
-      if(mx.status==='fulfilled'){ overlayLabelChunk(mx.value,'max_lbl'); if(mx.value.length) cursor = (mx.value.at(-1).id ?? mx.value.at(-1).start_id) + 1; }
-      if(md.status==='fulfilled'){ overlayLabelChunk(md.value,'mid_lbl'); }
-      if(mn.status==='fulfilled'){ overlayLabelChunk(mn.value,'min_lbl'); }
-      if((mx.status!=='fulfilled'||!mx.value.length) &&
-         (md.status!=='fulfilled'||!md.value.length) &&
-         (mn.status!=='fulfilled'||!mn.value.length)) break; // nothing more
-    }
-  }
-
-  async function seedAnchors(atId){
-    const [mx,md,mn]=await Promise.allSettled([
-      j(`/api/labels/max/prev?before_id=${atId}`),
-      j(`/api/labels/mid/prev?before_id=${atId}`),
-      j(`/api/labels/min/prev?before_id=${atId}`),
-    ]);
-    const i0 = state.x.indexOf(atId);
-    if(i0>=0){
-      if(mx.status==='fulfilled'&&mx.value?.value!=null) state.max_lbl[i0]=+mx.value.value;
-      if(md.status==='fulfilled'&&md.value?.value!=null) state.mid_lbl[i0]=+md.value.value;
-      if(mn.status==='fulfilled'&&mn.value?.value!=null) state.min_lbl[i0]=+mn.value.value;
-      chart.setOption({ series:[
-        {name:'Max (labels)',data:state.max_lbl},
-        {name:'Mid (labels)',data:state.mid_lbl},
-        {name:'Min (labels)',data:state.min_lbl},
-      ]},{lazyUpdate:true});
-    }
-  }
-
-  function setSeriesVisibility(){
-    const boxes=document.querySelectorAll('input[type=checkbox][data-series]');
-    const show={}; boxes.forEach(b=>show[b.dataset.series]=b.checked);
-    const opt=chart.getOption();
-    opt.series.forEach(s=>{
-      const key=({'Ask':'ask','Bid':'bid','Mid (ticks)':'mid_tick','Max (labels)':'max_lbl','Mid (labels)':'mid_lbl','Min (labels)':'min_lbl'})[s.name];
-      s.data=state[key]; const vis=show[key]; s.itemStyle.opacity=vis?1:0; s.lineStyle.opacity=vis?1:0;
+function buildPredScatter(windowRows){
+  if (!windowRows.length) return [];
+  const tsToMid = new Map(windowRows.map(r=>[new Date(r.ts).getTime(), r.mid]));
+  const startTs = new Date(windowRows[0].ts).getTime();
+  const endTs   = new Date(windowRows[windowRows.length-1].ts).getTime();
+  const items = [];
+  for (const p of preds){
+    const ts = p.at_ts ? new Date(p.at_ts).getTime() : null;
+    if (!ts || ts < startTs || ts > endTs) continue;
+    const y = tsToMid.get(ts);
+    if (y === undefined) continue;
+    items.push({
+      value:[ts, y],
+      p,
+      itemStyle:{ color: p.hit===true ? '#2ea043' : (p.hit===false ? '#f85149' : '#8b949e') },
+      symbol: p.hit==null ? 'circle' : (p.hit ? 'triangle' : 'rect')
     });
-    chart.setOption(opt,{notMerge:true,lazyUpdate:true});
   }
+  return items;
+}
 
-  // ---------- loading ----------
-  async function fetchRange(startId, endId){
-    const size=Math.max(1,endId-startId+1);
-    const tries=[
-      `/api/ticks?from_id=${startId}&to_id=${endId}`,
-      `/api/ticks/range?start_id=${startId}&limit=${size}`,
-      `/api/ticks/after?since_id=${Math.max(0,startId-1)}&limit=${size}`
+// --- data helpers ---
+function appendTicks(arr){
+  if (!arr || !arr.length) return;
+  rows = rows.concat(arr.map(r => ({
+    id:r.id, ts:r.ts, mid:r.mid, bid:r.bid, ask:r.ask, spread:r.spread
+  })));
+  initialLoadedCount = Math.max(initialLoadedCount, rows.length);
+  // Protect the anchored body from being trimmed away
+  const cap = Math.max(win * 2, initialLoadedCount);
+  if (rows.length > cap){
+    // trim only if we won't cross the anchor
+    let drop = rows.length - cap;
+    while (drop > 0 && rows.length && anchorStartId && rows[0].id > anchorStartId){
+      rows.shift(); drop--;
+    }
+  }
+  rebuildSeries();
+}
+
+function prependTicks(arr){
+  if (!arr || !arr.length) return;
+  const left = arr.map(r => ({ id:r.id, ts:r.ts, mid:r.mid, bid:r.bid, ask:r.ask, spread:r.spread }));
+  rows = left.concat(rows);
+  initialLoadedCount = Math.max(initialLoadedCount, rows.length);
+  rebuildSeries();
+}
+
+async function loadRangeInChunks(startId, endId){
+  let from = startId;
+  while (from <= endId){
+    const to = Math.min(from + CHUNK - 1, endId);
+    const r  = await fetch(`${API}/ticks?from_id=${from}&to_id=${to}`);
+    const a  = await r.json();
+    appendTicks(a);
+    from = to + 1;
+  }
+}
+
+async function jumpToTick(){
+  const val = +document.getElementById('jump').value;
+  if (!val) return;
+  const end = val;
+  const start = Math.max(1, end - win + 1);
+  const r = await fetch(`${API}/ticks?from_id=${start}&to_id=${end}`);
+  const arr = await r.json();
+  rows = arr.map(r=>({id:r.id, ts:r.ts, mid:r.mid, bid:r.bid, ask:r.ask, spread:r.spread}));
+  rebuildSeries();
+}
+
+async function loadMoreLeft(){
+  if (!rows.length || anchorStartId == null) return;
+  const firstId = rows[0].id;
+  const to   = firstId - 1;
+  if (to < anchorStartId) return;
+  const start = Math.max(anchorStartId, to - CHUNK + 1);
+  const r  = await fetch(`${API}/ticks?from_id=${start}&to_id=${to}`);
+  const a  = await r.json();
+  prependTicks(a);
+}
+
+// --- bootstrap ---
+async function bootstrap(){
+  // 1) get last max leg (anchor)
+  const maxline = await (await fetch(`${API}/maxline/last`)).json();
+  if (maxline && maxline.start_id){
+    anchorStartId = +maxline.start_id;
+    anchorEndId   = +(maxline.end_id ?? maxline.start_id);
+    maxlineData = [
+      [new Date(maxline.start_ts), +maxline.start_price],
+      [new Date(maxline.end_ts),   +maxline.end_price]
     ];
-    for(const u of tries){ try{ const rows=await j(u); if(Array.isArray(rows)&&rows.length) return rows; }catch{} }
-    return [];
+  } else {
+    anchorStartId = null;
+    maxlineData = [];
   }
 
-  async function loadInitialFromLastMax(){
-    status('finding last max…');
-    const seg = await j('/api/maxline/last');
-    if(!seg?.start_id){ status('no max'); return; }
-    state.seg = seg;
+  // 2) find current last tick
+  const last = await (await fetch('/ticks/lastid')).json();
+  const end  = +last.lastId;
 
-    // get latest tick id
-    let latest = 0;
-    try { const r = await j('/api/ticks/latestN?limit=1'); latest = r?.[0]?.id || 0; } catch {}
-    const from = seg.start_id, to = Math.max(seg.end_id || 0, latest);
-
-    status(`loading ticks ${from}..${to}`);
-    const rows = await fetchRange(from, to);
-    appendTicks(rows);
-    await seedAnchors(from);
-    await fetchLabelsWindow(from, to);
-    keepRight();
-    setSeriesVisibility();
-    status('ready');
+  // choose an initial end so the whole max leg is visible, but not insane
+  let initialEnd = end;
+  if (anchorStartId != null) {
+    initialEnd = Math.max(anchorEndId || anchorStartId, Math.min(anchorStartId + win - 1, end));
   }
 
-  async function loadNew(){
-    if(state.fetching) return;
-    state.fetching = true;
-    status('fetching…');
-    try{
-      const rows = await j(`/api/ticks/after?since_id=${state.lastId||0}&limit=5000`);
-      const added = appendTicks(rows);
-      if(added) await fetchLabelsWindow(state.lastId-added+1, state.lastId);
-      status(added?`+${added}`:'no new ticks');
-    }catch(e){ console.error(e); status('error'); }
-    finally{ state.fetching=false; }
+  // 3) initial load (from anchor or recent window) in chunks
+  if (anchorStartId != null) {
+    await loadRangeInChunks(anchorStartId, initialEnd);
+  } else {
+    const start = Math.max(1, end - win + 1);
+    const r = await fetch(`${API}/ticks?from_id=${start}&to_id=${end}`);
+    appendTicks(await r.json());
   }
 
-  // UI
-  document.querySelectorAll('input[type=checkbox][data-series]').forEach(cb=>cb.addEventListener('change', setSeriesVisibility));
-  document.getElementById('btnLoadNew').addEventListener('click', loadNew);
-  (function wireAuto(){
-    const box=document.getElementById('autoFetch'); let t=null;
-    box.addEventListener('change',()=>{ if(box.checked){ if(t)clearInterval(t); t=setInterval(loadNew,1000);} else { if(t)clearInterval(t); t=null; } });
-  })();
+  // 4) apply the overlay and draw once
+  rebuildSeries();
 
-  // boot
-  loadInitialFromLastMax();
-})();
+  // 5) stream live updates
+  const es = new EventSource(`${API}/live`);
+  es.addEventListener('tick', ev=>{
+    if (paused) return;
+    const d = JSON.parse(ev.data);
+    appendTicks([{ id:d.id, ts:d.ts, mid:d.mid, bid:d.bid, ask:d.ask, spread:d.spread }]);
+  });
+  es.addEventListener('pred', ev=>{
+    if (paused) return;
+    const d = JSON.parse(ev.data);
+    preds.push(d);
+    rebuildSeries();
+  });
+}
+
+setupChart();
+bootstrap();

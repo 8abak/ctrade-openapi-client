@@ -1,51 +1,62 @@
+<!-- PATH: frontend/live.html -->
 <!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Live – Six Price Lines</title>
+  <title>Live Tick Chart</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root { color-scheme: dark; }
-    body { margin: 0; background: #0b0f14; color: #e5e7eb; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
-    header, .controls {
-      display: flex; align-items: center; justify-content: space-between;
-      padding: 10px 14px; border-bottom: 1px solid #1f2937;
-    }
-    h1 { margin: 0; font-size: 16px; font-weight: 600; }
-    #legend { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
-    .toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
-    .swatch { width: 12px; height: 12px; border-radius: 2px; display:inline-block; }
-    .toolbar { display: flex; align-items: center; gap: 8px; }
-    button, input[type="checkbox"] { cursor: pointer; }
-    #chart { width: 100vw; height: calc(100vh - 96px); }
-    small#status { opacity: .7; }
+    body{margin:0;background:#0d1117;color:#c9d1d9;font:14px/1.4 system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+    header{display:flex;gap:.75rem;align-items:center;padding:.6rem .8rem;border-bottom:1px solid #30363d;flex-wrap:wrap}
+    header .spacer{flex:1}
+    select,input,button,label{background:#161b22;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:.35rem .5rem}
+    button{cursor:pointer}
+    #chart{height:calc(100vh - 56px)}
+    .group{display:flex;gap:.5rem;align-items:center}
+    .sep{width:1px;height:24px;background:#30363d;margin:0 .25rem}
+    .muted{opacity:.8}
   </style>
 </head>
 <body>
-  <header>
-    <h1>Live · Six Price Lines</h1>
-    <div id="legend" aria-label="series toggles">
-      <!-- no text labels by request; order matters -->
-      <label class="toggle" title="Ask"><span class="swatch" style="background:#FF6B6B"></span><input type="checkbox" data-series="ask"></label>
-      <label class="toggle" title="Mid (price)"><span class="swatch" style="background:#FFD166"></span><input type="checkbox" data-series="mid_tick" checked></label>
-      <label class="toggle" title="Bid"><span class="swatch" style="background:#4ECDC4"></span><input type="checkbox" data-series="bid"></label>
-      <label class="toggle" title="Max (label)"><span class="swatch" style="background:#A78BFA"></span><input type="checkbox" data-series="max_lbl" checked></label>
-      <label class="toggle" title="Mid (label)"><span class="swatch" style="background:#60A5FA"></span><input type="checkbox" data-series="mid_lbl" checked></label>
-      <label class="toggle" title="Min (label)"><span class="swatch" style="background:#34D399"></span><input type="checkbox" data-series="min_lbl" checked></label>
-    </div>
-  </header>
+<header>
+  <strong>Live Tick Chart</strong>
+  <div class="sep"></div>
+  <button id="toggle" title="Pause/Resume live stream">Pause</button>
 
-  <div class="controls">
-    <div class="toolbar">
-      <button id="btnLoadNew">Load New Ticks</button>
-      <label class="toggle"><input type="checkbox" id="autoFetch"> Auto-fetch</label>
-    </div>
-    <small id="status">idle</small>
+  <div class="group">
+    <label class="muted">Window</label>
+    <select id="win">
+      <option value="2000">2k</option>
+      <option value="5000">5k</option>
+      <option value="10000" selected>10k</option>
+      <option value="20000">20k</option>
+    </select>
   </div>
 
-  <div id="chart"></div>
+  <div class="group">
+    <label class="muted">Jump to tick</label>
+    <input id="jump" type="number" min="1" step="1" placeholder="id…" />
+    <button id="go">Go</button>
+  </div>
 
-  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
-  <script src="./live-core.js"></script>
+  <div class="group">
+    <button id="moreLeft" title="Load more history to the left">Load more ←</button>
+  </div>
+
+  <div class="spacer"></div>
+
+  <div class="group">
+    <label><input id="labels" type="checkbox" /> Pred labels</label>
+    <label><input id="showMax" type="checkbox" checked /> Max leg</label>
+  </div>
+</header>
+
+<div id="chart"></div>
+
+<!-- ECharts -->
+<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+<!-- Core logic -->
+<script src="./live-core.js"></script>
 </body>
 </html>
