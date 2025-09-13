@@ -6,12 +6,12 @@
   <title>Review · Six Price Lines</title>
   <style>
     :root { color-scheme: dark; }
-    body{ margin:0; background:#0b0f14; color:#e5e7eb; font:14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;}
+    body{ margin:0; background:#0b0f14; color:#e5e7eb; font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;}
     header{ display:flex; gap:.5rem; align-items:center; padding:.6rem .8rem; background:#0f1620; border-bottom:1px solid #111827;}
-    header .title{ font-weight:700; margin-right:.75rem; color:#cbd5e1;}
+    .title{ font-weight:700; margin-right:.75rem; color:#cbd5e1;}
     input[type="number"]{ width:7rem; padding:.35rem .5rem; border-radius:.5rem; border:1px solid #1f2937; background:#0b0f14; color:#e5e7eb;}
-    button{ padding:.35rem .6rem; border:1px solid #1f2937; background:#111827; color:#e5e7eb; border-radius:.5rem; cursor:pointer;}
-    button:hover{ background:#172032;}
+    select,button{ padding:.35rem .6rem; border:1px solid #1f2937; background:#111827; color:#e5e7eb; border-radius:.5rem; cursor:pointer;}
+    button:hover,select:hover{ background:#172032;}
     .legend{ display:flex; flex-wrap:wrap; gap:.8rem; padding:.4rem .8rem; border-top:1px solid #111827; background:#0f1620;}
     .legend label{ display:flex; align-items:center; gap:.35rem; color:#cbd5e1;}
     #status{ margin-left:auto; opacity:.8; }
@@ -21,9 +21,16 @@
 <body>
   <header>
     <div class="title">Review · Six Price Lines</div>
-    <label>Max ID <input id="maxId" type="number" placeholder="e.g. 978"/></label>
-    <button id="btnLoadMax">Load</button>
-    <button id="btnMoreMax">Load More</button>
+    <label>Leg
+      <select id="legKind">
+        <option value="max">Max</option>
+        <option value="mid">Mid</option>
+        <option value="min">Min</option>
+      </select>
+    </label>
+    <label>Row ID <input id="rowId" type="number" placeholder="e.g. 976"/></label>
+    <button id="btnLoad">Load</button>
+    <button id="btnMore">Load More</button>
     <button id="btnReset">Reset</button>
     <div id="status">idle</div>
   </header>
@@ -34,15 +41,17 @@
     <label><input type="checkbox" data-series="ask" checked> Ask</label>
     <label><input type="checkbox" data-series="mid_tick" checked> Mid (ticks)</label>
     <label><input type="checkbox" data-series="bid" checked> Bid</label>
+
     <label><input type="checkbox" data-series="max_lbl" checked> Max (labels)</label>
     <label><input type="checkbox" data-series="mid_lbl" checked> Mid (labels)</label>
     <label><input type="checkbox" data-series="min_lbl" checked> Min (labels)</label>
+
     <label><input type="checkbox" data-series="max_seg" checked> Max Segment</label>
+    <label><input type="checkbox" data-series="mid_seg" checked> Mid Segment</label>
+    <label><input type="checkbox" data-series="min_seg" checked> Min Segment</label>
   </div>
 
-  <!-- ECharts -->
   <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
-  <!-- Core logic -->
   <script src="./review-core.js"></script>
 </body>
 </html>
