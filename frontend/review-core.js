@@ -11,7 +11,7 @@
 
   const cbs = Array.from(document.querySelectorAll('input[type=checkbox][data-series]'));
 
-  // ---------- state ----------
+  // ---------- State ----------
   const COLORS = {
     ask:  "#FF6B6B",
     mid:  "#FFD166",
@@ -22,29 +22,33 @@
   };
 
   const S = {
-    ask: [], mid: [], bid: [],       // tick lines: [[id,price],...]
-    maxZ: [], midZ: [], minZ: [],    // polyline legs: [[sid,spr],[eid,epr],null,...]
-    tsById: new Map(),               // id -> timestamp
+    ask: [], mid: [], bid: [],       // [[tick_id, price], ...]
+    maxZ: [], midZ: [], minZ: [],    // [[sid, spr], [eid, epr], null, ...]
+    tsById: new Map(),               // tick_id -> ISO ts
     lastMaxRowId: null,
     lastSpanEndId: null,
-    lastZoomSpan: null,              // number of x units to keep when appending
+    lastZoomSpan: null,              // remember span to keep right on "Load More"
   };
 
-  // ---------- utils ----------
   const setStatus = (t) => { if (statusEl) statusEl.textContent = String(t); };
-  const j = async (u) => { const r = await fetch(u); if(!r.ok) throw new Error(await r.text()); return r.json(); };
+  const j = async (u) => { const r = await fetch(u); if (!r.ok) throw new Error(await r.text()); return r.json(); };
 
-  function yAxisInt(minY, maxY){
-    const pad = Math.max(0.5, (maxY - minY) * 0.08 || 1);
-    const lo = Math.floor((minY ?? 0) - pad);
-    const hi = Math.ceil ((maxY ?? 1) + pad);
-    return {
-      type:'value', min:lo, max:hi,
-      interval:1, minInterval:1, scale:false,
+  // ---------- Helpers ----------
+  function yAxisCfg(minY, maxY){
+    // Only clamp if we actually have data.
+    const cfg = {
+      type:'value',
+      minInterval:1, scale:false,
       axisLabel:{ color:'#9ca3af', formatter:v=>Number.isInteger(v)?v:'' },
       axisLine:{ lineStyle:{ color:'#1f2937' } },
       splitLine:{ show:true, lineStyle:{ color:'rgba(148,163,184,0.08)' } },
     };
+    if (Number.isFinite(minY) && Number.isFinite(maxY) && maxY > minY) {
+      const pad = Math.max(0.5, (maxY - minY) * 0.08);
+      cfg.min = Math.floor(minY - pad);
+      cfg.max = Math.ceil(maxY + pad);
+    }
+    return cfg;
   }
 
   function visibilityMap(){
@@ -60,7 +64,7 @@
     for(const arr of arrays){
       for(const p of arr){
         if(!p || p[0]==null || p[1]==null) continue;
-        const x=p[0], y=p[1];
+        const [x,y]=p;
         if(x<minX) minX=x; if(x>maxX) maxX=x;
         if(y<minY) minY=y; if(y>maxY) maxY=y;
       }
@@ -78,14 +82,14 @@
     return out;
   }
 
-  // ---------- data ----------
+  // ---------- Data ----------
   async function fetchMaxById(id){ return j(`/api/max/by_id?id=${id}`); }
   async function fetchNextMax(afterId){ return j(`/api/max/next?after_id=${afterId}`); }
   async function lastTickId(){ const r = await j('/api/ticks/last_id'); return r?.last_id ?? null; }
 
   async function fetchTicksWindow(fromId, toId){
     const OUT = { ask:[], mid:[], bid:[], tsById:new Map() };
-    if(toId < fromId){ const t=fromId; fromId=toId; toId=t; }
+    if (toId < fromId) [fromId,toId] = [toId,fromId];
     let cursor = fromId - 1;
     while(true){
       const limit = Math.min(20000, toId - cursor);
@@ -107,7 +111,7 @@
     return OUT;
   }
 
-  // unified zigzag (returns rows with .kind in {'max','mid','min'})
+  // unified zigzag endpoint: returns rows with .kind in {'max','mid','min'}
   async function fetchZigsWindow(fromId, toId){
     const rows = await j(`/api/zigzag?from_id=${fromId}&to_id=${toId}`);
     const out = { max:[], mid:[], min:[] };
@@ -120,11 +124,21 @@
     return out;
   }
 
-  // ---------- rendering ----------
+  // ---------- Chart ----------
   const chart = echarts.init(chartEl, null, { renderer:'canvas' });
 
-  function fullOption(){
+  function buildOption(){
     const vis = visibilityMap();
+    const ext = extentXY();
+    const dz = { start:0, end:100, useAbs:false };
+    const ycfg = ext ? yAxisCfg(ext.minY, ext.maxY) : yAxisCfg(undefined, undefined);
+    if (ext) {
+      dz.start = ext.minX;
+      dz.end   = ext.maxX;
+      dz.useAbs = true;
+      if (S.lastZoomSpan == null) S.lastZoomSpan = dz.end - dz.start;
+    }
+
     return {
       backgroundColor:'#0b0f14',
       animation:false,
@@ -150,11 +164,16 @@
         axisLine:{ lineStyle:{ color:'#1f2937' } },
         splitLine:{ show:true, lineStyle:{ color:'rgba(148,163,184,0.08)' } },
       },
-      yAxis: yAxisInt(ext?.minY, ext?.maxY),
-      dataZoom:[
-        { type:'inside', startValue: dz.start, endValue: dz.end },
-        { type:'slider', height:16, bottom:4, startValue: dz.start, endValue: dz.end },
-      ],
+      yAxis: ycfg,
+      dataZoom: dz.useAbs
+        ? [
+            { type:'inside', startValue:dz.start, endValue:dz.end },
+            { type:'slider', height:16, bottom:4, startValue:dz.start, endValue:dz.end },
+          ]
+        : [
+            { type:'inside', start:0, end:100 },
+            { type:'slider', height:16, bottom:4, start:0, end:100 },
+          ],
       series:[
         { name:'Ask',         type:'line', showSymbol:false, lineStyle:{ color:COLORS.ask,  width:1.4, opacity: vis.ask?1:0 },  itemStyle:{ opacity: vis.ask?1:0 },  data:S.ask },
         { name:'Mid (ticks)', type:'line', showSymbol:false, lineStyle:{ color:COLORS.mid,  width:1.4, opacity: (vis.mid_tick??vis.mid)?1:0 }, itemStyle:{ opacity: (vis.mid_tick??vis.mid)?1:0 }, data:S.mid },
@@ -171,46 +190,34 @@
     };
   }
 
-  // locals used by fullOption
-  let ext = null;
-  let dz  = { start: 0, end: 1 };
-
-  function computeZoomToData(){
-    ext = extentXY();
-    if(!ext){ dz = { start: 0, end: 1 }; return; }
-    // preserve span if we already had one (Load More), otherwise fit window
-    if (S.lastZoomSpan != null) {
-      const span = S.lastZoomSpan;
-      dz.end   = ext.maxX;
-      dz.start = Math.max(ext.minX, ext.maxX - span);
-    } else {
-      dz.start = ext.minX;
-      dz.end   = ext.maxX;
-      S.lastZoomSpan = dz.end - dz.start;
-    }
-  }
-
   function renderAll(){
-    computeZoomToData();
     chart.clear();
-    chart.setOption(fullOption(), { notMerge:true });
+    chart.setOption(buildOption(), { notMerge:true });
   }
 
-  // ---------- flows ----------
+  function rememberZoomToRight(){
+    const ex = extentXY();
+    if(!ex) return;
+    // Keep same span pinned to right edge
+    const span = S.lastZoomSpan ?? (ex.maxX - ex.minX);
+    S.lastZoomSpan = span;
+  }
+
+  // ---------- Flows ----------
   async function loadByMaxRow(rowId){
     setStatus(`loading max#${rowId}…`);
-    const seg = await fetchMaxById(rowId);
+    const seg = await fetchMaxById(rowId);                // start_id..end_id
     const fromId = seg.start_id, toId = seg.end_id;
     S.lastMaxRowId = seg.id;
     S.lastSpanEndId = toId;
 
-    // zigs first (fast)
+    // zigzags first (fast visual)
     const zz = await fetchZigsWindow(fromId, toId);
     S.maxZ = polyline(zz.max);
     S.midZ = polyline(zz.mid);
     S.minZ = polyline(zz.min);
 
-    // ticks
+    // ticks in the same window
     const T = await fetchTicksWindow(fromId, toId);
     S.ask = T.ask; S.mid = T.mid; S.bid = T.bid;
     T.tsById.forEach((v,k)=>S.tsById.set(k,v));
@@ -221,9 +228,12 @@
 
   async function loadMore(){
     if(!S.lastMaxRowId){ setStatus('nothing loaded'); return; }
+
     try{
       const nx = await fetchNextMax(S.lastMaxRowId);
       if(nx?.id){
+        rememberZoomToRight();
+
         const fromId = nx.start_id, toId = nx.end_id;
 
         const T = await fetchTicksWindow(fromId, toId);
@@ -244,12 +254,14 @@
         setStatus('ready');
         return;
       }
-    }catch(_){ /* fall to tail */ }
+    }catch(_){ /* no next -> tail */ }
 
-    // tail mode: extend to last tick and overlay remaining legs
+    // Tail: extend ticks to last_id and overlay remaining zigs
     setStatus('tail…');
     const last = await lastTickId();
     if(!last || !S.lastSpanEndId){ setStatus('ready'); return; }
+
+    rememberZoomToRight();
 
     let cursor = S.lastSpanEndId + 1;
     while(cursor <= last){
@@ -282,26 +294,53 @@
     S.lastMaxRowId=null;
     S.lastSpanEndId=null;
     S.lastZoomSpan=null;
-    ext=null; dz={start:0,end:1};
     chart.clear();
-    chart.setOption(fullOption(), { notMerge:true });
+    // draw an empty frame WITHOUT forcing min/max (so no -1..2)
+    chart.setOption({
+      backgroundColor:'#0b0f14',
+      animation:false,
+      grid:{ left:42, right:18, top:10, bottom:28 },
+      xAxis:{ type:'value',
+        axisLabel:{ color:'#9ca3af' },
+        axisLine:{ lineStyle:{ color:'#1f2937' } },
+        splitLine:{ show:true, lineStyle:{ color:'rgba(148,163,184,0.08)' } },
+      },
+      yAxis: yAxisCfg(undefined, undefined),
+      dataZoom:[
+        { type:'inside', start:0, end:100 },
+        { type:'slider', height:16, bottom:4, start:0, end:100 }
+      ],
+      series:[
+        { name:'Ask', type:'line', showSymbol:false, data:[] },
+        { name:'Mid (ticks)', type:'line', showSymbol:false, data:[] },
+        { name:'Bid', type:'line', showSymbol:false, data:[] },
+        { name:'Max (labels)', type:'line', showSymbol:false, data:[] },
+        { name:'Mid (labels)', type:'line', showSymbol:false, data:[] },
+        { name:'Min (labels)', type:'line', showSymbol:false, data:[] },
+        { name:'Max Segment', type:'line', connectNulls:false, showSymbol:false, data:[] },
+        { name:'Mid Segment', type:'line', connectNulls:false, showSymbol:false, data:[] },
+        { name:'Min Segment', type:'line', connectNulls:false, showSymbol:false, data:[] },
+      ]
+    }, { notMerge:true });
     setStatus('idle');
   }
 
-  // ---------- wire ----------
+  // ---------- Wire ----------
   if(btnLoad){
     btnLoad.addEventListener('click', async ()=>{
       const row = parseInt(rowInput?.value || '0', 10);
       const leg = (legSel?.value || 'max').toLowerCase();
       if(!row){ setStatus('enter Row ID'); return; }
-      if(leg !== 'max'){ setStatus('Anchoring by Max row id; fetching mid/min by tick range…'); }
+      if(leg !== 'max'){
+        setStatus('Anchoring by Max row id; fetching mid/min by tick range…');
+      }
       try { resetAll(); await loadByMaxRow(row); } catch(e){ setStatus(`error: ${String(e).slice(0,160)}`); }
     });
   }
   if(btnMore)  btnMore.addEventListener('click', ()=>loadMore().catch(e=>setStatus(`error: ${String(e).slice(0,160)}`)));
   if(btnReset) btnReset.addEventListener('click', resetAll);
-  cbs.forEach(cb => cb.addEventListener('change', ()=>renderAll()));
+  cbs.forEach(cb => cb.addEventListener('change', renderAll));
 
-  // initial empty frame
-  renderAll();
+  // initial frame
+  resetAll();
 })();
