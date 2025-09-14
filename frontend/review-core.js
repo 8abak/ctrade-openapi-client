@@ -200,15 +200,23 @@
     const opt = chart.getOption();
     if (!opt || !opt.dataZoom || opt.dataZoom.length === 0) return;
 
-    const dz0 = opt.dataZoom[0];
-    const x0 = (dz0.startValue != null) ? dz0.startValue : null;
-    const x1 = (dz0.endValue   != null) ? dz0.endValue   : null;
+    // We only adjust Y when there is data on screen
+    const hasData =
+      (S.ask.length + S.mid.length + S.bid.length +
+      S.maxZ.length + S.midZ.length + S.minZ.length) > 0;
+    if (!hasData) return;
+
+    // Read visible x-range (value axis uses startValue/endValue)
+    const dz = opt.dataZoom[0];
+    const x0 = dz.startValue ?? opt.dataZoom?.[1]?.startValue;
+    const x1 = dz.endValue   ?? opt.dataZoom?.[1]?.endValue;
     if (!Number.isFinite(x0) || !Number.isFinite(x1)) return;
 
+    // Find min/max Y inside [x0..x1]
     let minY = Infinity, maxY = -Infinity;
-    for (const arr of [S.ask,S.mid,S.bid,S.maxZ,S.midZ,S.minZ]) {
+    for (const arr of [S.ask, S.mid, S.bid, S.maxZ, S.midZ, S.minZ]) {
       for (const p of arr) {
-        if (!p || p[0]==null || p[1]==null) continue;
+        if (!p || p[0] == null || p[1] == null) continue;
         if (p[0] < x0 || p[0] > x1) continue;
         if (p[1] < minY) minY = p[1];
         if (p[1] > maxY) maxY = p[1];
@@ -217,18 +225,22 @@
     if (!isFinite(minY) || !isFinite(maxY) || maxY <= minY) return;
 
     const pad = Math.max(0.5, (maxY - minY) * 0.08);
+
+    // IMPORTANT: merge update (notMerge: false) so we don't wipe the series
     chart.setOption({
       yAxis: [{
-        type:'value',
+        type: 'value',
         min: Math.floor(minY - pad),
-        max: Math.ceil (maxY + pad),
-        minInterval:1, scale:false,
-        axisLabel:{ color:'#9ca3af', formatter:v=>Number.isInteger(v)?v:'' },
-        axisLine:{ lineStyle:{ color:'#1f2937' } },
-        splitLine:{ show:true, lineStyle:{ color:'rgba(148,163,184,0.08)' } },
+        max: Math.ceil(maxY + pad),
+        minInterval: 1,
+        scale: false,
+        axisLabel: { color: '#9ca3af', formatter: v => Number.isInteger(v) ? v : '' },
+        axisLine:  { lineStyle: { color: '#1f2937' } },
+        splitLine: { show: true, lineStyle: { color: 'rgba(148,163,184,0.08)' } },
       }]
-    }, { notMerge:true });
+    }, { notMerge: false, lazyUpdate: true });
   }
+
 
   // Keep right span if user is at the right
   function rememberZoomToRight(){
