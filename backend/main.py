@@ -21,6 +21,8 @@ VERSION = "2025.09.02.unified-routes"
 
 app = FastAPI(title="cTrade backend")
 
+ZIG_TABLES = {"max": "max", "mid": "mid", "min": "min"}
+
 # Mount frontend (useful if you ever open /frontend/*.html via the app)
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend")
 if os.path.isdir(FRONTEND_DIR):
@@ -166,6 +168,68 @@ def api_ticks_latest():
 # --- ADD: unified zigzag fetcher (min/mid/max) by id window
 from typing import Optional
 from fastapi import Query
+
+def _zig_overlapping(conn, table: str, start_id: int, end_id: int):
+    # A segment overlaps the window if it starts before the window ends AND ends after the window starts
+    cur = conn.cursor()
+    cur.execute(
+        f"""
+        SELECT id, start_id, end_id, start_price, end_price
+        FROM {table}
+        WHERE end_id >= %s AND start_id <= %s
+        ORDER BY start_id ASC, end_id ASC
+        """,
+        (start_id, end_id),
+    )
+    rows = cur.fetchall()
+    return [
+        dict(id=r[0], start_id=r[1], end_id=r[2], start_price=r[3], end_price=r[4])
+        for r in rows
+    ]
+
+@app.get("/api/zigzags/within")
+def zigzags_within(start_id: int, end_id: int, kinds: str = "max,mid,min"):
+    """
+    Return overlapping segments for requested kinds (comma-separated: max,mid,min)
+    within [start_id, end_id] (tick_id range).
+    """
+    ks = [k.strip() for k in kinds.split(",") if k.strip() in ZIG_TABLES]
+    if not ks:
+        raise HTTPException(400, "no valid kinds provided")
+    if end_id < start_id:
+        start_id, end_id = end_id, start_id
+    out: Dict[str, List[dict]] = {}
+    with get_conn() as conn:
+        for k in ks:
+            out[k] = _zig_overlapping(conn, ZIG_TABLES[k], start_id, end_id)
+    return out
+
+# (Optional but handy)
+@app.get("/api/max/by_id")
+def max_by_id(id: int):
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id, start_id, end_id, start_price, end_price FROM max WHERE id=%s", (id,))
+        r = cur.fetchone()
+        if not r: raise HTTPException(404, "not found")
+        return dict(id=r[0], start_id=r[1], end_id=r[2], start_price=r[3], end_price=r[4])
+
+@app.get("/api/max/next")
+def max_next(after_id: int):
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id, start_id, end_id, start_price, end_price FROM max WHERE id>%s ORDER BY id ASC LIMIT 1", (after_id,))
+        r = cur.fetchone()
+        if not r: raise HTTPException(404, "no next")
+        return dict(id=r[0], start_id=r[1], end_id=r[2], start_price=r[3], end_price=r[4])
+
+@app.get("/api/ticks/last_id")
+def ticks_last_id():
+    with get_conn() as conn:
+        cur = conn.cursor(); cur.execute("SELECT max(id) FROM ticks")
+        return {"last_id": cur.fetchone()[0]}
+
+
 
 @app.get("/api/zigzag")
 def api_zz(
