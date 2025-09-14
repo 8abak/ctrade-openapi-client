@@ -6,9 +6,10 @@
   const btnMore = document.getElementById("btnMore");
   const btnReset = document.getElementById("btnReset");
   const rowInput = document.getElementById("rowId");
-  const legSel   = document.getElementById("legKind"); // we anchor by 'max'
+  const legSel   = document.getElementById("legKind"); // anchor by 'max'
   const statusEl = document.getElementById("status");
 
+  // checkboxes: ask | mid_tick | bid | max_lbl | mid_lbl | min_lbl | max_seg | mid_seg | min_seg
   const cbs = Array.from(document.querySelectorAll('input[type=checkbox][data-series]'));
 
   // ---------- State ----------
@@ -27,29 +28,12 @@
     tsById: new Map(),               // tick_id -> ISO ts
     lastMaxRowId: null,
     lastSpanEndId: null,
-    lastZoomSpan: null,              // remember span to keep right on "Load More"
+    lastZoomSpan: null,              // span to keep when appending
   };
 
+  // ---------- Utils ----------
   const setStatus = (t) => { if (statusEl) statusEl.textContent = String(t); };
   const j = async (u) => { const r = await fetch(u); if (!r.ok) throw new Error(await r.text()); return r.json(); };
-
-  // ---------- Helpers ----------
-  function yAxisCfg(minY, maxY){
-    // Only clamp if we actually have data.
-    const cfg = {
-      type:'value',
-      minInterval:1, scale:false,
-      axisLabel:{ color:'#9ca3af', formatter:v=>Number.isInteger(v)?v:'' },
-      axisLine:{ lineStyle:{ color:'#1f2937' } },
-      splitLine:{ show:true, lineStyle:{ color:'rgba(148,163,184,0.08)' } },
-    };
-    if (Number.isFinite(minY) && Number.isFinite(maxY) && maxY > minY) {
-      const pad = Math.max(0.5, (maxY - minY) * 0.08);
-      cfg.min = Math.floor(minY - pad);
-      cfg.max = Math.ceil(maxY + pad);
-    }
-    return cfg;
-  }
 
   function visibilityMap(){
     const m = {};
@@ -124,20 +108,35 @@
     return out;
   }
 
-  // ---------- Chart ----------
-  const chart = echarts.init(chartEl, null, { renderer:'canvas' });
+  // ---------- Chart (declared ONCE, hot-reload safe) ----------
+  let chart = echarts.getInstanceByDom(chartEl);
+  if (!chart) chart = echarts.init(chartEl, null, { renderer:'canvas' });
+
+  function yAxisCfg(minY, maxY){
+    const cfg = {
+      type:'value',
+      minInterval:1, scale:false,
+      axisLabel:{ color:'#9ca3af', formatter:v=>Number.isInteger(v)?v:'' },
+      axisLine:{ lineStyle:{ color:'#1f2937' } },
+      splitLine:{ show:true, lineStyle:{ color:'rgba(148,163,184,0.08)' } },
+    };
+    if (Number.isFinite(minY) && Number.isFinite(maxY) && maxY > minY) {
+      const pad = Math.max(0.5, (maxY - minY) * 0.08);
+      cfg.min = Math.floor(minY - pad);
+      cfg.max = Math.ceil(maxY + pad);
+    }
+    return cfg;
+  }
 
   function buildOption(){
     const vis = visibilityMap();
-    const ext = extentXY();
-    const dz = { start:0, end:100, useAbs:false };
-    const ycfg = ext ? yAxisCfg(ext.minY, ext.maxY) : yAxisCfg(undefined, undefined);
-    if (ext) {
-      dz.start = ext.minX;
-      dz.end   = ext.maxX;
-      dz.useAbs = true;
-      if (S.lastZoomSpan == null) S.lastZoomSpan = dz.end - dz.start;
-    }
+    const ex = extentXY();
+
+    const dzAbs = !!ex;
+    const dzStart = ex ? ex.minX : 0;
+    const dzEnd   = ex ? ex.maxX : 100;
+
+    if (ex && S.lastZoomSpan == null) S.lastZoomSpan = dzEnd - dzStart;
 
     return {
       backgroundColor:'#0b0f14',
@@ -164,11 +163,11 @@
         axisLine:{ lineStyle:{ color:'#1f2937' } },
         splitLine:{ show:true, lineStyle:{ color:'rgba(148,163,184,0.08)' } },
       },
-      yAxis: ycfg,
-      dataZoom: dz.useAbs
+      yAxis: yAxisCfg(ex?.minY, ex?.maxY),
+      dataZoom: dzAbs
         ? [
-            { type:'inside', startValue:dz.start, endValue:dz.end },
-            { type:'slider', height:16, bottom:4, startValue:dz.start, endValue:dz.end },
+            { type:'inside', startValue:dzStart, endValue:dzEnd },
+            { type:'slider', height:16, bottom:4, startValue:dzStart, endValue:dzEnd },
           ]
         : [
             { type:'inside', start:0, end:100 },
@@ -193,19 +192,69 @@
   function renderAll(){
     chart.clear();
     chart.setOption(buildOption(), { notMerge:true });
+    refitYToVisible(); // keep Y tight to the visible X range
   }
 
+  // Re-fit Y to the currently visible X range
+  function refitYToVisible() {
+    const opt = chart.getOption();
+    if (!opt || !opt.dataZoom || opt.dataZoom.length === 0) return;
+
+    const dz0 = opt.dataZoom[0];
+    const x0 = (dz0.startValue != null) ? dz0.startValue : null;
+    const x1 = (dz0.endValue   != null) ? dz0.endValue   : null;
+    if (!Number.isFinite(x0) || !Number.isFinite(x1)) return;
+
+    let minY = Infinity, maxY = -Infinity;
+    for (const arr of [S.ask,S.mid,S.bid,S.maxZ,S.midZ,S.minZ]) {
+      for (const p of arr) {
+        if (!p || p[0]==null || p[1]==null) continue;
+        if (p[0] < x0 || p[0] > x1) continue;
+        if (p[1] < minY) minY = p[1];
+        if (p[1] > maxY) maxY = p[1];
+      }
+    }
+    if (!isFinite(minY) || !isFinite(maxY) || maxY <= minY) return;
+
+    const pad = Math.max(0.5, (maxY - minY) * 0.08);
+    chart.setOption({
+      yAxis: [{
+        type:'value',
+        min: Math.floor(minY - pad),
+        max: Math.ceil (maxY + pad),
+        minInterval:1, scale:false,
+        axisLabel:{ color:'#9ca3af', formatter:v=>Number.isInteger(v)?v:'' },
+        axisLine:{ lineStyle:{ color:'#1f2937' } },
+        splitLine:{ show:true, lineStyle:{ color:'rgba(148,163,184,0.08)' } },
+      }]
+    }, { notMerge:true });
+  }
+
+  // Keep right span if user is at the right
   function rememberZoomToRight(){
+    const opt = chart.getOption();
+    const dz0 = opt?.dataZoom?.[0];
+    const end = dz0?.endValue;
+    if (end == null) return;
     const ex = extentXY();
-    if(!ex) return;
-    // Keep same span pinned to right edge
-    const span = S.lastZoomSpan ?? (ex.maxX - ex.minX);
-    S.lastZoomSpan = span;
+    if (!ex) return;
+    const atRight = Math.abs(end - ex.maxX) <= 2;
+    if (atRight) {
+      const span = dz0.endValue - dz0.startValue;
+      if (isFinite(span) && span > 0) S.lastZoomSpan = span;
+    }
   }
 
   // ---------- Flows ----------
   async function loadByMaxRow(rowId){
     setStatus(`loading max#${rowId}…`);
+
+    // clear state
+    S.ask=[]; S.mid=[]; S.bid=[];
+    S.maxZ=[]; S.midZ=[]; S.minZ=[];
+    S.tsById.clear();
+    S.lastZoomSpan=null;
+
     const seg = await fetchMaxById(rowId);                // start_id..end_id
     const fromId = seg.start_id, toId = seg.end_id;
     S.lastMaxRowId = seg.id;
@@ -254,7 +303,7 @@
         setStatus('ready');
         return;
       }
-    }catch(_){ /* no next -> tail */ }
+    }catch(_){ /* fall to tail */ }
 
     // Tail: extend ticks to last_id and overlay remaining zigs
     setStatus('tail…');
@@ -294,8 +343,8 @@
     S.lastMaxRowId=null;
     S.lastSpanEndId=null;
     S.lastZoomSpan=null;
+
     chart.clear();
-    // draw an empty frame WITHOUT forcing min/max (so no -1..2)
     chart.setOption({
       backgroundColor:'#0b0f14',
       animation:false,
@@ -331,15 +380,14 @@
       const row = parseInt(rowInput?.value || '0', 10);
       const leg = (legSel?.value || 'max').toLowerCase();
       if(!row){ setStatus('enter Row ID'); return; }
-      if(leg !== 'max'){
-        setStatus('Anchoring by Max row id; fetching mid/min by tick range…');
-      }
-      try { resetAll(); await loadByMaxRow(row); } catch(e){ setStatus(`error: ${String(e).slice(0,160)}`); }
+      if(leg !== 'max'){ setStatus('Anchoring by Max row id; fetching mid/min by tick range…'); }
+      try { await loadByMaxRow(row); } catch(e){ setStatus(`error: ${String(e).slice(0,160)}`); }
     });
   }
   if(btnMore)  btnMore.addEventListener('click', ()=>loadMore().catch(e=>setStatus(`error: ${String(e).slice(0,160)}`)));
   if(btnReset) btnReset.addEventListener('click', resetAll);
   cbs.forEach(cb => cb.addEventListener('change', renderAll));
+  chart.on('dataZoom', () => refitYToVisible()); // auto-fit Y on every zoom/pan
 
   // initial frame
   resetAll();
