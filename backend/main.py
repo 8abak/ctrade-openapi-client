@@ -99,12 +99,18 @@ def api_sql_tables():
     conn = get_conn()
     with dict_cur(conn) as cur:
         cur.execute("""
-            SELECT table_name
-            FROM information_schema.tables
-            WHERE table_schema='public' AND table_type='BASE TABLE'
-            ORDER BY table_name
+            SELECT t.table_name
+            FROM information_schema.tables t
+            LEFT JOIN meta.hidden_tables h
+              ON h.table_schema = t.table_schema
+             AND h.table_name   = t.table_name
+            WHERE t.table_schema='public'
+              AND t.table_type='BASE TABLE'
+              AND h.table_name IS NULL          -- hide only what’s listed
+            ORDER BY t.table_name
         """)
         return [r["table_name"] for r in cur.fetchall()]
+
 
 
 @app.get("/api/sql")
