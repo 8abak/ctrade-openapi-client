@@ -7,6 +7,7 @@ from datetime import datetime
 from psycopg2.tz import FixedOffsetTimezone
 import pytz
 from threading import Event
+import requests   # NEW: for token refresh
 
 from twisted.internet import reactor
 from ctrader_open_api import Client, Protobuf, TcpProtocol, EndPoints
@@ -18,15 +19,17 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
 )
 
 # ---------------------------
-# Load credentials (unchanged)
+# Load credentials
 # ---------------------------
-with open(os.path.expanduser("~/cTrade/creds.json"), "r") as f:
+creds_file = os.path.expanduser("~/cTrade/creds.json")
+with open(creds_file, "r") as f:
     creds = json.load(f)
 
 clientId = creds["clientId"]
 clientSecret = creds["clientSecret"]
 accountId = creds["accountId"]
 accessToken = creds["accessToken"]
+refreshToken = creds["refreshToken"]
 symbolId = creds["symbolId"]
 
 connectionType = creds.get("connectionType", "live").lower()
@@ -34,18 +37,16 @@ host = EndPoints.PROTOBUF_LIVE_HOST if connectionType == "live" else EndPoints.P
 port = EndPoints.PROTOBUF_PORT
 
 # --------------------------------------------
-# PostgreSQL connection (same DB, made robust)
+# PostgreSQL connection
 # --------------------------------------------
 DB_KW = dict(dbname="trading", user="babak", password="babak33044", host="localhost", port=5432)
-conn = None      # keep a global connection like before
-cur = None       # keep this name so shutdown() can still close it if ever used
+conn = None
+cur = None
 
 def ensure_conn():
-    """Ensure a live psycopg2 connection. Keep explicit commit/rollback like original."""
     global conn
     if conn is None or getattr(conn, "closed", 1):
-        conn = psycopg2.connect(**DB_KW)   # same credentials as original
-        # keep default autocommit=False so conn.commit() remains exactly like original
+        conn = psycopg2.connect(**DB_KW)
 
 # ---------------------------------
 # Initialize cTrader Open API client
@@ -57,18 +58,46 @@ lastValidAsk = None
 shutdown_event = Event()
 
 # --------------------------------------------------
-# Write one tick (preserves all original behaviors)
-# - Forward-fill zeros
-# - Convert to Sydney time
-# - bidFloat/askFloat scaling
-# - mid = round((bid+ask)/2, 2)
-# - Duplicate check on (symbol, timestamp, bid, ask)
-# - INSERT into ticks and commit
+# Token refresh logic (NEW)
+# --------------------------------------------------
+def refresh_tokens():
+    global accessToken, refreshToken, creds
+    print("🔄 Refreshing tokens...", flush=True)
+    resp = requests.post(
+        "https://openapi.ctrader.com/apps/token",
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": refreshToken,
+            "client_id": clientId,
+            "client_secret": clientSecret,
+        },
+    )
+
+    if resp.status_code != 200:
+        print(f"❌ Failed to refresh tokens: {resp.text}", flush=True)
+        return False
+
+    tokens = resp.json()
+    accessToken = tokens["access_token"]
+    if "refresh_token" in tokens:
+        refreshToken = tokens["refresh_token"]
+    creds["accessToken"] = accessToken
+    creds["refreshToken"] = refreshToken
+    creds["tokenType"] = tokens.get("token_type", "Bearer")
+
+    with open(creds_file, "w") as f:
+        json.dump(creds, f, indent=2)
+
+    print("✅ Tokens refreshed and creds.json updated", flush=True)
+    return True
+
+# --------------------------------------------------
+# Write one tick (original behavior preserved)
 # --------------------------------------------------
 def writeTick(timestamp, _symbolId, bid, ask):
     global lastValidBid, lastValidAsk, conn
 
-    # Forward-fill if needed (unchanged)
+    # Forward-fill if needed
     if bid == 0.0 and lastValidBid is not None:
         bid = lastValidBid
     elif bid != 0.0:
@@ -79,20 +108,18 @@ def writeTick(timestamp, _symbolId, bid, ask):
     elif ask != 0.0:
         lastValidAsk = ask
 
-    # Convert timestamp to Sydney time (unchanged)
+    # Convert timestamp to Sydney time
     utc_dt = datetime.utcfromtimestamp(timestamp / 1000.0).replace(tzinfo=pytz.utc)
     sydney_dt = utc_dt.astimezone(FixedOffsetTimezone(600, "AEST"))
 
-    # Scaling + mid (unchanged)
+    # Scaling + mid
     bidFloat = bid / 100000.0
     askFloat = ask / 100000.0
     mid = round((bidFloat + askFloat) / 2, 2)
 
     try:
         ensure_conn()
-        # fresh cursor per operation to avoid "cursor already closed"
         with conn.cursor() as c:
-            # Duplicate check (unchanged)
             c.execute(
                 """
                 SELECT 1 FROM ticks
@@ -102,9 +129,8 @@ def writeTick(timestamp, _symbolId, bid, ask):
                 ("XAUUSD", sydney_dt, bidFloat, askFloat),
             )
             if c.fetchone():
-                return  # exact same tick already exists
+                return
 
-            # Insert (unchanged columns/order)
             c.execute(
                 """
                 INSERT INTO ticks (symbol, timestamp, bid, ask, mid)
@@ -112,20 +138,8 @@ def writeTick(timestamp, _symbolId, bid, ask):
                 """,
                 ("XAUUSD", sydney_dt, bidFloat, askFloat, mid),
             )
-
-        # keep explicit commit like original
         conn.commit()
         print(f"✅ Saved tick: {sydney_dt} → bid={bidFloat:.2f}, ask={askFloat:.2f}, mid={mid}", flush=True)
-
-    except (psycopg2.InterfaceError, psycopg2.OperationalError) as e:
-        # Connection dropped/restarted: close and recreate next tick
-        try:
-            if conn and not getattr(conn, "closed", 1):
-                conn.close()
-        except Exception:
-            pass
-        conn = None
-        print(f"❌ DB connection lost, will reconnect: {e}", flush=True)
 
     except Exception as e:
         print(f"❌ DB error: {e}", flush=True)
@@ -136,7 +150,7 @@ def writeTick(timestamp, _symbolId, bid, ask):
             pass
 
 # ---------------------------
-# Connection/auth flow (same)
+# Connection/auth flow
 # ---------------------------
 def connected(_):
     print("✅ Connected. Subscribing to spot data...", flush=True)
@@ -146,14 +160,14 @@ def connected(_):
     deferred = client.send(authMsg)
 
     def afterAppAuth(_):
-        print("  Application authorized", flush=True)
+        print("🎉 Application authorized", flush=True)
         accountAuth = ProtoOAAccountAuthReq()
         accountAuth.ctidTraderAccountId = accountId
         accountAuth.accessToken = accessToken
         return client.send(accountAuth)
 
     def afterAccountAuth(_):
-        print(f"  Account {accountId} authorized. Subscribing...", flush=True)
+        print(f"🔐 Account {accountId} authorized. Subscribing...", flush=True)
         subscribeToSpot()
 
     deferred.addCallback(afterAppAuth)
@@ -168,7 +182,7 @@ def subscribeToSpot():
     client.send(req)
 
 def disconnected(_, reason):
-    print(f"  Disconnected: {reason}", flush=True)
+    print(f"🔌 Disconnected: {reason}", flush=True)
     shutdown()
 
 def onMessage(_, message):
@@ -185,6 +199,13 @@ def onMessage(_, message):
             print("❌ Error:")
             print("  Code:", error.errorCode)
             print("  Desc:", error.description)
+
+            # NEW: Auto refresh if token invalid
+            if error.errorCode in ("CH_ACCESS_TOKEN_INVALID", "INVALID_REQUEST"):
+                if refresh_tokens():
+                    print("🔄 Restarting auth flow with new token...", flush=True)
+                    reactor.callLater(2, connected, None)
+
         except Exception as e:
             print("⚠️ Failed to parse error message:", e, flush=True)
 
@@ -197,9 +218,8 @@ def shutdown():
     if shutdown_event.is_set():
         return
     shutdown_event.set()
-    print("  Shutting down...", flush=True)
+    print("🛑 Shutting down...", flush=True)
     try:
-        # keep closing cur like original (cur is usually None now)
         if cur:
             try:
                 cur.close()
@@ -213,7 +233,7 @@ def shutdown():
         reactor.callFromThread(reactor.stop)
 
 # ----------------
-# Wire & run (same)
+# Wire & run
 # ----------------
 signal.signal(signal.SIGINT, lambda s, f: shutdown())
 signal.signal(signal.SIGTERM, lambda s, f: shutdown())
