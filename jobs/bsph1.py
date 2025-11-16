@@ -1,5 +1,6 @@
 import math
 from collections import deque
+from typing import Optional
 
 import psycopg2
 from psycopg2.extras import execute_values
@@ -89,7 +90,7 @@ class RollingStd:
             self.sum -= old
             self.sumsq -= old * old
 
-    def std(self) -> float | None:
+    def std(self) -> Optional[float]:
         n = len(self.buf)
         if n < 2:
             return None
@@ -185,7 +186,6 @@ def main():
             # ----------------------
             tick_date = ts.date()
             if current_date is None:
-                # First tick ever
                 gap_flag = False
                 gap_prev = None
                 gap_sz = None
@@ -202,7 +202,6 @@ def main():
 
                     last_mid_of_day = mid
                 else:
-                    # New day => gap vs previous day's close
                     gap_flag = True
                     gap_prev = last_mid_of_day
                     if gap_prev is not None:
@@ -232,27 +231,23 @@ def main():
                 else:
                     vel_pos += 1
 
-            # vel_len will be filled in a later phase
-            vel_len = None
+            vel_len = None  # later
 
             prev_vel_cat = vel_cat_val
 
             # ----------------------
             # kal: Kalman filter
             # ----------------------
-            z = mid  # measurement
+            z = mid
 
             if kal_x is None:
-                # initialise Kalman with first price
                 kal_x = z
                 kal_p = 1.0
                 kal_val = z
             else:
-                # predict
                 x_pred = kal_x
                 p_pred = kal_p + KAL_Q
 
-                # update
                 k_gain = p_pred / (p_pred + KAL_R)
                 kal_x = x_pred + k_gain * (z - x_pred)
                 kal_p = (1 - k_gain) * p_pred
@@ -263,7 +258,6 @@ def main():
             else:
                 kal_chg = kal_val - prev_kal_val
 
-            # classify kalman slope (we reuse VEL thresholds, can tune later)
             kal_cat_val = slope_category(kal_chg, slow=0.05, fast=0.30)
 
             if prev_kal_cat is None:
@@ -276,12 +270,11 @@ def main():
                 else:
                     kal_pos += 1
 
-            kal_len = None  # fill later if we want
+            kal_len = None  # later
 
             prev_kal_val = kal_val
             prev_kal_cat = kal_cat_val
 
-            # We'll also update ticks.kal with this kal_val
             ticks_kal_updates.append((tick_id, kal_val))
 
             # ----------------------
@@ -309,14 +302,13 @@ def main():
                     mom_pos += 1
 
             mom_len = None  # later
-
             prev_mom_cat = mom_cat_val
 
             # ----------------------
-            # vol: local volatility (only vol_val now)
+            # vol: local volatility
             # ----------------------
             vol_calc.push(mic_dm)
-            vol_val = vol_calc.std()  # could be None at the beginning
+            vol_val = vol_calc.std()
 
             vol_cat = None
             vol_grp = None
@@ -324,30 +316,23 @@ def main():
             vol_len = None
 
             # ----------------------
-            # Collect row for segments insert
+            # Collect row
             # ----------------------
             insert_rows.append((
                 tick_id,
 
-                # mic
                 mic_dm, mic_dt, mic_v,
 
-                # gap
                 gap_flag, gap_prev, gap_sz, gap_dir,
 
-                # vel
                 vel_cat_val, vel_prev_val, vel_grp, vel_pos, vel_len,
 
-                # str (all None in phase 1)
-                None, None, None, None, None, None,
+                None, None, None, None, None, None,  # str_*
 
-                # vol
                 vol_val, vol_cat, vol_grp, vol_pos, vol_len,
 
-                # kal
                 kal_val, kal_chg, kal_cat_val, kal_grp, kal_pos, kal_len,
 
-                # mom
                 mom_val, mom_cat_val, mom_grp, mom_pos, mom_len,
             ))
 
@@ -355,9 +340,9 @@ def main():
             prev_mid = mid
             prev_ts = ts
 
-        # ----------------------
-        # Flush batch to DB
-        # ----------------------
+        # =====================
+        # FLUSH TO DATABASE
+        # =====================
         if insert_rows:
             execute_values(
                 cur,
@@ -379,7 +364,6 @@ def main():
             insert_rows.clear()
 
         if ticks_kal_updates:
-            # bulk-update ticks.kal with Kalman values
             execute_values(
                 cur,
                 """
@@ -399,8 +383,9 @@ def main():
     stream_cur.close()
     cur.close()
     conn.close()
+
     print(f"Done. segments built for {total} ticks.")
-    
+
 
 if __name__ == "__main__":
     main()
