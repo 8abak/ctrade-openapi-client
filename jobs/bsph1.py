@@ -11,7 +11,7 @@ from psycopg2.extras import execute_values
 
 DB_NAME = "trading"
 DB_USER = "babak"
-DB_PASSWORD = "YOUR_DB_PASSWORD_HERE"  # <-- put your real password
+DB_PASSWORD = "babak33044"  # <-- put your real password
 DB_HOST = "localhost"
 DB_PORT = 5432
 
