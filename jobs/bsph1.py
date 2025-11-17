@@ -118,7 +118,7 @@ def main():
     cur = conn.cursor()
 
     # Server-side cursor to stream ticks in order
-    stream_cur = conn.cursor(name="tick_stream")
+    stream_cur = conn.cursor(name="tick_stream", withhold=True)
     stream_cur.itersize = BATCH_SIZE
 
     stream_cur.execute("""
