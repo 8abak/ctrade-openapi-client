@@ -3,6 +3,10 @@ from psycopg2.extras import execute_values
 
 DB_NAME = "trading"
 DB_USER = "babak"
+DB_PASSWORD = "babak33044"  # already working in bsph1
+DB_HOST = "localhost"
+DB_PORT = 5432
+
 
 BATCH_SIZE = 10_000
 UPDATE_BATCH_SIZE = 50_000
@@ -332,7 +336,11 @@ def main():
     conn = psycopg2.connect(
         dbname=DB_NAME,
         user=DB_USER,
+        password=DB_PASSWORD,
+        host=DB_HOST,
+        port=DB_PORT,
     )
+
     conn.autocommit = False
 
     # 1) vel_len
