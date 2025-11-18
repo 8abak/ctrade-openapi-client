@@ -25,7 +25,7 @@ import joblib
 # ⚠️ Set your database password here
 DB_NAME = "trading"
 DB_USER = "babak"
-DB_PASSWORD = "YOUR_DB_PASSWORD_HERE"  # <-- change this
+DB_PASSWORD = "babak33044"  # <-- change this
 DB_HOST = "localhost"
 DB_PORT = 5432
 
