@@ -5,7 +5,8 @@ Stage 5: Online forward-learning over Kalman chunks.
 - Loads data from kal_break_train (subset by MAX_ROWS)
 - Sorts by id_start
 - Groups rows into chunks by kal_grp_start (KAL_CHUNK_SIZE distinct kal_grps per chunk)
-- Uses an online SGDClassifier + StandardScaler with partial_fit
+- Uses an online SGDClassifier with partial_fit
+- Features are globally standardized once via StandardScaler BEFORE chunking
 - Chunk 0: train only (bootstrap)
 - Chunks 1..N:
     * predict on chunk -> metrics
@@ -16,7 +17,8 @@ Stage 5: Online forward-learning over Kalman chunks.
 import os
 import psycopg2
 import pandas as pd
-from sklearn.pipeline import Pipeline
+import numpy as np
+
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import SGDClassifier
 from sklearn.metrics import (
@@ -24,7 +26,6 @@ from sklearn.metrics import (
     roc_auc_score,
     precision_recall_fscore_support,
 )
-import numpy as np
 
 # ---------------------------
 # CONFIG
@@ -32,7 +33,7 @@ import numpy as np
 
 DB_NAME = "trading"
 DB_USER = "babak"
-DB_PASSWORD = "babak33044"  # <-- change
+DB_PASSWORD = "babak33044"  
 DB_HOST = "localhost"
 DB_PORT = 5432
 
@@ -127,7 +128,14 @@ def main():
     # Fill NULLs
     df[FEATURE_COLS] = df[FEATURE_COLS].fillna(0)
 
-    # 3) Prepare Kalman chunks
+    # 3) Global scaling (one-time, before chunking)
+    print("Fitting global StandardScaler on all rows...")
+    scaler = StandardScaler()
+    X_all_raw = df[FEATURE_COLS].values
+    X_all = scaler.fit_transform(X_all_raw)
+    y_all = df["label"].astype(int).values
+
+    # 4) Prepare Kalman chunks
     unique_kal = df["kal_grp_start"].dropna().unique()
     unique_kal.sort()
     total_kal = len(unique_kal)
@@ -140,25 +148,21 @@ def main():
 
     print(f"Total chunks: {len(kal_chunks)} (each ~{KAL_CHUNK_SIZE} kal_grps)")
 
-    # 4) Initialize online model (fresh)
-    # Both StandardScaler and SGDClassifier support partial_fit.
-    model = Pipeline([
-        ("scaler", StandardScaler(with_mean=True, with_std=True)),
-        ("clf", SGDClassifier(
-            loss="log_loss",
-            penalty="l2",
-            class_weight="balanced",
-            max_iter=1,
-            tol=None,
-            n_jobs=-1,
-            random_state=42,
-        )),
-    ])
+    # 5) Initialize online model (fresh)
+    model = SGDClassifier(
+        loss="log_loss",
+        penalty="l2",
+        class_weight="balanced",
+        max_iter=1,
+        tol=None,
+        n_jobs=-1,
+        random_state=42,
+    )
 
     classes = np.array([0, 1], dtype=int)
     n_seen_total = 0
 
-    # 5) Walk forward over chunks
+    # 6) Walk forward over chunks
     for chunk_id, kal_chunk in enumerate(kal_chunks):
         kal_min = int(kal_chunk.min())
         kal_max = int(kal_chunk.max())
@@ -169,8 +173,9 @@ def main():
         if df_chunk.empty:
             continue
 
-        X_chunk = df_chunk[FEATURE_COLS].values
-        y_chunk = df_chunk["label"].astype(int).values
+        idx = df_chunk.index.to_numpy()
+        X_chunk = X_all[idx]
+        y_chunk = y_all[idx]
 
         n_samples = len(df_chunk)
         n_break = int((y_chunk == 1).sum())
@@ -182,7 +187,7 @@ def main():
             f"break={n_break}, cont={n_continue})"
         )
 
-        # CHUNK 0: bootstrap training only (no forward eval)
+        # CHUNK 0: bootstrap training only (no evaluation)
         if chunk_id == 0:
             print("  -> Bootstrapping model with initial chunk (no evaluation).")
             model.partial_fit(X_chunk, y_chunk, classes=classes)
@@ -194,20 +199,16 @@ def main():
         y_pred = model.predict(X_chunk)
 
         # ROC AUC
+        roc = None
         try:
-            # Pipeline exposes predict_proba if final estimator does
-            y_score = model.predict_proba(X_chunk)[:, 1]
-            try:
+            if hasattr(model, "predict_proba"):
+                y_score = model.predict_proba(X_chunk)[:, 1]
                 roc = roc_auc_score(y_chunk, y_score)
-            except ValueError:
-                roc = None
-        except Exception:
-            # If no predict_proba, fallback to decision_function
-            try:
+            elif hasattr(model, "decision_function"):
                 y_dec = model.decision_function(X_chunk)
                 roc = roc_auc_score(y_chunk, y_dec)
-            except Exception:
-                roc = None
+        except Exception:
+            roc = None
 
         acc = accuracy_score(y_chunk, y_pred)
 
