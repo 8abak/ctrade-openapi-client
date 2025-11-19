@@ -1,14 +1,14 @@
 #!/usr/bin/env python
 """
-Stage 5: Online forward-learning over Kalman chunks.
+Stage 5: Online forward-learning over Kalman chunks with warmup.
 
 - Loads data from kal_break_train (subset by MAX_ROWS)
 - Sorts by id_start
 - Groups rows into chunks by kal_grp_start (KAL_CHUNK_SIZE distinct kal_grps per chunk)
 - Uses an online SGDClassifier with partial_fit
 - Features are globally standardized once via StandardScaler BEFORE chunking
-- Chunk 0: train only (bootstrap)
-- Chunks 1..N:
+- Warmup: first WARMUP_CHUNKS chunks are training-only (no eval/logging)
+- Chunks >= WARMUP_CHUNKS:
     * predict on chunk -> metrics
     * insert metrics into kal_break_online_chunks
     * update model with partial_fit on that chunk
@@ -43,7 +43,10 @@ MAX_ROWS = 500_000
 # Chunk size in terms of distinct kal_grp_start values
 KAL_CHUNK_SIZE = 5
 
-MODEL_NAME = "stage5_online_sgd_v1"
+# Number of initial chunks for warmup (train only, no eval/logging)
+WARMUP_CHUNKS = 100
+
+MODEL_NAME = "stage5_online_sgd_warmup100"
 
 FEATURE_COLS = [
     "mic_dm", "mic_dt", "mic_v",
@@ -143,7 +146,7 @@ def main():
     # Inverse-frequency weights (rare class gets higher weight)
     eps = 1e-8
     class_weight = 1.0 / np.maximum(class_freq, eps)
-    # Optional normalization (not strictly needed, but keeps numbers reasonable)
+    # Optional normalization (keeps numbers reasonable)
     class_weight = class_weight / class_weight.mean()
 
     print("Global class counts:", class_counts)
@@ -162,6 +165,7 @@ def main():
         kal_chunks.append(kal_chunk)
 
     print(f"Total chunks: {len(kal_chunks)} (each ~{KAL_CHUNK_SIZE} kal_grps)")
+    print(f"Warmup chunks: {WARMUP_CHUNKS} (train only, no eval/logging)")
 
     # 6) Initialize online model (fresh, no built-in class_weight)
     model = SGDClassifier(
@@ -203,14 +207,15 @@ def main():
         # Compute sample weights for this chunk from global class_weight
         sample_weight = class_weight[y_chunk]
 
-        # CHUNK 0: bootstrap training only (no evaluation)
-        if chunk_id == 0:
-            print("  -> Bootstrapping model with initial chunk (no evaluation).")
+        # WARMUP PHASE: train only, no evaluation/logging
+        if chunk_id < WARMUP_CHUNKS:
+            print("  -> Warmup training (no evaluation / no logging).")
             model.partial_fit(X_chunk, y_chunk, classes=classes, sample_weight=sample_weight)
             n_seen_total += n_samples
             continue
 
-        # For all later chunks:
+        # EVALUATION + UPDATE PHASE
+
         # 1) Evaluate with current model (trained on all previous chunks)
         y_pred = model.predict(X_chunk)
 
