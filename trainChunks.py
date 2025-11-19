@@ -33,7 +33,7 @@ from sklearn.metrics import (
 
 DB_NAME = "trading"
 DB_USER = "babak"
-DB_PASSWORD = "babak33044"  
+DB_PASSWORD = "babak33044"  # <-- change this
 DB_HOST = "localhost"
 DB_PORT = 5432
 
@@ -135,7 +135,22 @@ def main():
     X_all = scaler.fit_transform(X_all_raw)
     y_all = df["label"].astype(int).values
 
-    # 4) Prepare Kalman chunks
+    # 4) Compute global class weights manually for imbalance handling
+    classes = np.array([0, 1], dtype=int)
+    class_counts = np.bincount(y_all, minlength=2).astype(float)
+    total = class_counts.sum()
+    class_freq = class_counts / total
+    # Inverse-frequency weights (rare class gets higher weight)
+    eps = 1e-8
+    class_weight = 1.0 / np.maximum(class_freq, eps)
+    # Optional normalization (not strictly needed, but keeps numbers reasonable)
+    class_weight = class_weight / class_weight.mean()
+
+    print("Global class counts:", class_counts)
+    print("Global class freq  :", class_freq)
+    print("Global class weight:", class_weight)
+
+    # 5) Prepare Kalman chunks
     unique_kal = df["kal_grp_start"].dropna().unique()
     unique_kal.sort()
     total_kal = len(unique_kal)
@@ -148,21 +163,19 @@ def main():
 
     print(f"Total chunks: {len(kal_chunks)} (each ~{KAL_CHUNK_SIZE} kal_grps)")
 
-    # 5) Initialize online model (fresh)
+    # 6) Initialize online model (fresh, no built-in class_weight)
     model = SGDClassifier(
         loss="log_loss",
         penalty="l2",
-        class_weight="balanced",
         max_iter=1,
         tol=None,
         n_jobs=-1,
         random_state=42,
     )
 
-    classes = np.array([0, 1], dtype=int)
     n_seen_total = 0
 
-    # 6) Walk forward over chunks
+    # 7) Walk forward over chunks
     for chunk_id, kal_chunk in enumerate(kal_chunks):
         kal_min = int(kal_chunk.min())
         kal_max = int(kal_chunk.max())
@@ -187,10 +200,13 @@ def main():
             f"break={n_break}, cont={n_continue})"
         )
 
+        # Compute sample weights for this chunk from global class_weight
+        sample_weight = class_weight[y_chunk]
+
         # CHUNK 0: bootstrap training only (no evaluation)
         if chunk_id == 0:
             print("  -> Bootstrapping model with initial chunk (no evaluation).")
-            model.partial_fit(X_chunk, y_chunk, classes=classes)
+            model.partial_fit(X_chunk, y_chunk, classes=classes, sample_weight=sample_weight)
             n_seen_total += n_samples
             continue
 
@@ -305,7 +321,7 @@ def main():
         })
 
         # 3) Update model with this chunk (learning from its actual outcomes)
-        model.partial_fit(X_chunk, y_chunk)
+        model.partial_fit(X_chunk, y_chunk, sample_weight=sample_weight)
         n_seen_total += n_samples
 
     conn.commit()
