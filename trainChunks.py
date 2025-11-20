@@ -1,21 +1,18 @@
 #!/usr/bin/env python
 """
-Stage 5: Online forward-learning over Kalman chunks with warmup.
+Stage 5+7: Online forward-learning over Kalman chunks with warmup
+and per-velocity prediction logging.
 
-- Loads data from kal_break_train (subset by MAX_ROWS)
-- Sorts by id_start
-- Groups rows into chunks by kal_grp_start (KAL_CHUNK_SIZE distinct kal_grps per chunk)
-- Uses an online SGDClassifier with partial_fit
-- Features are globally standardized once via StandardScaler BEFORE chunking
-- Warmup: first WARMUP_CHUNKS chunks are training-only (no eval/logging)
-- Chunks >= WARMUP_CHUNKS:
-    * predict on chunk -> metrics
-    * insert metrics into kal_break_online_chunks
+- Warmup: first WARMUP_CHUNKS chunks -> train only, no eval/logging
+- From chunk >= WARMUP_CHUNKS:
+    * predict on chunk -> per-row predictions
+    * log metrics into kal_break_online_chunks
+    * log per-row predictions into kal_break_predictions
     * update model with partial_fit on that chunk
 """
 
-import os
 import psycopg2
+from psycopg2.extras import execute_values
 import pandas as pd
 import numpy as np
 
@@ -37,16 +34,11 @@ DB_PASSWORD = "babak33044"  # <-- change this
 DB_HOST = "localhost"
 DB_PORT = 5432
 
-# Use same subset as before for now
-MAX_ROWS = 500_000
+MAX_ROWS = 500_000           # same subset as before
+KAL_CHUNK_SIZE = 5           # kal groups per chunk
+WARMUP_CHUNKS = 100          # chunks used only for training
 
-# Chunk size in terms of distinct kal_grp_start values
-KAL_CHUNK_SIZE = 5
-
-# Number of initial chunks for warmup (train only, no eval/logging)
-WARMUP_CHUNKS = 100
-
-MODEL_NAME = "stage5_online_sgd_warmup100"
+MODEL_NAME = "stage5_online_sgd_warmup100"  # keep same name or bump if you like
 
 FEATURE_COLS = [
     "mic_dm", "mic_dt", "mic_v",
@@ -143,10 +135,8 @@ def main():
     class_counts = np.bincount(y_all, minlength=2).astype(float)
     total = class_counts.sum()
     class_freq = class_counts / total
-    # Inverse-frequency weights (rare class gets higher weight)
     eps = 1e-8
     class_weight = 1.0 / np.maximum(class_freq, eps)
-    # Optional normalization (keeps numbers reasonable)
     class_weight = class_weight / class_weight.mean()
 
     print("Global class counts:", class_counts)
@@ -167,7 +157,7 @@ def main():
     print(f"Total chunks: {len(kal_chunks)} (each ~{KAL_CHUNK_SIZE} kal_grps)")
     print(f"Warmup chunks: {WARMUP_CHUNKS} (train only, no eval/logging)")
 
-    # 6) Initialize online model (fresh, no built-in class_weight)
+    # 6) Initialize online model
     model = SGDClassifier(
         loss="log_loss",
         penalty="l2",
@@ -186,7 +176,6 @@ def main():
         kal_count = int(len(kal_chunk))
 
         df_chunk = df[df["kal_grp_start"].isin(kal_chunk)]
-
         if df_chunk.empty:
             continue
 
@@ -204,32 +193,40 @@ def main():
             f"break={n_break}, cont={n_continue})"
         )
 
-        # Compute sample weights for this chunk from global class_weight
+        # Per-example weights for this chunk
         sample_weight = class_weight[y_chunk]
 
-        # WARMUP PHASE: train only, no evaluation/logging
+        # ----------------- WARMUP PHASE -----------------
         if chunk_id < WARMUP_CHUNKS:
             print("  -> Warmup training (no evaluation / no logging).")
             model.partial_fit(X_chunk, y_chunk, classes=classes, sample_weight=sample_weight)
             n_seen_total += n_samples
             continue
 
-        # EVALUATION + UPDATE PHASE
+        # ----------------- EVAL + LOG + UPDATE PHASE -----------------
 
-        # 1) Evaluate with current model (trained on all previous chunks)
+        # 1) Predictions
         y_pred = model.predict(X_chunk)
 
-        # ROC AUC
+        p_break = None
+        p_continue = None
         roc = None
-        try:
-            if hasattr(model, "predict_proba"):
-                y_score = model.predict_proba(X_chunk)[:, 1]
-                roc = roc_auc_score(y_chunk, y_score)
-            elif hasattr(model, "decision_function"):
+
+        if hasattr(model, "predict_proba"):
+            y_proba = model.predict_proba(X_chunk)
+            p_continue = y_proba[:, 0]
+            p_break = y_proba[:, 1]
+            try:
+                roc = roc_auc_score(y_chunk, p_break)
+            except Exception:
+                roc = None
+        else:
+            # Fallback using decision_function for ROC only
+            try:
                 y_dec = model.decision_function(X_chunk)
                 roc = roc_auc_score(y_chunk, y_dec)
-        except Exception:
-            roc = None
+            except Exception:
+                roc = None
 
         acc = accuracy_score(y_chunk, y_pred)
 
@@ -246,8 +243,8 @@ def main():
             f"roc_auc={roc if roc is not None else 'NA'}"
         )
 
-        # 2) Insert metrics into kal_break_online_chunks
-        insert_sql = """
+        # 2) Log chunk-level metrics
+        insert_chunk_sql = """
             INSERT INTO kal_break_online_chunks (
                 chunk_id,
                 kal_grp_min,
@@ -305,7 +302,7 @@ def main():
                 model_name = EXCLUDED.model_name;
         """
 
-        cur.execute(insert_sql, {
+        cur.execute(insert_chunk_sql, {
             "chunk_id": chunk_id,
             "kal_grp_min": kal_min,
             "kal_grp_max": kal_max,
@@ -325,7 +322,49 @@ def main():
             "model_name": MODEL_NAME,
         })
 
-        # 3) Update model with this chunk (learning from its actual outcomes)
+        # 3) Log per-row predictions into kal_break_predictions
+        if p_break is not None and p_continue is not None:
+            rows = []
+            vel_vals = df_chunk["vel_grp"].to_numpy()
+            id_vals = df_chunk["id_start"].to_numpy()
+            kal_vals = df_chunk["kal_grp_start"].to_numpy()
+
+            for i in range(n_samples):
+                rows.append((
+                    int(vel_vals[i]),
+                    int(id_vals[i]),
+                    int(kal_vals[i]),
+                    int(y_chunk[i]),
+                    int(y_pred[i]),
+                    float(p_break[i]),
+                    float(p_continue[i]),
+                    int(chunk_id),
+                    MODEL_NAME,
+                ))
+
+            pred_sql = """
+                INSERT INTO kal_break_predictions (
+                    vel_grp,
+                    id_start,
+                    kal_grp_start,
+                    label,
+                    pred_label,
+                    p_break,
+                    p_continue,
+                    chunk_id,
+                    model_name
+                )
+                VALUES %s
+                ON CONFLICT (vel_grp, model_name) DO UPDATE SET
+                    pred_label = EXCLUDED.pred_label,
+                    p_break = EXCLUDED.p_break,
+                    p_continue = EXCLUDED.p_continue,
+                    chunk_id = EXCLUDED.chunk_id;
+            """
+
+            execute_values(cur, pred_sql, rows)
+
+        # 4) Update model with this chunk (learning from its outcomes)
         model.partial_fit(X_chunk, y_chunk, sample_weight=sample_weight)
         n_seen_total += n_samples
 
@@ -335,6 +374,7 @@ def main():
 
     print(f"\nFinished online progression over {len(kal_chunks)} chunks.")
     print("Metrics stored in kal_break_online_chunks.")
+    print("Per-row predictions stored in kal_break_predictions.")
 
 
 if __name__ == "__main__":
