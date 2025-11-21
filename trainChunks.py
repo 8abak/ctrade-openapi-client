@@ -1,13 +1,15 @@
 #!/usr/bin/env python
 """
-Stage 5+7: Online forward-learning over Kalman chunks with warmup
-and per-velocity prediction logging.
+Stage 5+7+8: Online forward-learning over Kalman chunks with warmup,
+per-velocity prediction logging, and trading-style signals.
 
 - Warmup: first WARMUP_CHUNKS chunks -> train only, no eval/logging
 - From chunk >= WARMUP_CHUNKS:
     * predict on chunk -> per-row predictions
     * log metrics into kal_break_online_chunks
     * log per-row predictions into kal_break_predictions
+    * derive signals (enter_long / enter_short / exit_signal)
+      and log them into kal_break_signals
     * update model with partial_fit on that chunk
 """
 
@@ -38,7 +40,7 @@ MAX_ROWS = 500_000           # same subset as before
 KAL_CHUNK_SIZE = 5           # kal groups per chunk
 WARMUP_CHUNKS = 100          # chunks used only for training
 
-MODEL_NAME = "stage5_online_sgd_warmup100"  # keep same name or bump if you like
+MODEL_NAME = "stage5_online_sgd_warmup100"  # same name as before
 
 FEATURE_COLS = [
     "mic_dm", "mic_dt", "mic_v",
@@ -364,7 +366,88 @@ def main():
 
             execute_values(cur, pred_sql, rows)
 
-        # 4) Update model with this chunk (learning from its outcomes)
+            # 4) Derive trading-style signals and insert into kal_break_signals
+            sig_rows = []
+            kal_chg_vals = df_chunk["kal_chg"].to_numpy()
+            kal_cat_vals = df_chunk["kal_cat"].to_numpy()
+            vol_cat_vals = df_chunk["vol_cat"].to_numpy()
+
+            for i in range(n_samples):
+                enter_long = False
+                enter_short = False
+                exit_sig = False
+
+                pc = float(p_continue[i])
+                pb = float(p_break[i])
+                kc = float(kal_chg_vals[i])
+                vc = int(vol_cat_vals[i])
+
+                # Entry rules
+                if pc > 0.98 and vc in (2, 3):
+                    if kc > 0:
+                        enter_long = True
+                    elif kc < 0:
+                        enter_short = True
+
+                # Exit rule
+                if pb > 0.5:
+                    exit_sig = True
+
+                # Signal strength: 0..1, distance from 0.5
+                signal_strength = abs(pc - 0.5) * 2.0
+
+                sig_rows.append((
+                    int(vel_vals[i]),
+                    int(id_vals[i]),
+                    int(kal_vals[i]),
+                    pc,
+                    pb,
+                    kc,
+                    int(kal_cat_vals[i]),
+                    vc,
+                    enter_long,
+                    enter_short,
+                    exit_sig,
+                    float(signal_strength),
+                    MODEL_NAME,
+                    int(chunk_id),
+                ))
+
+            sig_sql = """
+                INSERT INTO kal_break_signals (
+                    vel_grp,
+                    id_start,
+                    kal_grp_start,
+                    p_continue,
+                    p_break,
+                    kal_chg,
+                    kal_cat,
+                    vol_cat,
+                    enter_long,
+                    enter_short,
+                    exit_signal,
+                    signal_strength,
+                    model_name,
+                    chunk_id
+                )
+                VALUES %s
+                ON CONFLICT (vel_grp) DO UPDATE SET
+                    p_continue = EXCLUDED.p_continue,
+                    p_break = EXCLUDED.p_break,
+                    kal_chg = EXCLUDED.kal_chg,
+                    kal_cat = EXCLUDED.kal_cat,
+                    vol_cat = EXCLUDED.vol_cat,
+                    enter_long = EXCLUDED.enter_long,
+                    enter_short = EXCLUDED.enter_short,
+                    exit_signal = EXCLUDED.exit_signal,
+                    signal_strength = EXCLUDED.signal_strength,
+                    model_name = EXCLUDED.model_name,
+                    chunk_id = EXCLUDED.chunk_id;
+            """
+
+            execute_values(cur, sig_sql, sig_rows)
+
+        # 5) Update model with this chunk (learning from its outcomes)
         model.partial_fit(X_chunk, y_chunk, sample_weight=sample_weight)
         n_seen_total += n_samples
 
@@ -375,6 +458,7 @@ def main():
     print(f"\nFinished online progression over {len(kal_chunks)} chunks.")
     print("Metrics stored in kal_break_online_chunks.")
     print("Per-row predictions stored in kal_break_predictions.")
+    print("Signals stored in kal_break_signals.")
 
 
 if __name__ == "__main__":
