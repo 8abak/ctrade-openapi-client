@@ -32,7 +32,9 @@ from dataclasses import dataclass
 
 DB_NAME = "trading"
 DB_USER = "babak"
+DB_PASSWORD = "babak33044"  # <-- change this
 DB_HOST = "localhost"
+DB_PORT = 5432
 
 TP_DOLLARS = 1.0      # take-profit (price move)
 SL_DOLLARS = 1.0      # stop-loss (price move)
@@ -67,7 +69,9 @@ def connect_db():
     conn = psycopg2.connect(
         dbname=DB_NAME,
         user=DB_USER,
+        password=DB_PASSWORD,
         host=DB_HOST,
+        port=DB_PORT,
     )
     conn.autocommit = False
     return conn
