@@ -388,6 +388,122 @@ def _table_exists(conn, name: str) -> bool:
         )
         return cur.fetchone() is not None
 
+@app.get("/api/review/window")
+def api_review_window(
+    from_id: int = Query(...),
+    window: int = Query(5000, ge=1, le=20000),
+):
+    """
+    Return a review window starting at `from_id` over `window` ticks:
+      - ticks with mid, kal, bid, ask, spread
+      - overlapping kalseg rows
+      - overlapping zones rows
+    """
+    to_id = from_id + window - 1
+    conn = get_conn()
+    ts_col, mid_expr, (has_bid, has_ask) = _ts_mid_cols(conn)
+    bid_sel = ", bid" if has_bid else ""
+    ask_sel = ", ask" if has_ask else ""
+
+    ticks = []
+    kalseg = []
+    zones = []
+
+    with dict_cur(conn) as cur:
+        # ---- ticks (mid + kal + bid/ask/spread) ----
+        cur.execute(
+            f"""
+            SELECT id,
+                   {ts_col} AS ts,
+                   {mid_expr} AS mid,
+                   kal
+                   {bid_sel}
+                   {ask_sel}
+            FROM ticks
+            WHERE id BETWEEN %s AND %s
+            ORDER BY id ASC
+            """,
+            (from_id, to_id),
+        )
+        ticks = cur.fetchall()
+
+        # ---- kal segments ----
+        if _table_exists(conn, "kalseg"):
+            cur.execute(
+                """
+                SELECT id,
+                       start_id,
+                       end_id,
+                       start_ts,
+                       end_ts,
+                       direction
+                FROM kalseg
+                WHERE NOT (end_id < %s OR start_id > %s)
+                ORDER BY start_id
+                """,
+                (from_id, to_id),
+            )
+            kalseg = cur.fetchall()
+
+        # ---- zones ----
+        if _table_exists(conn, "zones"):
+            cur.execute(
+                """
+                SELECT id,
+                       start_seg_id,
+                       end_seg_id,
+                       start_id,
+                       end_id,
+                       start_ts,
+                       end_ts,
+                       direction,
+                       zone_type
+                FROM zones
+                WHERE NOT (end_id < %s OR start_id > %s)
+                ORDER BY start_id
+                """,
+                (from_id, to_id),
+            )
+            zones = cur.fetchall()
+
+    # normalize numerics & timestamps
+    for r in ticks:
+        if isinstance(r.get("mid"), Decimal):
+            r["mid"] = float(r["mid"])
+        if isinstance(r.get("kal"), Decimal):
+            r["kal"] = float(r["kal"])
+        if has_bid and isinstance(r.get("bid"), Decimal):
+            r["bid"] = float(r["bid"])
+        if has_ask and isinstance(r.get("ask"), Decimal):
+            r["ask"] = float(r["ask"])
+        r["spread"] = (
+            (r.get("ask") - r.get("bid"))
+            if (has_bid and has_ask and r.get("ask") is not None and r.get("bid") is not None)
+            else None
+        )
+        if isinstance(r.get("ts"), (datetime, date)):
+            r["ts"] = r["ts"].isoformat()
+
+    for r in kalseg:
+        if isinstance(r.get("start_ts"), (datetime, date)):
+            r["start_ts"] = r["start_ts"].isoformat()
+        if isinstance(r.get("end_ts"), (datetime, date)):
+            r["end_ts"] = r["end_ts"].isoformat()
+
+    for r in zones:
+        if isinstance(r.get("start_ts"), (datetime, date)):
+            r["start_ts"] = r["start_ts"].isoformat()
+        if isinstance(r.get("end_ts"), (datetime, date)):
+            r["end_ts"] = r["end_ts"].isoformat()
+
+    return {
+        "from_id": from_id,
+        "to_id": to_id,
+        "ticks": _jsonable(ticks),
+        "kalseg": _jsonable(kalseg),
+        "zones": _jsonable(zones),
+    }
+
 @app.get("/api/labels/{name}/range")
 def api_labels_range(
     name: str,
