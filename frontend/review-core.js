@@ -1,338 +1,348 @@
+// PATH: frontend/review-core.js
 // Review window viewer:
-// - Nothing loads by default.
-// - When you hit "Go", it fetches /api/review/window?from_id=&window=
-//   and draws:
-//     * mid line (blue)
-//     * kalman line (green)
-//     * zones as rectangles from min→max price
-//     * kalseg segs as arrows at top/bottom of price area.
+// - No live streaming, purely "static window" for any historical tick_id range.
+// - Data comes from /api/review/window?from_id=...&window=...
+//   and is expected to have: { ticks: [...], segs: [...], zones: [...] }.
+// - Mid  = blue line
+// - Kal  = green line
+// - Zones = colored rectangular bands (from local min->max price in that zone)
+// - Segs  = arrows at top/bottom of the price area (direction up/down).
 
-const API = '/api';
+/* global echarts */
 
-const chart = echarts.init(document.getElementById('chart'));
+const chartEl = document.getElementById('chart');
+const chart   = echarts.init(chartEl);
 
-const state = {
-  ticks: [],
-  segs: [],
-  zones: [],
-};
+let ticks = [];   // [{id, ts, mid, kal, bid, ask, spread}]
+let segs  = [];   // [{id, start_id, end_id, direction, ...}]
+let zones = [];   // [{id, start_id, end_id, direction, zone_type, ...}]
 
-const fromInput  = document.getElementById('fromId');
-const winInput   = document.getElementById('win');
-const goButton   = document.getElementById('btnGo');
-const statusSpan = document.getElementById('status');
+let globalMinPrice = null;
+let globalMaxPrice = null;
 
-const showKal    = document.getElementById('showKal');
-const showZones  = document.getElementById('showZones');
-const showSegs   = document.getElementById('showSegs');
+// UI elements (defensive: they might be null if HTML differs slightly)
+const fromInput   = document.getElementById('fromId');
+const windowInput = document.getElementById('window');
+const goBtn       = document.getElementById('goBtn');
+const statusEl    = document.getElementById('status');
+
+const chkKal     = document.getElementById('chkKal');
+const chkZones   = document.getElementById('chkZones');
+const chkSegs    = document.getElementById('chkSegs');
+
+// ------------------------ helpers ------------------------
 
 function setStatus(msg) {
-  statusSpan.textContent = msg || '';
+  if (statusEl) statusEl.textContent = msg;
 }
 
-// ------------------------ chart base option --------------------------
+// find first / last tick by id inside a [start_id, end_id] range
+function sliceTicksById(startId, endId) {
+  if (!ticks.length) return [];
+  return ticks.filter(t => t.id >= startId && t.id <= endId);
+}
 
-function initChart() {
+function recomputeGlobalMinMax() {
+  if (!ticks.length) {
+    globalMinPrice = null;
+    globalMaxPrice = null;
+    return;
+  }
+  let mn = Infinity;
+  let mx = -Infinity;
+  for (const t of ticks) {
+    const v = (t.mid != null) ? t.mid : t.kal;
+    if (v == null) continue;
+    if (v < mn) mn = v;
+    if (v > mx) mx = v;
+  }
+  if (!Number.isFinite(mn) || !Number.isFinite(mx)) {
+    globalMinPrice = null;
+    globalMaxPrice = null;
+  } else {
+    globalMinPrice = mn;
+    globalMaxPrice = mx;
+  }
+}
+
+// -------------- build ECharts series from data ------------
+
+function buildMidSeries() {
+  const data = ticks.map(t => ({
+    value: [t.ts, t.mid],
+    meta: t
+  }));
+  return {
+    name: 'Mid',
+    type: 'line',
+    showSymbol: false,
+    lineStyle: { width: 1.5 },
+    data
+  };
+}
+
+function buildKalSeries() {
+  const enabled = !chkKal || chkKal.checked;
+  const data = ticks
+    .filter(t => t.kal != null)
+    .map(t => ({
+      value: [t.ts, t.kal],
+      meta: t
+    }));
+  return {
+    name: 'Kalman',
+    type: 'line',
+    showSymbol: false,
+    lineStyle: { width: 1, opacity: enabled ? 1 : 0 },
+    data,
+    z: 3
+  };
+}
+
+function zoneColor(z) {
+  // Simple mapping based on zone_type + direction
+  const base = (z.zone_type || '').toUpperCase();
+  if (base === 'TREND') {
+    return z.direction > 0 ? 'rgba(25, 135, 84, 0.18)'   // strong green
+                           : 'rgba(220, 53, 69, 0.18)';  // strong red
+  }
+  if (base === 'WEAK_TREND') {
+    return z.direction > 0 ? 'rgba(25, 135, 84, 0.10)'
+                           : 'rgba(220, 53, 69, 0.10)';
+  }
+  if (base === 'CHOP') {
+    return 'rgba(108, 117, 125, 0.12)'; // gray
+  }
+  return 'rgba(255, 193, 7, 0.10)'; // OTHER = amber-ish
+}
+
+function buildZoneMarkAreas() {
+  const enabled = !chkZones || chkZones.checked;
+  if (!enabled || !zones.length || !ticks.length || globalMinPrice == null) {
+    return [];
+  }
+
+  const data = [];
+
+  for (const z of zones) {
+    const zTicks = sliceTicksById(z.start_id, z.end_id);
+    if (!zTicks.length) continue;
+
+    let localMin = Infinity;
+    let localMax = -Infinity;
+    for (const t of zTicks) {
+      const v = (t.mid != null) ? t.mid : t.kal;
+      if (v == null) continue;
+      if (v < localMin) localMin = v;
+      if (v > localMax) localMax = v;
+    }
+    if (!Number.isFinite(localMin) || !Number.isFinite(localMax)) {
+      localMin = globalMinPrice;
+      localMax = globalMaxPrice;
+    }
+
+    const startTs = zTicks[0].ts;
+    const endTs   = zTicks[zTicks.length - 1].ts;
+
+    data.push([
+      {
+        coord: [startTs, localMin],
+        itemStyle: { color: zoneColor(z) }
+      },
+      {
+        coord: [endTs, localMax]
+      }
+    ]);
+  }
+
+  return data;
+}
+
+function buildSegSeries() {
+  const enabled = !chkSegs || chkSegs.checked;
+  if (!enabled || !segs.length || !ticks.length || globalMinPrice == null) {
+    return {
+      name: 'Segs',
+      type: 'scatter',
+      data: [],
+      z: 6
+    };
+  }
+
+  const midPrice = (globalMinPrice + globalMaxPrice) / 2;
+  const topY     = globalMaxPrice + (globalMaxPrice - midPrice) * 0.06;
+  const bottomY  = globalMinPrice - (midPrice - globalMinPrice) * 0.06;
+
+  const data = [];
+
+  for (const s of segs) {
+    const sTicks = sliceTicksById(s.start_id, s.end_id);
+    if (!sTicks.length) continue;
+    const midIndex = Math.floor(sTicks.length / 2);
+    const midTick  = sTicks[midIndex];
+
+    const y = s.direction > 0 ? topY : bottomY;
+    data.push({
+      value: [midTick.ts, y],
+      symbol: 'triangle',
+      symbolSize: 10,
+      symbolRotate: s.direction > 0 ? 0 : 180,
+      itemStyle: {
+        color: s.direction > 0 ? '#2ea043' : '#f85149'
+      }
+    });
+  }
+
+  return {
+    name: 'Segs',
+    type: 'scatter',
+    data,
+    z: 6
+  };
+}
+
+// --------------------- main chart option --------------------
+
+function rebuildChart() {
+  recomputeGlobalMinMax();
+
+  const midSeries = buildMidSeries();
+  const kalSeries = buildKalSeries();
+  const segSeries = buildSegSeries();
+  const zoneAreas = buildZoneMarkAreas();
+
+  const showKal   = !chkKal   || chkKal.checked;
+  const showZones = !chkZones || chkZones.checked;
+  const showSegs  = !chkSegs  || chkSegs.checked;
+
   chart.setOption({
     backgroundColor: '#0d1117',
     animation: false,
     tooltip: {
       trigger: 'axis',
-      axisPointer: { type: 'cross' },
-      formatter: params => {
-        // Find mid line point
-        const midP = params.find(p => p.seriesName === 'Mid');
-        if (!midP) return '';
-        const d = midP.data && midP.data.meta;
-        if (!d) return '';
-
+      axisPointer: { type: 'line' },
+      formatter(params) {
+        // Find Mid point first, otherwise first series
+        const p = params.find(x => x.seriesName === 'Mid') || params[0];
+        if (!p || !p.data || !p.data.meta) return '';
+        const d  = p.data.meta;
         const dt = new Date(d.ts);
-        const fmtPrice = v => (v == null ? '' : (+v).toFixed(2));
+        const date = dt.toLocaleDateString();
+        const time = dt.toLocaleTimeString();
+        const fmt = v => (v == null ? '' : (+v).toFixed(2));
 
         const lines = [
           `id: ${d.id}`,
-          `${dt.toLocaleDateString()} ${dt.toLocaleTimeString()}`,
-          `mid: ${fmtPrice(d.mid)}`,
-          d.kal != null ? `kal: ${fmtPrice(d.kal)}` : '',
-          d.bid != null ? `bid: ${fmtPrice(d.bid)}` : '',
-          d.ask != null ? `ask: ${fmtPrice(d.ask)}` : '',
-          d.spread != null ? `spread: ${fmtPrice(d.spread)}` : '',
-        ].filter(Boolean);
-
-        return lines.join('<br>');
-      },
+          `${date} ${time}`,
+          `mid: ${fmt(d.mid)}`,
+          `kal: ${fmt(d.kal)}`,
+          `bid: ${fmt(d.bid)}`,
+          `ask: ${fmt(d.ask)}`,
+          `spread: ${fmt(d.spread)}`
+        ];
+        return lines.join('<br/>');
+      }
     },
-    grid: { left: 50, right: 20, top: 24, bottom: 40 },
+    grid: { left: 48, right: 24, top: 40, bottom: 48 },
     xAxis: {
-      type: 'value',
-      name: 'tick id',
-      boundaryGap: false,
-      axisLine: { lineStyle: { color: '#30363d' } },
+      type: 'time',
       axisLabel: { color: '#c9d1d9' },
+      axisLine: { lineStyle: { color: '#30363d' } },
+      splitLine: { lineStyle: { color: '#161b22' } }
     },
     yAxis: {
       type: 'value',
       scale: true,
-      axisLine: { lineStyle: { color: '#30363d' } },
-      splitLine: { lineStyle: { color: '#30363d' } },
+      minInterval: 1,
+      splitNumber: 8,
       axisLabel: {
         color: '#c9d1d9',
-        formatter: v => String(Math.round(v)),
+        formatter: v => String(Math.round(v))
       },
+      splitLine: { lineStyle: { color: '#30363d' } }
     },
     dataZoom: [
       { type: 'inside', xAxisIndex: 0, filterMode: 'weakFilter' },
-      { type: 'slider', xAxisIndex: 0, bottom: 6 },
+      { type: 'slider', xAxisIndex: 0, bottom: 6 }
     ],
     series: [
-      { // 0: mid
-        name: 'Mid',
-        type: 'line',
-        showSymbol: false,
-        lineStyle: { width: 1.2 },
-        data: [],
-        z: 10,
-      },
-      { // 1: kalman
-        name: 'Kalman',
-        type: 'line',
-        showSymbol: false,
-        lineStyle: { width: 1.4 },
-        data: [],
-        z: 11,
-      },
-      { // 2: zones (rectangles via custom series)
+      midSeries,
+      showKal   ? kalSeries : { ...kalSeries, data: [], lineStyle: { opacity: 0 } },
+      showSegs  ? segSeries : { ...segSeries, data: [] },
+      {
         name: 'Zones',
-        type: 'custom',
-        renderItem: renderZoneItem,
+        type: 'line',        // dummy, we only use markArea
         data: [],
-        silent: true,
-        z: 1,
-      },
-      { // 3: seg arrows
-        name: 'Segs',
-        type: 'scatter',
-        symbol: 'triangle',
-        symbolSize: 12,
-        data: [],
-        z: 20,
-        itemStyle: {
-          borderWidth: 1,
+        markArea: {
+          silent: true,
+          itemStyle: { opacity: 1 },
+          data: showZones ? zoneAreas : []
         },
-        // rotate up/down
-        symbolRotate: function (value, params) {
-          const d = params.data || {};
-          return d.dir === 1 ? 0 : 180;
-        },
-      },
-    ],
-  });
-}
-
-initChart();
-window.addEventListener('resize', () => chart.resize());
-
-// ----------------------------- helpers -------------------------------
-
-function computeExtents(ticks) {
-  let min = Infinity, max = -Infinity;
-  for (const t of ticks || []) {
-    if (t.mid == null) continue;
-    const v = +t.mid;
-    if (v < min) min = v;
-    if (v > max) max = v;
-  }
-  if (!isFinite(min) || !isFinite(max)) {
-    min = 0;
-    max = 1;
-  }
-  return { min, max };
-}
-
-function buildSeries() {
-  const ticks = state.ticks;
-  const segs  = state.segs;
-  const zones = state.zones;
-
-  if (!ticks.length) {
-    chart.setOption({
-      series: [
-        { data: [] },
-        { data: [] },
-        { data: [] },
-        { data: [] },
-      ],
-    });
-    return;
-  }
-
-  const { min, max } = computeExtents(ticks);
-  const pad = (max - min) * 0.05;
-  const bottomY = min + pad;
-  const topY    = max - pad;
-
-  // mid + kal lines
-  const midData = [];
-  const kalData = [];
-
-  for (const t of ticks) {
-    const point = {
-      value: [t.id, t.mid],
-      meta: t,
-    };
-    midData.push(point);
-    if (t.kal != null) {
-      kalData.push({ value: [t.id, t.kal], meta: t });
-    }
-  }
-
-  // zones => rectangle data: [start_id, end_id, minPrice, maxPrice, direction, zone_type]
-  const zoneData = [];
-  if (zones.length) {
-    for (const z of zones) {
-      const start = z.start_id;
-      const end   = z.end_id;
-      let zMin = Infinity;
-      let zMax = -Infinity;
-
-      for (const t of ticks) {
-        if (t.id < start || t.id > end) continue;
-        const y = t.kal != null ? t.kal : t.mid;
-        if (y == null) continue;
-        if (y < zMin) zMin = y;
-        if (y > zMax) zMax = y;
+        z: 1
       }
-      if (!isFinite(zMin) || !isFinite(zMax) || zMin === zMax) continue;
-
-      zoneData.push({
-        value: [
-          start,
-          end,
-          zMin,
-          zMax,
-          z.direction || 0,
-          z.zone_type || '',
-        ],
-      });
-    }
-  }
-
-  // segs => arrows
-  const segData = [];
-  if (segs.length) {
-    for (const s of segs) {
-      const centerX = (s.start_id + s.end_id) / 2;
-      const y = s.direction === 1 ? bottomY : topY;
-      segData.push({
-        value: [centerX, y],
-        dir: s.direction,
-        itemStyle: {
-          color: s.direction === 1 ? '#22c55e' : '#f97373',
-          borderColor: '#111827',
-        },
-      });
-    }
-  }
-
-  chart.setOption({
-    series: [
-      { data: midData },
-      { data: showKal.checked ? kalData : [] },
-      { data: showZones.checked ? zoneData : [] },
-      { data: showSegs.checked ? segData : [] },
-    ],
+    ]
   });
 }
 
-// Custom renderer for zone rectangles
-function renderZoneItem(params, api) {
-  const startId = api.value(0);
-  const endId   = api.value(1);
-  const minP    = api.value(2);
-  const maxP    = api.value(3);
-  const dir     = api.value(4);
+// ----------------------- data loading -----------------------
 
-  const startCoord = api.coord([startId, minP]);
-  const endCoord   = api.coord([endId,   maxP]);
-
-  const x = startCoord[0];
-  const y = endCoord[1];
-  const w = endCoord[0] - startCoord[0];
-  const h = startCoord[1] - endCoord[1];
-
-  const isUp   = dir === 1;
-  const isDown = dir === -1;
-
-  const fill = isUp
-    ? 'rgba(56, 189, 248, 0.10)'     // up zone
-    : isDown
-      ? 'rgba(248, 113, 113, 0.10)'  // down zone
-      : 'rgba(148, 163, 184, 0.08)'; // neutral
-
-  const stroke = isUp
-    ? '#0ea5e9'
-    : isDown
-      ? '#f97373'
-      : '#9ca3af';
-
-  return {
-    type: 'rect',
-    shape: { x, y, width: w, height: h },
-    style: api.style({
-      fill,
-      stroke,
-      lineWidth: 1,
-    }),
-  };
-}
-
-// -------------------------- data loading -----------------------------
-
-async function loadWindow() {
-  const from = parseInt(fromInput.value, 10);
-  const win  = parseInt(winInput.value, 10);
-
-  if (!from || !win || from < 1 || win <= 0) {
-    alert('Please enter a valid start tick id and window.');
-    return;
-  }
-
-  setStatus('Loading…');
-
+async function loadWindow(fromId, winSize) {
+  if (!fromId || !winSize) return;
   try {
-    const resp = await fetch(
-      `${API}/review/window?from_id=${from}&window=${win}`
-    );
+    setStatus('Loading...');
+    const resp = await fetch(`/api/review/window?from_id=${fromId}&window=${winSize}`);
     if (!resp.ok) {
       throw new Error(`HTTP ${resp.status}`);
     }
-    const data = await resp.json();
-    state.ticks = data.ticks || [];
-    state.segs  = data.segs || [];
-    state.zones = data.zones || [];
+    const payload = await resp.json();
+    ticks = (payload.ticks || []).map(t => ({
+      id: t.id,
+      ts: t.ts,           // already ISO string
+      mid: t.mid,
+      kal: t.kal,
+      bid: t.bid,
+      ask: t.ask,
+      spread: t.spread
+    }));
+    segs  = payload.segs  || [];
+    zones = payload.zones || [];
 
-    setStatus(
-      `Loaded ${state.ticks.length} ticks, ` +
-      `${state.segs.length} segs, ${state.zones.length} zones`
-    );
-    buildSeries();
+    setStatus(`Loaded ${ticks.length} ticks, ${segs.length} segs, ${zones.length} zones`);
+    rebuildChart();
   } catch (err) {
-    console.error('Error loading review window', err);
-    alert('Error loading data – see console for details.');
+    console.error('Error loading review window:', err);
+    alert('Error loading data — see console for details.');
     setStatus('Error.');
   }
 }
 
-// ------------------------- event bindings ----------------------------
+// ----------------------- UI wiring --------------------------
 
-goButton.addEventListener('click', loadWindow);
-showKal.addEventListener('change', buildSeries);
-showZones.addEventListener('change', buildSeries);
-showSegs.addEventListener('change', buildSeries);
-
-// Optionally: hitting Enter in inputs triggers Go
-[fromInput, winInput].forEach(el => {
-  el.addEventListener('keydown', ev => {
-    if (ev.key === 'Enter') loadWindow();
+if (goBtn) {
+  goBtn.addEventListener('click', () => {
+    const fromId   = parseInt(fromInput ? fromInput.value : '0', 10) || 0;
+    const winSize  = parseInt(windowInput ? windowInput.value : '5000', 10) || 5000;
+    loadWindow(fromId, winSize);
   });
-});
+}
+
+// allow pressing Enter in either input to trigger Go
+if (fromInput) {
+  fromInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && goBtn) goBtn.click();
+  });
+}
+if (windowInput) {
+  windowInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && goBtn) goBtn.click();
+  });
+}
+
+if (chkKal)   chkKal.addEventListener('change', rebuildChart);
+if (chkZones) chkZones.addEventListener('change', rebuildChart);
+if (chkSegs)  chkSegs.addEventListener('change', rebuildChart);
+
+window.addEventListener('resize', () => chart.resize());
+
+// Initial empty chart (no data until you press Go)
+rebuildChart();
