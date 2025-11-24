@@ -1,348 +1,508 @@
 // PATH: frontend/review-core.js
-// Review window viewer:
-// - No live streaming, purely "static window" for any historical tick_id range.
-// - Data comes from /api/review/window?from_id=...&window=...
-//   and is expected to have: { ticks: [...], segs: [...], zones: [...] }.
-// - Mid  = blue line
-// - Kal  = green line
-// - Zones = colored rectangular bands (from local min->max price in that zone)
-// - Segs  = arrows at top/bottom of the price area (direction up/down).
+// Review window viewer (historical only, no live stream).
+// Uses /api/review/window?from_id=...&window=...
+//
+// Response is expected as:
+//   {
+//     ticks: [{ id, ts, mid, kal, bid, ask, spread }, ...],
+//     segs:  [{ id, start_id, end_id, direction }, ...],
+//     zones: [{ id, start_id, end_id, direction, zone_type }, ...]
+//   }
+//
+// - Mid price  : main line
+// - Kalman     : optional overlay line
+// - Zones      : rectangular colored areas between local min/max price
+// - Segments   : arrows at top/bottom of price area (direction up/down)
+//
+// Dark mode, mouse wheel zoom, and panning preserved via ECharts dataZoom.
 
-/* global echarts */
+(function () {
+  /* global echarts */
 
-const chartEl = document.getElementById('chart');
-const chart   = echarts.init(chartEl);
+  const chartEl = document.getElementById('chart');
+  const chart = echarts.init(chartEl);
 
-let ticks = [];   // [{id, ts, mid, kal, bid, ask, spread}]
-let segs  = [];   // [{id, start_id, end_id, direction, ...}]
-let zones = [];   // [{id, start_id, end_id, direction, zone_type, ...}]
+  const fromIdInput = document.getElementById('fromId');
+  const windowInput = document.getElementById('windowSize');
+  const goBtn      = document.getElementById('btnGo');
+  const prevBtn    = document.getElementById('btnPrev');
+  const nextBtn    = document.getElementById('btnNext');
+  const statusEl   = document.getElementById('status');
 
-let globalMinPrice = null;
-let globalMaxPrice = null;
+  const chkKal   = document.getElementById('showKal');
+  const chkZones = document.getElementById('showZones');
+  const chkSegs  = document.getElementById('showSegs');
 
-// UI elements (defensive: they might be null if HTML differs slightly)
-const fromInput   = document.getElementById('fromId');
-const windowInput = document.getElementById('window');
-const goBtn       = document.getElementById('goBtn');
-const statusEl    = document.getElementById('status');
+  let ticks = [];
+  let segs  = [];
+  let zones = [];
 
-const chkKal     = document.getElementById('chkKal');
-const chkZones   = document.getElementById('chkZones');
-const chkSegs    = document.getElementById('chkSegs');
+  let currentFromId   = null;
+  let currentWindow   = 5000;
+  let loading         = false;
 
-// ------------------------ helpers ------------------------
-
-function setStatus(msg) {
-  if (statusEl) statusEl.textContent = msg;
-}
-
-// find first / last tick by id inside a [start_id, end_id] range
-function sliceTicksById(startId, endId) {
-  if (!ticks.length) return [];
-  return ticks.filter(t => t.id >= startId && t.id <= endId);
-}
-
-function recomputeGlobalMinMax() {
-  if (!ticks.length) {
-    globalMinPrice = null;
-    globalMaxPrice = null;
-    return;
-  }
-  let mn = Infinity;
-  let mx = -Infinity;
-  for (const t of ticks) {
-    const v = (t.mid != null) ? t.mid : t.kal;
-    if (v == null) continue;
-    if (v < mn) mn = v;
-    if (v > mx) mx = v;
-  }
-  if (!Number.isFinite(mn) || !Number.isFinite(mx)) {
-    globalMinPrice = null;
-    globalMaxPrice = null;
-  } else {
-    globalMinPrice = mn;
-    globalMaxPrice = mx;
-  }
-}
-
-// -------------- build ECharts series from data ------------
-
-function buildMidSeries() {
-  const data = ticks.map(t => ({
-    value: [t.ts, t.mid],
-    meta: t
-  }));
-  return {
-    name: 'Mid',
-    type: 'line',
-    showSymbol: false,
-    lineStyle: { width: 1.5 },
-    data
-  };
-}
-
-function buildKalSeries() {
-  const enabled = !chkKal || chkKal.checked;
-  const data = ticks
-    .filter(t => t.kal != null)
-    .map(t => ({
-      value: [t.ts, t.kal],
-      meta: t
-    }));
-  return {
-    name: 'Kalman',
-    type: 'line',
-    showSymbol: false,
-    lineStyle: { width: 1, opacity: enabled ? 1 : 0 },
-    data,
-    z: 3
-  };
-}
-
-function zoneColor(z) {
-  // Simple mapping based on zone_type + direction
-  const base = (z.zone_type || '').toUpperCase();
-  if (base === 'TREND') {
-    return z.direction > 0 ? 'rgba(25, 135, 84, 0.18)'   // strong green
-                           : 'rgba(220, 53, 69, 0.18)';  // strong red
-  }
-  if (base === 'WEAK_TREND') {
-    return z.direction > 0 ? 'rgba(25, 135, 84, 0.10)'
-                           : 'rgba(220, 53, 69, 0.10)';
-  }
-  if (base === 'CHOP') {
-    return 'rgba(108, 117, 125, 0.12)'; // gray
-  }
-  return 'rgba(255, 193, 7, 0.10)'; // OTHER = amber-ish
-}
-
-function buildZoneMarkAreas() {
-  const enabled = !chkZones || chkZones.checked;
-  if (!enabled || !zones.length || !ticks.length || globalMinPrice == null) {
-    return [];
+  function setStatus(text) {
+    if (statusEl) statusEl.textContent = text || '';
   }
 
-  const data = [];
-
-  for (const z of zones) {
-    const zTicks = sliceTicksById(z.start_id, z.end_id);
-    if (!zTicks.length) continue;
-
-    let localMin = Infinity;
-    let localMax = -Infinity;
-    for (const t of zTicks) {
-      const v = (t.mid != null) ? t.mid : t.kal;
-      if (v == null) continue;
-      if (v < localMin) localMin = v;
-      if (v > localMax) localMax = v;
+  function setLoading(isLoading) {
+    loading = isLoading;
+    if (goBtn)   goBtn.disabled = isLoading;
+    if (prevBtn) prevBtn.disabled = isLoading;
+    if (nextBtn) nextBtn.disabled = isLoading;
+    if (isLoading) {
+      setStatus('Loading...');
     }
-    if (!Number.isFinite(localMin) || !Number.isFinite(localMax)) {
-      localMin = globalMinPrice;
-      localMax = globalMaxPrice;
+  }
+
+  function safeInt(val, fallback) {
+    const n = Number(val);
+    if (!Number.isFinite(n) || n <= 0) return fallback;
+    return Math.floor(n);
+  }
+
+  async function fetchWindow(fromId, windowSize) {
+    const url = `/api/review/window?from_id=${encodeURIComponent(fromId)}&window=${encodeURIComponent(windowSize)}`;
+    const resp = await fetch(url);
+    if (!resp.ok) {
+      const txt = await resp.text();
+      throw new Error(`HTTP ${resp.status}: ${txt}`);
+    }
+    return resp.json();
+  }
+
+  function buildZoneBands(ticksArr, zonesArr) {
+    if (!ticksArr.length || !zonesArr.length) return [];
+
+    const byId = new Map();
+    for (const t of ticksArr) {
+      byId.set(Number(t.id), t);
     }
 
-    const startTs = zTicks[0].ts;
-    const endTs   = zTicks[zTicks.length - 1].ts;
+    const bands = [];
 
-    data.push([
-      {
-        coord: [startTs, localMin],
-        itemStyle: { color: zoneColor(z) }
+    for (const z of zonesArr) {
+      const startId = Number(z.start_id);
+      const endId   = Number(z.end_id);
+
+      let min = Number.POSITIVE_INFINITY;
+      let max = Number.NEGATIVE_INFINITY;
+      let tsStart = null;
+      let tsEnd   = null;
+
+      for (const t of ticksArr) {
+        const id = Number(t.id);
+        if (id < startId || id > endId) continue;
+
+        const price = Number(t.mid);
+        if (!Number.isFinite(price)) continue;
+
+        if (price < min) min = price;
+        if (price > max) max = price;
+        if (!tsStart || id === startId) tsStart = t.ts;
+        tsEnd = t.ts;
+      }
+
+      if (!Number.isFinite(min) || !Number.isFinite(max) || tsStart == null || tsEnd == null) {
+        continue;
+      }
+
+      const dir = (z.direction || '').toString().toLowerCase();
+      let color = 'rgba(56, 139, 253, 0.18)'; // default blue band
+      if (dir === 'up' || dir === '1' || dir === 'u') {
+        color = 'rgba(46, 160, 67, 0.18)'; // green-ish
+      } else if (dir === 'dn' || dir === '-1' || dir === 'down' || dir === 'd') {
+        color = 'rgba(248, 81, 73, 0.18)'; // red-ish
+      }
+
+      bands.push({
+        name: z.zone_type || '',
+        itemStyle: { color },
+        coord: [tsStart, tsEnd, min, max],
+      });
+    }
+
+    return bands;
+  }
+
+  function buildSegmentPoints(ticksArr, segsArr) {
+    if (!ticksArr.length || !segsArr.length) return [];
+
+    const priceVals = ticksArr.map(t => Number(t.mid)).filter(v => Number.isFinite(v));
+    if (!priceVals.length) return [];
+
+    const minPrice = Math.min(...priceVals);
+    const maxPrice = Math.max(...priceVals);
+    const padding  = (maxPrice - minPrice) * 0.04 || 0.25;
+
+    const topY = maxPrice + padding;
+    const botY = minPrice - padding;
+
+    const byId = new Map();
+    for (const t of ticksArr) {
+      byId.set(Number(t.id), t);
+    }
+
+    const points = [];
+    for (const s of segsArr) {
+      const startId = Number(s.start_id);
+      const endId   = Number(s.end_id);
+      const midId   = Math.floor((startId + endId) / 2);
+
+      let midTick = byId.get(midId);
+      if (!midTick) {
+        // fallback: pick closest id that exists
+        const candidates = [startId, endId];
+        for (const cid of candidates) {
+          if (byId.has(cid)) {
+            midTick = byId.get(cid);
+            break;
+          }
+        }
+      }
+      if (!midTick) continue;
+
+      const dir = (s.direction || '').toString().toLowerCase();
+      const isUp = (dir === 'up' || dir === '1' || dir === 'u');
+
+      points.push({
+        name: 'seg',
+        value: [midTick.ts, isUp ? topY : botY],
+        direction: dir,
+      });
+    }
+
+    return points;
+  }
+
+  function rebuildChart() {
+    const showKal   = chkKal   ? chkKal.checked   : true;
+    const showZones = chkZones ? chkZones.checked : true;
+    const showSegs  = chkSegs  ? chkSegs.checked  : true;
+
+    if (!ticks.length) {
+      chart.setOption({
+        backgroundColor: '#0d1117',
+        animation: false,
+        grid: {
+          left: 60,
+          right: 20,
+          top: 40,
+          bottom: 60,
+        },
+        xAxis: {
+          type: 'time',
+          axisLine: { lineStyle: { color: '#8b949e' } },
+          axisLabel: { color: '#8b949e' },
+          splitLine: { lineStyle: { color: '#30363d' } },
+        },
+        yAxis: {
+          type: 'value',
+          scale: true,
+          axisLine: { lineStyle: { color: '#8b949e' } },
+          axisLabel: { color: '#8b949e' },
+          splitLine: { lineStyle: { color: '#30363d' } },
+        },
+        dataZoom: [
+          {
+            type: 'inside',
+            throttle: 50,
+          },
+          {
+            type: 'slider',
+            height: 18,
+            bottom: 30,
+            handleSize: 8,
+            borderColor: '#30363d',
+            backgroundColor: '#161b22',
+            fillerColor: 'rgba(88, 166, 255, 0.2)',
+          },
+        ],
+        series: [],
+      }, true);
+      return;
+    }
+
+    const times = ticks.map(t => t.ts);
+    const midSeries = ticks.map(t => [t.ts, Number(t.mid)]);
+    const kalSeries = ticks.map(t =>
+      t.kal != null ? [t.ts, Number(t.kal)] : [t.ts, Number(t.mid)]
+    );
+
+    const zoneBands = showZones ? buildZoneBands(ticks, zones) : [];
+    const segPoints = showSegs ? buildSegmentPoints(ticks, segs) : [];
+
+    const series = [];
+
+    // Zones via custom series (rects)
+    if (showZones && zoneBands.length) {
+      series.push({
+        name: 'Zones',
+        type: 'custom',
+        renderItem: function (params, api) {
+          const band = zoneBands[params.dataIndex];
+          const xStart = api.coord([band.coord[0], band.coord[2]])[0];
+          const xEnd   = api.coord([band.coord[1], band.coord[3]])[0];
+          const yTop   = api.coord([band.coord[0], band.coord[3]])[1];
+          const yBot   = api.coord([band.coord[0], band.coord[2]])[1];
+          const width  = xEnd - xStart;
+          const height = yBot - yTop;
+
+          return {
+            type: 'rect',
+            shape: echarts.graphic.clipRectByRect(
+              {
+                x: width >= 0 ? xStart : xEnd,
+                y: height >= 0 ? yTop : yBot,
+                width: Math.abs(width),
+                height: Math.abs(height),
+              },
+              {
+                x: params.coordSys.x,
+                y: params.coordSys.y,
+                width: params.coordSys.width,
+                height: params.coordSys.height,
+              }
+            ),
+            style: api.style({
+              fill: band.itemStyle.color,
+            }),
+          };
+        },
+        encode: { x: 0, y: 1 },
+        data: zoneBands,
+        z: 0,
+        silent: true,
+      });
+    }
+
+    // Mid series
+    series.push({
+      name: 'Mid',
+      type: 'line',
+      showSymbol: false,
+      data: midSeries,
+      lineStyle: {
+        width: 1,
       },
-      {
-        coord: [endTs, localMax]
-      }
-    ]);
-  }
+      z: 1,
+    });
 
-  return data;
-}
+    // Kalman series
+    if (showKal) {
+      series.push({
+        name: 'Kalman',
+        type: 'line',
+        showSymbol: false,
+        data: kalSeries,
+        lineStyle: {
+          width: 1,
+        },
+        z: 2,
+      });
+    }
 
-function buildSegSeries() {
-  const enabled = !chkSegs || chkSegs.checked;
-  if (!enabled || !segs.length || !ticks.length || globalMinPrice == null) {
-    return {
-      name: 'Segs',
-      type: 'scatter',
-      data: [],
-      z: 6
+    // Segments as scatter triangles
+    if (showSegs && segPoints.length) {
+      series.push({
+        name: 'Segments',
+        type: 'scatter',
+        symbol: 'triangle',
+        symbolSize: 12,
+        data: segPoints.map(p => ({
+          value: p.value,
+          direction: p.direction,
+        })),
+        itemStyle: {
+          color: function (param) {
+            const dir = (param.data.direction || '').toString().toLowerCase();
+            if (dir === 'up' || dir === '1' || dir === 'u') {
+              return '#2ea043';
+            }
+            if (dir === 'dn' || dir === '-1' || dir === 'down' || dir === 'd') {
+              return '#f85149';
+            }
+            return '#8b949e';
+          },
+        },
+        z: 3,
+      });
+    }
+
+    const option = {
+      backgroundColor: '#0d1117',
+      animation: false,
+      tooltip: {
+        trigger: 'axis',
+        axisPointer: { type: 'cross' },
+        valueFormatter: value => (value != null ? value.toFixed(3) : ''),
+      },
+      legend: {
+        show: true,
+        top: 4,
+        textStyle: { color: '#c9d1d9', fontSize: 11 },
+        selected: {
+          'Kalman': showKal,
+          'Segments': showSegs,
+          'Zones': showZones,
+        },
+      },
+      grid: {
+        left: 60,
+        right: 20,
+        top: 35,
+        bottom: 60,
+      },
+      xAxis: {
+        type: 'time',
+        boundaryGap: false,
+        axisLine: { lineStyle: { color: '#8b949e' } },
+        axisLabel: {
+          color: '#8b949e',
+          formatter: value => echarts.format.formatTime('hh:mm:ss', value),
+        },
+        splitLine: { lineStyle: { color: '#30363d' } },
+      },
+      yAxis: {
+        type: 'value',
+        scale: true,
+        axisLine: { lineStyle: { color: '#8b949e' } },
+        axisLabel: { color: '#8b949e' },
+        splitLine: { lineStyle: { color: '#30363d' } },
+      },
+      dataZoom: [
+        {
+          type: 'inside',
+          throttle: 50,
+          zoomOnMouseWheel: true,
+          moveOnMouseWheel: true,
+          moveOnMouseMove: true,
+        },
+        {
+          type: 'slider',
+          height: 18,
+          bottom: 30,
+          borderColor: '#30363d',
+          backgroundColor: '#161b22',
+          fillerColor: 'rgba(88, 166, 255, 0.2)',
+          handleIcon:
+            'path://M8,0 L12,0 C12.552,0 13,0.448 13,1 L13,15 C13,15.552 12.552,16 12,16 L8,16 C7.448,16 7,15.552 7,15 L7,1 C7,0.448 7.448,0 8,0 Z',
+          handleSize: 10,
+          handleStyle: {
+            borderWidth: 1,
+          },
+        },
+      ],
+      series,
     };
+
+    chart.setOption(option, true);
   }
 
-  const midPrice = (globalMinPrice + globalMaxPrice) / 2;
-  const topY     = globalMaxPrice + (globalMaxPrice - midPrice) * 0.06;
-  const bottomY  = globalMinPrice - (midPrice - globalMinPrice) * 0.06;
+  async function loadWindow(fromId, windowSize) {
+    currentFromId = fromId;
+    currentWindow = windowSize;
 
-  const data = [];
+    if (fromIdInput) fromIdInput.value = String(fromId);
+    if (windowInput) windowInput.value = String(windowSize);
 
-  for (const s of segs) {
-    const sTicks = sliceTicksById(s.start_id, s.end_id);
-    if (!sTicks.length) continue;
-    const midIndex = Math.floor(sTicks.length / 2);
-    const midTick  = sTicks[midIndex];
+    setLoading(true);
+    try {
+      const data = await fetchWindow(fromId, windowSize);
+      ticks = (data.ticks || []).map(t => ({
+        ...t,
+        id: Number(t.id),
+      }));
+      segs  = data.segs  || [];
+      zones = data.zones || [];
 
-    const y = s.direction > 0 ? topY : bottomY;
-    data.push({
-      value: [midTick.ts, y],
-      symbol: 'triangle',
-      symbolSize: 10,
-      symbolRotate: s.direction > 0 ? 0 : 180,
-      itemStyle: {
-        color: s.direction > 0 ? '#2ea043' : '#f85149'
+      if (!ticks.length) {
+        setStatus(`No ticks for window from id ${fromId} (window ${windowSize})`);
+      } else {
+        const firstId = ticks[0].id;
+        const lastId  = ticks[ticks.length - 1].id;
+        setStatus(
+          `Ticks ${firstId}–${lastId} (${ticks.length}), ` +
+          `${segs.length} segs, ${zones.length} zones`
+        );
       }
+      rebuildChart();
+    } catch (err) {
+      console.error(err);
+      setStatus(`Error: ${err.message || err}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function handleGo() {
+    const fromId = safeInt(fromIdInput && fromIdInput.value, null);
+    const windowSize = safeInt(windowInput && windowInput.value, 5000);
+
+    if (fromId == null) {
+      setStatus('Please enter a valid starting tick id.');
+      return;
+    }
+    loadWindow(fromId, windowSize);
+  }
+
+  function handlePrev() {
+    if (currentFromId == null) {
+      setStatus('No current window; use Go first.');
+      return;
+    }
+    const windowSize = safeInt(windowInput && windowInput.value, currentWindow);
+    const newFrom = Math.max(1, currentFromId - windowSize);
+    loadWindow(newFrom, windowSize);
+  }
+
+  function handleNext() {
+    if (currentFromId == null) {
+      setStatus('No current window; use Go first.');
+      return;
+    }
+    const windowSize = safeInt(windowInput && windowInput.value, currentWindow);
+    const newFrom = currentFromId + windowSize;
+    loadWindow(newFrom, windowSize);
+  }
+
+  // --------- Wiring events ---------
+
+  if (goBtn) {
+    goBtn.addEventListener('click', () => {
+      if (!loading) handleGo();
+    });
+  }
+  if (prevBtn) {
+    prevBtn.addEventListener('click', () => {
+      if (!loading) handlePrev();
+    });
+  }
+  if (nextBtn) {
+    nextBtn.addEventListener('click', () => {
+      if (!loading) handleNext();
     });
   }
 
-  return {
-    name: 'Segs',
-    type: 'scatter',
-    data,
-    z: 6
-  };
-}
-
-// --------------------- main chart option --------------------
-
-function rebuildChart() {
-  recomputeGlobalMinMax();
-
-  const midSeries = buildMidSeries();
-  const kalSeries = buildKalSeries();
-  const segSeries = buildSegSeries();
-  const zoneAreas = buildZoneMarkAreas();
-
-  const showKal   = !chkKal   || chkKal.checked;
-  const showZones = !chkZones || chkZones.checked;
-  const showSegs  = !chkSegs  || chkSegs.checked;
-
-  chart.setOption({
-    backgroundColor: '#0d1117',
-    animation: false,
-    tooltip: {
-      trigger: 'axis',
-      axisPointer: { type: 'line' },
-      formatter(params) {
-        // Find Mid point first, otherwise first series
-        const p = params.find(x => x.seriesName === 'Mid') || params[0];
-        if (!p || !p.data || !p.data.meta) return '';
-        const d  = p.data.meta;
-        const dt = new Date(d.ts);
-        const date = dt.toLocaleDateString();
-        const time = dt.toLocaleTimeString();
-        const fmt = v => (v == null ? '' : (+v).toFixed(2));
-
-        const lines = [
-          `id: ${d.id}`,
-          `${date} ${time}`,
-          `mid: ${fmt(d.mid)}`,
-          `kal: ${fmt(d.kal)}`,
-          `bid: ${fmt(d.bid)}`,
-          `ask: ${fmt(d.ask)}`,
-          `spread: ${fmt(d.spread)}`
-        ];
-        return lines.join('<br/>');
-      }
-    },
-    grid: { left: 48, right: 24, top: 40, bottom: 48 },
-    xAxis: {
-      type: 'time',
-      axisLabel: { color: '#c9d1d9' },
-      axisLine: { lineStyle: { color: '#30363d' } },
-      splitLine: { lineStyle: { color: '#161b22' } }
-    },
-    yAxis: {
-      type: 'value',
-      scale: true,
-      minInterval: 1,
-      splitNumber: 8,
-      axisLabel: {
-        color: '#c9d1d9',
-        formatter: v => String(Math.round(v))
-      },
-      splitLine: { lineStyle: { color: '#30363d' } }
-    },
-    dataZoom: [
-      { type: 'inside', xAxisIndex: 0, filterMode: 'weakFilter' },
-      { type: 'slider', xAxisIndex: 0, bottom: 6 }
-    ],
-    series: [
-      midSeries,
-      showKal   ? kalSeries : { ...kalSeries, data: [], lineStyle: { opacity: 0 } },
-      showSegs  ? segSeries : { ...segSeries, data: [] },
-      {
-        name: 'Zones',
-        type: 'line',        // dummy, we only use markArea
-        data: [],
-        markArea: {
-          silent: true,
-          itemStyle: { opacity: 1 },
-          data: showZones ? zoneAreas : []
-        },
-        z: 1
-      }
-    ]
-  });
-}
-
-// ----------------------- data loading -----------------------
-
-async function loadWindow(fromId, winSize) {
-  if (!fromId || !winSize) return;
-  try {
-    setStatus('Loading...');
-    const resp = await fetch(`/api/review/window?from_id=${fromId}&window=${winSize}`);
-    if (!resp.ok) {
-      throw new Error(`HTTP ${resp.status}`);
-    }
-    const payload = await resp.json();
-    ticks = (payload.ticks || []).map(t => ({
-      id: t.id,
-      ts: t.ts,           // already ISO string
-      mid: t.mid,
-      kal: t.kal,
-      bid: t.bid,
-      ask: t.ask,
-      spread: t.spread
-    }));
-    segs  = payload.segs  || [];
-    zones = payload.zones || [];
-
-    setStatus(`Loaded ${ticks.length} ticks, ${segs.length} segs, ${zones.length} zones`);
-    rebuildChart();
-  } catch (err) {
-    console.error('Error loading review window:', err);
-    alert('Error loading data — see console for details.');
-    setStatus('Error.');
+  if (fromIdInput) {
+    fromIdInput.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !loading) handleGo();
+    });
   }
-}
+  if (windowInput) {
+    windowInput.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !loading) handleGo();
+    });
+  }
 
-// ----------------------- UI wiring --------------------------
+  if (chkKal)   chkKal.addEventListener('change', rebuildChart);
+  if (chkZones) chkZones.addEventListener('change', rebuildChart);
+  if (chkSegs)  chkSegs.addEventListener('change', rebuildChart);
 
-if (goBtn) {
-  goBtn.addEventListener('click', () => {
-    const fromId   = parseInt(fromInput ? fromInput.value : '0', 10) || 0;
-    const winSize  = parseInt(windowInput ? windowInput.value : '5000', 10) || 5000;
-    loadWindow(fromId, winSize);
+  window.addEventListener('resize', () => {
+    chart.resize();
   });
-}
 
-// allow pressing Enter in either input to trigger Go
-if (fromInput) {
-  fromInput.addEventListener('keydown', e => {
-    if (e.key === 'Enter' && goBtn) goBtn.click();
-  });
-}
-if (windowInput) {
-  windowInput.addEventListener('keydown', e => {
-    if (e.key === 'Enter' && goBtn) goBtn.click();
-  });
-}
-
-if (chkKal)   chkKal.addEventListener('change', rebuildChart);
-if (chkZones) chkZones.addEventListener('change', rebuildChart);
-if (chkSegs)  chkSegs.addEventListener('change', rebuildChart);
-
-window.addEventListener('resize', () => chart.resize());
-
-// Initial empty chart (no data until you press Go)
-rebuildChart();
+  // Initial empty chart (no auto-load so it doesn't hit DB until you say so)
+  rebuildChart();
+})();
