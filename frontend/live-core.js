@@ -1,248 +1,368 @@
 // PATH: frontend/live-core.js
-// Live chart anchored to the latest MAX leg start_id.
-// - draws mid line from start_id → now (chunked load + SSE updates)
-// - overlays the max leg as a separate line (start_ts→end_ts)
-// - keeps your dark theme, integer y-grid, rich tooltip
-// - provides "Load more ←" that never goes earlier than the anchor
+// Live window viewer for ticks + Kalman + kalseg + zones.
+// - Shows last 5000 ticks by default
+// - Lets you page backward/forward in windows
+// - Colors Kalman line by segment direction
+// - Shades background by zone type (TREND / WEAK_TREND / CHOP)
 
-const API = '/api';
-const chart = echarts.init(document.getElementById('chart'));
+const ApiBase = "/api/live_window";
+const WindowSize = 5000;
 
-// --- state ---
-let rows = [];                 // [{id, ts, mid, bid?, ask?, spread?}]
-let preds = [];                // [{at_ts, hit, dir, ...}]
-let paused = false;
-let win = 10000;               // visible window hint (doesn't force zoom)
-let anchorStartId = null;      // start_id of the last MAX leg
-let anchorEndId = null;        // end_id of that leg (for the overlay)
-let maxlineData = [];          // [[ts,price],[ts,price]]
-let initialLoadedCount = 0;    // used to keep the anchor body in memory
-const CHUNK = 5000;
+const ChartEl = document.getElementById("chart");
+if (!ChartEl) {
+  console.error("live-core.js: #chart element not found");
+}
 
-// --- UI bindings ---
-document.getElementById('toggle').onclick = () => {
-  paused = !paused;
-  document.getElementById('toggle').textContent = paused ? 'Resume' : 'Pause';
-};
-document.getElementById('win').onchange = (e) => {
-  win = +e.target.value;
-  rebuildSeries();
-};
-document.getElementById('go').onclick = jumpToTick;
-document.getElementById('labels').addEventListener('change', (e) => {
-  chart.setOption({ series: [ {}, {}, { label:{show:e.target.checked} } ] });
-});
-document.getElementById('showMax').addEventListener('change', (e) => {
-  chart.setOption({ series: [ {}, { show: e.target.checked }, {} ] });
-});
-document.getElementById('moreLeft').onclick = loadMoreLeft;
-window.addEventListener('resize', () => chart.resize());
+const Chart = ChartEl ? echarts.init(ChartEl) : null;
 
-// --- chart setup ---
-function setupChart(){
-  chart.setOption({
-    backgroundColor:'#0d1117',
-    animation:false,
-    tooltip:{
-      trigger:'axis',
-      axisPointer:{type:'line'},
-      formatter:(params)=>{
-        const p = params.find(x=>x.seriesName==='mid') || params[0];
-        const d = p && p.data ? p.data.meta : null;
-        if (!d) return '';
-        const dt = new Date(d.ts);
+// in-memory state
+let CurrentTicks = [];
+let CurrentSegments = [];
+let CurrentZones = [];
+let CurrentStartId = null;
+let CurrentEndId = null;
+
+// ------------- small helpers -------------
+
+function $(id) {
+  return document.getElementById(id);
+}
+
+function buildUrl(params = {}) {
+  const url = new URL(ApiBase, window.location.origin);
+  url.searchParams.set("limit", WindowSize.toString());
+  if (params.before_id) url.searchParams.set("before_id", params.before_id);
+  if (params.after_id) url.searchParams.set("after_id", params.after_id);
+  return url.toString();
+}
+
+async function fetchWindow(params = {}) {
+  const res = await fetch(buildUrl(params));
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status} from /api/live_window`);
+  }
+  return await res.json();
+}
+
+function buildTickIndexMap(ticks) {
+  const map = new Map();
+  for (let i = 0; i < ticks.length; i++) {
+    map.set(ticks[i].id, i);
+  }
+  return map;
+}
+
+// ------------- chart setup -------------
+
+function initChart() {
+  if (!Chart) return;
+
+  Chart.setOption({
+    backgroundColor: "#0d1117",
+    animation: false,
+    tooltip: {
+      trigger: "axis",
+      axisPointer: { type: "cross" },
+      formatter: (params) => {
+        if (!params || !params.length) return "";
+        // Prefer the mid series for meta
+        const midP = params.find((p) => p.seriesName === "Mid") || params[0];
+        const m = midP?.data?.meta;
+        if (!m) return "";
+
+        const dt = new Date(m.ts);
         const date = dt.toLocaleDateString();
         const time = dt.toLocaleTimeString();
-        const here = preds.filter(x=>x.at_ts && new Date(x.at_ts).getTime() === new Date(d.ts).getTime());
-        const labelsHere = here.map(x=>`pred:${x.dir} ${x.hit===true?'✓':x.hit===false?'✗':'?'}`);
-        const fmt = (v)=> (v===null || v===undefined) ? '' : (+v).toFixed(2);
+
+        const fmt = (v) =>
+          v === null || v === undefined ? "" : Number(v).toFixed(2);
+
         const lines = [
-          `id: ${d.id}`,
+          `id: ${m.id}`,
           `${date} ${time}`,
-          `mid: ${fmt(d.mid)}`,
-          `bid: ${fmt(d.bid)}`,
-          `ask: ${fmt(d.ask)}`,
-          `spread: ${fmt(d.spread)}`
+          `mid: ${fmt(m.mid)}`,
+          `kal: ${fmt(m.kal)}`,
         ];
-        if (labelsHere.length) lines.push(`labels: ${labelsHere.join(', ')}`);
-        return lines.join('<br/>');
-      }
+        if (m.bid !== undefined || m.ask !== undefined) {
+          lines.push(`bid: ${fmt(m.bid)}`);
+          lines.push(`ask: ${fmt(m.ask)}`);
+          lines.push(`spread: ${fmt(m.spread)}`);
+        }
+        return lines.join("<br/>");
+      },
     },
-    grid:{left:48,right:24,top:24,bottom:48},
-    xAxis:{ type:'time', axisLabel:{color:'#c9d1d9'}, axisLine:{lineStyle:{color:'#30363d'}}, axisPointer:{show:true} },
-    yAxis:{
-      type:'value', scale:true, minInterval:1, splitNumber:8,
-      axisLabel:{color:'#c9d1d9', formatter:(v)=> String(Math.round(v))},
-      splitLine:{lineStyle:{color:'#30363d'}}, axisPointer:{show:false}
+    grid: { left: 52, right: 20, top: 30, bottom: 40 },
+    xAxis: {
+      type: "time",
+      axisLabel: { color: "#c9d1d9" },
+      axisLine: { lineStyle: { color: "#30363d" } },
+      axisPointer: { show: true },
     },
-    dataZoom:[
-      {type:'inside', xAxisIndex:0, filterMode:'weakFilter'},
-      {type:'slider', xAxisIndex:0, bottom:6}
+    yAxis: {
+      type: "value",
+      scale: true,
+      minInterval: 1,
+      splitNumber: 8,
+      axisLabel: {
+        color: "#c9d1d9",
+        formatter: (v) => String(Math.round(v)),
+      },
+      splitLine: { lineStyle: { color: "#30363d" } },
+      axisPointer: { show: false },
+    },
+    dataZoom: [
+      { type: "inside", xAxisIndex: 0, filterMode: "weakFilter" },
+      { type: "slider", xAxisIndex: 0, bottom: 6 },
     ],
-    series:[
-      { // 0: mid
-        name:'mid', type:'line', showSymbol:false, lineStyle:{width:1.5}, data:[]
+    legend: {
+      data: ["Mid", "Kalman"],
+      textStyle: { color: "#c9d1d9" },
+    },
+    // visualMap paints Kalman line by segment direction
+    visualMap: [
+      {
+        show: false,
+        dimension: 2, // segDir dimension on Kalman series
+        seriesIndex: 1,
+        pieces: [
+          { value: 1, color: "#2ea043" }, // up
+          { value: -1, color: "#f85149" }, // down
+          { value: 0, color: "#8b949e" }, // flat / no segment
+        ],
       },
-      { // 1: max leg overlay (two points)
-        name:'max', type:'line', showSymbol:false, lineStyle:{width:2.5, type:'dashed'}, data:[], z:5
-      },
-      { // 2: prediction markers (optional)
-        name:'pred', type:'scatter', symbolSize:10, data:[],
-        label:{show:false, formatter:(p)=> p.data?.p?.hit===true?'✓':(p.data?.p?.hit===false?'✗':'?')}
-      }
-    ]
-  });
-}
-
-// --- series builders ---
-function rebuildSeries(){
-  // Keep a reasonable right-side window for perf, but never drop below anchor body.
-  let dataRows = rows;
-  if (rows.length > win * 2) dataRows = rows.slice(-win * 2);
-
-  const midData = dataRows.map(r => ({ value:[new Date(r.ts), r.mid], meta:r }));
-  chart.setOption({
+    ],
     series: [
-      { data: midData },
-      { data: maxlineData, show: document.getElementById('showMax').checked },
-      { data: buildPredScatter(dataRows) }
-    ]
+      {
+        // 0: Mid line
+        name: "Mid",
+        type: "line",
+        showSymbol: false,
+        lineStyle: { width: 1.2 },
+        data: [],
+      },
+      {
+        // 1: Kalman line (with segDir dimension)
+        name: "Kalman",
+        type: "line",
+        showSymbol: false,
+        smooth: true,
+        data: [], // [ts, kal, segDir]
+        encode: { x: 0, y: 1 },
+      },
+      {
+        // 2: TREND zones (greenish)
+        name: "TREND",
+        type: "line",
+        data: [],
+        markArea: {
+          silent: true,
+          itemStyle: { color: "rgba(46, 204, 113, 0.08)" },
+          data: [],
+        },
+      },
+      {
+        // 3: WEAK_TREND zones (blueish)
+        name: "WEAK_TREND",
+        type: "line",
+        data: [],
+        markArea: {
+          silent: true,
+          itemStyle: { color: "rgba(52, 152, 219, 0.08)" },
+          data: [],
+        },
+      },
+      {
+        // 4: CHOP zones (yellowish)
+        name: "CHOP",
+        type: "line",
+        data: [],
+        markArea: {
+          silent: true,
+          itemStyle: { color: "rgba(241, 196, 15, 0.08)" },
+          data: [],
+        },
+      },
+    ],
   });
+
+  window.addEventListener("resize", () => Chart.resize());
 }
 
-function buildPredScatter(windowRows){
-  if (!windowRows.length) return [];
-  const tsToMid = new Map(windowRows.map(r=>[new Date(r.ts).getTime(), r.mid]));
-  const startTs = new Date(windowRows[0].ts).getTime();
-  const endTs   = new Date(windowRows[windowRows.length-1].ts).getTime();
-  const items = [];
-  for (const p of preds){
-    const ts = p.at_ts ? new Date(p.at_ts).getTime() : null;
-    if (!ts || ts < startTs || ts > endTs) continue;
-    const y = tsToMid.get(ts);
-    if (y === undefined) continue;
-    items.push({
-      value:[ts, y],
-      p,
-      itemStyle:{ color: p.hit===true ? '#2ea043' : (p.hit===false ? '#f85149' : '#8b949e') },
-      symbol: p.hit==null ? 'circle' : (p.hit ? 'triangle' : 'rect')
-    });
-  }
-  return items;
-}
+function updateChart() {
+  if (!Chart || !CurrentTicks.length) return;
 
-// --- data helpers ---
-function appendTicks(arr){
-  if (!arr || !arr.length) return;
-  rows = rows.concat(arr.map(r => ({
-    id:r.id, ts:r.ts, mid:r.mid, bid:r.bid, ask:r.ask, spread:r.spread
-  })));
-  initialLoadedCount = Math.max(initialLoadedCount, rows.length);
-  // Protect the anchored body from being trimmed away
-  const cap = Math.max(win * 2, initialLoadedCount);
-  if (rows.length > cap){
-    // trim only if we won't cross the anchor
-    let drop = rows.length - cap;
-    while (drop > 0 && rows.length && anchorStartId && rows[0].id > anchorStartId){
-      rows.shift(); drop--;
+  // Build index: tick id -> index in CurrentTicks
+  const idxMap = buildTickIndexMap(CurrentTicks);
+
+  // Default segDir=0 (no segment)
+  const segDirPerIdx = new Array(CurrentTicks.length).fill(0);
+
+  for (const s of CurrentSegments) {
+    const dir = s.direction || 0;
+    const startIdx = idxMap.get(s.start_id);
+    const endIdx = idxMap.get(s.end_id);
+    if (startIdx == null || endIdx == null) continue;
+    const from = Math.min(startIdx, endIdx);
+    const to = Math.max(startIdx, endIdx);
+    for (let i = from; i <= to && i < segDirPerIdx.length; i++) {
+      segDirPerIdx[i] = dir;
     }
   }
-  rebuildSeries();
-}
 
-function prependTicks(arr){
-  if (!arr || !arr.length) return;
-  const left = arr.map(r => ({ id:r.id, ts:r.ts, mid:r.mid, bid:r.bid, ask:r.ask, spread:r.spread }));
-  rows = left.concat(rows);
-  initialLoadedCount = Math.max(initialLoadedCount, rows.length);
-  rebuildSeries();
-}
+  const midData = [];
+  const kalData = [];
 
-async function loadRangeInChunks(startId, endId){
-  let from = startId;
-  while (from <= endId){
-    const to = Math.min(from + CHUNK - 1, endId);
-    const r  = await fetch(`${API}/ticks?from_id=${from}&to_id=${to}`);
-    const a  = await r.json();
-    appendTicks(a);
-    from = to + 1;
-  }
-}
+  for (let i = 0; i < CurrentTicks.length; i++) {
+    const r = CurrentTicks[i];
+    const ts = new Date(r.ts);
+    const meta = {
+      id: r.id,
+      ts: r.ts,
+      mid: r.mid,
+      kal: r.kal,
+      bid: r.bid,
+      ask: r.ask,
+      spread: r.spread,
+    };
 
-async function jumpToTick(){
-  const val = +document.getElementById('jump').value;
-  if (!val) return;
-  const end = val;
-  const start = Math.max(1, end - win + 1);
-  const r = await fetch(`${API}/ticks?from_id=${start}&to_id=${end}`);
-  const arr = await r.json();
-  rows = arr.map(r=>({id:r.id, ts:r.ts, mid:r.mid, bid:r.bid, ask:r.ask, spread:r.spread}));
-  rebuildSeries();
-}
-
-async function loadMoreLeft(){
-  if (!rows.length || anchorStartId == null) return;
-  const firstId = rows[0].id;
-  const to   = firstId - 1;
-  if (to < anchorStartId) return;
-  const start = Math.max(anchorStartId, to - CHUNK + 1);
-  const r  = await fetch(`${API}/ticks?from_id=${start}&to_id=${to}`);
-  const a  = await r.json();
-  prependTicks(a);
-}
-
-// --- bootstrap ---
-async function bootstrap(){
-  // 1) get last max leg (anchor)
-  const maxline = await (await fetch(`${API}/maxline/last`)).json();
-  if (maxline && maxline.start_id){
-    anchorStartId = +maxline.start_id;
-    anchorEndId   = +(maxline.end_id ?? maxline.start_id);
-    maxlineData = [
-      [new Date(maxline.start_ts), +maxline.start_price],
-      [new Date(maxline.end_ts),   +maxline.end_price]
-    ];
-  } else {
-    anchorStartId = null;
-    maxlineData = [];
+    midData.push({ value: [ts, r.mid], meta });
+    kalData.push([ts, r.kal, segDirPerIdx[i]]); // segDir in dimension 2
   }
 
-  // 2) find current last tick
-  const last = await (await fetch('/ticks/lastid')).json();
-  const end  = +last.lastId;
+  // Build zone markAreas (TREND / WEAK_TREND / CHOP)
+  const trendAreas = [];
+  const weakAreas = [];
+  const chopAreas = [];
 
-  // choose an initial end so the whole max leg is visible, but not insane
-  let initialEnd = end;
-  if (anchorStartId != null) {
-    initialEnd = Math.max(anchorEndId || anchorStartId, Math.min(anchorStartId + win - 1, end));
+  if (CurrentZones && CurrentZones.length) {
+    const firstId = CurrentTicks[0].id;
+    const lastId = CurrentTicks[CurrentTicks.length - 1].id;
+
+    for (const z of CurrentZones) {
+      const zs = Math.max(z.start_id, firstId);
+      const ze = Math.min(z.end_id, lastId);
+      if (zs > ze) continue;
+
+      const startIdx = idxMap.get(zs);
+      const endIdx = idxMap.get(ze);
+      if (startIdx == null || endIdx == null) continue;
+
+      const xs = new Date(CurrentTicks[startIdx].ts);
+      const xe = new Date(CurrentTicks[endIdx].ts);
+
+      const area = [{ xAxis: xs }, { xAxis: xe }];
+
+      switch (z.zone_type) {
+        case "TREND":
+          trendAreas.push(area);
+          break;
+        case "CHOP":
+          chopAreas.push(area);
+          break;
+        case "WEAK_TREND":
+        default:
+          weakAreas.push(area);
+          break;
+      }
+    }
   }
 
-  // 3) initial load (from anchor or recent window) in chunks
-  if (anchorStartId != null) {
-    await loadRangeInChunks(anchorStartId, initialEnd);
-  } else {
-    const start = Math.max(1, end - win + 1);
-    const r = await fetch(`${API}/ticks?from_id=${start}&to_id=${end}`);
-    appendTicks(await r.json());
-  }
-
-  // 4) apply the overlay and draw once
-  rebuildSeries();
-
-  // 5) stream live updates
-  const es = new EventSource(`${API}/live`);
-  es.addEventListener('tick', ev=>{
-    if (paused) return;
-    const d = JSON.parse(ev.data);
-    appendTicks([{ id:d.id, ts:d.ts, mid:d.mid, bid:d.bid, ask:d.ask, spread:d.spread }]);
-  });
-  es.addEventListener('pred', ev=>{
-    if (paused) return;
-    const d = JSON.parse(ev.data);
-    preds.push(d);
-    rebuildSeries();
+  Chart.setOption({
+    series: [
+      { data: midData },
+      { data: kalData },
+      { markArea: { data: trendAreas } },
+      { markArea: { data: weakAreas } },
+      { markArea: { data: chopAreas } },
+    ],
   });
 }
 
-setupChart();
-bootstrap();
+// ------------- window loading -------------
+
+async function loadLatestWindow() {
+  setStatus("Loading latest…");
+  try {
+    const data = await fetchWindow({});
+    applyWindow(data, true);
+  } catch (err) {
+    console.error(err);
+    setStatus("Error loading latest window");
+  }
+}
+
+async function loadPrevWindow() {
+  if (CurrentStartId == null) return;
+  const beforeId = CurrentStartId - 1;
+  setStatus(`Loading before ${beforeId}…`);
+  try {
+    const data = await fetchWindow({ before_id: beforeId });
+    applyWindow(data, false);
+  } catch (err) {
+    console.error(err);
+    setStatus("Error loading previous window");
+  }
+}
+
+async function loadNextWindow() {
+  if (CurrentEndId == null) return;
+  const afterId = CurrentEndId + 1;
+  setStatus(`Loading after ${afterId}…`);
+  try {
+    const data = await fetchWindow({ after_id: afterId });
+    applyWindow(data, false);
+  } catch (err) {
+    console.error(err);
+    setStatus("Error loading next window");
+  }
+}
+
+function applyWindow(data, isLive) {
+  CurrentTicks = data.ticks || [];
+  CurrentSegments = data.segments || [];
+  CurrentZones = data.zones || [];
+
+  if (!CurrentTicks.length) {
+    setStatus("No ticks for this window");
+    updateChart();
+    return;
+  }
+
+  CurrentStartId = CurrentTicks[0].id;
+  CurrentEndId = CurrentTicks[CurrentTicks.length - 1].id;
+
+  updateChart();
+
+  setStatus(
+    (isLive ? "Live window" : "Window") +
+      ` · tick ids ${CurrentStartId} – ${CurrentEndId} · ` +
+      `${CurrentTicks.length} ticks · ` +
+      `${CurrentSegments.length} segs · ${CurrentZones.length} zones`
+  );
+}
+
+// ------------- UI wiring -------------
+
+function setStatus(msg) {
+  const el = $("status");
+  if (el) el.textContent = msg;
+}
+
+function initControls() {
+  const btnLive = $("btnLive");
+  const btnPrev = $("btnPrev");
+  const btnNext = $("btnNext");
+
+  if (btnLive) btnLive.addEventListener("click", loadLatestWindow);
+  if (btnPrev) btnPrev.addEventListener("click", loadPrevWindow);
+  if (btnNext) btnNext.addEventListener("click", loadNextWindow);
+}
+
+// ------------- bootstrap -------------
+
+window.addEventListener("DOMContentLoaded", async () => {
+  if (!Chart) return;
+  initChart();
+  initControls();
+  await loadLatestWindow();
+});
