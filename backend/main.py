@@ -602,6 +602,22 @@ def ticks_recent(limit: int = 2200):
         r["ts"] = r["ts"].isoformat()
     return rows
 
+# ADD THIS near other helpers (after _ts_mid_cols is a good place)
+
+def _ticks_has_kal(conn) -> bool:
+    """
+    Returns True if ticks table has a 'kal' column, False otherwise.
+    """
+    with dict_cur(conn) as cur:
+        cur.execute("""
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name   = 'ticks'
+              AND column_name  = 'kal'
+        """)
+        return cur.fetchone() is not None
+
 @app.get("/ticks/before/{tickid}")
 def ticks_before(tickid: int, limit: int = 2000):
     conn = get_conn()
