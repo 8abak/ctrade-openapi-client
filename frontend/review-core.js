@@ -1,406 +1,286 @@
-/* global echarts */
-(() => {
-  // ---------- DOM ----------
-  const chartEl = document.getElementById("chart");
-  const btnLoad = document.getElementById("btnLoad");
-  const btnMore = document.getElementById("btnMore");
-  const btnReset = document.getElementById("btnReset");
-  const rowInput = document.getElementById("rowId");
-  const legSel   = document.getElementById("legKind"); // anchor by 'max'
-  const statusEl = document.getElementById("status");
+// PATH: frontend/review-core.js
+// Historical review page
+// - loads NOTHING by default
+// - when user enters a tick id and clicks "Go":
+//     * loads ~windowSize ticks to the right (default 5000)
+//     * draws mid + kal (if present) lines
+//     * overlays kal zones as coloured markAreas
+// Depends on:
+//   - <div id="chart"></div>
+//   - <input id="fromId">
+//   - <input id="windowSize">  (optional, default 5000)
+//   - <button id="btnLoad">
+//   - (optional) <span id="status">
 
-  // checkboxes: ask | mid_tick | bid | max_lbl | mid_lbl | min_lbl | max_seg | mid_seg | min_seg
-  const cbs = Array.from(document.querySelectorAll('input[type=checkbox][data-series]'));
+const SQL_API = '/api/sql';
+const chartEl = document.getElementById('chart');
+const chart = echarts.init(chartEl);
 
-  // ---------- State ----------
-  const COLORS = {
-    ask:  "#FF6B6B",
-    mid:  "#FFD166",
-    bid:  "#4ECDC4",
-    maxZ: "#F472B6",
-    midZ: "#F59E0B",
-    minZ: "#10B981",
-  };
+// ----- State -----
+let ticks = [];   // {id, ts: Date, mid, kal}
+let zones = [];   // {id, start_id, end_id, start_ts, end_ts, direction, zone_type}
+let currentFromId = null;
+let currentWindow = 5000;
 
-  const S = {
-    ask: [], mid: [], bid: [],       // [[tick_id, price], ...]
-    maxZ: [], midZ: [], minZ: [],    // [[sid, spr], [eid, epr], null, ...]
-    tsById: new Map(),               // tick_id -> ISO ts
-    lastMaxRowId: null,
-    lastSpanEndId: null,
-    lastZoomSpan: null,              // span to keep when appending
-  };
-
-  // ---------- Utils ----------
-  const setStatus = (t) => { if (statusEl) statusEl.textContent = String(t); };
-  const j = async (u) => { const r = await fetch(u); if (!r.ok) throw new Error(await r.text()); return r.json(); };
-
-  function visibilityMap(){
-    const m = {};
-    cbs.forEach(cb => m[cb.dataset.series] = cb.checked);
-    return m;
+// ----- Helpers -----
+async function fetchSqlRows(sql) {
+  const res = await fetch(SQL_API, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sql })
+  });
+  if (!res.ok) {
+    const txt = await res.text();
+    console.error('SQL error', txt);
+    throw new Error('SQL error: ' + txt);
   }
+  const json = await res.json();
+  return json.rows || [];
+}
 
-  function extentXY(){
-    const arrays = [S.ask,S.mid,S.bid,S.maxZ,S.midZ,S.minZ].filter(a => a && a.length);
-    if(!arrays.length) return null;
-    let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
-    for(const arr of arrays){
-      for(const p of arr){
-        if(!p || p[0]==null || p[1]==null) continue;
-        const [x,y]=p;
-        if(x<minX) minX=x; if(x>maxX) maxX=x;
-        if(y<minY) minY=y; if(y>maxY) maxY=y;
+function setStatus(msg) {
+  const el = document.getElementById('status');
+  if (el) el.textContent = msg || '';
+}
+
+function parseIntSafe(val, def) {
+  const n = parseInt(val, 10);
+  return Number.isFinite(n) && n > 0 ? n : def;
+}
+
+// Find nearest ts for a tick id in our loaded window
+function findTsForIdOrNearest(id) {
+  if (!ticks.length) return null;
+  // ticks are sorted by id ascending
+  // exact or first >= id
+  for (let i = 0; i < ticks.length; i++) {
+    if (ticks[i].id >= id) return ticks[i].ts;
+  }
+  // otherwise last one
+  return ticks[ticks.length - 1].ts;
+}
+
+// ----- Chart setup -----
+function setupChart() {
+  chart.setOption({
+    backgroundColor: '#0d1117',
+    animation: false,
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'line' },
+      formatter: (params) => {
+        if (!params || !params.length) return '';
+        // Prefer mid series for meta
+        const p = params.find(x => x.seriesName === 'Mid') || params[0];
+        const d = p && p.data && p.data.meta ? p.data.meta : null;
+        if (!d) return '';
+        const dt = d.ts;
+        const lines = [
+          `id: ${d.id}`,
+          dt.toLocaleString(),
+          `mid: ${d.mid != null ? d.mid.toFixed(2) : ''}`,
+          `kal: ${d.kal != null ? d.kal.toFixed(2) : ''}`
+        ];
+        return lines.join('<br/>');
       }
-    }
-    if(!isFinite(minX) || !isFinite(maxX)) return null;
-    return {minX,maxX,minY,maxY};
-  }
-
-  function polyline(rows){
-    const out=[];
-    for(const r of rows||[]){
-      if(r.start_id==null || r.end_id==null || r.start_price==null || r.end_price==null) continue;
-      out.push([+r.start_id, +r.start_price], [+r.end_id, +r.end_price], null);
-    }
-    return out;
-  }
-
-  // ---------- Data ----------
-  async function fetchMaxById(id){ return j(`/api/max/by_id?id=${id}`); }
-  async function fetchNextMax(afterId){ return j(`/api/max/next?after_id=${afterId}`); }
-  async function lastTickId(){ const r = await j('/api/ticks/last_id'); return r?.last_id ?? null; }
-
-  async function fetchTicksWindow(fromId, toId){
-    const OUT = { ask:[], mid:[], bid:[], tsById:new Map() };
-    if (toId < fromId) [fromId,toId] = [toId,fromId];
-    let cursor = fromId - 1;
-    while(true){
-      const limit = Math.min(20000, toId - cursor);
-      if(limit <= 0) break;
-      const rows = await j(`/api/ticks/after?since_id=${cursor}&limit=${limit}`);
-      if(!Array.isArray(rows) || rows.length===0) break;
-      for(const r of rows){
-        const id = r.id;
-        if(id < fromId) continue;
-        if(id > toId){ cursor = toId; break; }
-        if(r.ask!=null) OUT.ask.push([id,+r.ask]);
-        if(r.mid!=null) OUT.mid.push([id,+r.mid]);
-        if(r.bid!=null) OUT.bid.push([id,+r.bid]);
-        const ts = r.ts || r.timestamp; if(ts) OUT.tsById.set(id, ts);
-        cursor = id;
-      }
-      if(cursor >= toId) break;
-    }
-    return OUT;
-  }
-
-  // unified zigzag endpoint: returns rows with .kind in {'max','mid','min'}
-  async function fetchZigsWindow(fromId, toId){
-    const rows = await j(`/api/zigzag?from_id=${fromId}&to_id=${toId}`);
-    const out = { max:[], mid:[], min:[] };
-    if(Array.isArray(rows)){
-      for(const r of rows){
-        const k = (r.kind||'').toLowerCase();
-        if(out[k]) out[k].push(r);
-      }
-    }
-    return out;
-  }
-
-  // ---------- Chart (declared ONCE, hot-reload safe) ----------
-  let chart = echarts.getInstanceByDom(chartEl);
-  if (!chart) chart = echarts.init(chartEl, null, { renderer:'canvas' });
-
-  function yAxisCfg(minY, maxY){
-    const cfg = {
-      type:'value',
-      minInterval:1, scale:false,
-      axisLabel:{ color:'#9ca3af', formatter:v=>Number.isInteger(v)?v:'' },
-      axisLine:{ lineStyle:{ color:'#1f2937' } },
-      splitLine:{ show:true, lineStyle:{ color:'rgba(148,163,184,0.08)' } },
-    };
-    if (Number.isFinite(minY) && Number.isFinite(maxY) && maxY > minY) {
-      const pad = Math.max(0.5, (maxY - minY) * 0.08);
-      cfg.min = Math.floor(minY - pad);
-      cfg.max = Math.ceil(maxY + pad);
-    }
-    return cfg;
-  }
-
-  function buildOption(){
-    const vis = visibilityMap();
-    const ex = extentXY();
-
-    const dzAbs = !!ex;
-    const dzStart = ex ? ex.minX : 0;
-    const dzEnd   = ex ? ex.maxX : 100;
-
-    if (ex && S.lastZoomSpan == null) S.lastZoomSpan = dzEnd - dzStart;
-
-    return {
-      backgroundColor:'#0b0f14',
-      animation:false,
-      grid:{ left:42, right:18, top:10, bottom:28 },
-      tooltip:{
-        trigger:'axis', axisPointer:{type:'line'},
-        backgroundColor:'rgba(17,24,39,.95)',
-        formatter: (ps)=>{
-          if(!ps?.length) return '';
-          const p0 = ps.find(p=>Array.isArray(p.data));
-          const id = p0 ? p0.data[0] : null;
-          const ts = id!=null ? S.tsById.get(id) : null;
-          const when = ts ? new Date(ts).toLocaleString() : '(no time)';
-          const lines = ps.filter(p=>p.value!=null).map(p=>{
-            const y = Array.isArray(p.data) ? p.data[1] : p.value;
-            return `${p.seriesName}: ${y}`;
-          });
-          return `ID: ${id}\n\nTime: ${when}\n\n* * *\n` + lines.join('\n');
-        }
+    },
+    grid: { left: 48, right: 24, top: 24, bottom: 48 },
+    xAxis: {
+      type: 'time',
+      axisLabel: { color: '#c9d1d9' },
+      axisLine: { lineStyle: { color: '#30363d' } }
+    },
+    yAxis: {
+      type: 'value',
+      scale: true,
+      minInterval: 1,
+      splitNumber: 8,
+      axisLabel: {
+        color: '#c9d1d9',
+        formatter: v => String(Math.round(v))
       },
-      xAxis:{ type:'value',
-        axisLabel:{ color:'#9ca3af' },
-        axisLine:{ lineStyle:{ color:'#1f2937' } },
-        splitLine:{ show:true, lineStyle:{ color:'rgba(148,163,184,0.08)' } },
+      splitLine: { lineStyle: { color: '#30363d' } }
+    },
+    dataZoom: [
+      { type: 'inside', xAxisIndex: 0, filterMode: 'weakFilter' },
+      { type: 'slider', xAxisIndex: 0, bottom: 6 }
+    ],
+    legend: {
+      top: 0,
+      textStyle: { color: '#c9d1d9' }
+    },
+    series: [
+      {
+        name: 'Mid',
+        type: 'line',
+        showSymbol: false,
+        lineStyle: { width: 1.5 },
+        data: []
       },
-      yAxis: yAxisCfg(ex?.minY, ex?.maxY),
-      dataZoom: dzAbs
-        ? [
-            { type:'inside', startValue:dzStart, endValue:dzEnd },
-            { type:'slider', height:16, bottom:4, startValue:dzStart, endValue:dzEnd },
-          ]
-        : [
-            { type:'inside', start:0, end:100 },
-            { type:'slider', height:16, bottom:4, start:0, end:100 },
-          ],
-      series:[
-        { name:'Ask',         type:'line', showSymbol:false, lineStyle:{ color:COLORS.ask,  width:1.4, opacity: vis.ask?1:0 },  itemStyle:{ opacity: vis.ask?1:0 },  data:S.ask },
-        { name:'Mid (ticks)', type:'line', showSymbol:false, lineStyle:{ color:COLORS.mid,  width:1.4, opacity: (vis.mid_tick??vis.mid)?1:0 }, itemStyle:{ opacity: (vis.mid_tick??vis.mid)?1:0 }, data:S.mid },
-        { name:'Bid',         type:'line', showSymbol:false, lineStyle:{ color:COLORS.bid,  width:1.4, opacity: vis.bid?1:0 }, itemStyle:{ opacity: vis.bid?1:0 }, data:S.bid },
-
-        { name:'Max (labels)', type:'line', showSymbol:false, lineStyle:{ width:0.5, opacity: vis.max_lbl?1:0 }, data:[] },
-        { name:'Mid (labels)', type:'line', showSymbol:false, lineStyle:{ width:0.5, opacity: vis.mid_lbl?1:0 }, data:[] },
-        { name:'Min (labels)', type:'line', showSymbol:false, lineStyle:{ width:0.5, opacity: vis.min_lbl?1:0 }, data:[] },
-
-        { name:'Max Segment', type:'line', connectNulls:false, showSymbol:false, lineStyle:{ color:COLORS.maxZ, width:1.8, opacity:(vis.max_seg??true)?1:0 }, data:S.maxZ },
-        { name:'Mid Segment', type:'line', connectNulls:false, showSymbol:false, lineStyle:{ color:COLORS.midZ, width:1.6, opacity:(vis.mid_seg??true)?1:0 }, data:S.midZ },
-        { name:'Min Segment', type:'line', connectNulls:false, showSymbol:false, lineStyle:{ color:COLORS.minZ, width:1.4, opacity:(vis.min_seg??true)?1:0 }, data:S.minZ },
-      ]
-    };
-  }
-
-  function renderAll(){
-    chart.clear();
-    chart.setOption(buildOption(), { notMerge:true });
-    refitYToVisible(); // keep Y tight to the visible X range
-  }
-
-  // Re-fit Y to the currently visible X range
-  function refitYToVisible() {
-    const opt = chart.getOption();
-    if (!opt || !opt.dataZoom || opt.dataZoom.length === 0) return;
-
-    // We only adjust Y when there is data on screen
-    const hasData =
-      (S.ask.length + S.mid.length + S.bid.length +
-      S.maxZ.length + S.midZ.length + S.minZ.length) > 0;
-    if (!hasData) return;
-
-    // Read visible x-range (value axis uses startValue/endValue)
-    const dz = opt.dataZoom[0];
-    const x0 = dz.startValue ?? opt.dataZoom?.[1]?.startValue;
-    const x1 = dz.endValue   ?? opt.dataZoom?.[1]?.endValue;
-    if (!Number.isFinite(x0) || !Number.isFinite(x1)) return;
-
-    // Find min/max Y inside [x0..x1]
-    let minY = Infinity, maxY = -Infinity;
-    for (const arr of [S.ask, S.mid, S.bid, S.maxZ, S.midZ, S.minZ]) {
-      for (const p of arr) {
-        if (!p || p[0] == null || p[1] == null) continue;
-        if (p[0] < x0 || p[0] > x1) continue;
-        if (p[1] < minY) minY = p[1];
-        if (p[1] > maxY) maxY = p[1];
+      {
+        name: 'Kalman',
+        type: 'line',
+        showSymbol: false,
+        lineStyle: { width: 1, type: 'dashed' },
+        data: []
+      },
+      {
+        name: 'Zones',
+        type: 'line',
+        data: [],
+        markArea: { data: [] }
       }
-    }
-    if (!isFinite(minY) || !isFinite(maxY) || maxY <= minY) return;
+    ]
+  });
+}
 
-    const pad = Math.max(0.5, (maxY - minY) * 0.08);
-
-    // IMPORTANT: merge update (notMerge: false) so we don't wipe the series
+function rebuildChart() {
+  if (!ticks.length) {
     chart.setOption({
-      yAxis: [{
-        type: 'value',
-        min: Math.floor(minY - pad),
-        max: Math.ceil(maxY + pad),
-        minInterval: 1,
-        scale: false,
-        axisLabel: { color: '#9ca3af', formatter: v => Number.isInteger(v) ? v : '' },
-        axisLine:  { lineStyle: { color: '#1f2937' } },
-        splitLine: { show: true, lineStyle: { color: 'rgba(148,163,184,0.08)' } },
-      }]
-    }, { notMerge: false, lazyUpdate: true });
+      series: [
+        { data: [] },
+        { data: [] },
+        { data: [], markArea: { data: [] } }
+      ]
+    });
+    return;
   }
 
+  const midSeries = ticks.map(t => ({
+    value: [t.ts, t.mid],
+    meta: t
+  }));
 
-  // Keep right span if user is at the right
-  function rememberZoomToRight(){
-    const opt = chart.getOption();
-    const dz0 = opt?.dataZoom?.[0];
-    const end = dz0?.endValue;
-    if (end == null) return;
-    const ex = extentXY();
-    if (!ex) return;
-    const atRight = Math.abs(end - ex.maxX) <= 2;
-    if (atRight) {
-      const span = dz0.endValue - dz0.startValue;
-      if (isFinite(span) && span > 0) S.lastZoomSpan = span;
-    }
+  const hasKal = ticks.some(t => t.kal != null);
+  const kalSeries = hasKal
+    ? ticks
+        .filter(t => t.kal != null)
+        .map(t => ({ value: [t.ts, t.kal], meta: t }))
+    : [];
+
+  // Build zone markAreas
+  const zoneColors = {
+    'TREND': 'rgba(34,197,94,0.18)',       // green-ish
+    'WEAK_TREND': 'rgba(59,130,246,0.16)', // blue-ish
+    'CHOP': 'rgba(248,113,113,0.18)',      // red-ish
+    'OTHER': 'rgba(148,163,184,0.12)'      // gray-ish
+  };
+
+  const areas = zones.map(z => {
+    const startTs = z.start_ts || findTsForIdOrNearest(z.start_id);
+    const endTs   = z.end_ts   || findTsForIdOrNearest(z.end_id);
+    if (!startTs || !endTs) return null;
+
+    const color = zoneColors[z.zone_type] || zoneColors['OTHER'];
+    const label = `${z.zone_type || 'ZONE'} (${z.direction > 0 ? '↑' : z.direction < 0 ? '↓' : '≈'})`;
+
+    return [
+      {
+        name: label,
+        xAxis: startTs,
+        itemStyle: { color }
+      },
+      {
+        xAxis: endTs
+      }
+    ];
+  }).filter(Boolean);
+
+  chart.setOption({
+    series: [
+      { name: 'Mid', data: midSeries },
+      { name: 'Kalman', data: kalSeries },
+      { name: 'Zones', data: [], markArea: { data: areas } }
+    ]
+  });
+}
+
+// ----- Loading logic -----
+async function loadWindow(fromId, windowSize) {
+  currentFromId = fromId;
+  currentWindow = windowSize;
+
+  const startId = fromId;
+  const endId = fromId + windowSize - 1;
+
+  setStatus(`Loading ticks ${startId} – ${endId} ...`);
+
+  // 1) Ticks with mid + kal
+  const tickSql = `
+    SELECT id, ts, mid, kal
+    FROM ticks
+    WHERE id BETWEEN ${startId} AND ${endId}
+    ORDER BY id
+  `;
+  // 2) Zones overlapping this id window
+  const zoneSql = `
+    SELECT id, start_id, end_id,
+           start_ts, end_ts,
+           direction,
+           zone_type
+    FROM zones
+    WHERE NOT (end_id < ${startId} OR start_id > ${endId})
+    ORDER BY start_id
+  `;
+
+  const [tickRows, zoneRows] = await Promise.all([
+    fetchSqlRows(tickSql),
+    fetchSqlRows(zoneSql)
+  ]);
+
+  // Normalize ticks
+  ticks = tickRows.map(r => ({
+    id: Number(r.id),
+    ts: new Date(r.ts),
+    mid: r.mid != null ? Number(r.mid) : null,
+    kal: r.kal != null ? Number(r.kal) : null
+  }));
+
+  zones = zoneRows.map(r => ({
+    id: Number(r.id),
+    start_id: Number(r.start_id),
+    end_id: Number(r.end_id),
+    start_ts: r.start_ts ? new Date(r.start_ts) : null,
+    end_ts: r.end_ts ? new Date(r.end_ts) : null,
+    direction: r.direction != null ? Number(r.direction) : 0,
+    zone_type: r.zone_type || 'OTHER'
+  }));
+
+  setStatus(`Loaded ${ticks.length} ticks, ${zones.length} zones.`);
+  rebuildChart();
+}
+
+// ----- UI wiring -----
+function wireUi() {
+  const btn = document.getElementById('btnLoad');
+  const fromInput = document.getElementById('fromId');
+  const winInput = document.getElementById('windowSize');
+
+  if (winInput && !winInput.value) {
+    winInput.value = String(currentWindow);
   }
 
-  // ---------- Flows ----------
-  async function loadByMaxRow(rowId){
-    setStatus(`loading max#${rowId}…`);
-
-    // clear state
-    S.ask=[]; S.mid=[]; S.bid=[];
-    S.maxZ=[]; S.midZ=[]; S.minZ=[];
-    S.tsById.clear();
-    S.lastZoomSpan=null;
-
-    const seg = await fetchMaxById(rowId);                // start_id..end_id
-    const fromId = seg.start_id, toId = seg.end_id;
-    S.lastMaxRowId = seg.id;
-    S.lastSpanEndId = toId;
-
-    // zigzags first (fast visual)
-    const zz = await fetchZigsWindow(fromId, toId);
-    S.maxZ = polyline(zz.max);
-    S.midZ = polyline(zz.mid);
-    S.minZ = polyline(zz.min);
-
-    // ticks in the same window
-    const T = await fetchTicksWindow(fromId, toId);
-    S.ask = T.ask; S.mid = T.mid; S.bid = T.bid;
-    T.tsById.forEach((v,k)=>S.tsById.set(k,v));
-
-    renderAll();
-    setStatus('ready');
-  }
-
-  async function loadMore(){
-    if(!S.lastMaxRowId){ setStatus('nothing loaded'); return; }
-
-    try{
-      const nx = await fetchNextMax(S.lastMaxRowId);
-      if(nx?.id){
-        rememberZoomToRight();
-
-        const fromId = nx.start_id, toId = nx.end_id;
-
-        const T = await fetchTicksWindow(fromId, toId);
-        S.ask = S.ask.concat(T.ask);
-        S.mid = S.mid.concat(T.mid);
-        S.bid = S.bid.concat(T.bid);
-        T.tsById.forEach((v,k)=>S.tsById.set(k,v));
-
-        const zz = await fetchZigsWindow(fromId, toId);
-        S.maxZ = S.maxZ.concat(polyline(zz.max));
-        S.midZ = S.midZ.concat(polyline(zz.mid));
-        S.minZ = S.minZ.concat(polyline(zz.min));
-
-        S.lastMaxRowId = nx.id;
-        S.lastSpanEndId = toId;
-
-        renderAll();
-        setStatus('ready');
+  if (btn) {
+    btn.addEventListener('click', async () => {
+      const fromVal = parseIntSafe(fromInput && fromInput.value, null);
+      if (!fromVal) {
+        alert('Please enter a valid starting tick id.');
         return;
       }
-    }catch(_){ /* fall to tail */ }
-
-    // Tail: extend ticks to last_id and overlay remaining zigs
-    setStatus('tail…');
-    const last = await lastTickId();
-    if(!last || !S.lastSpanEndId){ setStatus('ready'); return; }
-
-    rememberZoomToRight();
-
-    let cursor = S.lastSpanEndId + 1;
-    while(cursor <= last){
-      const chunk = Math.min(20000, last - cursor + 1);
-      const rows = await j(`/api/ticks/after?since_id=${cursor-1}&limit=${chunk}`);
-      if(!rows?.length) break;
-      for(const r of rows){
-        const id=r.id;
-        if(r.ask!=null) S.ask.push([id,+r.ask]);
-        if(r.mid!=null) S.mid.push([id,+r.mid]);
-        if(r.bid!=null) S.bid.push([id,+r.bid]);
-        const ts = r.ts || r.timestamp; if(ts) S.tsById.set(id, ts);
-        cursor = id + 1;
+      const winVal = parseIntSafe(winInput && winInput.value, currentWindow);
+      try {
+        await loadWindow(fromVal, winVal);
+      } catch (err) {
+        console.error(err);
+        setStatus('Error: ' + err.message);
+        alert('Error loading data – see console for details.');
       }
-    }
-
-    const zzTail = await fetchZigsWindow(S.lastSpanEndId, last);
-    S.maxZ = S.maxZ.concat(polyline(zzTail.max));
-    S.midZ = S.midZ.concat(polyline(zzTail.mid));
-    S.minZ = S.minZ.concat(polyline(zzTail.min));
-
-    renderAll();
-    setStatus('ready');
-  }
-
-  function resetAll(){
-    S.ask=[]; S.mid=[]; S.bid=[];
-    S.maxZ=[]; S.midZ=[]; S.minZ=[];
-    S.tsById.clear();
-    S.lastMaxRowId=null;
-    S.lastSpanEndId=null;
-    S.lastZoomSpan=null;
-
-    chart.clear();
-    chart.setOption({
-      backgroundColor:'#0b0f14',
-      animation:false,
-      grid:{ left:42, right:18, top:10, bottom:28 },
-      xAxis:{ type:'value',
-        axisLabel:{ color:'#9ca3af' },
-        axisLine:{ lineStyle:{ color:'#1f2937' } },
-        splitLine:{ show:true, lineStyle:{ color:'rgba(148,163,184,0.08)' } },
-      },
-      yAxis: yAxisCfg(undefined, undefined),
-      dataZoom:[
-        { type:'inside', start:0, end:100 },
-        { type:'slider', height:16, bottom:4, start:0, end:100 }
-      ],
-      series:[
-        { name:'Ask', type:'line', showSymbol:false, data:[] },
-        { name:'Mid (ticks)', type:'line', showSymbol:false, data:[] },
-        { name:'Bid', type:'line', showSymbol:false, data:[] },
-        { name:'Max (labels)', type:'line', showSymbol:false, data:[] },
-        { name:'Mid (labels)', type:'line', showSymbol:false, data:[] },
-        { name:'Min (labels)', type:'line', showSymbol:false, data:[] },
-        { name:'Max Segment', type:'line', connectNulls:false, showSymbol:false, data:[] },
-        { name:'Mid Segment', type:'line', connectNulls:false, showSymbol:false, data:[] },
-        { name:'Min Segment', type:'line', connectNulls:false, showSymbol:false, data:[] },
-      ]
-    }, { notMerge:true });
-    setStatus('idle');
-  }
-
-  // ---------- Wire ----------
-  if(btnLoad){
-    btnLoad.addEventListener('click', async ()=>{
-      const row = parseInt(rowInput?.value || '0', 10);
-      const leg = (legSel?.value || 'max').toLowerCase();
-      if(!row){ setStatus('enter Row ID'); return; }
-      if(leg !== 'max'){ setStatus('Anchoring by Max row id; fetching mid/min by tick range…'); }
-      try { await loadByMaxRow(row); } catch(e){ setStatus(`error: ${String(e).slice(0,160)}`); }
     });
   }
-  if(btnMore)  btnMore.addEventListener('click', ()=>loadMore().catch(e=>setStatus(`error: ${String(e).slice(0,160)}`)));
-  if(btnReset) btnReset.addEventListener('click', resetAll);
-  cbs.forEach(cb => cb.addEventListener('change', renderAll));
-  chart.on('dataZoom', () => refitYToVisible()); // auto-fit Y on every zoom/pan
+}
 
-  // initial frame
-  resetAll();
-})();
+// ----- Bootstrap -----
+window.addEventListener('resize', () => chart.resize());
+setupChart();
+wireUi();
+// NOTE: no auto-load; page starts empty on purpose.
