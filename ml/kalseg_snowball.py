@@ -200,7 +200,26 @@ def insert_predictions(
     y_true_chunk: np.ndarray,
     proba_chunk: np.ndarray,
     y_pred_chunk: np.ndarray,
+    classes: np.ndarray,
 ):
+    """
+    Insert prediction rows into kalseg_prediction, handling the fact
+    that scikit-learn may only give probabilities for classes that
+    have been seen in training so far.
+
+    We always store three columns:
+        proba_down  = P(label = -1)
+        proba_none  = P(label =  0)
+        proba_up    = P(label = +1)
+
+    If a class hasn't been seen yet by the model, its probability is 0.0.
+    """
+    class_to_idx = {int(c): i for i, c in enumerate(classes)}
+
+    def get_prob(probs, cls):
+        idx = class_to_idx.get(cls)
+        return float(probs[idx]) if idx is not None else 0.0
+
     sql = """
     INSERT INTO kalseg_prediction (
         run_id, chunk_index, seg_id, start_id, dir_kalseg,
@@ -232,12 +251,13 @@ def insert_predictions(
                     "dir_kalseg": meta["dir_kalseg"],
                     "true_label": int(y_true_chunk[i]),
                     "pred_label": int(y_pred_chunk[i]),
-                    "proba_down": float(probs[0]),
-                    "proba_none": float(probs[1]),
-                    "proba_up": float(probs[2]),
+                    "proba_down": get_prob(probs, -1),
+                    "proba_none": get_prob(probs, 0),
+                    "proba_up":   get_prob(probs, 1),
                 },
             )
     conn.commit()
+
 
 
 def snowball_train(limit_segments: int):
@@ -308,6 +328,7 @@ def snowball_train(limit_segments: int):
             y_true_chunk=y_chunk,
             proba_chunk=proba,
             y_pred_chunk=y_pred,
+            classes=clf.classes_,
         )
 
         # 3) Extend training set and retrain
