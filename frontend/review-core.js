@@ -2,19 +2,12 @@
 // Review window viewer (historical only, no live stream).
 // Uses /api/review/window?from_id=...&window=...
 //
-// Response is expected as:
+// Response:
 //   {
 //     ticks: [{ id, ts, mid, kal, bid, ask, spread }, ...],
 //     segs:  [{ id, start_id, end_id, direction }, ...],
 //     zones: [{ id, start_id, end_id, direction, zone_type }, ...]
 //   }
-//
-// - Mid price  : main line
-// - Kalman     : optional overlay line
-// - Zones      : rectangular colored areas between local min/max price
-// - Segments   : arrows at top/bottom of price area (direction up/down)
-//
-// Dark mode, mouse wheel zoom, and panning preserved via ECharts dataZoom.
 
 (function () {
   /* global echarts */
@@ -74,11 +67,6 @@
   function buildZoneBands(ticksArr, zonesArr) {
     if (!ticksArr.length || !zonesArr.length) return [];
 
-    const byId = new Map();
-    for (const t of ticksArr) {
-      byId.set(Number(t.id), t);
-    }
-
     const bands = [];
 
     for (const z of zonesArr) {
@@ -125,18 +113,9 @@
     return bands;
   }
 
+  // NEW: segment points drawn ON the kalman line at the segment start
   function buildSegmentPoints(ticksArr, segsArr) {
     if (!ticksArr.length || !segsArr.length) return [];
-
-    const priceVals = ticksArr.map(t => Number(t.mid)).filter(v => Number.isFinite(v));
-    if (!priceVals.length) return [];
-
-    const minPrice = Math.min(...priceVals);
-    const maxPrice = Math.max(...priceVals);
-    const padding  = (maxPrice - minPrice) * 0.04 || 0.25;
-
-    const topY = maxPrice + padding;
-    const botY = minPrice - padding;
 
     const byId = new Map();
     for (const t of ticksArr) {
@@ -144,31 +123,34 @@
     }
 
     const points = [];
+
     for (const s of segsArr) {
       const startId = Number(s.start_id);
-      const endId   = Number(s.end_id);
-      const midId   = Math.floor((startId + endId) / 2);
 
-      let midTick = byId.get(midId);
-      if (!midTick) {
-        // fallback: pick closest id that exists
-        const candidates = [startId, endId];
-        for (const cid of candidates) {
-          if (byId.has(cid)) {
-            midTick = byId.get(cid);
+      // Try exact start_id, otherwise first tick with id >= start_id
+      let startTick = byId.get(startId);
+      if (!startTick) {
+        for (const t of ticksArr) {
+          if (Number(t.id) >= startId) {
+            startTick = t;
             break;
           }
         }
       }
-      if (!midTick) continue;
+      if (!startTick) continue;
 
-      const dir = (s.direction || '').toString().toLowerCase();
-      const isUp = (dir === 'up' || dir === '1' || dir === 'u');
+      const dirRaw = (s.direction || '').toString().toLowerCase();
+      const isUp   = (dirRaw === 'up' || dirRaw === '1' || dirRaw === 'u');
+
+      const price  = Number(
+        startTick.kal != null ? startTick.kal : startTick.mid
+      );
+      if (!Number.isFinite(price)) continue;
 
       points.push({
-        name: 'seg',
-        value: [midTick.ts, isUp ? topY : botY],
-        direction: dir,
+        value: [startTick.ts, price],
+        direction: dirRaw,
+        symbolRotate: isUp ? 0 : 180, // ▲ for up, ▼ for down
       });
     }
 
@@ -223,7 +205,6 @@
       return;
     }
 
-    const times = ticks.map(t => t.ts);
     const midSeries = ticks.map(t => [t.ts, Number(t.mid)]);
     const kalSeries = ticks.map(t =>
       t.kal != null ? [t.ts, Number(t.kal)] : [t.ts, Number(t.mid)]
@@ -234,7 +215,7 @@
 
     const series = [];
 
-    // Zones via custom series (rects)
+    // Zones via custom series (rectangles)
     if (showZones && zoneBands.length) {
       series.push({
         name: 'Zones',
@@ -302,7 +283,7 @@
       });
     }
 
-    // Segments as scatter triangles
+    // Segments as scatter triangles ON kalman line
     if (showSegs && segPoints.length) {
       series.push({
         name: 'Segments',
@@ -312,18 +293,23 @@
         data: segPoints.map(p => ({
           value: p.value,
           direction: p.direction,
+          symbolRotate: p.symbolRotate,
         })),
+        encode: { x: 0, y: 1 },
         itemStyle: {
           color: function (param) {
             const dir = (param.data.direction || '').toString().toLowerCase();
             if (dir === 'up' || dir === '1' || dir === 'u') {
-              return '#2ea043';
+              return '#2ea043'; // green
             }
             if (dir === 'dn' || dir === '-1' || dir === 'down' || dir === 'd') {
-              return '#f85149';
+              return '#f85149'; // red
             }
             return '#8b949e';
           },
+        },
+        symbolRotate: function (param) {
+          return param.data.symbolRotate || 0;
         },
         z: 3,
       });
@@ -503,6 +489,6 @@
     chart.resize();
   });
 
-  // Initial empty chart (no auto-load so it doesn't hit DB until you say so)
+  // Initial empty chart
   rebuildChart();
 })();
