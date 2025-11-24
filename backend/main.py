@@ -504,6 +504,112 @@ def api_review_window(
         "zones": _jsonable(zones),
     }
 
+@app.get("/api/review/window")
+def api_review_window(
+    from_id: int = Query(..., description="Starting tick id (inclusive)"),
+    window: int = Query(5000, ge=100, le=50000),
+):
+    """
+    Return:
+      - ticks:  id, ts, mid, kal (if column exists), bid/ask/spread
+      - segs:   kalseg rows overlapping [from_id, to_id] (id, start_id, end_id, direction)
+      - zones:  zones rows overlapping [from_id, to_id] (id, start_id, end_id, direction, zone_type)
+    Used by review.html to study past Kalman behaviour.
+    """
+    to_id = from_id + window - 1
+    conn = get_conn()
+    ts_col, mid_expr, (has_bid, has_ask) = _ts_mid_cols(conn)
+
+    with dict_cur(conn) as cur:
+        # Does ticks have a 'kal' column?
+        cur.execute(
+            """
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema='public'
+              AND table_name='ticks'
+              AND column_name='kal'
+            """
+        )
+        has_kal = cur.fetchone() is not None
+
+        bid_sel = ", bid" if has_bid else ""
+        ask_sel = ", ask" if has_ask else ""
+        kal_sel = ", kal" if has_kal else ""
+
+        # ---- ticks ----
+        cur.execute(
+            f"""
+            SELECT id,
+                   {ts_col}   AS ts,
+                   {mid_expr} AS mid
+                   {bid_sel}
+                   {ask_sel}
+                   {kal_sel}
+            FROM ticks
+            WHERE id BETWEEN %s AND %s
+            ORDER BY id ASC
+            """,
+            (from_id, to_id),
+        )
+        ticks = cur.fetchall()
+
+        # normalise numerics + timestamps + spread
+        for r in ticks:
+            if isinstance(r.get("mid"), Decimal):
+                r["mid"] = float(r["mid"])
+            if has_bid and isinstance(r.get("bid"), Decimal):
+                r["bid"] = float(r["bid"])
+            if has_ask and isinstance(r.get("ask"), Decimal):
+                r["ask"] = float(r["ask"])
+            if has_kal and isinstance(r.get("kal"), Decimal):
+                r["kal"] = float(r["kal"])
+            r["spread"] = (
+                (r.get("ask") - r.get("bid"))
+                if (has_bid and has_ask and r.get("ask") is not None and r.get("bid") is not None)
+                else None
+            )
+            if isinstance(r.get("ts"), (datetime, date)):
+                r["ts"] = r["ts"].isoformat()
+
+        # ---- segs: kalseg ----
+        if _table_exists(conn, "kalseg"):
+            cur.execute(
+                """
+                SELECT id, start_id, end_id, direction
+                FROM kalseg
+                WHERE NOT (end_id < %s OR start_id > %s)
+                ORDER BY start_id
+                """,
+                (from_id, to_id),
+            )
+            segs = cur.fetchall()
+        else:
+            segs = []
+
+        # ---- zones ----
+        if _table_exists(conn, "zones"):
+            cur.execute(
+                """
+                SELECT id, start_id, end_id, direction, zone_type
+                FROM zones
+                WHERE NOT (end_id < %s OR start_id > %s)
+                ORDER BY start_id
+                """,
+                (from_id, to_id),
+            )
+            zones = cur.fetchall()
+        else:
+            zones = []
+
+    # _jsonable will take care of any Decimal / datetime leftovers
+    return {
+        "ticks": _jsonable(ticks),
+        "segs": _jsonable(segs),
+        "zones": _jsonable(zones),
+    }
+
+
 @app.get("/api/labels/{name}/range")
 def api_labels_range(
     name: str,
