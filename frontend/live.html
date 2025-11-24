@@ -1,62 +1,67 @@
-<!-- PATH: frontend/live.html -->
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Live Tick Chart</title>
+  <title>Live Tick Viewer</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    :root { color-scheme: dark; }
-    body{margin:0;background:#0d1117;color:#c9d1d9;font:14px/1.4 system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
-    header{display:flex;gap:.75rem;align-items:center;padding:.6rem .8rem;border-bottom:1px solid #30363d;flex-wrap:wrap}
-    header .spacer{flex:1}
-    select,input,button,label{background:#161b22;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:.35rem .5rem}
-    button{cursor:pointer}
-    #chart{height:calc(100vh - 56px)}
-    .group{display:flex;gap:.5rem;align-items:center}
-    .sep{width:1px;height:24px;background:#30363d;margin:0 .25rem}
-    .muted{opacity:.8}
+    html, body {
+      margin: 0; padding: 0; height: 100%; width: 100%;
+      background: #0d1117; color: #c9d1d9;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    body {
+      display: flex; flex-direction: column;
+    }
+
+    #toolbar {
+      display: flex; gap: 0.5rem; align-items: center;
+      background: #161b22; padding: 0.5rem 0.75rem;
+      border-bottom: 1px solid #30363d;
+    }
+
+    #toolbar input[type="number"] {
+      background: #0d1117; border: 1px solid #30363d; color: #c9d1d9;
+      padding: 0.15rem 0.35rem; border-radius: 4px; width: 100px;
+    }
+
+    #toolbar button {
+      background: #238636; color:#fff;
+      border: 1px solid #2ea043; border-radius: 4px;
+      padding: 0.25rem 0.75rem; cursor: pointer; font-size: 13px;
+    }
+    #toolbar button.secondary {
+      background:#30363d; border-color:#30363d;
+    }
+
+    #chart {
+      flex: 1 1 auto; width:100%; min-height:0;
+    }
+
+    #status { color:#8b949e; margin-left:1rem; font-size:12px; }
   </style>
 </head>
+
 <body>
-<header>
-  <strong>Live Tick Chart</strong>
-  <div class="sep"></div>
-  <button id="toggle" title="Pause/Resume live stream">Pause</button>
+  <div id="toolbar">
+    <button id="btnReload" class="secondary">Reload</button>
 
-  <div class="group">
-    <label class="muted">Window</label>
-    <select id="win">
-      <option value="2000">2k</option>
-      <option value="5000">5k</option>
-      <option value="10000" selected>10k</option>
-      <option value="20000">20k</option>
-    </select>
+    <label>Jump to: <input type="number" id="jumpId" /></label>
+    <button id="btnJump">Go</button>
+
+    <span id="status"></span>
+
+    <div style="margin-left:auto; display:flex; gap:0.75rem;">
+      <label><input type="checkbox" id="chkKal" checked/> Kalman</label>
+      <label><input type="checkbox" id="chkZones" checked/> Zones</label>
+      <label><input type="checkbox" id="chkSegs" checked/> Segs</label>
+    </div>
   </div>
 
-  <div class="group">
-    <label class="muted">Jump to tick</label>
-    <input id="jump" type="number" min="1" step="1" placeholder="id…" />
-    <button id="go">Go</button>
-  </div>
+  <div id="chart"></div>
 
-  <div class="group">
-    <button id="moreLeft" title="Load more history to the left">Load more ←</button>
-  </div>
-
-  <div class="spacer"></div>
-
-  <div class="group">
-    <label><input id="labels" type="checkbox" /> Pred labels</label>
-    <label><input id="showMax" type="checkbox" checked /> Max leg</label>
-  </div>
-</header>
-
-<div id="chart"></div>
-
-<!-- ECharts -->
-<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
-<!-- Core logic -->
-<script src="./live-core.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+  <script src="live-core.js"></script>
 </body>
 </html>
