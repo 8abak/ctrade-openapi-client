@@ -618,6 +618,148 @@ def _ticks_has_kal(conn) -> bool:
         """)
         return cur.fetchone() is not None
 
+# ADD THIS after existing tick endpoints (e.g. after api_ticks or ticks_range)
+
+@app.get("/api/live_window")
+def api_live_window(
+    limit: int = Query(5000, ge=500, le=20000),
+    before_id: Optional[int] = Query(None),
+    after_id: Optional[int] = Query(None),
+):
+    """
+    Unified window for the live view:
+      - returns last {limit} ticks by default
+      - OR a window ending at/before before_id
+      - OR a window starting at/after after_id
+
+    Response:
+      {
+        "ticks":    [{id, ts, mid, kal, bid?, ask?, spread?}, ...],
+        "segments": [{id, start_id, end_id, direction}, ...],
+        "zones":    [{id, start_id, end_id, direction, zone_type}, ...]
+      }
+    """
+    if before_id is not None and after_id is not None:
+        raise HTTPException(400, "Use only one of before_id or after_id")
+
+    conn = get_conn()
+    ts_col, mid_expr, (has_bid, has_ask) = _ts_mid_cols(conn)
+    has_kal = _ticks_has_kal(conn)
+
+    bid_sel = ", bid" if has_bid else ""
+    ask_sel = ", ask" if has_ask else ""
+    kal_sel = ", kal" if has_kal else ""
+
+    with dict_cur(conn) as cur:
+        if before_id is not None:
+            # window ending at/before before_id
+            cur.execute(
+                f"""
+                SELECT id, {ts_col} AS ts, {mid_expr} AS mid
+                       {kal_sel}{bid_sel}{ask_sel}
+                FROM ticks
+                WHERE id <= %s
+                ORDER BY id DESC
+                LIMIT %s
+                """,
+                (before_id, limit),
+            )
+            tick_rows = list(reversed(cur.fetchall()))
+        elif after_id is not None:
+            # window starting at/after after_id
+            cur.execute(
+                f"""
+                SELECT id, {ts_col} AS ts, {mid_expr} AS mid
+                       {kal_sel}{bid_sel}{ask_sel}
+                FROM ticks
+                WHERE id >= %s
+                ORDER BY id ASC
+                LIMIT %s
+                """,
+                (after_id, limit),
+            )
+            tick_rows = cur.fetchall()
+        else:
+            # default: last N ticks
+            cur.execute(
+                f"""
+                SELECT id, {ts_col} AS ts, {mid_expr} AS mid
+                       {kal_sel}{bid_sel}{ask_sel}
+                FROM ticks
+                ORDER BY id DESC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            tick_rows = list(reversed(cur.fetchall()))
+
+    # normalize ticks
+    if not tick_rows:
+        return {"ticks": [], "segments": [], "zones": []}
+
+    for r in tick_rows:
+        if isinstance(r.get("mid"), Decimal):
+            r["mid"] = float(r["mid"])
+        if has_kal and isinstance(r.get("kal"), Decimal):
+            r["kal"] = float(r["kal"])
+        else:
+            # fall back: use mid as kal if no dedicated column
+            if has_kal is False:
+                r["kal"] = r["mid"]
+        if has_bid and isinstance(r.get("bid"), Decimal):
+            r["bid"] = float(r["bid"])
+        if has_ask and isinstance(r.get("ask"), Decimal):
+            r["ask"] = float(r["ask"])
+        r["spread"] = (
+            (r.get("ask") - r.get("bid"))
+            if (has_bid and has_ask and r.get("ask") is not None and r.get("bid") is not None)
+            else None
+        )
+        if isinstance(r.get("ts"), (datetime, date)):
+            r["ts"] = r["ts"].isoformat()
+
+    window_start = int(tick_rows[0]["id"])
+    window_end   = int(tick_rows[-1]["id"])
+
+    # Segments and zones are optional – return [] if tables are missing
+    segments: List[Dict[str, Any]] = []
+    zones: List[Dict[str, Any]] = []
+
+    # we already have a global _table_exists(conn, name) defined in this file
+    if _table_exists(conn, "kalseg"):
+        with dict_cur(conn) as cur:
+            cur.execute(
+                """
+                SELECT id, start_id, end_id, direction
+                FROM kalseg
+                WHERE end_id   >= %s
+                  AND start_id <= %s
+                ORDER BY start_id ASC
+                """,
+                (window_start, window_end),
+            )
+            segments = [dict(r) for r in cur.fetchall()]
+
+    if _table_exists(conn, "zones"):
+        with dict_cur(conn) as cur:
+            cur.execute(
+                """
+                SELECT id, start_id, end_id, direction, zone_type
+                FROM zones
+                WHERE end_id   >= %s
+                  AND start_id <= %s
+                ORDER BY start_id ASC
+                """,
+                (window_start, window_end),
+            )
+            zones = [dict(r) for r in cur.fetchall()]
+
+    return {
+        "ticks": tick_rows,
+        "segments": segments,
+        "zones": zones,
+    }
+
 @app.get("/ticks/before/{tickid}")
 def ticks_before(tickid: int, limit: int = 2000):
     conn = get_conn()
