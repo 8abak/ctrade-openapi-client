@@ -113,7 +113,7 @@
     return bands;
   }
 
-  // NEW: segment points drawn ON the kalman line at the segment start
+  // Seg arrows on Kalman line at segment START
   function buildSegmentPoints(ticksArr, segsArr) {
     if (!ticksArr.length || !segsArr.length) return [];
 
@@ -127,7 +127,7 @@
     for (const s of segsArr) {
       const startId = Number(s.start_id);
 
-      // Try exact start_id, otherwise first tick with id >= start_id
+      // Try exact id, else first tick with id >= startId
       let startTick = byId.get(startId);
       if (!startTick) {
         for (const t of ticksArr) {
@@ -150,7 +150,7 @@
       points.push({
         value: [startTick.ts, price],
         direction: dirRaw,
-        symbolRotate: isUp ? 0 : 180, // ▲ for up, ▼ for down
+        symbolRotate: isUp ? 0 : 180,   // ▲ for up, ▼ for down
       });
     }
 
@@ -215,7 +215,7 @@
 
     const series = [];
 
-    // Zones via custom series (rectangles)
+    // Zones as rectangles
     if (showZones && zoneBands.length) {
       series.push({
         name: 'Zones',
@@ -257,7 +257,7 @@
       });
     }
 
-    // Mid series
+    // Mid line
     series.push({
       name: 'Mid',
       type: 'line',
@@ -269,7 +269,7 @@
       z: 1,
     });
 
-    // Kalman series
+    // Kalman line
     if (showKal) {
       series.push({
         name: 'Kalman',
@@ -283,13 +283,14 @@
       });
     }
 
-    // Segments as scatter triangles ON kalman line
+    // Segment arrows ON kalman line
     if (showSegs && segPoints.length) {
       series.push({
         name: 'Segments',
         type: 'scatter',
         symbol: 'triangle',
         symbolSize: 12,
+        // NOTE: symbolRotate is now per-point (no callback needed)
         data: segPoints.map(p => ({
           value: p.value,
           direction: p.direction,
@@ -307,9 +308,6 @@
             }
             return '#8b949e';
           },
-        },
-        symbolRotate: function (param) {
-          return param.data.symbolRotate || 0;
         },
         z: 3,
       });
