@@ -59,36 +59,47 @@ def fetch_labeled_segments(conn, limit: int):
 
 def fetch_segment_stats(conn, seg_id: int, start_id: int, end_id: int):
     """
-    Extract segment-level features using auto-detected columns.
+    Extract segment-level features using auto-detected columns,
+    using correct Postgres window/aggregation handling.
     """
-    ts_col = detect_ts_col(conn)
-    mid_expr = detect_mid_expr(conn)
+
+    ts_col = detect_ts_col(conn)         # will resolve to "timestamp"
+    mid_expr = detect_mid_expr(conn)     # will resolve to "mid"
+
+    # 1) base_stream: raw ticks
+    # 2) enriched: add first/last price using window functions
+    # 3) stats: aggregate summary
+    sql = f"""
+    WITH base AS (
+        SELECT
+            id,
+            {ts_col} AS ts,
+            COALESCE(kal, {mid_expr}) AS price
+        FROM ticks
+        WHERE id BETWEEN %s AND %s
+        ORDER BY id
+    ),
+    enriched AS (
+        SELECT
+            *,
+            first_value(price) OVER (ORDER BY id ASC) AS p_start,
+            last_value(price)  OVER (ORDER BY id ASC) AS p_end
+        FROM base
+    )
+    SELECT
+        count(*)                       AS n,
+        min(ts)                        AS ts_min,
+        max(ts)                        AS ts_max,
+        min(price)                     AS p_min,
+        max(price)                     AS p_max,
+        stddev_pop(price)              AS p_std,
+        max(p_start)                   AS p_start,  -- same for all rows
+        max(p_end)                     AS p_end
+    FROM enriched;
+    """
 
     with dict_cur(conn) as cur:
-        cur.execute(
-            f"""
-            WITH base AS (
-                SELECT
-                    id,
-                    {ts_col} AS ts,
-                    COALESCE(kal, {mid_expr}) AS price
-                FROM ticks
-                WHERE id BETWEEN %s AND %s
-                ORDER BY id
-            )
-            SELECT
-                count(*)                          AS n,
-                min(ts)                           AS ts_min,
-                max(ts)                           AS ts_max,
-                min(price)                        AS p_min,
-                max(price)                        AS p_max,
-                stddev_pop(price)                 AS p_std,
-                first_value(price) OVER ()        AS p_start,
-                last_value(price)  OVER ()        AS p_end
-            FROM base;
-            """,
-            (start_id, end_id),
-        )
+        cur.execute(sql, (start_id, end_id))
         row = cur.fetchone()
 
     if not row or row["n"] == 0:
@@ -99,7 +110,8 @@ def fetch_segment_stats(conn, seg_id: int, start_id: int, end_id: int):
     ts_max = row["ts_max"]
 
     duration_secs = (
-        (ts_max - ts_min).total_seconds() if ts_min and ts_max else 0.0
+        (ts_max - ts_min).total_seconds()
+        if ts_min is not None and ts_max is not None else 0.0
     )
 
     p_start = float(row["p_start"])
@@ -119,6 +131,7 @@ def fetch_segment_stats(conn, seg_id: int, start_id: int, end_id: int):
         "p_max": p_max,
         "p_std": p_std,
     }
+
 
 
 
