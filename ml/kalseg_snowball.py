@@ -58,47 +58,33 @@ def fetch_labeled_segments(conn, limit: int):
 
 def fetch_segment_stats(conn, seg_id: int, start_id: int, end_id: int):
     """
-    A first simple feature set based on ticks inside the kalseg.
-
-    Features:
-      - length_ticks
-      - duration_secs
-      - price_change (end - start)
-      - abs_change
-      - max_price
-      - min_price
-      - std_dev_price
+    Extract segment-level features using auto-detected columns.
     """
-    # NB: we rely on kal if present, otherwise mid.
+    ts_col = detect_ts_col(conn)
+    mid_expr = detect_mid_expr(conn)
+
     with dict_cur(conn) as cur:
         cur.execute(
-            """
-            SELECT
-                count(*)                               AS n,
-                min(ts)                                AS ts_min,
-                max(ts)                                AS ts_max,
-                min(price)                             AS p_min,
-                max(price)                             AS p_max,
-                stddev_pop(price)                      AS p_std,
-                first_value(price) OVER w              AS p_start,
-                last_value(price)  OVER w              AS p_end
-            FROM (
+            f"""
+            WITH base AS (
                 SELECT
                     id,
-                    ts,
-                    COALESCE(kal, mid) AS price
-                FROM (
-                    SELECT
-                        t.id,
-                        t.ts,
-                        t.kal,
-                        t.mid
-                    FROM ticks t
-                    WHERE t.id BETWEEN %s AND %s
-                    ORDER BY t.id
-                ) q
-            ) qq
-            WINDOW w AS ()
+                    {ts_col} AS ts,
+                    COALESCE(kal, {mid_expr}) AS price
+                FROM ticks
+                WHERE id BETWEEN %s AND %s
+                ORDER BY id
+            )
+            SELECT
+                count(*)                          AS n,
+                min(ts)                           AS ts_min,
+                max(ts)                           AS ts_max,
+                min(price)                        AS p_min,
+                max(price)                        AS p_max,
+                stddev_pop(price)                 AS p_std,
+                first_value(price) OVER ()        AS p_start,
+                last_value(price)  OVER ()        AS p_end
+            FROM base;
             """,
             (start_id, end_id),
         )
@@ -110,8 +96,9 @@ def fetch_segment_stats(conn, seg_id: int, start_id: int, end_id: int):
     length_ticks = int(row["n"])
     ts_min = row["ts_min"]
     ts_max = row["ts_max"]
+
     duration_secs = (
-        (ts_max - ts_min).total_seconds() if ts_min is not None and ts_max is not None else 0.0
+        (ts_max - ts_min).total_seconds() if ts_min and ts_max else 0.0
     )
 
     p_start = float(row["p_start"])
@@ -131,6 +118,7 @@ def fetch_segment_stats(conn, seg_id: int, start_id: int, end_id: int):
         "p_max": p_max,
         "p_std": p_std,
     }
+
 
 
 def build_feature_matrix(conn, seg_rows: List[dict]):
