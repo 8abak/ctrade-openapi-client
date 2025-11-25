@@ -2,14 +2,15 @@
 """
 Snowball training over kalseg segments using kalseg_outcome as labels.
 
-- Uses first N segments (default 5000).
-- Chunks of CHUNK_SIZE (default 5).
-- Chunk 0 is used only for initial training.
-- For chunk k>=1:
-    * predict labels with current model
-    * log predictions to kalseg_prediction
-    * add these 5 segments to training set
-    * retrain model from scratch
+We walk forward chunk by chunk:
+
+- Use first CHUNK_SIZE segments as an "early childhood" training set.
+- For every subsequent chunk:
+    * model predicts labels
+    * predictions are stored in kalseg_prediction
+    * accuracy for that chunk is computed and stored in kalseg_run_stats
+    * if accuracy is too low -> big update (reset model and retrain)
+    * if accuracy is acceptable -> small shift (extend model a bit)
 
 We model 3 classes:
     -1 : "eventually significant DOWN regime"
@@ -27,8 +28,20 @@ from sklearn.metrics import classification_report
 
 from backend.db import get_conn, dict_cur, detect_ts_col, detect_mid_expr
 
+# --------- Snowball configuration ---------
 
 CHUNK_SIZE = 5
+
+# Below this accuracy, we treat the chunk as "badly missed"
+# and do a strong update (reset + retrain).
+ACCURACY_THRESHOLD = 0.75
+
+# Base size of the ensemble and small incremental growth
+BASE_ESTIMATORS = 200
+SMALL_DELTA_ESTIMATORS = 20
+
+
+# --------- Data access helpers ---------
 
 
 def fetch_labeled_segments(conn, limit: int):
@@ -63,8 +76,8 @@ def fetch_segment_stats(conn, seg_id: int, start_id: int, end_id: int):
     using correct Postgres window/aggregation handling.
     """
 
-    ts_col = detect_ts_col(conn)         # will resolve to "timestamp"
-    mid_expr = detect_mid_expr(conn)     # will resolve to "mid"
+    ts_col = detect_ts_col(conn)         # resolves to "timestamp"
+    mid_expr = detect_mid_expr(conn)     # resolves to "mid"
 
     # 1) base_stream: raw ticks
     # 2) enriched: add first/last price using window functions
@@ -111,7 +124,8 @@ def fetch_segment_stats(conn, seg_id: int, start_id: int, end_id: int):
 
     duration_secs = (
         (ts_max - ts_min).total_seconds()
-        if ts_min is not None and ts_max is not None else 0.0
+        if ts_min is not None and ts_max is not None
+        else 0.0
     )
 
     p_start = float(row["p_start"])
@@ -131,8 +145,6 @@ def fetch_segment_stats(conn, seg_id: int, start_id: int, end_id: int):
         "p_max": p_max,
         "p_std": p_std,
     }
-
-
 
 
 def build_feature_matrix(conn, seg_rows: List[dict]):
@@ -158,7 +170,6 @@ def build_feature_matrix(conn, seg_rows: List[dict]):
         if stats is None:
             continue
 
-        # feature vector
         feats = [
             dir_kalseg,
             stats["length_ticks"],
@@ -253,11 +264,76 @@ def insert_predictions(
                     "pred_label": int(y_pred_chunk[i]),
                     "proba_down": get_prob(probs, -1),
                     "proba_none": get_prob(probs, 0),
-                    "proba_up":   get_prob(probs, 1),
+                    "proba_up": get_prob(probs, 1),
                 },
             )
     conn.commit()
 
+
+def record_chunk_stats(
+    conn,
+    run_id: str,
+    chunk_index: int,
+    y_true_chunk: np.ndarray,
+    y_pred_chunk: np.ndarray,
+) -> float:
+    """
+    Store per-chunk accuracy in kalseg_run_stats and return accuracy.
+
+    Table (auto-created if needed):
+
+        kalseg_run_stats(
+            run_id      text,
+            chunk_index integer,
+            n           integer,
+            n_correct   integer,
+            accuracy    double precision,
+            PRIMARY KEY (run_id, chunk_index)
+        )
+    """
+    n = int(len(y_true_chunk))
+    n_correct = int(np.sum(y_true_chunk == y_pred_chunk))
+    accuracy = (n_correct / n) if n > 0 else 0.0
+
+    ddl = """
+    CREATE TABLE IF NOT EXISTS kalseg_run_stats (
+        run_id      text    NOT NULL,
+        chunk_index integer NOT NULL,
+        n           integer NOT NULL,
+        n_correct   integer NOT NULL,
+        accuracy    double precision NOT NULL,
+        PRIMARY KEY (run_id, chunk_index)
+    );
+    """
+    sql = """
+    INSERT INTO kalseg_run_stats (
+        run_id, chunk_index, n, n_correct, accuracy
+    ) VALUES (
+        %(run_id)s, %(chunk_index)s, %(n)s, %(n_correct)s, %(accuracy)s
+    )
+    ON CONFLICT (run_id, chunk_index) DO UPDATE
+       SET n         = EXCLUDED.n,
+           n_correct = EXCLUDED.n_correct,
+           accuracy  = EXCLUDED.accuracy;
+    """
+
+    with conn.cursor() as cur:
+        cur.execute(ddl)
+        cur.execute(
+            sql,
+            {
+                "run_id": run_id,
+                "chunk_index": chunk_index,
+                "n": n,
+                "n_correct": n_correct,
+                "accuracy": accuracy,
+            },
+        )
+    conn.commit()
+    return accuracy
+
+
+# --------- Main snowball procedure ---------
 
 
 def snowball_train(limit_segments: int):
@@ -282,20 +358,21 @@ def snowball_train(limit_segments: int):
     run_id = f"run-{uuid.uuid4().hex[:10]}"
     print(f"Run id: {run_id}, chunks: {num_chunks}, chunk size: {CHUNK_SIZE}")
 
-    # Classifier: 3-class Gradient Boosting
+    # Classifier: 3-class Gradient Boosting with warm_start
     clf = GradientBoostingClassifier(
-        n_estimators=200,
+        n_estimators=BASE_ESTIMATORS,
         learning_rate=0.05,
         max_depth=3,
         subsample=0.9,
         random_state=42,
+        warm_start=True,
     )
+    n_estimators_current = BASE_ESTIMATORS
 
-    # Chunk 0: initial training
+    # Chunk 0: initial training ("early childhood")
     first_end = min(CHUNK_SIZE, n)
     X_train = X_all[:first_end]
     y_train = y_all[:first_end]
-    meta_train = meta_all[:first_end]
 
     clf.fit(X_train, y_train)
     print(f"Initial training on {len(y_train)} segments (chunk 0).")
@@ -312,14 +389,14 @@ def snowball_train(limit_segments: int):
         if len(y_chunk) == 0:
             continue
 
-        # 1) Predict
+        # 1) Predict for this chunk
         proba = clf.predict_proba(X_chunk)
         y_pred = clf.predict(X_chunk)
 
         print(f"\nChunk {chunk_idx}: {len(y_chunk)} segments")
         print(classification_report(y_chunk, y_pred, digits=3))
 
-        # 2) Log predictions
+        # 2) Store predictions
         insert_predictions(
             conn,
             run_id=run_id,
@@ -331,11 +408,46 @@ def snowball_train(limit_segments: int):
             classes=clf.classes_,
         )
 
-        # 3) Extend training set and retrain
+        # 3) Store accuracy for this chunk
+        acc = record_chunk_stats(
+            conn,
+            run_id=run_id,
+            chunk_index=chunk_idx,
+            y_true_chunk=y_chunk,
+            y_pred_chunk=y_pred,
+        )
+        print(f"Chunk {chunk_idx}: accuracy = {acc:.3f}")
+
+        # 4) Update training set with this chunk
         X_train = np.vstack([X_train, X_chunk])
         y_train = np.concatenate([y_train, y_chunk])
-        clf.fit(X_train, y_train)
-        print(f"Retrained model on {len(y_train)} segments (up to chunk {chunk_idx}).")
+
+        # 5) Decide how strongly to update the model
+        if acc < ACCURACY_THRESHOLD:
+            # Big update: reset model and retrain from scratch
+            print(
+                f"Chunk {chunk_idx}: accuracy below {ACCURACY_THRESHOLD:.2f}, "
+                "resetting model and retraining from scratch."
+            )
+            clf = GradientBoostingClassifier(
+                n_estimators=BASE_ESTIMATORS,
+                learning_rate=0.05,
+                max_depth=3,
+                subsample=0.9,
+                random_state=42,
+                warm_start=True,
+            )
+            n_estimators_current = BASE_ESTIMATORS
+            clf.fit(X_train, y_train)
+        else:
+            # Small shift: grow ensemble a bit with warm_start
+            n_estimators_current += SMALL_DELTA_ESTIMATORS
+            clf.n_estimators = n_estimators_current
+            print(
+                f"Chunk {chunk_idx}: accuracy OK, "
+                f"extending ensemble to {n_estimators_current} trees."
+            )
+            clf.fit(X_train, y_train)
 
     print("\nSnowball training complete.")
 
