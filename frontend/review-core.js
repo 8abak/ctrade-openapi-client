@@ -30,9 +30,9 @@
   let segs  = [];
   let zones = [];
 
-  let currentFromId   = null;
-  let currentWindow   = 5000;
-  let loading         = false;
+  let currentFromId = null;
+  let currentWindow = 5000;
+  let loading       = false;
 
   function setStatus(text) {
     if (statusEl) statusEl.textContent = text || '';
@@ -113,7 +113,7 @@
     return bands;
   }
 
-  // Seg arrows on Kalman line at segment START
+  // Segment arrows on Kalman line at segment START
   function buildSegmentPoints(ticksArr, segsArr) {
     if (!ticksArr.length || !segsArr.length) return [];
 
@@ -142,7 +142,7 @@
       const dirRaw = (s.direction || '').toString().toLowerCase();
       const isUp   = (dirRaw === 'up' || dirRaw === '1' || dirRaw === 'u');
 
-      const price  = Number(
+      const price = Number(
         startTick.kal != null ? startTick.kal : startTick.mid
       );
       if (!Number.isFinite(price)) continue;
@@ -150,7 +150,7 @@
       points.push({
         value: [startTick.ts, price],
         direction: dirRaw,
-        symbolRotate: isUp ? 0 : 180,   // ▲ for up, ▼ for down
+        symbolRotate: isUp ? 0 : 180, // ▲ for up, ▼ for down
       });
     }
 
@@ -290,7 +290,6 @@
         type: 'scatter',
         symbol: 'triangle',
         symbolSize: 12,
-        // NOTE: symbolRotate is now per-point (no callback needed)
         data: segPoints.map(p => ({
           value: p.value,
           direction: p.direction,
@@ -306,7 +305,7 @@
             if (dir === 'dn' || dir === '-1' || dir === 'down' || dir === 'd') {
               return '#f85149'; // red
             }
-            return '#8b949e';
+            return '#8b949e';   // grey fallback
           },
         },
         z: 3,
@@ -319,16 +318,48 @@
       tooltip: {
         trigger: 'axis',
         axisPointer: { type: 'cross' },
-        valueFormatter: value => (value != null ? value.toFixed(3) : ''),
+        // Custom formatter so we can show tick id + clean info
+        formatter: function (params) {
+          if (!params || !params.length) return '';
+
+          // Prefer Mid series for anchor, fall back to first
+          let p = params.find(x => x.seriesName === 'Mid') || params[0];
+          const ts = p.value[0];
+
+          // Find original tick by timestamp
+          const tick = ticks.find(t => t.ts === ts);
+          const dt = new Date(ts);
+
+          const date = dt.toLocaleDateString();
+          const time = dt.toLocaleTimeString();
+
+          const fmt = v => (v == null ? '' : (+v).toFixed(3));
+
+          const lines = [];
+          if (tick && typeof tick.id !== 'undefined') {
+            lines.push(`id: ${tick.id}`);
+          }
+          lines.push(`${date} ${time}`);
+
+          // Show mid / kalman if available
+          if (tick && tick.mid != null) {
+            lines.push(`Mid\t${fmt(tick.mid)}`);
+          }
+          if (tick && tick.kal != null) {
+            lines.push(`Kalman\t${fmt(tick.kal)}`);
+          }
+
+          return lines.join('<br/>');
+        },
       },
       legend: {
         show: true,
         top: 4,
         textStyle: { color: '#c9d1d9', fontSize: 11 },
         selected: {
-          'Kalman': showKal,
-          'Segments': showSegs,
-          'Zones': showZones,
+          Kalman: showKal,
+          Segments: showSegs,
+          Zones: showZones,
         },
       },
       grid: {
@@ -351,7 +382,11 @@
         type: 'value',
         scale: true,
         axisLine: { lineStyle: { color: '#8b949e' } },
-        axisLabel: { color: '#8b949e' },
+        axisLabel: {
+          color: '#8b949e',
+          // show clean whole numbers like 3361, 3362, ...
+          formatter: value => value != null ? value.toFixed(0) : '',
+        },
         splitLine: { lineStyle: { color: '#30363d' } },
       },
       dataZoom: [
