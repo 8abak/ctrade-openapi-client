@@ -1,47 +1,132 @@
 # PATH: ml/kalseg_snowball.py
 """
-Snowball training over kalseg segments using kalseg_outcome as labels.
+Persistent snowball training over kalseg segments using kalseg_outcome.
 
-We walk forward chunk by chunk:
+Key ideas
+---------
+* Work in chronological order over kalseg.id.
+* CHUNK_SIZE = 1 => one segment per learning step.
+* Chunk 0: used only as initial training (no prediction logged).
+* For each subsequent chunk:
+    - predict label for that segment
+    - log prediction to kalseg_prediction
+    - compute accuracy for that chunk and record in kalseg_run_stats
+    - update the model:
+        * if accuracy < ACCURACY_THRESHOLD:
+              reset model and retrain from scratch on ALL data seen so far
+        * else:
+              gently extend ensemble with a few more trees (warm_start)
 
-- Use first CHUNK_SIZE segments as an "early childhood" training set.
-- For every subsequent chunk:
-    * model predicts labels
-    * predictions are stored in kalseg_prediction
-    * accuracy for that chunk is computed and stored in kalseg_run_stats
-    * if accuracy is too low -> big update (reset model and retrain)
-    * if accuracy is acceptable -> small shift (extend model a bit)
+Persistence
+-----------
+We persist a single "brain":
 
-We model 3 classes:
-    -1 : "eventually significant DOWN regime"
-     0 : "no strong regime within horizon"
-    +1 : "eventually significant UP regime"
+    ml/model_store/kalseg_gb.pkl         (sklearn model)
+    ml/model_store/kalseg_gb_meta.json   (metadata)
+
+Meta fields:
+    trained_index         : how many segments (from the start) are in the
+                            training set the model has seen so far.
+    n_estimators_current  : current size of the ensemble (trees).
+
+On each new run:
+    - If model+meta exist:
+        * load classifier + meta
+        * rebuild features from DB
+        * reconstruct X_train, y_train from the first `trained_index` segments
+        * continue snowball from the first unseen segment
+    - If not:
+        * start from scratch, using chunk 0 as initial training only
 """
 
 import argparse
+import json
+import os
+from pathlib import Path
 import uuid
 from typing import List, Tuple
 
 import numpy as np
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.metrics import classification_report
+import joblib
 
 from backend.db import get_conn, dict_cur, detect_ts_col, detect_mid_expr
 
-# --------- Snowball configuration ---------
 
-CHUNK_SIZE = 5
+# ----------------- Snowball configuration -----------------
 
-# Below this accuracy, we treat the chunk as "badly missed"
-# and do a strong update (reset + retrain).
+CHUNK_SIZE = 1  # one segment per chunk
+
+# Below this accuracy we treat the chunk as "badly missed"
 ACCURACY_THRESHOLD = 0.75
 
 # Base size of the ensemble and small incremental growth
 BASE_ESTIMATORS = 200
 SMALL_DELTA_ESTIMATORS = 20
 
+# Model persistence paths
+MODEL_DIR = Path(__file__).resolve().parent / "model_store"
+MODEL_PATH = MODEL_DIR / "kalseg_gb.pkl"
+META_PATH = MODEL_DIR / "kalseg_gb_meta.json"
 
-# --------- Data access helpers ---------
+
+# ----------------- DB helpers -----------------
+
+
+def ensure_prediction_tables(conn):
+    """
+    Ensure kalseg_prediction, kalseg_run_stats tables and a summary view exist.
+    """
+    ddl_prediction = """
+    CREATE TABLE IF NOT EXISTS kalseg_prediction (
+        run_id      text    NOT NULL,
+        chunk_index integer NOT NULL,
+        seg_id      integer NOT NULL,
+        start_id    integer NOT NULL,
+        dir_kalseg  integer NOT NULL,
+        true_label  integer NOT NULL,
+        pred_label  integer NOT NULL,
+        proba_down  double precision NOT NULL,
+        proba_none  double precision NOT NULL,
+        proba_up    double precision NOT NULL,
+        PRIMARY KEY (run_id, seg_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_kalseg_pred_run_chunk
+        ON kalseg_prediction(run_id, chunk_index);
+    """
+
+    ddl_run_stats = """
+    CREATE TABLE IF NOT EXISTS kalseg_run_stats (
+        run_id      text    NOT NULL,
+        chunk_index integer NOT NULL,
+        n           integer NOT NULL,
+        n_correct   integer NOT NULL,
+        accuracy    double precision NOT NULL,
+        PRIMARY KEY (run_id, chunk_index)
+    );
+    """
+
+    ddl_view = """
+    CREATE OR REPLACE VIEW kalseg_run_summary AS
+    SELECT
+        run_id,
+        MIN(chunk_index)                      AS first_chunk,
+        MAX(chunk_index)                      AS last_chunk,
+        SUM(n)                                AS total_segments,
+        SUM(n_correct)                        AS total_correct,
+        ROUND(100.0 * SUM(n_correct)
+              / GREATEST(SUM(n), 1), 2)       AS accuracy_pct
+    FROM kalseg_run_stats
+    GROUP BY run_id
+    ORDER BY run_id;
+    """
+
+    with conn.cursor() as cur:
+        cur.execute(ddl_prediction)
+        cur.execute(ddl_run_stats)
+        cur.execute(ddl_view)
+    conn.commit()
 
 
 def fetch_labeled_segments(conn, limit: int):
@@ -79,9 +164,6 @@ def fetch_segment_stats(conn, seg_id: int, start_id: int, end_id: int):
     ts_col = detect_ts_col(conn)         # resolves to "timestamp"
     mid_expr = detect_mid_expr(conn)     # resolves to "mid"
 
-    # 1) base_stream: raw ticks
-    # 2) enriched: add first/last price using window functions
-    # 3) stats: aggregate summary
     sql = f"""
     WITH base AS (
         SELECT
@@ -106,7 +188,7 @@ def fetch_segment_stats(conn, seg_id: int, start_id: int, end_id: int):
         min(price)                     AS p_min,
         max(price)                     AS p_max,
         stddev_pop(price)              AS p_std,
-        max(p_start)                   AS p_start,  -- same for all rows
+        max(p_start)                   AS p_start,
         max(p_end)                     AS p_end
     FROM enriched;
     """
@@ -154,7 +236,7 @@ def build_feature_matrix(conn, seg_rows: List[dict]):
     """
     X = []
     y = []
-    meta = []  # each: dict with seg_id, start_id,...
+    meta = []
 
     prev_dir = 0
     prev_label = 0
@@ -194,13 +276,10 @@ def build_feature_matrix(conn, seg_rows: List[dict]):
             }
         )
 
-        # update context for next segment
         prev_dir = dir_kalseg
         prev_label = final_label
 
-    X = np.array(X, dtype=float)
-    y = np.array(y, dtype=int)
-    return X, y, meta
+    return np.array(X, dtype=float), np.array(y, dtype=int), meta
 
 
 def insert_predictions(
@@ -214,17 +293,14 @@ def insert_predictions(
     classes: np.ndarray,
 ):
     """
-    Insert prediction rows into kalseg_prediction, handling the fact
-    that scikit-learn may only give probabilities for classes that
-    have been seen in training so far.
+    Insert prediction rows into kalseg_prediction.
 
-    We always store three columns:
-        proba_down  = P(label = -1)
-        proba_none  = P(label =  0)
-        proba_up    = P(label = +1)
-
-    If a class hasn't been seen yet by the model, its probability is 0.0.
+    We always store three probability columns:
+        proba_down  = P(label=-1)
+        proba_none  = P(label=0)
+        proba_up    = P(label=+1)
     """
+
     class_to_idx = {int(c): i for i, c in enumerate(classes)}
 
     def get_prob(probs, cls):
@@ -249,17 +325,18 @@ def insert_predictions(
            proba_none  = EXCLUDED.proba_none,
            proba_up    = EXCLUDED.proba_up;
     """
+
     with dict_cur(conn) as cur:
-        for i, meta in enumerate(meta_chunk):
+        for i, m in enumerate(meta_chunk):
             probs = proba_chunk[i]
             cur.execute(
                 sql,
                 {
                     "run_id": run_id,
                     "chunk_index": chunk_index,
-                    "seg_id": meta["seg_id"],
-                    "start_id": meta["start_id"],
-                    "dir_kalseg": meta["dir_kalseg"],
+                    "seg_id": m["seg_id"],
+                    "start_id": m["start_id"],
+                    "dir_kalseg": m["dir_kalseg"],
                     "true_label": int(y_true_chunk[i]),
                     "pred_label": int(y_pred_chunk[i]),
                     "proba_down": get_prob(probs, -1),
@@ -279,17 +356,6 @@ def record_chunk_stats(
 ) -> float:
     """
     Store per-chunk accuracy in kalseg_run_stats and return accuracy.
-
-    Table (auto-created if needed):
-
-        kalseg_run_stats(
-            run_id      text,
-            chunk_index integer,
-            n           integer,
-            n_correct   integer,
-            accuracy    double precision,
-            PRIMARY KEY (run_id, chunk_index)
-        )
     """
     n = int(len(y_true_chunk))
     n_correct = int(np.sum(y_true_chunk == y_pred_chunk))
@@ -333,61 +399,125 @@ def record_chunk_stats(
     return accuracy
 
 
-# --------- Main snowball procedure ---------
+# ----------------- Persistence helpers -----------------
+
+
+def load_persistent_model() -> Tuple[GradientBoostingClassifier, dict]:
+    """
+    Load model + meta if they exist, otherwise return (None, default_meta).
+    """
+    MODEL_DIR.mkdir(exist_ok=True)
+
+    if MODEL_PATH.exists() and META_PATH.exists():
+        clf = joblib.load(MODEL_PATH)
+        with META_PATH.open("r") as f:
+            meta = json.load(f)
+        return clf, meta
+
+    default_meta = {
+        "trained_index": 0,
+        "n_estimators_current": BASE_ESTIMATORS,
+    }
+    return None, default_meta
+
+
+def save_persistent_model(clf: GradientBoostingClassifier, meta: dict):
+    MODEL_DIR.mkdir(exist_ok=True)
+    joblib.dump(clf, MODEL_PATH)
+    with META_PATH.open("w") as f:
+        json.dump(meta, f)
+
+
+# ----------------- Main snowball procedure -----------------
 
 
 def snowball_train(limit_segments: int):
     conn = get_conn()
+    ensure_prediction_tables(conn)
 
     rows = fetch_labeled_segments(conn, limit_segments)
     if not rows:
         print("No labeled segments found; did you run build_kalseg_outcome?")
         return
 
-    # Build base feature matrix
     X_all, y_all, meta_all = build_feature_matrix(conn, rows)
     n = X_all.shape[0]
     if n == 0:
         print("No features built (maybe no ticks in these segments).")
         return
 
-    print(f"Total segments with features: {n}")
-
-    # Align chunks by index
     num_chunks = (n + CHUNK_SIZE - 1) // CHUNK_SIZE
+    print(f"Total segments with features: {n} (chunks: {num_chunks})")
+
+    # Load or initialise persistent model
+    clf, meta = load_persistent_model()
+    trained_index = int(meta.get("trained_index", 0))
+    n_estimators_current = int(meta.get("n_estimators_current", BASE_ESTIMATORS))
+
+    # Clamp trained_index to current data size
+    if trained_index > n:
+        trained_index = n
+
+    # Prepare classifier
+    if clf is None:
+        clf = GradientBoostingClassifier(
+            n_estimators=BASE_ESTIMATORS,
+            learning_rate=0.05,
+            max_depth=3,
+            subsample=0.9,
+            random_state=42,
+            warm_start=True,
+        )
+        n_estimators_current = BASE_ESTIMATORS
+        X_train = None
+        y_train = None
+        start_chunk = 0
+        print("No existing model found: starting from scratch.")
+    else:
+        # Rebuild X_train, y_train from DB features
+        X_train = X_all[:trained_index]
+        y_train = y_all[:trained_index]
+        start_chunk = trained_index // CHUNK_SIZE
+        print(
+            f"Loaded existing model: trained_index={trained_index}, "
+            f"start_chunk={start_chunk}, n_estimators={n_estimators_current}"
+        )
+
+    # If no training yet, use chunk 0 purely as initial training
+    if trained_index == 0:
+        init_end = min(CHUNK_SIZE, n)
+        if init_end == 0:
+            print("Nothing to train on.")
+            return
+
+        X_init = X_all[:init_end]
+        y_init = y_all[:init_end]
+        clf.fit(X_init, y_init)
+
+        X_train = X_init.copy()
+        y_train = y_init.copy()
+        trained_index = init_end
+        meta["trained_index"] = trained_index
+        meta["n_estimators_current"] = n_estimators_current
+        start_chunk = trained_index // CHUNK_SIZE
+
+        print(f"Initial training on {len(y_init)} segments (chunk 0).")
+
+    # Run id for this evaluation run
     run_id = f"run-{uuid.uuid4().hex[:10]}"
-    print(f"Run id: {run_id}, chunks: {num_chunks}, chunk size: {CHUNK_SIZE}")
+    print(f"Run id: {run_id}")
 
-    # Classifier: 3-class Gradient Boosting with warm_start
-    clf = GradientBoostingClassifier(
-        n_estimators=BASE_ESTIMATORS,
-        learning_rate=0.05,
-        max_depth=3,
-        subsample=0.9,
-        random_state=42,
-        warm_start=True,
-    )
-    n_estimators_current = BASE_ESTIMATORS
-
-    # Chunk 0: initial training ("early childhood")
-    first_end = min(CHUNK_SIZE, n)
-    X_train = X_all[:first_end]
-    y_train = y_all[:first_end]
-
-    clf.fit(X_train, y_train)
-    print(f"Initial training on {len(y_train)} segments (chunk 0).")
-
-    # Walk forward chunk by chunk
-    for chunk_idx in range(1, num_chunks):
+    # Snowball from first unseen chunk
+    for chunk_idx in range(start_chunk, num_chunks):
         start = chunk_idx * CHUNK_SIZE
-        end = min((chunk_idx + 1) * CHUNK_SIZE, n)
+        end = min(start + CHUNK_SIZE, n)
+
+        if start >= end:
+            continue
 
         X_chunk = X_all[start:end]
         y_chunk = y_all[start:end]
         meta_chunk = meta_all[start:end]
-
-        if len(y_chunk) == 0:
-            continue
 
         # 1) Predict for this chunk
         proba = clf.predict_proba(X_chunk)
@@ -408,7 +538,7 @@ def snowball_train(limit_segments: int):
             classes=clf.classes_,
         )
 
-        # 3) Store accuracy for this chunk
+        # 3) Record accuracy for this chunk
         acc = record_chunk_stats(
             conn,
             run_id=run_id,
@@ -418,13 +548,16 @@ def snowball_train(limit_segments: int):
         )
         print(f"Chunk {chunk_idx}: accuracy = {acc:.3f}")
 
-        # 4) Update training set with this chunk
-        X_train = np.vstack([X_train, X_chunk])
-        y_train = np.concatenate([y_train, y_chunk])
+        # 4) Extend training set to include this chunk
+        X_train = np.vstack([X_train, X_chunk]) if X_train is not None else X_chunk
+        y_train = (
+            np.concatenate([y_train, y_chunk]) if y_train is not None else y_chunk
+        )
+        trained_index = X_train.shape[0]
 
         # 5) Decide how strongly to update the model
         if acc < ACCURACY_THRESHOLD:
-            # Big update: reset model and retrain from scratch
+            # Big reset: new model, retrain from scratch on all training data so far
             print(
                 f"Chunk {chunk_idx}: accuracy below {ACCURACY_THRESHOLD:.2f}, "
                 "resetting model and retraining from scratch."
@@ -440,7 +573,7 @@ def snowball_train(limit_segments: int):
             n_estimators_current = BASE_ESTIMATORS
             clf.fit(X_train, y_train)
         else:
-            # Small shift: grow ensemble a bit with warm_start
+            # Gentle extension: increase number of trees with warm_start
             n_estimators_current += SMALL_DELTA_ESTIMATORS
             clf.n_estimators = n_estimators_current
             print(
@@ -449,11 +582,27 @@ def snowball_train(limit_segments: int):
             )
             clf.fit(X_train, y_train)
 
+        # Update meta after each chunk
+        meta["trained_index"] = trained_index
+        meta["n_estimators_current"] = n_estimators_current
+
+    # Save persistent model & meta at the end
+    save_persistent_model(clf, meta)
+
     print("\nSnowball training complete.")
+    print(
+        f"Final trained_index={meta['trained_index']}, "
+        f"n_estimators_current={meta['n_estimators_current']}"
+    )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--limit", type=int, default=5000)
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=5000,
+        help="Maximum number of earliest kalseg segments to consider.",
+    )
     args = parser.parse_args()
     snowball_train(args.limit)
