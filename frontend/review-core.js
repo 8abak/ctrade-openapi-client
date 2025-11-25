@@ -318,7 +318,6 @@
       tooltip: {
         trigger: 'axis',
         axisPointer: { type: 'cross' },
-        // Custom formatter so we can show tick id + clean info
         formatter: function (params) {
           if (!params || !params.length) return '';
 
@@ -341,7 +340,6 @@
           }
           lines.push(`${date} ${time}`);
 
-          // Show mid / kalman if available
           if (tick && tick.mid != null) {
             lines.push(`Mid\t${fmt(tick.mid)}`);
           }
@@ -381,11 +379,18 @@
       yAxis: {
         type: 'value',
         scale: true,
+        // 👇 Force integer grid lines only
+        min: function (val) {
+          return Math.floor(val.min);
+        },
+        max: function (val) {
+          return Math.ceil(val.max);
+        },
+        interval: 1,
         axisLine: { lineStyle: { color: '#8b949e' } },
         axisLabel: {
           color: '#8b949e',
-          // show clean whole numbers like 3361, 3362, ...
-          formatter: value => value != null ? value.toFixed(0) : '',
+          formatter: value => (value != null ? value.toFixed(0) : ''),
         },
         splitLine: { lineStyle: { color: '#30363d' } },
       },
