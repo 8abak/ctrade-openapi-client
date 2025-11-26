@@ -2,7 +2,7 @@
 // Review window viewer with:
 //   - zones, Kalman, segments
 //   - snowball predictions (latest SGD run) drawn on price
-//   - Play/Stop auto-scroll over historical data
+//   - Run/Stop auto-scroll over historical data (tick-by-tick)
 //
 // Backend endpoints used:
 //   GET  /api/review/window?from_id=...&window=...
@@ -53,7 +53,8 @@
     if (goBtn)   goBtn.disabled   = isLoading;
     if (prevBtn) prevBtn.disabled = isLoading;
     if (nextBtn) nextBtn.disabled = isLoading;
-    if (playBtn) playBtn.disabled = isLoading && !autoPlay; // allow stop
+    // while running we still want the button enabled so user can Stop
+    if (playBtn) playBtn.disabled = isLoading && !autoPlay;
     if (isLoading) setStatus('Loading...');
   }
 
@@ -73,16 +74,9 @@
     return resp.json();
   }
 
+  // --- predictions: latest SGD run, restricted by tick-id range ---
   async function fetchPredictionsForRange(startId, endId) {
-    // Latest SGD run on kalseg_prediction, restricted to this id range
     const sql = `
-      WITH latest_sgd AS (
-        SELECT run_id
-        FROM kalseg_prediction
-        WHERE run_id LIKE 'sgd-%'
-        ORDER BY run_id DESC
-        LIMIT 1
-      )
       SELECT
         seg_id,
         start_id,
@@ -91,9 +85,15 @@
         proba_none,
         proba_up,
         run_id
-      FROM kalseg_prediction p
-      JOIN latest_sgd l USING (run_id)
-      WHERE start_id BETWEEN ${startId} AND ${endId}
+      FROM kalseg_prediction
+      WHERE run_id = (
+        SELECT run_id
+        FROM kalseg_prediction
+        WHERE run_id LIKE 'sgd-%'
+        ORDER BY id DESC
+        LIMIT 1
+      )
+      AND start_id BETWEEN ${startId} AND ${endId}
       ORDER BY start_id;
     `;
 
@@ -109,7 +109,14 @@
     }
 
     const data = await resp.json();
-    return data && Array.isArray(data.rows) ? data.rows : [];
+
+    // Be tolerant about the exact JSON shape the backend returns
+    if (!data) return [];
+    if (Array.isArray(data.rows))   return data.rows;
+    if (Array.isArray(data.data))   return data.data;
+    if (Array.isArray(data.result)) return data.result;
+    if (Array.isArray(data))        return data;
+    return [];
   }
 
   function buildZoneBands(ticksArr, zonesArr) {
@@ -270,7 +277,7 @@
         yAxis: {
           type: 'value',
           scale: true,
-          minInterval: 1,      // only full-dollar grid lines
+          minInterval: 1,
           axisLine: { lineStyle: { color: '#8b949e' } },
           axisLabel: { color: '#8b949e' },
           splitLine: { lineStyle: { color: '#30363d' } },
@@ -303,7 +310,6 @@
 
     const series = [];
 
-    // Zones
     if (showZones && zoneBands.length) {
       series.push({
         name: 'Zones',
@@ -343,7 +349,6 @@
       });
     }
 
-    // Mid line
     series.push({
       name: 'Mid',
       type: 'line',
@@ -353,7 +358,6 @@
       z: 1,
     });
 
-    // Kalman
     if (showKal) {
       series.push({
         name: 'Kalman',
@@ -365,7 +369,6 @@
       });
     }
 
-    // Segment arrows (Kalman direction changes)
     if (showSegs && segPoints.length) {
       series.push({
         name: 'Segments',
@@ -390,17 +393,14 @@
       });
     }
 
-    // Prediction markers (snowball guesses)
     if (showPreds && predictionPts.length) {
       series.push({
         name: 'Predictions',
         type: 'scatter',
         symbol: 'triangle',
-        // bigger marker for higher certainty (max probability)
         symbolSize: function (value, params) {
           const d = params.data;
           const p = Math.max(0, Math.min(1, d.maxProba || 0));
-          // from 8px at 0.5 up to 18px at 1.0
           const base = 8;
           const extra = p > 0.5 ? (p - 0.5) * 20 : 0;
           return base + extra;
@@ -415,7 +415,6 @@
           probaUp: p.probaUp,
           maxProba: p.maxProba,
           runId: p.runId,
-          // rotate for up/down like arrows
           symbolRotate: p.predLabel < 0 ? 180 : 0,
         })),
         encode: { x: 0, y: 1 },
@@ -424,7 +423,7 @@
             const d = params.data;
             if (d.predLabel > 0) return '#2ea043'; // buy
             if (d.predLabel < 0) return '#f85149'; // sell
-            return '#58a6ff';                      // "no strong move"
+            return '#58a6ff';                      // none / flat
           },
         },
         z: 4,
@@ -452,9 +451,7 @@
           lines.push(ts);
 
           if (tickDatum) {
-            lines.push(
-              `ID: ${tickDatum.id}`,
-            );
+            lines.push(`ID: ${tickDatum.id}`);
           }
 
           if (midPoint) {
@@ -512,7 +509,7 @@
       yAxis: {
         type: 'value',
         scale: true,
-        minInterval: 1,         // *** only whole-dollar horizontal grid lines
+        minInterval: 1,
         axisLine: { lineStyle: { color: '#8b949e' } },
         axisLabel: { color: '#8b949e' },
         splitLine: { lineStyle: { color: '#30363d' } },
@@ -568,13 +565,19 @@
       if (!ticks.length) {
         setStatus(`No ticks for window from id ${fromId} (window ${windowSize})`);
         rebuildChart();
+
+        // If we were auto-playing and hit the end, stop cleanly.
+        if (autoPlay) {
+          autoPlay = false;
+          if (playBtn) playBtn.textContent = 'Run';
+          stopPlayTimer();
+        }
         return;
       }
 
       const firstId = ticks[0].id;
       const lastId  = ticks[ticks.length - 1].id;
 
-      // Fetch predictions within same id range (best effort)
       try {
         predictions = await fetchPredictionsForRange(firstId, lastId);
       } catch (predErr) {
@@ -582,10 +585,12 @@
         predictions = [];
       }
 
+      const runId = predictions.length ? predictions[0].run_id : null;
+
       setStatus(
         `Ticks ${firstId}–${lastId} (${ticks.length}), ` +
         `${segs.length} segs, ${zones.length} zones, ` +
-        `${predictions.length} preds`
+        `${predictions.length} preds${runId ? ' [' + runId + ']' : ''}`
       );
 
       rebuildChart();
@@ -642,6 +647,7 @@
     }
   }
 
+  // auto-play: slide one tick at a time, keeping same window size
   function scheduleNextStep() {
     if (!autoPlay) return;
 
@@ -651,8 +657,18 @@
       return;
     }
 
-    handleNext();
-    // Give some time for the user to see each window
+    if (currentFromId == null) {
+      setStatus('No current window; use Go first.');
+      autoPlay = false;
+      if (playBtn) playBtn.textContent = 'Run';
+      return;
+    }
+
+    const windowSize = safeInt(windowInput && windowInput.value, currentWindow);
+    const nextFrom = currentFromId + 1; // <-- one tick shift
+    loadWindow(nextFrom, windowSize);
+
+    // Wait a little so user can see motion
     playTimer = setTimeout(scheduleNextStep, 1500);
   }
 
@@ -664,7 +680,7 @@
       playBtn.textContent = 'Stop';
       scheduleNextStep();
     } else {
-      playBtn.textContent = 'Play';
+      playBtn.textContent = 'Run';
       stopPlayTimer();
     }
   }
