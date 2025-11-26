@@ -1,120 +1,103 @@
+<!-- PATH: frontend/review.html -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
+  <meta charset="UTF-8" />
   <title>Review Tick Window</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    html, body {
-      margin: 0;
-      padding: 0;
-      height: 100%;
-      width: 100%;
-      background: #0d1117;
-      color: #c9d1d9;
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    }
-
     body {
-      display: flex;
-      flex-direction: column;
-    }
-
-    #toolbar {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      padding: 0.5rem 0.75rem;
-      border-bottom: 1px solid #30363d;
-      background: #161b22;
-      font-size: 14px;
-      flex-wrap: wrap;
-      box-sizing: border-box;
-    }
-
-    #toolbar label {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.25rem;
-      cursor: pointer;
-    }
-
-    #toolbar input[type="number"] {
-      background: #0d1117;
-      border: 1px solid #30363d;
-      border-radius: 4px;
-      padding: 0.15rem 0.35rem;
+      margin: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background-color: #0d1117;
       color: #c9d1d9;
-      width: 90px;
     }
-
-    #toolbar button {
-      background: #238636;
-      border: 1px solid #2ea043;
-      color: #ffffff;
-      padding: 0.25rem 0.75rem;
-      border-radius: 4px;
+    #topbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      background-color: #161b22;
+      border-bottom: 1px solid #30363d;
       font-size: 13px;
-      cursor: pointer;
+      flex-wrap: wrap;
     }
-
-    #toolbar button:disabled {
+    #topbar label {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    #topbar input[type="number"] {
+      width: 90px;
+      padding: 2px 4px;
+      background-color: #0d1117;
+      border: 1px solid #30363d;
+      color: #c9d1d9;
+      border-radius: 3px;
+      font-size: 12px;
+    }
+    #topbar button {
+      padding: 3px 10px;
+      background-color: #238636;
+      border: 1px solid #2ea043;
+      border-radius: 4px;
+      color: white;
+      cursor: pointer;
+      font-size: 12px;
+    }
+    #topbar button:disabled {
       opacity: 0.6;
       cursor: default;
     }
-
-    #toolbar button.secondary {
-      background: #30363d;
-      border-color: #30363d;
+    #navButtons {
+      display: flex;
+      gap: 4px;
+      align-items: center;
     }
-
-    #toolbar #status {
-      margin-left: 0.5rem;
+    #playButtonWrapper button {
+      background-color: #0969da;
+      border-color: #1f6feb;
+    }
+    #status {
+      margin-left: 8px;
       font-size: 12px;
       color: #8b949e;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      max-width: 380px;
+      flex: 1;
+      min-width: 120px;
     }
-
     #toggles {
-      margin-left: auto;
-      display: inline-flex;
-      gap: 0.75rem;
+      display: flex;
+      gap: 8px;
       align-items: center;
-      flex-wrap: wrap;
+      font-size: 12px;
     }
-
     #chart {
-      flex: 1 1 auto;
-      width: 100%;
-      min-height: 0;
-    }
-
-    a {
-      color: #58a6ff;
-      text-decoration: none;
-    }
-    a:hover {
-      text-decoration: underline;
+      width: 100vw;
+      height: calc(100vh - 42px);
     }
   </style>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
 </head>
 <body>
-  <div id="toolbar">
+  <div id="topbar">
     <label>
       From id:
-      <input type="number" id="fromId" min="1" step="1" />
+      <input id="fromId" type="number" placeholder="tick id" />
     </label>
     <label>
       Window:
-      <input type="number" id="windowSize" min="100" max="50000" step="100" value="5000" />
+      <input id="windowSize" type="number" value="5000" />
     </label>
     <button id="btnGo">Go</button>
 
-    <button id="btnPrev" class="secondary" title="Previous window">&lt;</button>
-    <button id="btnNext" class="secondary" title="Next window">&gt;</button>
+    <div id="navButtons">
+      <button id="btnPrev">&lt;</button>
+      <button id="btnNext">&gt;</button>
+    </div>
+
+    <div id="playButtonWrapper">
+      <button id="btnPlay">Play</button>
+    </div>
 
     <span id="status"></span>
 
@@ -122,12 +105,12 @@
       <label><input type="checkbox" id="showKal" checked /> Kalman</label>
       <label><input type="checkbox" id="showZones" checked /> Zones</label>
       <label><input type="checkbox" id="showSegs" checked /> Segs</label>
+      <label><input type="checkbox" id="showPreds" checked /> Predictions</label>
     </div>
   </div>
 
   <div id="chart"></div>
 
-  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
   <script src="review-core.js"></script>
 </body>
 </html>
