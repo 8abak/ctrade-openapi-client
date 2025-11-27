@@ -52,13 +52,13 @@ def fetch_zone(cursor, zone_id: int):
 
 def fetch_ticks(cursor, start_id: int, end_id: int):
     """
-    Assumes ticks table has:
-        id, ts, mid
-    If your column names differ (e.g. time, mid), adjust here.
+    ticks columns (from screenshot):
+      id, symbol, timestamp, bid, ask, kal, mid
+    We will use timestamp + mid.
     """
     cursor.execute(
         """
-        SELECT id, ts, mid
+        SELECT id, timestamp, mid
         FROM ticks
         WHERE id BETWEEN %s AND %s
         ORDER BY id
@@ -68,7 +68,8 @@ def fetch_ticks(cursor, start_id: int, end_id: int):
     rows = cursor.fetchall()
     if not rows:
         raise ValueError(f"No ticks between {start_id} and {end_id}")
-    return rows  # list of (id, ts, mid)
+    return rows  # list of (id, timestamp, mid)
+
 
 
 def compute_swings(prices):
