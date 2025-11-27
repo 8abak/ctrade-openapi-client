@@ -20,14 +20,9 @@ def get_connection():
 
 
 def fetch_zone(cursor, zone_id: int):
-    """
-    Assumes there is a 'zones' table with:
-        id, start_id, end_id, dir
-    If your column names differ, adjust here.
-    """
     cursor.execute(
         """
-        SELECT id, start_id, end_id, dir
+        SELECT id, start_id, end_id, direction
         FROM zones
         WHERE id = %s
         """,
@@ -37,13 +32,14 @@ def fetch_zone(cursor, zone_id: int):
     if not row:
         raise ValueError(f"Zone {zone_id} not found in zones table")
 
-    zid, start_id, end_id, dir_zone = row
+    zid, start_id, end_id, direction = row
     return {
         "id": zid,
         "start_id": start_id,
         "end_id": end_id,
-        "dir_zone": dir_zone,
+        "dir_zone": direction,   # keep same field name for internal use
     }
+
 
 
 
