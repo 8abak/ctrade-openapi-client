@@ -1,59 +1,97 @@
 """
 ml/snowball.py
 
-Online "snowball" trainer that tries to predict **the direction of the CURRENT zone**
-from the personalities of the PREVIOUS zones.
+New snowball trainer:
 
-Flow (offline backtest, streaming style):
+- At each step it predicts the **direction of the CURRENT zone (zone_i)**
+  using the personalities of the previous `memory_depth` zones:
+      [zone_{i-memory_depth}, ..., zone_{i-1}]
 
-    zones[0], zones[1], zones[2], ... ordered by id
+- After making the prediction, it:
+    1) Stores prediction + probabilities in snowball_prediction.
+    2) Compares with the true direction of zone_i and updates running accuracy.
+    3) Calls build_zone_personality(zone_i) so the zone's own personality
+       becomes available for future steps.
+    4) Trains the model on this example (features from previous zones,
+       label = direction of zone_i).
 
-    - For the very first few zones we only build their personalities.
-    - Once we have `memory_depth` previous personalities:
+- DB tables used:
+    zones              (existing)
+    zone_personality   (we just built)
+    snowball_run       (created if not exists)
+    snowball_prediction (created if not exists)
 
-        For zone_i:
-            1) Build a feature vector from personalities of zones
-               [i-memory_depth, ..., i-1].
-            2) Use the current model to predict direction of zone_i.
-            3) Store prediction + probabilities + meta in snowball_prediction.
-            4) Compare with true direction of zone_i and update running accuracy.
-            5) Train (partial_fit) on this (features, true_dir) pair.
-            6) Build personality for zone_i and add it to the history.
-
-The model is strictly walk-forward: at each step it only sees information
-from zones up to i-1 when making a prediction for zone_i.
+The schema of snowball_run/snowball_prediction is kept compatible
+with your previous version so review.html can still read them.
 """
-import os
-import sys
-
 
 from __future__ import annotations
 
 import argparse
-
+import os
+import sys
 import uuid
-from typing import Dict, List
+from dataclasses import dataclass
+from typing import Dict, List, Tuple
 
 import numpy as np
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from contextlib import contextmanager
 from sklearn.linear_model import SGDClassifier
 
-from backend.db import get_conn, dict_cur
-from jobs.buildZonePersonality import build_zone_personality
-
 # ---------------------------------------------------------------------------
-# Configuration
+# Make project root importable and load build_zone_personality from jobs/
 # ---------------------------------------------------------------------------
 
-# Multi-class labels for direction
+ROOT_DIR = os.path.dirname(os.path.dirname(__file__))
+if ROOT_DIR not in sys.path:
+    sys.path.append(ROOT_DIR)
+
+import importlib.util
+
+_build_path = os.path.join(ROOT_DIR, "jobs", "buildZonePersonality.py")
+_spec = importlib.util.spec_from_file_location("buildZonePersonality", _build_path)
+_build_module = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_build_module)  # type: ignore
+build_zone_personality = _build_module.build_zone_personality  # noqa: E305
+
+
+# ---------------------------------------------------------------------------
+# DB config / helpers
+# ---------------------------------------------------------------------------
+
+DB_CONFIG = {
+    "dbname": "trading",
+    "user": "babak",
+    "password": "babak33044",
+    "host": "localhost",
+    "port": 5432,
+}
+
+
+def get_conn():
+    return psycopg2.connect(**DB_CONFIG)
+
+
+@contextmanager
+def dict_cur(conn):
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        yield cur
+    finally:
+        cur.close()
+
+
+# ---------------------------------------------------------------------------
+# Labels, features, small helpers
+# ---------------------------------------------------------------------------
+
 CLASSES = np.array([-1, 0, 1], dtype=int)
-
-# How many previous zones to use as "memory"
 DEFAULT_MEMORY_DEPTH = 3
-
-# Reporting cadence (how often to print running accuracy).
 REPORT_EVERY = 100
 
-# Which fields we use from zone_personality for each zone
+# Which columns from zone_personality we use for each zone
 PERSONALITY_FEATURES = [
     "dir_zone",
     "net_move",
@@ -76,20 +114,8 @@ PERSONALITY_FEATURES = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
 def dir_to_int(raw) -> int:
-    """
-    Normalise various direction encodings to -1 / 0 / 1.
-    Accepts:
-        -1, 0, 1
-        'up', 'u', 'long', 'buy'
-        'down', 'dn', 'd', 'short', 'sell'
-    Anything else -> 0
-    """
+    """Normalise direction into -1 / 0 / 1."""
     if raw is None:
         return 0
     if isinstance(raw, (int, float)):
@@ -106,10 +132,23 @@ def dir_to_int(raw) -> int:
     return 0
 
 
-def fetch_zones(conn, limit: int) -> List[Dict]:
+@dataclass
+class ZoneMeta:
+    id: int
+    start_id: int
+    end_id: int
+    direction: int
+
+
+# ---------------------------------------------------------------------------
+# Fetch zones and personalities
+# ---------------------------------------------------------------------------
+
+
+def fetch_zones(conn, limit: int) -> List[ZoneMeta]:
     """
-    Fetch zones in id order, limited to `limit`.
-    We need id, start_id, end_id, direction for each.
+    Fetch zones in id order, up to `limit`.
+    Only keep the columns we need.
     """
     sql = """
         SELECT id, start_id, end_id, direction
@@ -122,14 +161,25 @@ def fetch_zones(conn, limit: int) -> List[Dict]:
     with dict_cur(conn) as cur:
         cur.execute(sql, (limit,))
         rows = cur.fetchall()
-    return rows
+
+    result: List[ZoneMeta] = []
+    for r in rows:
+        result.append(
+            ZoneMeta(
+                id=int(r["id"]),
+                start_id=int(r["start_id"]),
+                end_id=int(r["end_id"]),
+                direction=dir_to_int(r["direction"]),
+            )
+        )
+    return result
 
 
 def fetch_zone_personality(conn, zone_id: int) -> Dict:
     """
-    Ensure zone_personality exists for this zone_id, then fetch the row.
+    Ensure zone_personality exists for given zone, then return it as dict.
     """
-    # First try to fetch
+    # Try to fetch
     with dict_cur(conn) as cur:
         cur.execute(
             """
@@ -163,7 +213,7 @@ def fetch_zone_personality(conn, zone_id: int) -> Dict:
     if row:
         return row
 
-    # Not present -> build it using the jobs helper (separate connection).
+    # Not found: build it via jobs/buildZonePersonality.py
     build_zone_personality(zone_id)
 
     # Fetch again
@@ -198,15 +248,15 @@ def fetch_zone_personality(conn, zone_id: int) -> Dict:
         row = cur.fetchone()
 
     if not row:
-        raise RuntimeError(f"zone_personality not found for zone {zone_id} even after build.")
+        raise RuntimeError(f"zone_personality not found for zone {zone_id} even after build()")
 
     return row
 
 
 def features_from_history(history: List[Dict]) -> List[float]:
     """
-    Build a flat feature vector from a list of zone_personality rows,
-    in chronological order (oldest first).
+    Build a flat feature vector from a list of zone_personality dicts,
+    oldest first.
     """
     feats: List[float] = []
     for zp in history:
@@ -215,7 +265,6 @@ def features_from_history(history: List[Dict]) -> List[float]:
             if val is None:
                 feats.append(0.0)
             else:
-                # dir_zone can be SMALLINT, others are numeric
                 try:
                     feats.append(float(val))
                 except Exception:
@@ -224,17 +273,11 @@ def features_from_history(history: List[Dict]) -> List[float]:
 
 
 # ---------------------------------------------------------------------------
-# DB schema for runs & predictions (unchanged)
+# DB schema for snowball_run / snowball_prediction
 # ---------------------------------------------------------------------------
 
 
 def ensure_tables(conn) -> None:
-    """
-    Create snowball_run and snowball_prediction if they don't exist.
-
-    Probabilities are stored in DOUBLE PRECISION so we keep the true
-    confidence levels (no more 0/1 truncation).
-    """
     with conn, conn.cursor() as cur:
         cur.execute(
             """
@@ -276,24 +319,20 @@ def insert_prediction(
     conn,
     run_id: str,
     step_index: int,
-    meta_row: Dict,
+    base_zone: ZoneMeta,
+    target_zone: ZoneMeta,
     true_label: int,
     pred_label: int,
     proba_vec: np.ndarray,
 ) -> None:
-    """
-    Store one online prediction.
-
-    proba_vec is an array of length len(CLASSES) with probabilities
-    in the same order as CLASSES.
-    """
+    # Map label -> index in probability vector (CLASSES order)
     label_to_idx = {int(lbl): i for i, lbl in enumerate(CLASSES)}
 
     def p(label: int) -> float:
         idx = label_to_idx[label]
-        if idx < 0 or idx >= len(proba_vec):
-            return 0.0
-        return float(proba_vec[idx])
+        if 0 <= idx < len(proba_vec):
+            return float(proba_vec[idx])
+        return 0.0
 
     with conn, conn.cursor() as cur:
         cur.execute(
@@ -317,11 +356,11 @@ def insert_prediction(
             (
                 run_id,
                 step_index,
-                meta_row["zone_id"],
-                meta_row["next_zone_id"],
-                meta_row["start_id"],
-                meta_row["end_id"],
-                meta_row["dir_curr"],
+                base_zone.id,
+                target_zone.id,
+                target_zone.start_id,
+                target_zone.end_id,
+                base_zone.direction,
                 int(true_label),
                 int(pred_label),
                 p(-1),
@@ -332,23 +371,22 @@ def insert_prediction(
 
 
 # ---------------------------------------------------------------------------
-# Online training loop (SGD snowball with zone personalities)
+# Model helpers
 # ---------------------------------------------------------------------------
 
 
 def _predict_proba_any(clf: SGDClassifier, x_row: np.ndarray) -> np.ndarray:
     """
-    Return probability vector for a single row, even if the model
-    doesn't implement predict_proba (fallback using softmax).
+    Get probability vector for a single row.
+    If predict_proba isn't available, approximate with softmax(decision_function).
     """
     if hasattr(clf, "predict_proba"):
-        proba = clf.predict_proba(x_row)[0]
-        return np.asarray(proba, dtype=float)
+        return np.asarray(clf.predict_proba(x_row)[0], dtype=float)
 
-    # Fallback: use decision_function scores and softmax.
     scores = clf.decision_function(x_row)
     scores = np.atleast_1d(scores)
     if scores.ndim == 1:
+        # binary case → convert to 2-class scores
         scores = np.vstack([-scores, scores]).T
     scores = scores[0]
     scores = scores - np.max(scores)
@@ -357,17 +395,13 @@ def _predict_proba_any(clf: SGDClassifier, x_row: np.ndarray) -> np.ndarray:
     return prob.astype(float)
 
 
-def snowball_train(limit: int, memory_depth: int) -> None:
-    """
-    Main entrypoint.
+# ---------------------------------------------------------------------------
+# Main snowball training loop
+# ---------------------------------------------------------------------------
 
-    - Fetch up to `limit` zones in order.
-    - Walk through them once in chronological order.
-    - Use previous `memory_depth` zone personalities to predict
-      direction of the current zone.
-    - After prediction, build current zone's personality and learn from it.
-    """
-    if memory_depth <= 0:
+
+def snowball_train(limit: int, memory_depth: int) -> None:
+    if memory_depth < 1:
         raise ValueError("memory_depth must be >= 1")
 
     conn = get_conn()
@@ -376,29 +410,25 @@ def snowball_train(limit: int, memory_depth: int) -> None:
     zones = fetch_zones(conn, limit)
     n_zones = len(zones)
     if n_zones <= memory_depth:
-        print(f"Not enough zones: have {n_zones}, need > memory_depth ({memory_depth}).")
+        print(f"Not enough zones: have {n_zones}, need > memory_depth ({memory_depth})")
         return
 
     total_samples = max(0, n_zones - memory_depth)
-
     run_id = f"zp-sgd-{uuid.uuid4().hex[:8]}"
-    algo_name = f"SGDClassifier(log_loss) with memory_depth={memory_depth}"
+    algo_desc = f"SGD(log_loss) using previous {memory_depth} zone_personality rows"
 
     with conn, conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO snowball_run (run_id, algo, label_target, total_samples)
             VALUES (%s, %s, %s, %s)
-            ON CONFLICT (run_id) DO NOTHING
             """,
-            (run_id, algo_name, "curr_zone_direction_from_prev_personalities", total_samples),
+            (run_id, algo_desc, "direction(zone_i) from previous zone_personalities", total_samples),
         )
 
-    print(f"Total zones fetched: {n_zones}")
-    print(f"Will train on up to {total_samples} zones (after warm-up).")
-    print(f"Run id: {run_id}")
+    print(f"Snowball run id: {run_id}")
+    print(f"Zones fetched: {n_zones}, training samples (after warm-up): {total_samples}")
 
-    # Model: linear, online, with probabilistic output
     clf = SGDClassifier(
         loss="log_loss",
         penalty="l2",
@@ -409,29 +439,30 @@ def snowball_train(limit: int, memory_depth: int) -> None:
         random_state=42,
     )
 
-    history: List[Dict] = []  # list of zone_personality dicts
+    history: List[Dict] = []  # zone_personality rows
     correct = 0
     total = 0
     step_index = 0
     model_initialized = False
 
-    for idx, z in enumerate(zones):
-        zone_id = z["id"]
-        true_dir = dir_to_int(z["direction"])
+    for idx, zone in enumerate(zones):
+        zone_id = zone.id
+        true_dir = zone.direction
 
-        # Only predict once we have enough history
+        # We can only predict after we have enough previous personalities.
         if len(history) >= memory_depth:
+            # Features built from the previous `memory_depth` zones.
             window = history[-memory_depth:]
             feat_vec = features_from_history(window)
             x_row = np.asarray(feat_vec, dtype=float).reshape(1, -1)
 
             if not model_initialized:
-                # Warm-up: first sample only trains, no prediction recorded.
+                # First sample: only initialise model via partial_fit.
                 clf.partial_fit(x_row, [true_dir], classes=CLASSES)
                 model_initialized = True
-                print(f"Warm-up on zone_id={zone_id}, direction={true_dir}")
+                print(f"Warm-up on zone_id={zone_id}, dir={true_dir}")
             else:
-                # Predict with the current model (it has only seen zones < idx)
+                # Predict direction for CURRENT zone using previous personalities.
                 pred_label = int(clf.predict(x_row)[0])
                 proba_vec = _predict_proba_any(clf, x_row)
 
@@ -443,41 +474,33 @@ def snowball_train(limit: int, memory_depth: int) -> None:
                 acc = correct / total if total else 0.0
                 if step_index % REPORT_EVERY == 0 or idx == n_zones - 1:
                     print(
-                        f"Up to global index {idx} (zone_id={zone_id}): "
+                        f"Index {idx} (zone_id={zone_id}): "
                         f"running accuracy = {acc:.3f}"
                     )
 
-                # Meta row: we treat the last zone in history as the "current"
-                # zone that led to this prediction, and zone_id as the predicted one.
-                last_zone = zones[idx - 1]
-                meta_row = {
-                    "zone_id": last_zone["id"],         # base zone (most recent previous)
-                    "next_zone_id": zone_id,           # zone whose direction we're predicting
-                    "start_id": z["start_id"],
-                    "end_id": z["end_id"],
-                    "dir_curr": dir_to_int(last_zone["direction"]),
-                }
+                # For compatibility with old schema:
+                # base_zone = last previous zone, target_zone = current zone.
+                base_zone = zones[idx - 1]
 
-                # Persist this prediction
                 insert_prediction(
-                    conn,
-                    run_id,
-                    step_index,
-                    meta_row,
+                    conn=conn,
+                    run_id=run_id,
+                    step_index=step_index,
+                    base_zone=base_zone,
+                    target_zone=zone,
                     true_label=true_dir,
                     pred_label=pred_label,
                     proba_vec=proba_vec,
                 )
 
-                # Learn from this example
+                # Learn from this sample
                 clf.partial_fit(x_row, [true_dir])
 
-        # After prediction and learning, build personality for the current zone
-        # and extend our history.
+        # After prediction+learning: ensure personality for the CURRENT zone exists
+        # and push it into history for future steps.
         zp = fetch_zone_personality(conn, zone_id)
         history.append(zp)
 
-    # Final accuracy bookkeeping
     final_acc = correct / total if total else 0.0
     with conn, conn.cursor() as cur:
         cur.execute(
@@ -490,7 +513,7 @@ def snowball_train(limit: int, memory_depth: int) -> None:
             (final_acc, run_id),
         )
 
-    # Persist the final model to disk so we can later load it for live trading.
+    # Save model for later reuse
     model_dir = os.path.join(os.path.dirname(__file__), "model_store")
     os.makedirs(model_dir, exist_ok=True)
     model_path = os.path.join(model_dir, f"{run_id}_sgd.joblib")
@@ -499,31 +522,31 @@ def snowball_train(limit: int, memory_depth: int) -> None:
         from joblib import dump as joblib_dump
 
         joblib_dump(clf, model_path)
-        print(f"Saved final SGD model to {model_path}")
-    except Exception as exc:  # pragma: no cover - best effort
+        print(f"Saved model to {model_path}")
+    except Exception as exc:
         print(f"Warning: could not save model to {model_path}: {exc}", file=sys.stderr)
 
-    print(f"Snowball training complete. Final accuracy = {final_acc:.3f}")
+    print(f"Snowball finished. Final accuracy = {final_acc:.3f}")
 
 
 # ---------------------------------------------------------------------------
-# CLI entrypoint
+# CLI
 # ---------------------------------------------------------------------------
 
 
 def main(argv: List[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Zone-personality SGD snowball trainer")
+    parser = argparse.ArgumentParser(description="Zone-personality snowball trainer")
     parser.add_argument(
         "--limit",
         type=int,
         default=5000,
-        help="Maximum number of zones to use (we walk on them once in id order).",
+        help="Maximum number of zones to walk through.",
     )
     parser.add_argument(
         "--memory",
         type=int,
         default=DEFAULT_MEMORY_DEPTH,
-        help="How many previous zone personalities to use as features.",
+        help="How many previous zone personalities to use.",
     )
     args = parser.parse_args(argv)
     snowball_train(args.limit, args.memory)
