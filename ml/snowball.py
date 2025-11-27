@@ -1,54 +1,77 @@
 """
 ml/snowball.py
 
-Online "snowball" trainer that tries to predict **the direction of the NEXT zone**
-from the behaviour of the CURRENT zone.
+Online "snowball" trainer that tries to predict **the direction of the CURRENT zone**
+from the personalities of the PREVIOUS zones.
 
-- Input rows:   zone_i features (direction, volatility, duration, etc.)
-- Target label: direction of zone_{i+1}  in {-1, 0, 1}
-    -1 : next zone is down
-     0 : next zone is neutral/flat/undefined
-     1 : next zone is up
+Flow (offline backtest, streaming style):
 
-Training is strictly walk-forward:
-    1) Warm-up on the very first (current, next) pair.
-    2) For every subsequent zone_i:
-         • Predict next_dir for zone_{i+1} using the model trained so far.
-         • Store prediction + probability vector in snowball_prediction.
-         • Compare with the true label and update a running accuracy.
-         • Then do a partial_fit() on this (x_i, y_i) pair to learn from it.
+    zones[0], zones[1], zones[2], ... ordered by id
 
-The run level metrics are stored in snowball_run.
+    - For the very first few zones we only build their personalities.
+    - Once we have `memory_depth` previous personalities:
 
-This file is intentionally self-contained and only relies on `backend.db`
-for the Postgres connection and tick/price detection helpers.
+        For zone_i:
+            1) Build a feature vector from personalities of zones
+               [i-memory_depth, ..., i-1].
+            2) Use the current model to predict direction of zone_i.
+            3) Store prediction + probabilities + meta in snowball_prediction.
+            4) Compare with true direction of zone_i and update running accuracy.
+            5) Train (partial_fit) on this (features, true_dir) pair.
+            6) Build personality for zone_i and add it to the history.
+
+The model is strictly walk-forward: at each step it only sees information
+from zones up to i-1 when making a prediction for zone_i.
 """
 
 from __future__ import annotations
 
 import argparse
-import math
 import os
 import sys
 import uuid
-from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 import numpy as np
 from sklearn.linear_model import SGDClassifier
 
-from backend.db import get_conn, dict_cur, detect_ts_col, detect_mid_expr
-
+from backend.db import get_conn, dict_cur
+from jobs.buildZonePersonality import build_zone_personality
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
-# Multi-class labels for "direction of NEXT zone"
+# Multi-class labels for direction
 CLASSES = np.array([-1, 0, 1], dtype=int)
+
+# How many previous zones to use as "memory"
+DEFAULT_MEMORY_DEPTH = 3
 
 # Reporting cadence (how often to print running accuracy).
 REPORT_EVERY = 100
+
+# Which fields we use from zone_personality for each zone
+PERSONALITY_FEATURES = [
+    "dir_zone",
+    "net_move",
+    "abs_move",
+    "full_range",
+    "body_range_ratio",
+    "upper_wick_ratio",
+    "lower_wick_ratio",
+    "duration_sec",
+    "n_ticks",
+    "speed",
+    "noise_ratio",
+    "pos_of_extreme",
+    "delay_frac_0_2",
+    "delay_frac_0_4",
+    "n_swings",
+    "swing_dir_changes",
+    "avg_swing_range",
+    "max_swing_range",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -81,29 +104,10 @@ def dir_to_int(raw) -> int:
     return 0
 
 
-@dataclass
-class ZonePair:
+def fetch_zones(conn, limit: int) -> List[Dict]:
     """
-    One training row:
-        current zone i  -> features
-        next zone i+1   -> label (direction)
-    """
-    zone_id: int
-    next_zone_id: int
-    start_id: int
-    end_id: int
-    dir_curr: int
-    dir_next: int
-
-
-def fetch_zone_pairs(conn, limit: int) -> List[ZonePair]:
-    """
-    Fetch zones and build (current, next) pairs.
-
-    We order by zones.id and pair each zone with the next zone in time.
-    The very last zone has no "next" and is therefore ignored.
-
-    Returns at most (limit - 1) pairs.
+    Fetch zones in id order, limited to `limit`.
+    We need id, start_id, end_id, direction for each.
     """
     sql = """
         SELECT id, start_id, end_id, direction
@@ -116,181 +120,109 @@ def fetch_zone_pairs(conn, limit: int) -> List[ZonePair]:
     with dict_cur(conn) as cur:
         cur.execute(sql, (limit,))
         rows = cur.fetchall()
-
-    pairs: List[ZonePair] = []
-    for i in range(len(rows) - 1):
-        cur_z = rows[i]
-        nxt_z = rows[i + 1]
-
-        dir_curr = dir_to_int(cur_z["direction"])
-        dir_next = dir_to_int(nxt_z["direction"])
-
-        # If we have absolutely no idea about the next direction, skip.
-        # (You can relax this later if you want a 3-way model including "0".)
-        if dir_next == 0:
-            continue
-
-        pairs.append(
-            ZonePair(
-                zone_id=cur_z["id"],
-                next_zone_id=nxt_z["id"],
-                start_id=cur_z["start_id"],
-                end_id=cur_z["end_id"],
-                dir_curr=dir_curr,
-                dir_next=dir_next,
-            )
-        )
-
-    return pairs
+    return rows
 
 
-def fetch_zone_stats(conn, ts_col: str, mid_expr: str, start_id: int, end_id: int) -> Dict[str, float]:
+def fetch_zone_personality(conn, zone_id: int) -> Dict:
     """
-    Aggregate tick-level behaviour for a single zone.
-
-    We deliberately keep this fairly small and interpretable:
-        - n_ticks         (# of ticks in the zone)
-        - duration_sec    (wall-clock duration)
-        - p_min / p_max   (extremes)
-        - p_mean          (average price)
-        - p_range         (max-min)
-        - p_std           (stddev of price)
-        - drift           (close - open)
-        - speed           (drift / duration_sec)
-        - range_per_tick  (p_range / n_ticks)
+    Ensure zone_personality exists for this zone_id, then fetch the row.
     """
-    sql = f"""
-        WITH base AS (
+    # First try to fetch
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
             SELECT
                 id,
-                {ts_col}  AS ts,
-                {mid_expr}::double precision AS mid
-            FROM ticks
-            WHERE id BETWEEN %s AND %s
-            ORDER BY id
-        ),
-        agg AS (
-            SELECT
-                COUNT(*)               AS n_ticks,
-                MIN(mid)               AS p_min,
-                MAX(mid)               AS p_max,
-                AVG(mid)               AS p_mean,
-                STDDEV_POP(mid)        AS p_std,
-                MAX(mid) - MIN(mid)    AS p_range,
-                EXTRACT(EPOCH FROM (MAX(ts) - MIN(ts))) AS duration_sec,
-                ARRAY_AGG(mid ORDER BY id) AS arr
-            FROM base
+                dir_zone,
+                net_move,
+                abs_move,
+                full_range,
+                body_range_ratio,
+                upper_wick_ratio,
+                lower_wick_ratio,
+                duration_sec,
+                n_ticks,
+                speed,
+                noise_ratio,
+                pos_of_extreme,
+                delay_frac_0_2,
+                delay_frac_0_4,
+                n_swings,
+                swing_dir_changes,
+                avg_swing_range,
+                max_swing_range
+            FROM zone_personality
+            WHERE id = %s
+            """,
+            (zone_id,),
         )
-        SELECT
-            n_ticks,
-            p_min,
-            p_max,
-            p_mean,
-            COALESCE(p_std, 0.0)      AS p_std,
-            p_range,
-            COALESCE(duration_sec, 0) AS duration_sec,
-            arr[1]                    AS p_open,
-            arr[array_length(arr, 1)] AS p_close
-        FROM agg
-    """
-    with dict_cur(conn) as cur:
-        cur.execute(sql, (start_id, end_id))
         row = cur.fetchone()
 
-    if not row or row["n_ticks"] is None or row["n_ticks"] == 0:
-        # Completely missing zone data – return neutral defaults.
-        return {
-            "n_ticks": 0.0,
-            "duration_sec": 0.0,
-            "p_min": 0.0,
-            "p_max": 0.0,
-            "p_mean": 0.0,
-            "p_range": 0.0,
-            "p_std": 0.0,
-            "drift": 0.0,
-            "speed": 0.0,
-            "range_per_tick": 0.0,
-        }
+    if row:
+        return row
 
-    n_ticks = float(row["n_ticks"])
-    duration = float(row["duration_sec"] or 0.0)
-    p_min = float(row["p_min"])
-    p_max = float(row["p_max"])
-    p_mean = float(row["p_mean"])
-    p_range = float(row["p_range"] or 0.0)
-    p_std = float(row["p_std"] or 0.0)
-    p_open = float(row["p_open"])
-    p_close = float(row["p_close"])
+    # Not present -> build it using the jobs helper (separate connection).
+    build_zone_personality(zone_id)
 
-    drift = p_close - p_open
-    # Avoid division by zero
-    speed = drift / duration if duration > 0 else 0.0
-    range_per_tick = p_range / n_ticks if n_ticks > 0 else 0.0
-
-    return {
-        "n_ticks": n_ticks,
-        "duration_sec": duration,
-        "p_min": p_min,
-        "p_max": p_max,
-        "p_mean": p_mean,
-        "p_range": p_range,
-        "p_std": p_std,
-        "drift": drift,
-        "speed": speed,
-        "range_per_tick": range_per_tick,
-    }
-
-
-def build_feature_matrix(conn, limit: int):
-    """
-    Build X, y, meta for the first `limit` zones.
-
-    X: features from CURRENT zone i
-    y: direction of NEXT zone i+1 (-1 / 1)
-    meta: list of dicts with ids etc. for later inspection.
-    """
-    ts_col = detect_ts_col(conn)
-    mid_expr = detect_mid_expr(conn)
-
-    pairs = fetch_zone_pairs(conn, limit)
-    if not pairs:
-        raise RuntimeError("No zone pairs available to train on.")
-
-    X: List[List[float]] = []
-    y: List[int] = []
-    meta: List[Dict] = []
-
-    for p in pairs:
-        stats = fetch_zone_stats(conn, ts_col, mid_expr, p.start_id, p.end_id)
-
-        features = [
-            float(p.dir_curr),              # direction of current zone
-            stats["n_ticks"],
-            stats["duration_sec"],
-            stats["p_range"],
-            stats["p_std"],
-            stats["drift"],
-            stats["speed"],
-            stats["range_per_tick"],
-        ]
-
-        X.append(features)
-        y.append(p.dir_next)
-        meta.append(
-            {
-                "zone_id": p.zone_id,
-                "next_zone_id": p.next_zone_id,
-                "start_id": p.start_id,
-                "end_id": p.end_id,
-                "dir_curr": p.dir_curr,
-            }
+    # Fetch again
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            SELECT
+                id,
+                dir_zone,
+                net_move,
+                abs_move,
+                full_range,
+                body_range_ratio,
+                upper_wick_ratio,
+                lower_wick_ratio,
+                duration_sec,
+                n_ticks,
+                speed,
+                noise_ratio,
+                pos_of_extreme,
+                delay_frac_0_2,
+                delay_frac_0_4,
+                n_swings,
+                swing_dir_changes,
+                avg_swing_range,
+                max_swing_range
+            FROM zone_personality
+            WHERE id = %s
+            """,
+            (zone_id,),
         )
+        row = cur.fetchone()
 
-    return np.array(X, dtype=float), np.array(y, dtype=int), meta
+    if not row:
+        raise RuntimeError(f"zone_personality not found for zone {zone_id} even after build.")
+
+    return row
+
+
+def features_from_history(history: List[Dict]) -> List[float]:
+    """
+    Build a flat feature vector from a list of zone_personality rows,
+    in chronological order (oldest first).
+    """
+    feats: List[float] = []
+    for zp in history:
+        for key in PERSONALITY_FEATURES:
+            val = zp.get(key)
+            if val is None:
+                feats.append(0.0)
+            else:
+                # dir_zone can be SMALLINT, others are numeric
+                try:
+                    feats.append(float(val))
+                except Exception:
+                    feats.append(0.0)
+    return feats
 
 
 # ---------------------------------------------------------------------------
-# DB schema for runs & predictions
+# DB schema for runs & predictions (unchanged)
 # ---------------------------------------------------------------------------
 
 
@@ -353,7 +285,6 @@ def insert_prediction(
     proba_vec is an array of length len(CLASSES) with probabilities
     in the same order as CLASSES.
     """
-    # Helper to grab probability by label value
     label_to_idx = {int(lbl): i for i, lbl in enumerate(CLASSES)}
 
     def p(label: int) -> float:
@@ -399,7 +330,7 @@ def insert_prediction(
 
 
 # ---------------------------------------------------------------------------
-# Online training loop (SGD snowball)
+# Online training loop (SGD snowball with zone personalities)
 # ---------------------------------------------------------------------------
 
 
@@ -415,10 +346,6 @@ def _predict_proba_any(clf: SGDClassifier, x_row: np.ndarray) -> np.ndarray:
     # Fallback: use decision_function scores and softmax.
     scores = clf.decision_function(x_row)
     scores = np.atleast_1d(scores)
-    # For binary, decision_function returns shape (n_samples,),
-    # so we manually expand to 2-class; here we have 3 classes,
-    # but SGDClassifier with log_loss *should* give predict_proba.
-    # This is defensive code.
     if scores.ndim == 1:
         scores = np.vstack([-scores, scores]).T
     scores = scores[0]
@@ -428,30 +355,32 @@ def _predict_proba_any(clf: SGDClassifier, x_row: np.ndarray) -> np.ndarray:
     return prob.astype(float)
 
 
-def snowball_train(limit: int) -> None:
+def snowball_train(limit: int, memory_depth: int) -> None:
     """
     Main entrypoint.
 
-    1) Build dataset (X, y, meta) for the first `limit` zones.
-    2) Create a new SGD run row.
-    3) Warm-up on the very first example so the model has initial weights.
-    4) For every subsequent example:
-         - predict,
-         - store prediction + probabilities,
-         - update running accuracy,
-         - learn via partial_fit.
+    - Fetch up to `limit` zones in order.
+    - Walk through them once in chronological order.
+    - Use previous `memory_depth` zone personalities to predict
+      direction of the current zone.
+    - After prediction, build current zone's personality and learn from it.
     """
+    if memory_depth <= 0:
+        raise ValueError("memory_depth must be >= 1")
+
     conn = get_conn()
     ensure_tables(conn)
 
-    X, y, meta = build_feature_matrix(conn, limit)
-    n_samples = len(y)
-    if n_samples < 2:
-        print("Not enough samples to do online snowball training (need at least 2).")
+    zones = fetch_zones(conn, limit)
+    n_zones = len(zones)
+    if n_zones <= memory_depth:
+        print(f"Not enough zones: have {n_zones}, need > memory_depth ({memory_depth}).")
         return
 
-    run_id = f"sgd-{uuid.uuid4().hex[:8]}"
-    algo_name = "SGDClassifier(log_loss)"
+    total_samples = max(0, n_zones - memory_depth)
+
+    run_id = f"zp-sgd-{uuid.uuid4().hex[:8]}"
+    algo_name = f"SGDClassifier(log_loss) with memory_depth={memory_depth}"
 
     with conn, conn.cursor() as cur:
         cur.execute(
@@ -460,10 +389,11 @@ def snowball_train(limit: int) -> None:
             VALUES (%s, %s, %s, %s)
             ON CONFLICT (run_id) DO NOTHING
             """,
-            (run_id, algo_name, "next_zone_direction", n_samples),
+            (run_id, algo_name, "curr_zone_direction_from_prev_personalities", total_samples),
         )
 
-    print(f"Total zone pairs with features: {n_samples}")
+    print(f"Total zones fetched: {n_zones}")
+    print(f"Will train on up to {total_samples} zones (after warm-up).")
     print(f"Run id: {run_id}")
 
     # Model: linear, online, with probabilistic output
@@ -477,34 +407,73 @@ def snowball_train(limit: int) -> None:
         random_state=42,
     )
 
-    # Warm-up on the very first sample so we have a model to start from.
-    clf.partial_fit(X[0:1], y[0:1], classes=CLASSES)
-
+    history: List[Dict] = []  # list of zone_personality dicts
     correct = 0
     total = 0
+    step_index = 0
+    model_initialized = False
 
-    # Start online loop from the *second* sample
-    for idx in range(1, n_samples):
-        x_row = X[idx : idx + 1]
-        true_label = int(y[idx])
+    for idx, z in enumerate(zones):
+        zone_id = z["id"]
+        true_dir = dir_to_int(z["direction"])
 
-        # Predict with the current model (no knowledge of this label yet).
-        pred_label = int(clf.predict(x_row)[0])
-        proba_vec = _predict_proba_any(clf, x_row)
+        # Only predict once we have enough history
+        if len(history) >= memory_depth:
+            window = history[-memory_depth:]
+            feat_vec = features_from_history(window)
+            x_row = np.asarray(feat_vec, dtype=float).reshape(1, -1)
 
-        total += 1
-        if pred_label == true_label:
-            correct += 1
+            if not model_initialized:
+                # Warm-up: first sample only trains, no prediction recorded.
+                clf.partial_fit(x_row, [true_dir], classes=CLASSES)
+                model_initialized = True
+                print(f"Warm-up on zone_id={zone_id}, direction={true_dir}")
+            else:
+                # Predict with the current model (it has only seen zones < idx)
+                pred_label = int(clf.predict(x_row)[0])
+                proba_vec = _predict_proba_any(clf, x_row)
 
-        acc = correct / total if total else 0.0
-        if total % REPORT_EVERY == 0 or idx == n_samples - 1:
-            print(f"Up to zone {idx}: accuracy = {acc:.3f}")
+                total += 1
+                if pred_label == true_dir:
+                    correct += 1
+                step_index += 1
 
-        # Persist this prediction
-        insert_prediction(conn, run_id, idx, meta[idx], true_label, pred_label, proba_vec)
+                acc = correct / total if total else 0.0
+                if step_index % REPORT_EVERY == 0 or idx == n_zones - 1:
+                    print(
+                        f"Up to global index {idx} (zone_id={zone_id}): "
+                        f"running accuracy = {acc:.3f}"
+                    )
 
-        # Now learn from this example
-        clf.partial_fit(x_row, [true_label])
+                # Meta row: we treat the last zone in history as the "current"
+                # zone that led to this prediction, and zone_id as the predicted one.
+                last_zone = zones[idx - 1]
+                meta_row = {
+                    "zone_id": last_zone["id"],         # base zone (most recent previous)
+                    "next_zone_id": zone_id,           # zone whose direction we're predicting
+                    "start_id": z["start_id"],
+                    "end_id": z["end_id"],
+                    "dir_curr": dir_to_int(last_zone["direction"]),
+                }
+
+                # Persist this prediction
+                insert_prediction(
+                    conn,
+                    run_id,
+                    step_index,
+                    meta_row,
+                    true_label=true_dir,
+                    pred_label=pred_label,
+                    proba_vec=proba_vec,
+                )
+
+                # Learn from this example
+                clf.partial_fit(x_row, [true_dir])
+
+        # After prediction and learning, build personality for the current zone
+        # and extend our history.
+        zp = fetch_zone_personality(conn, zone_id)
+        history.append(zp)
 
     # Final accuracy bookkeeping
     final_acc = correct / total if total else 0.0
@@ -541,15 +510,21 @@ def snowball_train(limit: int) -> None:
 
 
 def main(argv: List[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Zone-level SGD snowball trainer")
+    parser = argparse.ArgumentParser(description="Zone-personality SGD snowball trainer")
     parser.add_argument(
         "--limit",
         type=int,
         default=5000,
-        help="Maximum number of zones to use (we train on up to limit-1 zone pairs).",
+        help="Maximum number of zones to use (we walk on them once in id order).",
+    )
+    parser.add_argument(
+        "--memory",
+        type=int,
+        default=DEFAULT_MEMORY_DEPTH,
+        help="How many previous zone personalities to use as features.",
     )
     args = parser.parse_args(argv)
-    snowball_train(args.limit)
+    snowball_train(args.limit, args.memory)
 
 
 if __name__ == "__main__":
