@@ -24,7 +24,7 @@ Usage (from repo root):
 
 import psycopg2
 import numpy as np
-import umap
+import umap.umap_ as umap
 import hdbscan
 from psycopg2.extras import RealDictCursor
 from contextlib import contextmanager
