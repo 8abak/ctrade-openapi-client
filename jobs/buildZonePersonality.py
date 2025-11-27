@@ -22,12 +22,12 @@ def get_connection():
 def fetch_zone(cursor, zone_id: int):
     """
     Assumes there is a 'zones' table with:
-        id, start_id, end_id, dir_zone
-    Adjust column names if your table is slightly different.
+        id, start_id, end_id, dir
+    If your column names differ, adjust here.
     """
     cursor.execute(
         """
-        SELECT id, start_id, end_id, dir_zone
+        SELECT id, start_id, end_id, dir
         FROM zones
         WHERE id = %s
         """,
@@ -44,6 +44,7 @@ def fetch_zone(cursor, zone_id: int):
         "end_id": end_id,
         "dir_zone": dir_zone,
     }
+
 
 
 def fetch_ticks(cursor, start_id: int, end_id: int):
