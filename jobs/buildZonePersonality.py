@@ -20,6 +20,12 @@ def get_connection():
 
 
 def fetch_zone(cursor, zone_id: int):
+    """
+    zones columns (from screenshot):
+      id, start_id, end_id, start_ts, end_ts, mid_ts,
+      n_ticks, direction, ...
+    We only need: id, start_id, end_id, direction
+    """
     cursor.execute(
         """
         SELECT id, start_id, end_id, direction
@@ -37,8 +43,9 @@ def fetch_zone(cursor, zone_id: int):
         "id": zid,
         "start_id": start_id,
         "end_id": end_id,
-        "dir_zone": direction,   # keep same field name for internal use
+        "dir_zone": direction,   # internal key used by rest of script
     }
+
 
 
 
