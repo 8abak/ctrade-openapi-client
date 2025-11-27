@@ -377,22 +377,44 @@ def insert_prediction(
 
 def _predict_proba_any(clf: SGDClassifier, x_row: np.ndarray) -> np.ndarray:
     """
-    Get probability vector for a single row.
-    If predict_proba isn't available, approximate with softmax(decision_function).
-    """
-    if hasattr(clf, "predict_proba"):
-        return np.asarray(clf.predict_proba(x_row)[0], dtype=float)
+    Get a *soft* probability vector for a single row.
 
+    To avoid 0/1 saturation we:
+      - Always use decision_function scores.
+      - Centre and scale them.
+      - Apply softmax.
+      - Clip to [eps, 1-eps].
+    """
+    # Always work from decision_function so we can control scaling
     scores = clf.decision_function(x_row)
     scores = np.atleast_1d(scores)
+
+    # For binary case sklearn returns shape (n_samples,), convert to 2-class scores
     if scores.ndim == 1:
-        # binary case → convert to 2-class scores
         scores = np.vstack([-scores, scores]).T
+
+    # Take the single sample
     scores = scores[0]
+
+    # Centre to avoid huge shift, and scale down to reduce saturation
+    scores = scores - scores.mean()
+    temperature = 5.0  # larger = softer probabilities
+    scores = scores / temperature
+
+    # Softmax
     scores = scores - np.max(scores)
     exp = np.exp(scores)
     prob = exp / exp.sum()
+
+    # Avoid exact 0 / 1
+    eps = 1e-4
+    prob = np.clip(prob, eps, 1.0 - eps)
+
+    # Re-normalise after clipping
+    prob = prob / prob.sum()
+
     return prob.astype(float)
+
 
 
 # ---------------------------------------------------------------------------
