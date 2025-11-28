@@ -159,30 +159,42 @@
         continue;
       }
 
-      // --- NEW: personality-based color mapping ---
+      // --- Personality + zone-type based colour selection ---
+      const clusterRaw = z.personality_cluster;
+      const clusterId  = (clusterRaw === undefined || clusterRaw === null)
+        ? null
+        : Number(clusterRaw);
+
+      const zoneTypeRaw   = (z.zone_type || z.zone_type_code || '').toString();
+      const zoneTypeUpper = zoneTypeRaw.toUpperCase();
+
       let color;
       let labelName = '';
 
-      if (z.personality_cluster !== undefined && z.personality_cluster !== null) {
-        const clusterId = Number(z.personality_cluster);
-        const key = String(clusterId);
-        labelName = personalityLabels[key] || '';
+      // Give the personality name if we have it
+      if (clusterId !== null && personalityLabels[String(clusterId)]) {
+        labelName = personalityLabels[String(clusterId)];
+      } else if (zoneTypeUpper) {
+        labelName = zoneTypeUpper;
+      }
 
-        if (clusterId === 0) {
-          // Up personality -> green
-          color = 'rgba(46, 160, 67, 0.18)';
-        } else if (clusterId === 1) {
-          // Down personality -> red
-          color = 'rgba(248, 81, 73, 0.18)';
-        } else if (clusterId === 2) {
-          // Small noisy / choppy -> white-ish
-          color = 'rgba(255, 255, 255, 0.10)';
-        } else {
-          // Mixed / unknown -> soft bluish-grey
-          color = 'rgba(99, 110, 139, 0.16)';
-        }
+      if (zoneTypeUpper.startsWith('CHOP')) {
+        // Anything labeled CHOP / CHOP_TICKS / CHOP_TICKS_WEAK -> white-ish
+        color = 'rgba(255, 255, 255, 0.10)';
+      } else if (clusterId === 0) {
+        // Up personality -> green
+        color = 'rgba(46, 160, 67, 0.18)';
+      } else if (clusterId === 1) {
+        // Down personality -> red
+        color = 'rgba(248, 81, 73, 0.18)';
+      } else if (clusterId === 2) {
+        // Small noisy / chop personality -> white-ish
+        color = 'rgba(255, 255, 255, 0.10)';
+      } else if (clusterId === -1) {
+        // Mixed / long zones -> bluish neutral
+        color = 'rgba(99, 110, 139, 0.16)';
       } else {
-        // Fallback: OLD direction-based coloring if personality is absent
+        // Fallback: use old direction-based colour if nothing else
         const dir = (z.direction || '').toString().toLowerCase();
         if (dir === 'up' || dir === '1' || dir === 'u') {
           color = 'rgba(46, 160, 67, 0.18)';     // green-ish
@@ -194,8 +206,9 @@
       }
 
       bands.push({
-        name: labelName || z.zone_type || '',
-        personality_cluster: z.personality_cluster ?? null,
+        name: labelName,
+        personality_cluster: clusterId,
+        zone_type: zoneTypeRaw,
         itemStyle: { color },
         coord: [tsStart, tsEnd, min, max],
       });
@@ -203,6 +216,7 @@
 
     return bands;
   }
+
 
   function buildSegmentPoints(ticksArr, segsArr) {
     if (!ticksArr.length || !segsArr.length) return [];
