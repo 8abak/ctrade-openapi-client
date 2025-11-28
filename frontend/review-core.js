@@ -3,6 +3,7 @@
 //   - zones, Kalman, segments
 //   - snowball predictions (latest SGD run) drawn on price
 //   - Run/Stop auto-scroll over historical data (tick-by-tick)
+//   - Zone "personalities" (personality_cluster) colored in the background
 //
 // Backend endpoints used:
 //   GET  /api/review/window?from_id=...&window=...
@@ -41,6 +42,14 @@
 
   let autoPlay      = false;
   let playTimer     = null;
+
+  // Optional labels for personalities
+  const personalityLabels = {
+    '-1': 'MIXED_LONG',
+    '0':  'UP_CLEAN_FAST',
+    '1':  'DOWN_CLEAN_FAST',
+    '2':  'SMALL_NOISY_CHOP',
+  };
 
   // ---------- Helpers ----------
 
@@ -110,7 +119,6 @@
 
     const data = await resp.json();
 
-    // Be tolerant about the exact JSON shape the backend returns
     if (!data) return [];
     if (Array.isArray(data.rows))   return data.rows;
     if (Array.isArray(data.data))   return data.data;
@@ -119,6 +127,7 @@
     return [];
   }
 
+  // ---------- Zone bands with personality-based colors ----------
   function buildZoneBands(ticksArr, zonesArr) {
     if (!ticksArr.length || !zonesArr.length) return [];
 
@@ -150,16 +159,43 @@
         continue;
       }
 
-      const dir = (z.direction || '').toString().toLowerCase();
-      let color = 'rgba(56, 139, 253, 0.18)'; // blue-ish default
-      if (dir === 'up' || dir === '1' || dir === 'u') {
-        color = 'rgba(46, 160, 67, 0.18)';     // green-ish
-      } else if (dir === 'dn' || dir === '-1' || dir === 'down' || dir === 'd') {
-        color = 'rgba(248, 81, 73, 0.18)';     // red-ish
+      // --- NEW: personality-based color mapping ---
+      let color;
+      let labelName = '';
+
+      if (z.personality_cluster !== undefined && z.personality_cluster !== null) {
+        const clusterId = Number(z.personality_cluster);
+        const key = String(clusterId);
+        labelName = personalityLabels[key] || '';
+
+        if (clusterId === 0) {
+          // Up personality -> green
+          color = 'rgba(46, 160, 67, 0.18)';
+        } else if (clusterId === 1) {
+          // Down personality -> red
+          color = 'rgba(248, 81, 73, 0.18)';
+        } else if (clusterId === 2) {
+          // Small noisy / choppy -> white-ish
+          color = 'rgba(255, 255, 255, 0.10)';
+        } else {
+          // Mixed / unknown -> soft bluish-grey
+          color = 'rgba(99, 110, 139, 0.16)';
+        }
+      } else {
+        // Fallback: OLD direction-based coloring if personality is absent
+        const dir = (z.direction || '').toString().toLowerCase();
+        if (dir === 'up' || dir === '1' || dir === 'u') {
+          color = 'rgba(46, 160, 67, 0.18)';     // green-ish
+        } else if (dir === 'dn' || dir === '-1' || dir === 'down' || dir === 'd') {
+          color = 'rgba(248, 81, 73, 0.18)';     // red-ish
+        } else {
+          color = 'rgba(56, 139, 253, 0.18)';    // default blue-ish
+        }
       }
 
       bands.push({
-        name: z.zone_type || '',
+        name: labelName || z.zone_type || '',
+        personality_cluster: z.personality_cluster ?? null,
         itemStyle: { color },
         coord: [tsStart, tsEnd, min, max],
       });
@@ -665,7 +701,7 @@
     }
 
     const windowSize = safeInt(windowInput && windowInput.value, currentWindow);
-    const nextFrom = currentFromId + 1; // <-- one tick shift
+    const nextFrom = currentFromId + 1; // one tick shift
     loadWindow(nextFrom, windowSize);
 
     // Wait a little so user can see motion
