@@ -37,7 +37,7 @@ SYMBOL = "XAUUSD"
 
 # Range selection (by tick id).
 # If END_TICK_ID is None, the script will go until the latest tick.
-START_TICK_ID = 1   # e.g. 1 or 1_000_000; None = min id
+START_TICK_ID = None   # e.g. 1 or 1_000_000; None = min id
 END_TICK_ID = 50000     # e.g. 10_000_000;   None = max id
 
 # Streaming / performance
