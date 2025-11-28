@@ -2,16 +2,22 @@
 #
 # Regime-Adaptive Directional Change (RADC) pivot & swing builder
 #
-# Assumptions about DB schema:
+# Stream all XAUUSD ticks from PostgreSQL, detect adaptive pivots, and
+# write:
+#   - piv: pivot points
+#   - swg: swings between pivots
+#
+# This version:
+#   * Processes ticks in batches (chunks) via fetchmany
+#   * Prints a summary after each batch (chunk)
+#   * Prints additional progress every REPORT_EVERY_N_TICKS
+#
+# Assumes tables:
 #   ticks(id BIGINT PK, symbol TEXT, timestamp TIMESTAMPTZ,
 #         bid DOUBLE PRECISION, ask DOUBLE PRECISION,
 #         kal DOUBLE PRECISION, mid DOUBLE PRECISION)
 #
-#   piv / swg tables are already created using the DDL we defined earlier.
-#
-# This script is now designed to do a FULL REBUILD:
-#   - optionally TRUNCATE piv & swg at the start
-#   - process ALL ticks for SYMBOL (min(id)..max(id))
+#   piv / swg created with previous DDL.
 
 import math
 import sys
@@ -36,12 +42,13 @@ DB_CONFIG = {
 SYMBOL = "XAUUSD"
 
 # Range selection (by tick id).
-# For a full rebuild we keep these as None so the script discovers min/max.
+# For full history, keep both as None so we auto-detect min/max.
 START_TICK_ID = None          # None = min id for this symbol
 END_TICK_ID   = None          # None = max id for this symbol
 
 # Streaming / performance
-TICK_BATCH_SIZE = 10_000
+TICK_BATCH_SIZE = 20_000          # how many ticks to fetch per DB roundtrip
+REPORT_EVERY_N_TICKS = 200_000    # extra progress print frequency
 
 # Volatility estimation (EWMA)
 EWMA_ALPHA = 0.05          # higher = more reactive, 0.05–0.1 reasonable
@@ -233,6 +240,7 @@ class RADCState:
         # Counters
         self.num_swings_inserted = 0
 
+
     def update_vol(self, r):
         r2 = r * r
         if self.var_ewma is None:
@@ -305,6 +313,7 @@ def process_ticks():
             c.execute("TRUNCATE TABLE swg;")
             c.execute("TRUNCATE TABLE piv;")
         conn.commit()
+        sys.stdout.flush()
 
     # Determine ID range if None
     def fetch_scalar(sql, params=None):
@@ -327,7 +336,12 @@ def process_ticks():
         print("No ticks found for symbol", SYMBOL)
         return
 
-    print(f"Processing ticks {START_TICK_ID} .. {END_TICK_ID} for {SYMBOL}")
+    total_to_do = END_TICK_ID - START_TICK_ID + 1
+    print(
+        f"Processing ticks {START_TICK_ID} .. {END_TICK_ID} "
+        f"({total_to_do:,} ticks) for {SYMBOL}"
+    )
+    sys.stdout.flush()
 
     read_cur.execute(
         """
@@ -347,11 +361,15 @@ def process_ticks():
     swing_times = []  # seconds since swing start_ts
 
     total_ticks = 0
+    batch_index = 0
 
     while True:
         rows = read_cur.fetchmany(TICK_BATCH_SIZE)
         if not rows:
             break
+
+        batch_index += 1
+        batch_size = len(rows)
 
         for tick_id, ts, price in rows:
             total_ticks += 1
@@ -556,9 +574,10 @@ def process_ticks():
                 if state.num_swings_inserted % COMMIT_EVERY_N_SWINGS == 0:
                     conn.commit()
                     print(
-                        f"Committed after {state.num_swings_inserted} swings, "
-                        f"{total_ticks} ticks processed..."
+                        f"[commit] swings={state.num_swings_inserted:,}, "
+                        f"ticks={total_ticks:,}, last_tick_id={tick_id}"
                     )
+                    sys.stdout.flush()
 
                 state.curr_piv_id = new_piv_id
                 state.curr_piv_tick_id = state.ext_tick_id
@@ -586,9 +605,29 @@ def process_ticks():
                 swing_prices = [state.curr_piv_price]
                 swing_times = [0.0]
 
+            # Update "previous tick" state
             state.prev_price = price
             state.prev_ts = ts
             state.prev_tick_id = tick_id
+
+            # Extra periodic progress print based on total_ticks
+            if total_ticks % REPORT_EVERY_N_TICKS == 0:
+                done_pct = (total_ticks / total_to_do) * 100.0
+                print(
+                    f"[progress] ticks={total_ticks:,}/{total_to_do:,} "
+                    f"({done_pct:5.1f}%), swings={state.num_swings_inserted:,}, "
+                    f"last_tick_id={tick_id}"
+                )
+                sys.stdout.flush()
+
+        # End of this batch
+        print(
+            f"[batch {batch_index}] processed {batch_size:,} ticks "
+            f"(total {total_ticks:,}), "
+            f"swings={state.num_swings_inserted:,}, "
+            f"last_tick_id={rows[-1][0]}"
+        )
+        sys.stdout.flush()
 
     conn.commit()
     read_cur.close()
@@ -596,9 +635,10 @@ def process_ticks():
     conn.close()
 
     print(
-        f"Done. Processed {total_ticks} ticks, "
-        f"inserted {state.num_swings_inserted} swings and their pivots."
+        f"Done. Processed {total_ticks:,} ticks, "
+        f"inserted {state.num_swings_inserted:,} swings and their pivots."
     )
+    sys.stdout.flush()
 
 
 if __name__ == "__main__":
