@@ -15,7 +15,6 @@
 import math
 import sys
 from collections import deque
-from datetime import timedelta
 
 import numpy as np
 import psycopg2
@@ -37,8 +36,8 @@ SYMBOL = "XAUUSD"
 
 # Range selection (by tick id).
 # If END_TICK_ID is None, the script will go until the latest tick.
-START_TICK_ID = None   # e.g. 1 or 1_000_000; None = min id
-END_TICK_ID = 50000     # e.g. 10_000_000;   None = max id
+START_TICK_ID = None          # e.g. 1 or 1_000_000; None = min id
+END_TICK_ID = 50000           # e.g. 10_000_000; None = max id
 
 # Streaming / performance
 TICK_BATCH_SIZE = 10_000
@@ -220,7 +219,7 @@ class RADCState:
         self.swing_start_price = None
 
         self.swing_tick_count = 0
-        self.swing_rv = 0.0             # sum of returns^2
+        self.swing_rv = 0.0
         self.swing_sigma_sum = 0.0
         self.swing_sigma_max = 0.0
 
@@ -292,7 +291,8 @@ def process_ticks():
     conn = get_conn()
     conn.autocommit = False
 
-    read_cur = conn.cursor(name="tick_cursor")
+    # Normal (non-named) cursor – safe with commits.
+    read_cur = conn.cursor()
     write_cur = conn.cursor()
 
     # Determine ID range if None
@@ -408,7 +408,7 @@ def process_ticks():
                 swing_prices = [state.curr_piv_price]
                 swing_times = [0.0]
 
-                # Now continue processing as usual for this tick (falls through)
+                # fall-through to handle this tick as part of swing
 
             # Update per-swing aggregation with current tick
             state.swing_tick_count += 1
@@ -424,7 +424,6 @@ def process_ticks():
 
             # Update extreme and compute counter-move
             if state.dir == +1:
-                # We are in an upswing: extreme is the highest price since pivot.
                 if price >= state.ext_price:
                     state.ext_price = price
                     state.ext_tick_id = tick_id
@@ -437,9 +436,7 @@ def process_ticks():
 
                     counter_abs = state.ext_price - price
                     counter_vol = counter_abs / max(state.sigma, VOL_EPS)
-
             else:
-                # dir == -1 : downswing, extreme is the lowest price since pivot.
                 if price <= state.ext_price:
                     state.ext_price = price
                     state.ext_tick_id = tick_id
@@ -456,7 +453,6 @@ def process_ticks():
             # Decide whether to mark a new pivot at the extreme
             do_pivot = False
             if state.ext_tick_id is not None and state.ext_tick_id != state.curr_piv_tick_id:
-                # Ensure we defined swing_vol in both branches
                 if state.dir == +1:
                     swing_abs = state.ext_price - state.curr_piv_price
                 else:
@@ -465,14 +461,19 @@ def process_ticks():
                 swing_vol = swing_abs / max(state.ext_sigma, VOL_EPS)
 
                 qsize = state.get_qsize()
-                # basic filters
                 enough_swing = swing_vol >= max(MIN_SWING_VOL, 0.0)
                 enough_counter = counter_vol >= max(qsize, MIN_COUNTER_VOL)
                 ratio_ok = counter_vol >= COUNTER_RATIO * swing_vol
                 enough_ticks = state.swing_tick_count >= MIN_TICKS_PER_SWING
                 enough_time = dur_since_start >= MIN_DURATION_SEC
 
-                if enough_swing and enough_counter and ratio_ok and enough_ticks and enough_time:
+                if (
+                    enough_swing
+                    and enough_counter
+                    and ratio_ok
+                    and enough_ticks
+                    and enough_time
+                ):
                     do_pivot = True
 
             if do_pivot:
@@ -485,7 +486,7 @@ def process_ticks():
                     price=state.ext_price,
                     ptype=new_ptype,
                     vol_local=state.ext_sigma,
-                    swing_zscore=None,  # will be updated after swing insertion
+                    swing_zscore=None,
                     energy=None,
                     reg_code=None,
                     prev_piv_id=state.curr_piv_id,
@@ -519,10 +520,7 @@ def process_ticks():
                 rv = state.swing_rv
                 vel = ret_abs / max(dur_sec, 1e-6)
 
-                # Linear fit R^2
                 lin_r2 = compute_lin_reg_r2(swing_prices, swing_times)
-
-                # Importance: |ret| divided by mean vol
                 imp = ret_abs / max(vol_mean, VOL_EPS)
 
                 insert_swing(
@@ -549,11 +547,9 @@ def process_ticks():
                     meta=None,
                 )
 
-                # 3) Compute swing z-score and update pivot row we just inserted
                 swing_z = ret_abs / max(vol_mean, VOL_EPS)
                 update_pivot_swing_zscore(write_cur, new_piv_id, swing_z)
 
-                # 4) Update swing history distribution
                 state.recent_swings.append(swing_z)
                 state.num_swings_inserted += 1
 
@@ -571,16 +567,13 @@ def process_ticks():
                 state.curr_piv_price = state.ext_price
                 state.curr_piv_ptype = new_ptype
 
-                # Direction flips
                 state.dir = -state.dir
 
-                # Extreme reset to new pivot (will move with new swing)
                 state.ext_price = state.curr_piv_price
                 state.ext_tick_id = state.curr_piv_tick_id
                 state.ext_ts = state.curr_piv_ts
                 state.ext_sigma = state.sigma
 
-                # Reset swing aggregations for next swing
                 state.swing_start_piv_id = state.curr_piv_id
                 state.swing_start_tick_id = state.curr_piv_tick_id
                 state.swing_start_ts = state.curr_piv_ts
@@ -594,16 +587,12 @@ def process_ticks():
                 swing_prices = [state.curr_piv_price]
                 swing_times = [0.0]
 
-            # Finally, move prev_* forward
+            # move prev_* forward
             state.prev_price = price
             state.prev_ts = ts
             state.prev_tick_id = tick_id
 
-        # End of batch loop
-
-    # After all ticks, we do NOT force-closing the last partial swing yet.
-    # We can add optional logic later if needed.
-
+    # We don't force-close the last partial swing for now.
     conn.commit()
     read_cur.close()
     write_cur.close()
