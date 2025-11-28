@@ -26,9 +26,9 @@ from psycopg2.extras import Json
 # ----------------------------------------------------------------------
 
 DB_CONFIG = {
-    "host": "127.0.0.1",
+    "host": "localhost",
     "port": 5432,
-    "dbname": "ctrade",
+    "dbname": "trading",
     "user": "babak",
     "password": "babak33044",
 }
