@@ -29,8 +29,8 @@ DB_CONFIG = {
     "host": "127.0.0.1",
     "port": 5432,
     "dbname": "ctrade",
-    "user": "postgres",
-    "password": "YOUR_PASSWORD_HERE",
+    "user": "babak",
+    "password": "babak33044",
 }
 
 SYMBOL = "XAUUSD"
