@@ -5,7 +5,7 @@ ml/clusterZones.py
 Cluster all zone personalities into behavioral regimes using:
 
   1) StandardScaler
-  2) UMAP (nonlinear 3D embedding)
+  2) PCA (linear dimension reduction to 3D)
   3) HDBSCAN (density-based clustering)
 
 Input:
@@ -24,11 +24,11 @@ Usage (from repo root):
 
 import psycopg2
 import numpy as np
-import umap.umap_ as umap
 import hdbscan
 from psycopg2.extras import RealDictCursor
 from contextlib import contextmanager
 from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
 from collections import Counter
 
 # ------------------------------------------------------------------------------
@@ -86,7 +86,7 @@ FEATURES = [
 
 
 # ------------------------------------------------------------------------------
-# Main logic
+# Helpers
 # ------------------------------------------------------------------------------
 
 def load_zone_personality(conn):
@@ -120,26 +120,22 @@ def load_zone_personality(conn):
     return zone_ids, M
 
 
-def run_umap(M_scaled):
-    """Run UMAP to reduce feature space to 3D."""
-    print("Running UMAP (3D embedding)...")
-    umap_model = umap.UMAP(
-        n_neighbors=50,
-        min_dist=0.1,
-        n_components=3,
-        metric="euclidean",
-        random_state=42,
-    )
-    embedding = umap_model.fit_transform(M_scaled)
-    print("UMAP done, embedding shape =", embedding.shape)
+def run_pca(M_scaled, n_components=3):
+    """Run PCA to reduce feature space to n_components."""
+    print(f"Running PCA ({n_components} components)...")
+    pca = PCA(n_components=n_components, random_state=42)
+    embedding = pca.fit_transform(M_scaled)
+    explained = pca.explained_variance_ratio_.sum()
+    print(f"PCA done, embedding shape = {embedding.shape}, "
+          f"explained variance = {explained:.3f}")
     return embedding
 
 
 def run_hdbscan(embedding):
-    """Run HDBSCAN clustering on UMAP embedding."""
+    """Run HDBSCAN clustering on PCA embedding."""
     print("Running HDBSCAN clustering...")
     clusterer = hdbscan.HDBSCAN(
-        min_cluster_size=300,   # you can tune later
+        min_cluster_size=300,   # tune later if needed
         min_samples=50,
         prediction_data=True,
     )
@@ -169,6 +165,10 @@ def write_zone_cluster(conn, zone_ids, labels, probs):
     print("zone_cluster updated.")
 
 
+# ------------------------------------------------------------------------------
+# Main
+# ------------------------------------------------------------------------------
+
 def main():
     conn = get_conn()
 
@@ -180,8 +180,8 @@ def main():
     scaler = StandardScaler()
     M_scaled = scaler.fit_transform(M)
 
-    # 3) UMAP
-    embedding = run_umap(M_scaled)
+    # 3) PCA
+    embedding = run_pca(M_scaled, n_components=3)
 
     # 4) HDBSCAN
     labels, probs = run_hdbscan(embedding)
