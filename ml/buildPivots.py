@@ -287,6 +287,8 @@ def compute_lin_reg_r2(prices, times_sec):
 
 
 def process_ticks():
+    global START_TICK_ID, END_TICK_ID
+
     conn = get_conn()
     conn.autocommit = False
 
