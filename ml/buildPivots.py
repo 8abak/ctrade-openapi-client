@@ -9,8 +9,9 @@
 #
 #   piv / swg tables are already created using the DDL we defined earlier.
 #
-# NOTE: For the first run, assume piv and swg are EMPTY.
-#       We can later add "rebuild range" logic.
+# This script is now designed to do a FULL REBUILD:
+#   - optionally TRUNCATE piv & swg at the start
+#   - process ALL ticks for SYMBOL (min(id)..max(id))
 
 import math
 import sys
@@ -35,9 +36,9 @@ DB_CONFIG = {
 SYMBOL = "XAUUSD"
 
 # Range selection (by tick id).
-# If END_TICK_ID is None, the script will go until the latest tick.
-START_TICK_ID = None          # e.g. 1 or 1_000_000; None = min id
-END_TICK_ID = 50000           # e.g. 10_000_000; None = max id
+# For a full rebuild we keep these as None so the script discovers min/max.
+START_TICK_ID = None          # None = min id for this symbol
+END_TICK_ID   = None          # None = max id for this symbol
 
 # Streaming / performance
 TICK_BATCH_SIZE = 10_000
@@ -61,7 +62,10 @@ MIN_TICKS_PER_SWING = 10         # avoid pivots after ultra-short swings
 MIN_DURATION_SEC = 1.0           # avoid pivots in < 1 second (optional)
 
 # Commit behaviour
-COMMIT_EVERY_N_SWINGS = 100
+COMMIT_EVERY_N_SWINGS = 500
+
+# Whether to TRUNCATE existing piv/swg before building
+TRUNCATE_PIV_SWG_FIRST = True
 
 # ----------------------------------------------------------------------
 # DB helpers
@@ -291,9 +295,16 @@ def process_ticks():
     conn = get_conn()
     conn.autocommit = False
 
-    # Normal (non-named) cursor – safe with commits.
     read_cur = conn.cursor()
     write_cur = conn.cursor()
+
+    # Optionally start from a clean slate
+    if TRUNCATE_PIV_SWG_FIRST:
+        print("Truncating piv and swg...")
+        with conn.cursor() as c:
+            c.execute("TRUNCATE TABLE swg;")
+            c.execute("TRUNCATE TABLE piv;")
+        conn.commit()
 
     # Determine ID range if None
     def fetch_scalar(sql, params=None):
@@ -332,7 +343,6 @@ def process_ticks():
 
     state = RADCState()
 
-    # For computing R^2 cheaply, we keep prices and times only within current swing
     swing_prices = []
     swing_times = []  # seconds since swing start_ts
 
@@ -359,7 +369,6 @@ def process_ticks():
 
             # Initialise pivot and direction after we have 2 ticks
             if state.curr_piv_id is None:
-                # Determine initial direction from first non-zero return
                 move = price - state.prev_price
                 if move >= 0:
                     state.dir = +1
@@ -368,7 +377,6 @@ def process_ticks():
                     state.dir = -1
                     ptype = +1  # starting from a high
 
-                # Insert first pivot at previous tick
                 state.curr_piv_id = insert_pivot(
                     write_cur,
                     tick_id=state.prev_tick_id,
@@ -388,13 +396,11 @@ def process_ticks():
                 state.curr_piv_price = state.prev_price
                 state.curr_piv_ptype = ptype
 
-                # Initialise extreme to pivot
                 state.ext_price = state.curr_piv_price
                 state.ext_tick_id = state.curr_piv_tick_id
                 state.ext_ts = state.curr_piv_ts
                 state.ext_sigma = state.sigma
 
-                # Initialise swing aggregation
                 state.swing_start_piv_id = state.curr_piv_id
                 state.swing_start_tick_id = state.curr_piv_tick_id
                 state.swing_start_ts = state.curr_piv_ts
@@ -408,8 +414,6 @@ def process_ticks():
                 swing_prices = [state.curr_piv_price]
                 swing_times = [0.0]
 
-                # fall-through to handle this tick as part of swing
-
             # Update per-swing aggregation with current tick
             state.swing_tick_count += 1
             state.swing_rv += r * r
@@ -417,12 +421,11 @@ def process_ticks():
             if state.sigma > state.swing_sigma_max:
                 state.swing_sigma_max = state.sigma
 
-            # Time since swing start
             dur_since_start = (ts - state.swing_start_ts).total_seconds()
             swing_prices.append(price)
             swing_times.append(max(dur_since_start, 0.0))
 
-            # Update extreme and compute counter-move
+            # Update extreme and counter-move
             if state.dir == +1:
                 if price >= state.ext_price:
                     state.ext_price = price
@@ -477,7 +480,6 @@ def process_ticks():
                     do_pivot = True
 
             if do_pivot:
-                # 1) Insert new pivot at the extreme point
                 new_ptype = +1 if state.dir == +1 else -1
                 new_piv_id = insert_pivot(
                     write_cur,
@@ -494,14 +496,12 @@ def process_ticks():
                     meta=None,
                 )
 
-                # Link previous pivot to this one
                 update_pivot_links(
                     write_cur,
                     pivot_id=state.curr_piv_id,
                     next_piv_id=new_piv_id,
                 )
 
-                # 2) Close current swing and insert into swg
                 p_start = state.swing_start_price
                 p_end = state.ext_price
                 dir_ = +1 if p_end > p_start else -1
@@ -560,7 +560,6 @@ def process_ticks():
                         f"{total_ticks} ticks processed..."
                     )
 
-                # 5) Prepare for next swing: new pivot becomes current
                 state.curr_piv_id = new_piv_id
                 state.curr_piv_tick_id = state.ext_tick_id
                 state.curr_piv_ts = state.ext_ts
@@ -587,12 +586,10 @@ def process_ticks():
                 swing_prices = [state.curr_piv_price]
                 swing_times = [0.0]
 
-            # move prev_* forward
             state.prev_price = price
             state.prev_ts = ts
             state.prev_tick_id = tick_id
 
-    # We don't force-close the last partial swing for now.
     conn.commit()
     read_cur.close()
     write_cur.close()
