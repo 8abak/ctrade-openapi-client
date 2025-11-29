@@ -647,7 +647,3 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("Interrupted by user")
         sys.exit(1)
-
-
- 
- 
