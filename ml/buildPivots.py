@@ -1,23 +1,28 @@
 # ml/buildPivots.py
 #
 # Regime-Adaptive Directional Change (RADC) pivot & swing builder
+# INCREMENTAL VERSION:
+# - Each run continues from the last pivot in DB (if any)
+# - Builds at most MAX_SWINGS_PER_RUN swings, then exits
+# - You can run it repeatedly until history is covered
 #
-# Stream all XAUUSD ticks from PostgreSQL, detect adaptive pivots, and
-# write:
-#   - piv: pivot points
-#   - swg: swings between pivots
-#
-# This version:
-#   * Processes ticks in batches (chunks) via fetchmany
-#   * Prints a summary after each batch (chunk)
-#   * Prints additional progress every REPORT_EVERY_N_TICKS
-#
-# Assumes tables:
+# Tables used:
 #   ticks(id BIGINT PK, symbol TEXT, timestamp TIMESTAMPTZ,
 #         bid DOUBLE PRECISION, ask DOUBLE PRECISION,
 #         kal DOUBLE PRECISION, mid DOUBLE PRECISION)
 #
-#   piv / swg created with previous DDL.
+#   piv(id BIGSERIAL PK, tick_id BIGINT, ts TIMESTAMPTZ,
+#       price DOUBLE PRECISION, ptype SMALLINT,
+#       vol_local DOUBLE PRECISION,
+#       swing_zscore DOUBLE PRECISION,
+#       energy DOUBLE PRECISION,
+#       reg_code INTEGER,
+#       prev_piv_id BIGINT,
+#       next_piv_id BIGINT,
+#       meta JSONB,
+#       created_at TIMESTAMPTZ DEFAULT now())
+#
+#   swg(id BIGSERIAL PK, ... as we defined before)
 
 import math
 import sys
@@ -28,7 +33,7 @@ import psycopg2
 from psycopg2.extras import Json
 
 # ----------------------------------------------------------------------
-# CONFIGURATION
+# CONFIG
 # ----------------------------------------------------------------------
 
 DB_CONFIG = {
@@ -41,43 +46,36 @@ DB_CONFIG = {
 
 SYMBOL = "XAUUSD"
 
-# Range selection (by tick id).
-# For full history, keep both as None so we auto-detect min/max.
-START_TICK_ID = None          # None = min id for this symbol
-END_TICK_ID   = None          # None = max id for this symbol
+# Streaming
+TICK_BATCH_SIZE = 5_000
 
-# Streaming / performance
-TICK_BATCH_SIZE = 20_000          # how many ticks to fetch per DB roundtrip
-REPORT_EVERY_N_TICKS = 200_000    # extra progress print frequency
+# How many **new swings** to build per run before exiting
+MAX_SWINGS_PER_RUN = 250
 
-# Volatility estimation (EWMA)
-EWMA_ALPHA = 0.05          # higher = more reactive, 0.05–0.1 reasonable
+# Volatility (EWMA) params
+EWMA_ALPHA = 0.05
 VOL_EPS = 1e-8
 
 # RADC thresholds
-SWING_MEMORY = 300         # how many past swings to remember for quantile
-MIN_SWINGS_FOR_QUANT = 20  # before this, fall back to DEFAULT_QSIZE
-QUANTILE_LEVEL = 0.7       # e.g. 0.7 -> 70th percentile of swing sizes
-DEFAULT_QSIZE = 1.0        # fallback swing size (in vol units)
+SWING_MEMORY = 300
+MIN_SWINGS_FOR_QUANT = 20
+QUANTILE_LEVEL = 0.7
+DEFAULT_QSIZE = 1.0
 
-COUNTER_RATIO = 0.4        # counter move must be at least 40% of swing size
-MIN_SWING_VOL = 0.5        # require swing itself to be at least 0.5 vol units
-MIN_COUNTER_VOL = 0.5      # and counter move at least 0.5 vol units
+COUNTER_RATIO = 0.4
+MIN_SWING_VOL = 0.5
+MIN_COUNTER_VOL = 0.5
 
-# Additional small filters
-MIN_TICKS_PER_SWING = 10         # avoid pivots after ultra-short swings
-MIN_DURATION_SEC = 1.0           # avoid pivots in < 1 second (optional)
+MIN_TICKS_PER_SWING = 10
+MIN_DURATION_SEC = 1.0
 
-# Commit behaviour
-COMMIT_EVERY_N_SWINGS = 500
+COMMIT_EVERY_N_SWINGS = 100
+REPORT_EVERY_N_TICKS = 50_000
 
-# Whether to TRUNCATE existing piv/swg before building
-TRUNCATE_PIV_SWG_FIRST = True
 
 # ----------------------------------------------------------------------
 # DB helpers
 # ----------------------------------------------------------------------
-
 
 def get_conn():
     return psycopg2.connect(**DB_CONFIG)
@@ -116,34 +114,31 @@ def insert_pivot(cur, tick_id, ts, price, ptype,
 
 
 def update_pivot_links(cur, pivot_id, prev_piv_id=None, next_piv_id=None):
-    sets = []
-    params = []
+    sets, params = [], []
     if prev_piv_id is not None:
         sets.append("prev_piv_id = %s")
         params.append(prev_piv_id)
     if next_piv_id is not None:
         sets.append("next_piv_id = %s")
         params.append(next_piv_id)
-
     if not sets:
         return
-
     params.append(pivot_id)
     sql = f"UPDATE piv SET {', '.join(sets)} WHERE id = %s"
     cur.execute(sql, params)
 
 
 def update_pivot_swing_zscore(cur, pivot_id, swing_zscore):
-    sql = "UPDATE piv SET swing_zscore = %s WHERE id = %s"
-    cur.execute(sql, (swing_zscore, pivot_id))
+    cur.execute("UPDATE piv SET swing_zscore = %s WHERE id = %s",
+                (swing_zscore, pivot_id))
 
 
 def insert_swing(cur,
                  start_piv_id, end_piv_id,
                  start_tick_id, end_tick_id,
                  start_ts, end_ts,
-                 p_start, p_end,
-                 dir_, ret, ret_abs,
+                 dir_, p_start, p_end,
+                 ret, ret_abs,
                  dur_sec, tick_count,
                  vol_mean, vol_max,
                  rv, vel, lin_r2,
@@ -165,65 +160,45 @@ def insert_swing(cur,
     cur.execute(
         sql,
         (
-            start_piv_id,
-            end_piv_id,
-            start_tick_id,
-            end_tick_id,
-            start_ts,
-            end_ts,
-            dir_,
-            p_start,
-            p_end,
-            ret,
-            ret_abs,
-            dur_sec,
-            tick_count,
-            vol_mean,
-            vol_max,
-            rv,
-            vel,
-            lin_r2,
-            imp,
-            Json(meta) if meta is not None else None,
+            start_piv_id, end_piv_id,
+            start_tick_id, end_tick_id,
+            start_ts, end_ts,
+            dir_, p_start, p_end,
+            ret, ret_abs,
+            dur_sec, tick_count,
+            vol_mean, vol_max,
+            rv, vel, lin_r2,
+            imp, Json(meta) if meta is not None else None,
         ),
     )
 
 
 # ----------------------------------------------------------------------
-# Core RADC logic
+# Core RADC state
 # ----------------------------------------------------------------------
 
-
 class RADCState:
-    """Holds the evolving state while we stream ticks."""
-
     def __init__(self):
-        # Volatility (EWMA of returns^2)
         self.var_ewma = None
         self.sigma = None
 
-        # Previous tick data
         self.prev_price = None
         self.prev_ts = None
         self.prev_tick_id = None
 
-        # Current direction (+1 up, -1 down)
         self.dir = None
 
-        # Current pivot
         self.curr_piv_id = None
         self.curr_piv_tick_id = None
         self.curr_piv_ts = None
         self.curr_piv_price = None
         self.curr_piv_ptype = None
 
-        # Current extreme inside swing
         self.ext_price = None
         self.ext_tick_id = None
         self.ext_ts = None
         self.ext_sigma = None
 
-        # Per-swing aggregation
         self.swing_start_piv_id = None
         self.swing_start_tick_id = None
         self.swing_start_ts = None
@@ -234,12 +209,9 @@ class RADCState:
         self.swing_sigma_sum = 0.0
         self.swing_sigma_max = 0.0
 
-        # Completed swings (z-scores) history
         self.recent_swings = deque(maxlen=SWING_MEMORY)
 
-        # Counters
-        self.num_swings_inserted = 0
-
+        self.total_swings_inserted = 0
 
     def update_vol(self, r):
         r2 = r * r
@@ -251,25 +223,15 @@ class RADCState:
 
     def get_qsize(self):
         if len(self.recent_swings) >= MIN_SWINGS_FOR_QUANT:
-            return float(np.quantile(np.array(self.recent_swings), QUANTILE_LEVEL))
-        else:
-            return DEFAULT_QSIZE
-
-
-# ----------------------------------------------------------------------
-# Utility
-# ----------------------------------------------------------------------
+            return float(np.quantile(np.array(self.recent_swings),
+                                     QUANTILE_LEVEL))
+        return DEFAULT_QSIZE
 
 
 def compute_lin_reg_r2(prices, times_sec):
-    """
-    Simple linear regression R^2 of price ~ time.
-    times_sec: list of seconds since swing start.
-    """
     n = len(prices)
     if n < 2:
         return None
-
     x = np.array(times_sec, dtype=float)
     y = np.array(prices, dtype=float)
     x_mean = x.mean()
@@ -277,10 +239,8 @@ def compute_lin_reg_r2(prices, times_sec):
     cov_xy = ((x - x_mean) * (y - y_mean)).sum()
     var_x = ((x - x_mean) ** 2).sum()
     var_y = ((y - y_mean) ** 2).sum()
-
     if var_x <= 0 or var_y <= 0:
         return None
-
     beta = cov_xy / var_x
     alpha = y_mean - beta * x_mean
     y_hat = alpha + beta * x
@@ -293,55 +253,97 @@ def compute_lin_reg_r2(prices, times_sec):
 
 
 # ----------------------------------------------------------------------
-# Main processing
+# Main
 # ----------------------------------------------------------------------
 
-
-def process_ticks():
-    global START_TICK_ID, END_TICK_ID
-
+def process_ticks_incremental():
     conn = get_conn()
     conn.autocommit = False
 
-    read_cur = conn.cursor()
-    write_cur = conn.cursor()
+    meta_cur = conn.cursor()
 
-    # Optionally start from a clean slate
-    if TRUNCATE_PIV_SWG_FIRST:
-        print("Truncating piv and swg...")
-        with conn.cursor() as c:
-            c.execute("TRUNCATE TABLE swg;")
-            c.execute("TRUNCATE TABLE piv;")
-        conn.commit()
-        sys.stdout.flush()
-
-    # Determine ID range if None
-    def fetch_scalar(sql, params=None):
-        c = conn.cursor()
-        c.execute(sql, params or [])
-        v = c.fetchone()[0]
-        c.close()
-        return v
-
-    if START_TICK_ID is None:
-        START_TICK_ID = fetch_scalar(
-            "SELECT MIN(id) FROM ticks WHERE symbol = %s", (SYMBOL,)
-        )
-    if END_TICK_ID is None:
-        END_TICK_ID = fetch_scalar(
-            "SELECT MAX(id) FROM ticks WHERE symbol = %s", (SYMBOL,)
-        )
-
-    if START_TICK_ID is None or END_TICK_ID is None:
-        print("No ticks found for symbol", SYMBOL)
+    # Global tick range for this symbol
+    meta_cur.execute(
+        "SELECT MIN(id), MAX(id) FROM ticks WHERE symbol = %s",
+        (SYMBOL,),
+    )
+    min_id, max_id = meta_cur.fetchone()
+    if min_id is None or max_id is None:
+        print("No ticks for symbol", SYMBOL)
         return
 
-    total_to_do = END_TICK_ID - START_TICK_ID + 1
-    print(
-        f"Processing ticks {START_TICK_ID} .. {END_TICK_ID} "
-        f"({total_to_do:,} ticks) for {SYMBOL}"
+    # Last pivot if exists
+    meta_cur.execute(
+        """
+        SELECT id, tick_id, ts, price, ptype
+        FROM piv
+        ORDER BY tick_id DESC
+        LIMIT 1
+        """
     )
-    sys.stdout.flush()
+    row = meta_cur.fetchone()
+    have_prev_piv = row is not None
+
+    state = RADCState()
+
+    if have_prev_piv:
+        last_piv_id, last_piv_tick_id, last_piv_ts, last_piv_price, last_piv_ptype = row
+        start_from_tick_id = last_piv_tick_id
+
+        print(
+            f"Continuing from last pivot id={last_piv_id} at tick {last_piv_tick_id}, "
+            f"price={last_piv_price}, ptype={last_piv_ptype}"
+        )
+
+        # Seed state from last pivot
+        state.curr_piv_id = last_piv_id
+        state.curr_piv_tick_id = last_piv_tick_id
+        state.curr_piv_ts = last_piv_ts
+        state.curr_piv_price = last_piv_price
+        state.curr_piv_ptype = last_piv_ptype
+
+        state.prev_price = last_piv_price
+        state.prev_ts = last_piv_ts
+        state.prev_tick_id = last_piv_tick_id
+
+        state.dir = +1 if last_piv_ptype == -1 else -1
+
+        state.ext_price = last_piv_price
+        state.ext_tick_id = last_piv_tick_id
+        state.ext_ts = last_piv_ts
+        state.ext_sigma = 0.0
+
+        state.swing_start_piv_id = last_piv_id
+        state.swing_start_tick_id = last_piv_tick_id
+        state.swing_start_ts = last_piv_ts
+        state.swing_start_price = last_piv_price
+
+        state.swing_tick_count = 1
+
+        # Rebuild recent_swings from DB
+        meta_cur.execute(
+            """
+            SELECT swing_zscore
+            FROM piv
+            WHERE swing_zscore IS NOT NULL
+            ORDER BY tick_id DESC
+            LIMIT %s
+            """,
+            (SWING_MEMORY,),
+        )
+        rows = meta_cur.fetchall()
+        for (sz,) in reversed(rows):
+            state.recent_swings.append(float(sz))
+
+    else:
+        start_from_tick_id = min_id
+        print("No previous pivots, starting from first tick", start_from_tick_id)
+
+    meta_cur.close()
+
+    # Stream ticks AFTER last pivot tick (or from very beginning if no pivot)
+    read_cur = conn.cursor()
+    write_cur = conn.cursor()
 
     read_cur.execute(
         """
@@ -349,51 +351,48 @@ def process_ticks():
         FROM ticks
         WHERE symbol = %s
           AND id >= %s
-          AND id <= %s
         ORDER BY id ASC
         """,
-        (SYMBOL, START_TICK_ID, END_TICK_ID),
+        (SYMBOL, start_from_tick_id if not have_prev_piv else start_from_tick_id + 0),
     )
 
-    state = RADCState()
+    total_ticks = 0
+    swings_this_run = 0
+    stop = False
 
     swing_prices = []
-    swing_times = []  # seconds since swing start_ts
+    swing_times = []
 
-    total_ticks = 0
-    batch_index = 0
+    print(f"Streaming ticks from id >= {start_from_tick_id} up to {max_id}...")
+    sys.stdout.flush()
 
-    while True:
+    while not stop:
         rows = read_cur.fetchmany(TICK_BATCH_SIZE)
         if not rows:
             break
 
-        batch_index += 1
-        batch_size = len(rows)
-
         for tick_id, ts, price in rows:
             total_ticks += 1
 
+            # First tick in this run when we had no prev pivot
             if state.prev_price is None:
-                # First tick, just store and continue.
                 state.prev_price = price
                 state.prev_ts = ts
                 state.prev_tick_id = tick_id
                 continue
 
-            # Compute return and volatility
             r = price - state.prev_price
             state.update_vol(r)
 
-            # Initialise pivot and direction after we have 2 ticks
+            # If we don't yet have a current pivot (first-ever run)
             if state.curr_piv_id is None:
                 move = price - state.prev_price
                 if move >= 0:
                     state.dir = +1
-                    ptype = -1  # starting from a low
+                    ptype = -1
                 else:
                     state.dir = -1
-                    ptype = +1  # starting from a high
+                    ptype = +1
 
                 state.curr_piv_id = insert_pivot(
                     write_cur,
@@ -432,7 +431,7 @@ def process_ticks():
                 swing_prices = [state.curr_piv_price]
                 swing_times = [0.0]
 
-            # Update per-swing aggregation with current tick
+            # Update per-swing aggregates
             state.swing_tick_count += 1
             state.swing_rv += r * r
             state.swing_sigma_sum += state.sigma
@@ -443,7 +442,7 @@ def process_ticks():
             swing_prices.append(price)
             swing_times.append(max(dur_since_start, 0.0))
 
-            # Update extreme and counter-move
+            # Update extreme + counter move
             if state.dir == +1:
                 if price >= state.ext_price:
                     state.ext_price = price
@@ -454,7 +453,6 @@ def process_ticks():
                 else:
                     swing_abs = state.ext_price - state.curr_piv_price
                     swing_vol = swing_abs / max(state.ext_sigma, VOL_EPS)
-
                     counter_abs = state.ext_price - price
                     counter_vol = counter_abs / max(state.sigma, VOL_EPS)
             else:
@@ -467,11 +465,10 @@ def process_ticks():
                 else:
                     swing_abs = state.curr_piv_price - state.ext_price
                     swing_vol = swing_abs / max(state.ext_sigma, VOL_EPS)
-
                     counter_abs = price - state.ext_price
                     counter_vol = counter_abs / max(state.sigma, VOL_EPS)
 
-            # Decide whether to mark a new pivot at the extreme
+            # Decide pivot
             do_pivot = False
             if state.ext_tick_id is not None and state.ext_tick_id != state.curr_piv_tick_id:
                 if state.dir == +1:
@@ -480,9 +477,9 @@ def process_ticks():
                     swing_abs = state.curr_piv_price - state.ext_price
 
                 swing_vol = swing_abs / max(state.ext_sigma, VOL_EPS)
-
                 qsize = state.get_qsize()
-                enough_swing = swing_vol >= max(MIN_SWING_VOL, 0.0)
+
+                enough_swing = swing_vol >= MIN_SWING_VOL
                 enough_counter = counter_vol >= max(qsize, MIN_COUNTER_VOL)
                 ratio_ok = counter_vol >= COUNTER_RATIO * swing_vol
                 enough_ticks = state.swing_tick_count >= MIN_TICKS_PER_SWING
@@ -513,7 +510,6 @@ def process_ticks():
                     next_piv_id=None,
                     meta=None,
                 )
-
                 update_pivot_links(
                     write_cur,
                     pivot_id=state.curr_piv_id,
@@ -528,16 +524,14 @@ def process_ticks():
                 ret_abs = abs(ret)
                 dur_sec = (state.ext_ts - state.swing_start_ts).total_seconds()
                 tick_count = state.swing_tick_count
-
-                if tick_count > 0:
-                    vol_mean = state.swing_sigma_sum / tick_count
-                else:
-                    vol_mean = state.sigma
-
+                vol_mean = (
+                    state.swing_sigma_sum / tick_count
+                    if tick_count > 0
+                    else state.sigma
+                )
                 vol_max = state.swing_sigma_max
                 rv = state.swing_rv
                 vel = ret_abs / max(dur_sec, 1e-6)
-
                 lin_r2 = compute_lin_reg_r2(swing_prices, swing_times)
                 imp = ret_abs / max(vol_mean, VOL_EPS)
 
@@ -549,9 +543,9 @@ def process_ticks():
                     end_tick_id=state.ext_tick_id,
                     start_ts=state.swing_start_ts,
                     end_ts=state.ext_ts,
+                    dir_=dir_,
                     p_start=p_start,
                     p_end=p_end,
-                    dir_=dir_,
                     ret=ret,
                     ret_abs=ret_abs,
                     dur_sec=dur_sec,
@@ -567,24 +561,25 @@ def process_ticks():
 
                 swing_z = ret_abs / max(vol_mean, VOL_EPS)
                 update_pivot_swing_zscore(write_cur, new_piv_id, swing_z)
-
                 state.recent_swings.append(swing_z)
-                state.num_swings_inserted += 1
 
-                if state.num_swings_inserted % COMMIT_EVERY_N_SWINGS == 0:
+                state.total_swings_inserted += 1
+                swings_this_run += 1
+
+                if swings_this_run % COMMIT_EVERY_N_SWINGS == 0:
                     conn.commit()
                     print(
-                        f"[commit] swings={state.num_swings_inserted:,}, "
-                        f"ticks={total_ticks:,}, last_tick_id={tick_id}"
+                        f"[commit] swings_this_run={swings_this_run}, "
+                        f"last_tick_id={tick_id}"
                     )
                     sys.stdout.flush()
 
+                # Prepare next swing
                 state.curr_piv_id = new_piv_id
                 state.curr_piv_tick_id = state.ext_tick_id
                 state.curr_piv_ts = state.ext_ts
                 state.curr_piv_price = state.ext_price
                 state.curr_piv_ptype = new_ptype
-
                 state.dir = -state.dir
 
                 state.ext_price = state.curr_piv_price
@@ -601,33 +596,32 @@ def process_ticks():
                 state.swing_rv = 0.0
                 state.swing_sigma_sum = state.sigma
                 state.swing_sigma_max = state.sigma
-
                 swing_prices = [state.curr_piv_price]
                 swing_times = [0.0]
 
-            # Update "previous tick" state
+                if swings_this_run >= MAX_SWINGS_PER_RUN:
+                    print(
+                        f"[stop] reached MAX_SWINGS_PER_RUN={MAX_SWINGS_PER_RUN}, "
+                        f"last_tick_id={tick_id}"
+                    )
+                    sys.stdout.flush()
+                    stop = True
+                    break
+
+            # update prev tick
             state.prev_price = price
             state.prev_ts = ts
             state.prev_tick_id = tick_id
 
-            # Extra periodic progress print based on total_ticks
             if total_ticks % REPORT_EVERY_N_TICKS == 0:
-                done_pct = (total_ticks / total_to_do) * 100.0
                 print(
-                    f"[progress] ticks={total_ticks:,}/{total_to_do:,} "
-                    f"({done_pct:5.1f}%), swings={state.num_swings_inserted:,}, "
-                    f"last_tick_id={tick_id}"
+                    f"[progress] ticks_this_run={total_ticks}, "
+                    f"swings_this_run={swings_this_run}, last_tick_id={tick_id}"
                 )
                 sys.stdout.flush()
 
-        # End of this batch
-        print(
-            f"[batch {batch_index}] processed {batch_size:,} ticks "
-            f"(total {total_ticks:,}), "
-            f"swings={state.num_swings_inserted:,}, "
-            f"last_tick_id={rows[-1][0]}"
-        )
-        sys.stdout.flush()
+        if stop:
+            break
 
     conn.commit()
     read_cur.close()
@@ -635,15 +629,15 @@ def process_ticks():
     conn.close()
 
     print(
-        f"Done. Processed {total_ticks:,} ticks, "
-        f"inserted {state.num_swings_inserted:,} swings and their pivots."
+        f"Run finished. ticks_this_run={total_ticks}, "
+        f"swings_this_run={swings_this_run}"
     )
     sys.stdout.flush()
 
 
 if __name__ == "__main__":
     try:
-        process_ticks()
+        process_ticks_incremental()
     except KeyboardInterrupt:
         print("Interrupted by user")
         sys.exit(1)
