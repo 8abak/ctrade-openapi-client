@@ -85,7 +85,7 @@ SYMBOL = "XAUUSD"
 
 # Tick loading
 TICK_CHUNK_SIZE = 5000          # how many ticks per DB query
-MAX_TICKS_PER_RUN = 200000      # safety limit per run (can raise later)
+MAX_TICKS_PER_RUN = 2000000      # safety limit per run (can raise later)
 
 # How many new swings to build per run
 MAX_SWINGS_PER_RUN = 250
