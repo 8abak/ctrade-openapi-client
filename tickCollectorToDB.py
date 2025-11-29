@@ -58,7 +58,70 @@ lastValidAsk = None
 shutdown_event = Event()
 
 # --------------------------------------------------
-# Token refresh logic (NEW)
+# 1D Kalman filters: normal, fast, slow  (NEW)
+# --------------------------------------------------
+
+class KalmanFilter1D:
+    def __init__(self, InitialValue: float, ProcessNoise: float, MeasurementNoise: float):
+        self.X = InitialValue          # state (smoothed price)
+        self.P = 1.0                   # estimate variance
+        self.Q = ProcessNoise          # process noise
+        self.R = MeasurementNoise      # measurement noise
+
+    def Update(self, Measurement: float) -> float:
+        # Predict
+        self.P = self.P + self.Q
+
+        # Kalman gain
+        K = self.P / (self.P + self.R)
+
+        # Update estimate
+        self.X = self.X + K * (Measurement - self.X)
+
+        # Update error covariance
+        self.P = (1 - K) * self.P
+        return self.X
+
+NormalKalman = None
+FastKalman = None
+SlowKalman = None
+
+def GetKalmans(MidValue: float):
+    """
+    Returns (kal_normal, kal_fast, kal_slow) for the current mid price.
+    All three filters are stateful across ticks.
+    """
+    global NormalKalman, FastKalman, SlowKalman
+
+    if NormalKalman is None:
+        # Medium – main 'kal'
+        NormalKalman = KalmanFilter1D(
+            InitialValue=MidValue,
+            ProcessNoise=0.02,
+            MeasurementNoise=0.5,
+        )
+    if FastKalman is None:
+        # Reacts quickly
+        FastKalman = KalmanFilter1D(
+            InitialValue=MidValue,
+            ProcessNoise=0.1,
+            MeasurementNoise=0.5,
+        )
+    if SlowKalman is None:
+        # Very smooth, background regime
+        SlowKalman = KalmanFilter1D(
+            InitialValue=MidValue,
+            ProcessNoise=0.005,
+            MeasurementNoise=0.5,
+        )
+
+    KalNormal = NormalKalman.Update(MidValue)
+    KalFast = FastKalman.Update(MidValue)
+    KalSlow = SlowKalman.Update(MidValue)
+    return KalNormal, KalFast, KalSlow
+
+# --------------------------------------------------
+# Token refresh logic (existing)
 # --------------------------------------------------
 def refresh_tokens():
     global accessToken, refreshToken, creds
@@ -92,7 +155,7 @@ def refresh_tokens():
     return True
 
 # --------------------------------------------------
-# Write one tick (original behavior preserved)
+# Write one tick  (KALs + SPREAD ADDED)
 # --------------------------------------------------
 def writeTick(timestamp, _symbolId, bid, ask):
     global lastValidBid, lastValidAsk, conn
@@ -112,14 +175,22 @@ def writeTick(timestamp, _symbolId, bid, ask):
     utc_dt = datetime.utcfromtimestamp(timestamp / 1000.0).replace(tzinfo=pytz.utc)
     sydney_dt = utc_dt.astimezone(FixedOffsetTimezone(600, "AEST"))
 
-    # Scaling + mid
+    # Scaling
     bidFloat = bid / 100000.0
     askFloat = ask / 100000.0
-    mid = round((bidFloat + askFloat) / 2, 2)
+    midRaw = (bidFloat + askFloat) / 2.0
+    mid = round(midRaw, 2)
+
+    # NEW: spread + 3-kalman system
+    spread = round(askFloat - bidFloat, 2)
+    kal_normal, kal_fast, kal_slow = GetKalmans(midRaw)
+    kal_fast_resid = midRaw - kal_fast
+    kal_slow_resid = midRaw - kal_slow
 
     try:
         ensure_conn()
         with conn.cursor() as c:
+            # check duplicate
             c.execute(
                 """
                 SELECT 1 FROM ticks
@@ -131,15 +202,38 @@ def writeTick(timestamp, _symbolId, bid, ask):
             if c.fetchone():
                 return
 
+            # Insert tick with kal + fast/slow + residuals + spread
             c.execute(
                 """
-                INSERT INTO ticks (symbol, timestamp, bid, ask, mid)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO ticks
+                    (symbol, timestamp,
+                     bid, ask,
+                     kal, mid,
+                     spread,
+                     kal_fast, kal_slow,
+                     kal_fast_resid, kal_slow_resid)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
-                ("XAUUSD", sydney_dt, bidFloat, askFloat, mid),
+                (
+                    "XAUUSD",
+                    sydney_dt,
+                    bidFloat,
+                    askFloat,
+                    kal_normal,
+                    mid,
+                    spread,
+                    kal_fast,
+                    kal_slow,
+                    kal_fast_resid,
+                    kal_slow_resid,
+                ),
             )
         conn.commit()
-        print(f"✅ Saved tick: {sydney_dt} → bid={bidFloat:.2f}, ask={askFloat:.2f}, mid={mid}", flush=True)
+        print(
+            f"✅ Saved tick: {sydney_dt} → bid={bidFloat:.2f}, ask={askFloat:.2f}, mid={mid}, "
+            f"kal={kal_normal:.2f}, kf={kal_fast:.2f}, ks={kal_slow:.2f}, spread={spread:.2f}",
+            flush=True,
+        )
 
     except Exception as e:
         print(f"❌ DB error: {e}", flush=True)
@@ -150,7 +244,7 @@ def writeTick(timestamp, _symbolId, bid, ask):
             pass
 
 # ---------------------------
-# Connection/auth flow
+# Connection/auth flow (unchanged)
 # ---------------------------
 def connected(_):
     print("✅ Connected. Subscribing to spot data...", flush=True)
@@ -200,7 +294,7 @@ def onMessage(_, message):
             print("  Code:", error.errorCode)
             print("  Desc:", error.description)
 
-            # NEW: Auto refresh if token invalid
+            # Auto refresh if token invalid
             if error.errorCode in ("CH_ACCESS_TOKEN_INVALID", "INVALID_REQUEST"):
                 if refresh_tokens():
                     print("🔄 Restarting auth flow with new token...", flush=True)
