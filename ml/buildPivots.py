@@ -70,7 +70,7 @@ MIN_TICKS_PER_SWING = 10
 MIN_DURATION_SEC = 1.0
 
 COMMIT_EVERY_N_SWINGS = 100
-REPORT_EVERY_N_TICKS = 50_000
+REPORT_EVERY_N_TICKS = 50000
 
 
 # ----------------------------------------------------------------------
