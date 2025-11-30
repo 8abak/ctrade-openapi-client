@@ -1,9 +1,9 @@
 // PATH: frontend/review-core.js
 // Review window viewer with:
-//   - zones, Kalman, segments
+//   - bid/ask/mid + kal/kal_fast/kal_slow (spread + residuals optional)
+//   - zones, segments
 //   - snowball predictions (latest SGD run) drawn on price
 //   - Run/Stop auto-scroll over historical data (tick-by-tick)
-//   - Zone "personalities" (personality_cluster) colored in the background
 //
 // Backend endpoints used:
 //   GET  /api/review/window?from_id=...&window=...
@@ -24,7 +24,18 @@
   const playBtn       = document.getElementById('btnPlay');
   const statusEl      = document.getElementById('status');
 
+  // price / kalman toggles
+  const chkBid        = document.getElementById('showBid');
+  const chkAsk        = document.getElementById('showAsk');
+  const chkMid        = document.getElementById('showMid');
   const chkKal        = document.getElementById('showKal');
+  const chkKalFast    = document.getElementById('showKalFast');
+  const chkKalSlow    = document.getElementById('showKalSlow');
+  const chkSpread     = document.getElementById('showSpread');
+  const chkFastResid  = document.getElementById('showFastResid');
+  const chkSlowResid  = document.getElementById('showSlowResid');
+
+  // overlays
   const chkZones      = document.getElementById('showZones');
   const chkSegs       = document.getElementById('showSegs');
   const chkPred       = document.getElementById('showPreds');
@@ -171,7 +182,6 @@
       let color;
       let labelName = '';
 
-      // Give the personality name if we have it
       if (clusterId !== null && personalityLabels[String(clusterId)]) {
         labelName = personalityLabels[String(clusterId)];
       } else if (zoneTypeUpper) {
@@ -179,29 +189,23 @@
       }
 
       if (zoneTypeUpper.startsWith('CHOP')) {
-        // Anything labeled CHOP / CHOP_TICKS / CHOP_TICKS_WEAK -> white-ish
         color = 'rgba(255, 255, 255, 0.10)';
       } else if (clusterId === 0) {
-        // Up personality -> green
         color = 'rgba(46, 160, 67, 0.18)';
       } else if (clusterId === 1) {
-        // Down personality -> red
         color = 'rgba(248, 81, 73, 0.18)';
       } else if (clusterId === 2) {
-        // Small noisy / chop personality -> white-ish
         color = 'rgba(255, 255, 255, 0.10)';
       } else if (clusterId === -1) {
-        // Mixed / long zones -> bluish neutral
         color = 'rgba(99, 110, 139, 0.16)';
       } else {
-        // Fallback: use old direction-based colour if nothing else
         const dir = (z.direction || '').toString().toLowerCase();
         if (dir === 'up' || dir === '1' || dir === 'u') {
-          color = 'rgba(46, 160, 67, 0.18)';     // green-ish
+          color = 'rgba(46, 160, 67, 0.18)';
         } else if (dir === 'dn' || dir === '-1' || dir === 'down' || dir === 'd') {
-          color = 'rgba(248, 81, 73, 0.18)';     // red-ish
+          color = 'rgba(248, 81, 73, 0.18)';
         } else {
-          color = 'rgba(56, 139, 253, 0.18)';    // default blue-ish
+          color = 'rgba(56, 139, 253, 0.18)';
         }
       }
 
@@ -216,7 +220,6 @@
 
     return bands;
   }
-
 
   function buildSegmentPoints(ticksArr, segsArr) {
     if (!ticksArr.length || !segsArr.length) return [];
@@ -308,7 +311,16 @@
   // ---------- Chart drawing ----------
 
   function rebuildChart() {
-    const showKal   = chkKal   ? chkKal.checked   : true;
+    const showBid       = chkBid      ? chkBid.checked      : true;
+    const showAsk       = chkAsk      ? chkAsk.checked      : true;
+    const showMid       = chkMid      ? chkMid.checked      : true;
+    const showKal       = chkKal      ? chkKal.checked      : true;
+    const showKalFast   = chkKalFast  ? chkKalFast.checked  : true;
+    const showKalSlow   = chkKalSlow  ? chkKalSlow.checked  : true;
+    const showSpread    = chkSpread   ? chkSpread.checked   : false;
+    const showFastResid = chkFastResid? chkFastResid.checked: false;
+    const showSlowResid = chkSlowResid? chkSlowResid.checked: false;
+
     const showZones = chkZones ? chkZones.checked : true;
     const showSegs  = chkSegs  ? chkSegs.checked  : true;
     const showPreds = chkPred  ? chkPred.checked  : true;
@@ -349,9 +361,27 @@
       return;
     }
 
-    const midSeries = ticks.map(t => [t.ts, Number(t.mid)]);
-    const kalSeries = ticks.map(t =>
-      t.kal != null ? [t.ts, Number(t.kal)] : [t.ts, Number(t.mid)]
+    // Build series data arrays
+    const bidSeries       = ticks.map(t => [t.ts, Number(t.bid)]);
+    const askSeries       = ticks.map(t => [t.ts, Number(t.ask)]);
+    const midSeries       = ticks.map(t => [t.ts, Number(t.mid)]);
+    const kalSeries       = ticks.map(t =>
+      t.kal != null ? [t.ts, Number(t.kal)] : [t.ts, NaN]
+    );
+    const kalFastSeries   = ticks.map(t =>
+      t.kal_fast != null ? [t.ts, Number(t.kal_fast)] : [t.ts, NaN]
+    );
+    const kalSlowSeries   = ticks.map(t =>
+      t.kal_slow != null ? [t.ts, Number(t.kal_slow)] : [t.ts, NaN]
+    );
+    const spreadSeries    = ticks.map(t =>
+      t.spread != null ? [t.ts, Number(t.spread)] : [t.ts, NaN]
+    );
+    const fastResidSeries = ticks.map(t =>
+      t.kal_fast_resid != null ? [t.ts, Number(t.kal_fast_resid)] : [t.ts, NaN]
+    );
+    const slowResidSeries = ticks.map(t =>
+      t.kal_slow_resid != null ? [t.ts, Number(t.kal_slow_resid)] : [t.ts, NaN]
     );
 
     const zoneBands     = showZones ? buildZoneBands(ticks, zones) : [];
@@ -360,6 +390,7 @@
 
     const series = [];
 
+    // Zones as background rectangles
     if (showZones && zoneBands.length) {
       series.push({
         name: 'Zones',
@@ -399,26 +430,30 @@
       });
     }
 
-    series.push({
-      name: 'Mid',
-      type: 'line',
-      showSymbol: false,
-      data: midSeries,
-      lineStyle: { width: 1 },
-      z: 1,
-    });
-
-    if (showKal) {
+    // Price + kalman lines
+    function pushLine(name, data, z) {
       series.push({
-        name: 'Kalman',
+        name,
         type: 'line',
         showSymbol: false,
-        data: kalSeries,
+        data,
         lineStyle: { width: 1 },
-        z: 2,
+        z,
       });
     }
 
+    let zLevel = 1;
+    if (showBid)       pushLine('Bid',       bidSeries,       zLevel++);
+    if (showAsk)       pushLine('Ask',       askSeries,       zLevel++);
+    if (showMid)       pushLine('Mid',       midSeries,       zLevel++);
+    if (showKal)       pushLine('Kalman',    kalSeries,       zLevel++);
+    if (showKalFast)   pushLine('Kal Fast',  kalFastSeries,   zLevel++);
+    if (showKalSlow)   pushLine('Kal Slow',  kalSlowSeries,   zLevel++);
+    if (showSpread)    pushLine('Spread',    spreadSeries,    zLevel++);
+    if (showFastResid) pushLine('Fast Resid',fastResidSeries, zLevel++);
+    if (showSlowResid) pushLine('Slow Resid',slowResidSeries, zLevel++);
+
+    // Segment markers
     if (showSegs && segPoints.length) {
       series.push({
         name: 'Segments',
@@ -439,10 +474,11 @@
             return '#8b949e';
           },
         },
-        z: 3,
+        z: zLevel++,
       });
     }
 
+    // Prediction markers
     if (showPreds && predictionPts.length) {
       series.push({
         name: 'Predictions',
@@ -476,7 +512,7 @@
             return '#58a6ff';                      // none / flat
           },
         },
-        z: 4,
+        z: zLevel++,
       });
     }
 
@@ -491,26 +527,39 @@
           if (!params || !params.length) return '';
 
           const axis = params[0];
-          const ts = axis.axisValueLabel;
-          const midPoint   = params.find(p => p.seriesName === 'Mid');
-          const kalPoint   = params.find(p => p.seriesName === 'Kalman');
-          const predPoint  = params.find(p => p.seriesName === 'Predictions');
-          const tickDatum  = midPoint && ticks[midPoint.dataIndex];
+          const tsLabel = axis.axisValueLabel;
+          const dataIndex = axis.dataIndex;
+          const tickDatum = ticks[dataIndex];
+
+          const byName = {};
+          for (const p of params) {
+            byName[p.seriesName] = p;
+          }
 
           const lines = [];
-          lines.push(ts);
+          lines.push(tsLabel);
 
           if (tickDatum) {
             lines.push(`ID: ${tickDatum.id}`);
           }
 
-          if (midPoint) {
-            lines.push(`Mid: ${midPoint.data[1].toFixed(3)}`);
-          }
-          if (kalPoint) {
-            lines.push(`Kalman: ${kalPoint.data[1].toFixed(3)}`);
+          function addVal(seriesName, label) {
+            const p = byName[seriesName];
+            if (!p || !p.data || p.data[1] == null || !Number.isFinite(p.data[1])) return;
+            lines.push(`${label}: ${p.data[1].toFixed(3)}`);
           }
 
+          addVal('Bid',        'Bid');
+          addVal('Ask',        'Ask');
+          addVal('Mid',        'Mid');
+          addVal('Kalman',     'Kal');
+          addVal('Kal Fast',   'Kal Fast');
+          addVal('Kal Slow',   'Kal Slow');
+          addVal('Spread',     'Spread');
+          addVal('Fast Resid', 'Fast Resid');
+          addVal('Slow Resid', 'Slow Resid');
+
+          const predPoint = byName['Predictions'];
           if (predPoint && predPoint.data) {
             const d = predPoint.data;
             const label =
@@ -534,10 +583,18 @@
         top: 4,
         textStyle: { color: '#c9d1d9', fontSize: 11 },
         selected: {
-          'Kalman': showKal,
-          'Zones': showZones,
-          'Segments': showSegs,
-          'Predictions': showPreds,
+          'Bid':        showBid,
+          'Ask':        showAsk,
+          'Mid':        showMid,
+          'Kalman':     showKal,
+          'Kal Fast':   showKalFast,
+          'Kal Slow':   showKalSlow,
+          'Spread':     showSpread,
+          'Fast Resid': showFastResid,
+          'Slow Resid': showSlowResid,
+          'Zones':      showZones,
+          'Segments':   showSegs,
+          'Predictions':showPreds,
         },
       },
       grid: {
@@ -607,6 +664,15 @@
       ticks = (data.ticks || []).map(t => ({
         ...t,
         id: Number(t.id),
+        bid: t.bid != null ? Number(t.bid) : t.bid,
+        ask: t.ask != null ? Number(t.ask) : t.ask,
+        mid: t.mid != null ? Number(t.mid) : t.mid,
+        kal: t.kal != null ? Number(t.kal) : t.kal,
+        kal_fast: t.kal_fast != null ? Number(t.kal_fast) : t.kal_fast,
+        kal_slow: t.kal_slow != null ? Number(t.kal_slow) : t.kal_slow,
+        spread: t.spread != null ? Number(t.spread) : t.spread,
+        kal_fast_resid: t.kal_fast_resid != null ? Number(t.kal_fast_resid) : t.kal_fast_resid,
+        kal_slow_resid: t.kal_slow_resid != null ? Number(t.kal_slow_resid) : t.kal_slow_resid,
       }));
       segs  = data.segs  || [];
       zones = data.zones || [];
@@ -753,10 +819,24 @@
     });
   }
 
-  if (chkKal)   chkKal.addEventListener('change', rebuildChart);
-  if (chkZones) chkZones.addEventListener('change', rebuildChart);
-  if (chkSegs)  chkSegs.addEventListener('change', rebuildChart);
-  if (chkPred)  chkPred.addEventListener('change', rebuildChart);
+  // Toggle handlers – redraw when any checkbox changes
+  function hookToggle(el) {
+    if (!el) return;
+    el.addEventListener('change', rebuildChart);
+  }
+
+  hookToggle(chkBid);
+  hookToggle(chkAsk);
+  hookToggle(chkMid);
+  hookToggle(chkKal);
+  hookToggle(chkKalFast);
+  hookToggle(chkKalSlow);
+  hookToggle(chkSpread);
+  hookToggle(chkFastResid);
+  hookToggle(chkSlowResid);
+  hookToggle(chkZones);
+  hookToggle(chkSegs);
+  hookToggle(chkPred);
 
   window.addEventListener('resize', () => {
     chart.resize();

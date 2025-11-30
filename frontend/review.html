@@ -31,49 +31,46 @@
       width: 90px;
       padding: 2px 4px;
       background-color: #0d1117;
-      border: 1px solid #30363d;
       color: #c9d1d9;
-      border-radius: 3px;
+      border: 1px solid #30363d;
+      border-radius: 4px;
       font-size: 12px;
     }
     #topbar button {
-      padding: 3px 10px;
-      background-color: #238636;
-      border: 1px solid #2ea043;
+      padding: 4px 8px;
       border-radius: 4px;
-      color: white;
+      border: 1px solid #30363d;
+      background-color: #21262d;
+      color: #c9d1d9;
       cursor: pointer;
       font-size: 12px;
     }
     #topbar button:disabled {
-      opacity: 0.6;
+      opacity: 0.4;
       cursor: default;
     }
-    #navButtons {
-      display: flex;
-      gap: 4px;
-      align-items: center;
-    }
-    #playButtonWrapper button {
-      background-color: #0969da;
-      border-color: #1f6feb;
-    }
     #status {
-      margin-left: 8px;
+      margin-left: auto;
       font-size: 12px;
       color: #8b949e;
-      flex: 1;
-      min-width: 120px;
+      white-space: nowrap;
     }
     #toggles {
       display: flex;
+      flex-wrap: wrap;
       gap: 8px;
-      align-items: center;
+      margin-left: 10px;
       font-size: 12px;
+    }
+    #toggles label {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      white-space: nowrap;
     }
     #chart {
       width: 100vw;
-      height: calc(100vh - 42px);
+      height: calc(100vh - 48px);
     }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
@@ -82,32 +79,33 @@
   <div id="topbar">
     <label>
       From id:
-      <input id="fromId" type="number" placeholder="tick id" />
+      <input type="number" id="fromId" value="1" min="1" />
     </label>
     <label>
       Window:
-      <input id="windowSize" type="number" value="5000" />
+      <input type="number" id="windowSize" value="2000" min="100" step="100" />
     </label>
     <button id="btnGo">Go</button>
-
-    <div id="navButtons">
-      <button id="btnPrev">&lt;</button>
-      <button id="btnNext">&gt;</button>
-    </div>
-
-    <div id="playButtonWrapper">
-      <!-- renamed label only -->
-      <button id="btnPlay">Run</button>
-    </div>
-
-    <span id="status"></span>
+    <button id="btnPrev">&laquo; Prev</button>
+    <button id="btnNext">Next &raquo;</button>
+    <button id="btnPlay">Run</button>
 
     <div id="toggles">
+      <label><input type="checkbox" id="showBid" checked /> Bid</label>
+      <label><input type="checkbox" id="showAsk" checked /> Ask</label>
+      <label><input type="checkbox" id="showMid" checked /> Mid</label>
       <label><input type="checkbox" id="showKal" checked /> Kalman</label>
+      <label><input type="checkbox" id="showKalFast" checked /> Kal Fast</label>
+      <label><input type="checkbox" id="showKalSlow" checked /> Kal Slow</label>
+      <label><input type="checkbox" id="showSpread" /> Spread</label>
+      <label><input type="checkbox" id="showFastResid" /> Fast Resid</label>
+      <label><input type="checkbox" id="showSlowResid" /> Slow Resid</label>
       <label><input type="checkbox" id="showZones" checked /> Zones</label>
       <label><input type="checkbox" id="showSegs" checked /> Segs</label>
       <label><input type="checkbox" id="showPreds" checked /> Predictions</label>
     </div>
+
+    <div id="status"></div>
   </div>
 
   <div id="chart"></div>
