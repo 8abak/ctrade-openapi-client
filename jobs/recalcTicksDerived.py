@@ -7,7 +7,7 @@ DBPassword = "babak33044"
 DBHost = "localhost"
 DBPort = 5432
 
-BatchSize = 10000  # safe chunk size
+BatchSize = 10000  # small, safe chunk size
 
 def GetConnection():
     return psycopg2.connect(
@@ -36,7 +36,7 @@ def Main():
     conn = GetConnection()
     cur = conn.cursor()
 
-    # Get first and last id
+    # Find id range
     cur.execute("SELECT MIN(id), MAX(id) FROM ticks;")
     row = cur.fetchone()
     if row is None or row[0] is None:
@@ -70,8 +70,8 @@ def Main():
         if not rows:
             break
 
-        # Lazily initialize Kalmans on first batch
-        if NormalKalman is None and rows:
+        # Initialize Kalmans on the very first tick
+        if NormalKalman is None:
             firstBid, firstAsk = rows[0][1], rows[0][2]
             firstMidRaw = (firstBid + firstAsk) / 2.0
             NormalKalman = KalmanFilter1D(firstMidRaw, ProcessNoise=0.02,  MeasurementNoise=0.5)
@@ -80,8 +80,7 @@ def Main():
 
         updates = []
 
-        for row in rows:
-            tickId, bid, ask = row
+        for tickId, bid, ask in rows:
             lastId = tickId
 
             midRaw = (bid + ask) / 2.0
@@ -108,7 +107,6 @@ def Main():
                 )
             )
 
-        # Apply updates for this batch
         cur.executemany(
             """
             UPDATE ticks
