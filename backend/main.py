@@ -290,10 +290,15 @@ def api_review_window(
             f"""
             SELECT id,
                    {ts_col}   AS ts,
-                   {mid_expr} AS mid
-                   {bid_sel}
-                   {ask_sel}
-                   {kal_sel}
+                   {mid_expr} AS mid,
+                   bid,
+                   ask,
+                   kal,
+                   kal_fast,
+                   kal_slow,
+                   spread,
+                   kal_fast_resid,
+                   kal_slow_resid
             FROM ticks
             WHERE id BETWEEN %s AND %s
             ORDER BY id ASC
