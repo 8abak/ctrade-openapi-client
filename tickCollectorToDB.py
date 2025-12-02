@@ -4,7 +4,6 @@ import os
 import signal
 import psycopg2
 from datetime import datetime
-from psycopg2.tz import FixedOffsetTimezone
 import pytz
 from threading import Event
 import requests   # for token refresh
@@ -57,44 +56,6 @@ lastValidAsk = None
 shutdown_event = Event()
 
 # --------------------------------------------------
-# 1D Kalman filter: single main kal
-# --------------------------------------------------
-
-class KalmanFilter1D:
-    def __init__(self, InitialValue: float, ProcessNoise: float, MeasurementNoise: float):
-        self.X = InitialValue          # state (smoothed price)
-        self.P = 1.0                   # estimate variance
-        self.Q = ProcessNoise          # process noise
-        self.R = MeasurementNoise      # measurement noise
-
-    def Update(self, Measurement: float) -> float:
-        # Predict
-        self.P = self.P + self.Q
-
-        # Kalman gain
-        K = self.P / (self.P + self.R)
-
-        # Update estimate
-        self.X = self.X + K * (Measurement - self.X)
-
-        # Update error covariance
-        self.P = (1 - K) * self.P
-        return self.X
-
-NormalKalman = None
-
-def GetKalman(MidValue: float) -> float:
-    """Return main kalman-smoothed price for current mid."""
-    global NormalKalman
-    if NormalKalman is None:
-        NormalKalman = KalmanFilter1D(
-            InitialValue=MidValue,
-            ProcessNoise=0.02,
-            MeasurementNoise=0.5,
-        )
-    return NormalKalman.Update(MidValue)
-
-# --------------------------------------------------
 # Token refresh logic
 # --------------------------------------------------
 def refresh_tokens():
@@ -129,12 +90,12 @@ def refresh_tokens():
     return True
 
 # --------------------------------------------------
-# Write one tick  (ONLY bid/ask/mid/kal)
+# Write one tick  (no Kalman, just bid/ask/mid/spread)
 # --------------------------------------------------
 def writeTick(timestamp, _symbolId, bid, ask):
     global lastValidBid, lastValidAsk, conn
 
-    # Forward-fill if needed
+    # Forward-fill bid/ask if zeros appear
     if bid == 0.0 and lastValidBid is not None:
         bid = lastValidBid
     elif bid != 0.0:
@@ -145,23 +106,26 @@ def writeTick(timestamp, _symbolId, bid, ask):
     elif ask != 0.0:
         lastValidAsk = ask
 
-    # Convert timestamp to Sydney time
-    utc_dt = datetime.utcfromtimestamp(timestamp / 1000.0).replace(tzinfo=pytz.utc)
-    sydney_dt = utc_dt.astimezone(FixedOffsetTimezone(600, "AEST"))
+    # If still missing (first tick, etc.), just skip
+    if bid == 0.0 or ask == 0.0:
+        print("⚠️ Skipping tick with no valid bid/ask", flush=True)
+        return
 
-    # Scaling
+    # Convert timestamp (ms since epoch, UTC) to Sydney local time
+    utc_dt = datetime.utcfromtimestamp(timestamp / 1000.0).replace(tzinfo=pytz.utc)
+    sydney_tz = pytz.timezone("Australia/Sydney")
+    sydney_dt = utc_dt.astimezone(sydney_tz)
+
+    # Scaling (cTrader prices are in 1e-5 units)
     bidFloat = bid / 100000.0
     askFloat = ask / 100000.0
-    midRaw = (bidFloat + askFloat) / 2.0
-    mid = round(midRaw, 2)
-
-    # Single kalman only
-    kal = GetKalman(midRaw)
+    mid = round((bidFloat + askFloat) / 2.0, 2)
+    spread = round(askFloat - bidFloat, 2)
 
     try:
         ensure_conn()
         with conn.cursor() as c:
-            # check duplicate
+            # avoid duplicates
             c.execute(
                 """
                 SELECT 1 FROM ticks
@@ -173,10 +137,10 @@ def writeTick(timestamp, _symbolId, bid, ask):
             if c.fetchone():
                 return
 
-            # Insert minimal tick (no spread / fast / slow / residuals)
+            # Insert simple tick (no Kalman columns)
             c.execute(
                 """
-                INSERT INTO ticks (symbol, timestamp, bid, ask, kal, mid)
+                INSERT INTO ticks (symbol, timestamp, bid, ask, mid, spread)
                 VALUES (%s, %s, %s, %s, %s, %s)
                 """,
                 (
@@ -184,14 +148,14 @@ def writeTick(timestamp, _symbolId, bid, ask):
                     sydney_dt,
                     bidFloat,
                     askFloat,
-                    kal,
                     mid,
+                    spread,
                 ),
             )
         conn.commit()
         print(
             f"✅ Saved tick: {sydney_dt} → bid={bidFloat:.2f}, ask={askFloat:.2f}, "
-            f"mid={mid:.2f}, kal={kal:.2f}",
+            f"mid={mid:.2f}, spread={spread:.2f}",
             flush=True,
         )
 
@@ -243,11 +207,17 @@ def onMessage(_, message):
     if message.payloadType == ProtoOASpotEvent().payloadType:
         try:
             spot = Protobuf.extract(message)
-            writeTick(spot.timestamp, spot.symbolId, getattr(spot, "bid", 0), getattr(spot, "ask", 0))
+            writeTick(
+                spot.timestamp,
+                spot.symbolId,
+                getattr(spot, "bid", 0),
+                getattr(spot, "ask", 0),
+            )
         except Exception as e:
             print("⚠️ Error processing spot message:", e, flush=True)
 
-    if message.payloadType == 2142:  # ProtoOAErrorRes
+    # ProtoOAErrorRes
+    if message.payloadType == 2142:
         try:
             error = Protobuf.extract(message)
             print("❌ Error:")
