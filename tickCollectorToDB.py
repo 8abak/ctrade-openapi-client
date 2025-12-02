@@ -7,7 +7,7 @@ from datetime import datetime
 from psycopg2.tz import FixedOffsetTimezone
 import pytz
 from threading import Event
-import requests   # NEW: for token refresh
+import requests   # for token refresh
 
 from twisted.internet import reactor
 from ctrader_open_api import Client, Protobuf, TcpProtocol, EndPoints
@@ -41,7 +41,6 @@ port = EndPoints.PROTOBUF_PORT
 # --------------------------------------------
 DB_KW = dict(dbname="trading", user="babak", password="babak33044", host="localhost", port=5432)
 conn = None
-cur = None
 
 def ensure_conn():
     global conn
@@ -58,7 +57,7 @@ lastValidAsk = None
 shutdown_event = Event()
 
 # --------------------------------------------------
-# 1D Kalman filters: normal, fast, slow  (NEW)
+# 1D Kalman filter: single main kal
 # --------------------------------------------------
 
 class KalmanFilter1D:
@@ -83,45 +82,20 @@ class KalmanFilter1D:
         return self.X
 
 NormalKalman = None
-FastKalman = None
-SlowKalman = None
 
-def GetKalmans(MidValue: float):
-    """
-    Returns (kal_normal, kal_fast, kal_slow) for the current mid price.
-    All three filters are stateful across ticks.
-    """
-    global NormalKalman, FastKalman, SlowKalman
-
+def GetKalman(MidValue: float) -> float:
+    """Return main kalman-smoothed price for current mid."""
+    global NormalKalman
     if NormalKalman is None:
-        # Medium – main 'kal'
         NormalKalman = KalmanFilter1D(
             InitialValue=MidValue,
             ProcessNoise=0.02,
             MeasurementNoise=0.5,
         )
-    if FastKalman is None:
-        # Reacts quickly
-        FastKalman = KalmanFilter1D(
-            InitialValue=MidValue,
-            ProcessNoise=0.1,
-            MeasurementNoise=0.5,
-        )
-    if SlowKalman is None:
-        # Very smooth, background regime
-        SlowKalman = KalmanFilter1D(
-            InitialValue=MidValue,
-            ProcessNoise=0.005,
-            MeasurementNoise=0.5,
-        )
-
-    KalNormal = NormalKalman.Update(MidValue)
-    KalFast = FastKalman.Update(MidValue)
-    KalSlow = SlowKalman.Update(MidValue)
-    return KalNormal, KalFast, KalSlow
+    return NormalKalman.Update(MidValue)
 
 # --------------------------------------------------
-# Token refresh logic (existing)
+# Token refresh logic
 # --------------------------------------------------
 def refresh_tokens():
     global accessToken, refreshToken, creds
@@ -155,7 +129,7 @@ def refresh_tokens():
     return True
 
 # --------------------------------------------------
-# Write one tick  (KALs + SPREAD ADDED)
+# Write one tick  (ONLY bid/ask/mid/kal)
 # --------------------------------------------------
 def writeTick(timestamp, _symbolId, bid, ask):
     global lastValidBid, lastValidAsk, conn
@@ -181,11 +155,8 @@ def writeTick(timestamp, _symbolId, bid, ask):
     midRaw = (bidFloat + askFloat) / 2.0
     mid = round(midRaw, 2)
 
-    # NEW: spread + 3-kalman system
-    spread = round(askFloat - bidFloat, 2)
-    kal_normal, kal_fast, kal_slow = GetKalmans(midRaw)
-    kal_fast_resid = midRaw - kal_fast
-    kal_slow_resid = midRaw - kal_slow
+    # Single kalman only
+    kal = GetKalman(midRaw)
 
     try:
         ensure_conn()
@@ -202,36 +173,25 @@ def writeTick(timestamp, _symbolId, bid, ask):
             if c.fetchone():
                 return
 
-            # Insert tick with kal + fast/slow + residuals + spread
+            # Insert minimal tick (no spread / fast / slow / residuals)
             c.execute(
                 """
-                INSERT INTO ticks
-                    (symbol, timestamp,
-                     bid, ask,
-                     kal, mid,
-                     spread,
-                     kal_fast, kal_slow,
-                     kal_fast_resid, kal_slow_resid)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO ticks (symbol, timestamp, bid, ask, kal, mid)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 """,
                 (
                     "XAUUSD",
                     sydney_dt,
                     bidFloat,
                     askFloat,
-                    kal_normal,
+                    kal,
                     mid,
-                    spread,
-                    kal_fast,
-                    kal_slow,
-                    kal_fast_resid,
-                    kal_slow_resid,
                 ),
             )
         conn.commit()
         print(
-            f"✅ Saved tick: {sydney_dt} → bid={bidFloat:.2f}, ask={askFloat:.2f}, mid={mid}, "
-            f"kal={kal_normal:.2f}, kf={kal_fast:.2f}, ks={kal_slow:.2f}, spread={spread:.2f}",
+            f"✅ Saved tick: {sydney_dt} → bid={bidFloat:.2f}, ask={askFloat:.2f}, "
+            f"mid={mid:.2f}, kal={kal:.2f}",
             flush=True,
         )
 
@@ -244,7 +204,7 @@ def writeTick(timestamp, _symbolId, bid, ask):
             pass
 
 # ---------------------------
-# Connection/auth flow (unchanged)
+# Connection/auth flow
 # ---------------------------
 def connected(_):
     print("✅ Connected. Subscribing to spot data...", flush=True)
@@ -308,17 +268,12 @@ def onError(err):
     shutdown()
 
 def shutdown():
-    global cur, conn
+    global conn
     if shutdown_event.is_set():
         return
     shutdown_event.set()
     print("🛑 Shutting down...", flush=True)
     try:
-        if cur:
-            try:
-                cur.close()
-            except Exception:
-                pass
         if conn and not getattr(conn, "closed", 1):
             conn.close()
     except Exception:
