@@ -417,6 +417,7 @@
   hookToggle(chkKal);
   hookToggle(chkKalFast);
   hookToggle(chkKalSlow);
+  
 
   window.addEventListener('resize', () => {
     chart.resize();
