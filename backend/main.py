@@ -368,6 +368,214 @@ def api_review_window(
     }
 
 
+# patch for review window
+@app.get("/api/review/window")
+def api_review_window(
+    from_id: int = Query(..., description="Starting tick id (inclusive)"),
+    window: int = Query(5000, ge=100, le=50000),
+):
+    """
+    Extended review window:
+    Returns:
+      {
+        ticks:   [...],
+        segs:    [...],     # kalseg (old)
+        zones:   [...],     # zones (old)
+        piv_hilo:   [...],  # NEW
+        piv_swings: [...],  # NEW
+        hhll:        [...], # NEW
+        zones_hhll:  [...]  # NEW final zones
+      }
+    """
+    to_id = from_id + window - 1
+    conn = get_conn()
+    ts_col, mid_expr, (has_bid, has_ask) = _ts_mid_cols(conn)
+
+    # --------------------- Load Ticks ----------------------
+    with dict_cur(conn) as cur:
+        # detect kal
+        cur.execute("""
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema='public'
+              AND table_name='ticks'
+              AND column_name='kal'
+        """)
+        has_kal = cur.fetchone() is not None
+
+        # ---- ticks ----
+        cur.execute(f"""
+            SELECT id,
+                   {ts_col}   AS ts,
+                   {mid_expr} AS mid,
+                   bid,
+                   ask,
+                   kal,
+                   kal_fast,
+                   kal_slow,
+                   spread,
+                   kal_fast_resid,
+                   kal_slow_resid
+            FROM ticks
+            WHERE id BETWEEN %s AND %s
+            ORDER BY id ASC
+        """, (from_id, to_id))
+        ticks = cur.fetchall()
+
+        # Normalize tick fields
+        for r in ticks:
+            if isinstance(r.get("mid"), Decimal):
+                r["mid"] = float(r["mid"])
+            if has_bid and isinstance(r.get("bid"), Decimal):
+                r["bid"] = float(r["bid"])
+            if has_ask and isinstance(r.get("ask"), Decimal):
+                r["ask"] = float(r["ask"])
+            if has_kal and isinstance(r.get("kal"), Decimal):
+                r["kal"] = float(r["kal"])
+            r["spread"] = (
+                (r.get("ask") - r.get("bid"))
+                if has_bid and has_ask and r.get("ask") and r.get("bid")
+                else None
+            )
+            if isinstance(r.get("ts"), (datetime, date)):
+                r["ts"] = r["ts"].isoformat()
+
+        # ----------------- Old kalseg segments -----------------
+        if _table_exists(conn, "kalseg"):
+            cur.execute("""
+                SELECT id, start_id, end_id, direction
+                FROM kalseg
+                WHERE NOT (end_id < %s OR start_id > %s)
+                ORDER BY start_id
+            """, (from_id, to_id))
+            segs = cur.fetchall()
+        else:
+            segs = []
+
+        # ----------------- Old zones table ---------------------
+        if _table_exists(conn, "zones"):
+            cur.execute("""
+                SELECT id, start_id, end_id, direction, zone_type
+                FROM zones
+                WHERE NOT (end_id < %s OR start_id > %s)
+                ORDER BY start_id
+            """, (from_id, to_id))
+            zones = cur.fetchall()
+        else:
+            zones = []
+
+        # ===========================================================
+        #                   NEW BLOCKS FOR STRUCTURE
+        # ===========================================================
+
+        # -------- piv_hilo -----------------------------------------
+        if _table_exists(conn, "piv_hilo"):
+            cur.execute("""
+                SELECT id, tick_id, ts, mid, ptype
+                FROM piv_hilo
+                WHERE tick_id BETWEEN %s AND %s
+                ORDER BY tick_id
+            """, (from_id, to_id))
+            piv_hilo = cur.fetchall()
+
+            # normalize
+            for r in piv_hilo:
+                if isinstance(r.get("mid"), Decimal):
+                    r["mid"] = float(r["mid"])
+                if isinstance(r.get("ts"), (datetime, date)):
+                    r["ts"] = r["ts"].isoformat()
+        else:
+            piv_hilo = []
+
+        # -------- piv_swings ---------------------------------------
+        if _table_exists(conn, "piv_swings"):
+            cur.execute("""
+                SELECT id, pivot_id, tick_id, ts, mid, ptype, swing_index
+                FROM piv_swings
+                WHERE tick_id BETWEEN %s AND %s
+                ORDER BY tick_id
+            """, (from_id, to_id))
+            piv_swings = cur.fetchall()
+
+            for r in piv_swings:
+                if isinstance(r.get("mid"), Decimal):
+                    r["mid"] = float(r["mid"])
+                if isinstance(r.get("ts"), (datetime, date)):
+                    r["ts"] = r["ts"].isoformat()
+        else:
+            piv_swings = []
+
+        # -------- hhll_piv (HH/HL/LH/LL) ---------------------------
+        if _table_exists(conn, "hhll_piv"):
+            cur.execute("""
+                SELECT id, swing_id, tick_id, ts, mid, ptype, class, class_text
+                FROM hhll_piv
+                WHERE tick_id BETWEEN %s AND %s
+                ORDER BY tick_id
+            """, (from_id, to_id))
+            hhll = cur.fetchall()
+
+            for r in hhll:
+                if isinstance(r.get("mid"), Decimal):
+                    r["mid"] = float(r["mid"])
+                if isinstance(r.get("ts"), (datetime, date)):
+                    r["ts"] = r["ts"].isoformat()
+        else:
+            hhll = []
+
+        # -------- zones_hhll (final zones) -------------------------
+        if _table_exists(conn, "zones_hhll"):
+            cur.execute("""
+                SELECT id,
+                       start_tick_id,
+                       end_tick_id,
+                       start_time,
+                       end_time,
+                       top_price,
+                       bot_price,
+                       top_pivot_id,
+                       bot_pivot_id,
+                       n_ticks,
+                       break_dir,
+                       break_tick_id,
+                       break_time,
+                       state,
+                       activate_time,
+                       invalidate_time,
+                       invalidate_tick
+                FROM zones_hhll
+                WHERE end_tick_id >= %s
+                  AND start_tick_id <= %s
+                ORDER BY start_tick_id
+            """, (from_id, to_id))
+            zones_hhll = cur.fetchall()
+
+            for r in zones_hhll:
+                if isinstance(r.get("top_price"), Decimal):
+                    r["top_price"] = float(r["top_price"])
+                if isinstance(r.get("bot_price"), Decimal):
+                    r["bot_price"] = float(r["bot_price"])
+                for key in ["start_time","end_time","break_time","activate_time","invalidate_time"]:
+                    if isinstance(r.get(key), (datetime,date)):
+                        r[key] = r[key].isoformat()
+        else:
+            zones_hhll = []
+
+    return {
+        "ticks": _jsonable(ticks),
+        "segs": _jsonable(segs),
+        "zones": _jsonable(zones),
+
+        # ===== NEW STRUCTURE OUTPUTS =====
+        "piv_hilo": _jsonable(piv_hilo),
+        "piv_swings": _jsonable(piv_swings),
+        "hhll": _jsonable(hhll),
+        "zones_hhll": _jsonable(zones_hhll),
+    }
+
+
+
+
 # ------------------------------ Live API ------------------------------
 # Used for the live chart (window-based, but we can layer streaming/polling on top).
 # live-core.js will talk to /api/live_window.

@@ -1,109 +1,69 @@
-<!-- PATH: frontend/review.html -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <title>Review Tick Window</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <style>
-    body {
-      margin: 0;
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background-color: #0d1117;
-      color: #c9d1d9;
-    }
-    #topbar {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 6px 10px;
-      background-color: #161b22;
-      border-bottom: 1px solid #30363d;
-      font-size: 13px;
-      flex-wrap: wrap;
-    }
-    #topbar label {
-      display: flex;
-      align-items: center;
-      gap: 4px;
-    }
-    #topbar input[type="number"] {
-      width: 90px;
-      padding: 2px 4px;
-      background-color: #0d1117;
-      color: #c9d1d9;
-      border: 1px solid #30363d;
-      border-radius: 4px;
-      font-size: 12px;
-    }
-    #topbar button {
-      padding: 4px 8px;
-      border-radius: 4px;
-      border: 1px solid #30363d;
-      background-color: #21262d;
-      color: #c9d1d9;
-      cursor: pointer;
-      font-size: 12px;
-    }
-    #topbar button:disabled {
-      opacity: 0.4;
-      cursor: default;
-    }
-    #status {
-      margin-left: auto;
-      font-size: 12px;
-      color: #8b949e;
-      white-space: nowrap;
-    }
-    #toggles {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      margin-left: 10px;
-      font-size: 12px;
-    }
-    #toggles label {
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      white-space: nowrap;
-    }
-    #chart {
-      width: 100vw;
-      height: calc(100vh - 48px);
-    }
-  </style>
-  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
-</head>
-<body>
-  <div id="topbar">
-    <label>
-      From id:
-      <input type="number" id="fromId" value="1" min="1" />
-    </label>
-    <label>
-      Window:
-      <input type="number" id="windowSize" value="2000" min="100" step="100" />
-    </label>
-    <button id="btnGo">Go</button>
-    <button id="btnPrev">&laquo; Prev</button>
-    <button id="btnNext">Next &raquo;</button>
-    <button id="btnPlay">Run</button>
+    <meta charset="UTF-8" />
+    <title>Review</title>
+    <script src="https://cdn.jsdelivr.net/npm/echarts/dist/echarts.min.js"></script>
+    <script src="review-core.js"></script>
 
-    <div id="toggles">
-      <label><input type="checkbox" id="showBid" checked /> Bid</label>
-      <label><input type="checkbox" id="showAsk" checked /> Ask</label>
-      <label><input type="checkbox" id="showMid" checked /> Mid</label>
-      <label><input type="checkbox" id="showKal" checked /> Kalman</label>
-      <label><input type="checkbox" id="showKalFast" checked /> Kal Fast</label>
-      <label><input type="checkbox" id="showKalSlow" checked /> Kal Slow</label>
+    <style>
+        body {
+            margin: 0;
+            background: #111;
+            color: #eee;
+            font-family: sans-serif;
+        }
+
+        .topbar {
+            padding: 10px;
+            background: #222;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            flex-wrap: wrap;
+            border-bottom: 1px solid #333;
+        }
+
+        .topbar input[type="checkbox"] {
+            transform: scale(1.2);
+            margin-right: 6px;
+        }
+
+        #chart {
+            width: 100%;
+            height: calc(100vh - 60px);
+        }
+
+        button {
+            padding: 6px 12px;
+            background: #333;
+            color: #fff;
+            border: 1px solid #555;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background: #444;
+        }
+
+        .spacer { flex-grow: 1; }
+    </style>
+</head>
+
+<body>
+    <div class="topbar">
+        <label><input type="checkbox" id="showTicks" checked />Ticks</label>
+        <label><input type="checkbox" id="showPivHiLo" checked />HiLo Pivots</label>
+        <label><input type="checkbox" id="showPivSwings" checked />Swings</label>
+        <label><input type="checkbox" id="showHHLL" checked />HH/HL/LH/LL</label>
+        <label><input type="checkbox" id="showZones" checked />Zones</label>
+
+        <div class="spacer"></div>
+
+        <button id="btnRun">Run</button>
+        <button id="btnStop">Stop</button>
     </div>
 
-    <div id="status"></div>
-  </div>
-
-  <div id="chart"></div>
-
-  <script src="review-core.js"></script>
+    <div id="chart"></div>
 </body>
 </html>
