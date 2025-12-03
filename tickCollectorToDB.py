@@ -6,7 +6,7 @@ import psycopg2
 from datetime import datetime
 import pytz
 from threading import Event
-import requests   # for token refresh
+import requests
 
 from twisted.internet import reactor
 from ctrader_open_api import Client, Protobuf, TcpProtocol, EndPoints
@@ -90,7 +90,7 @@ def refresh_tokens():
     return True
 
 # --------------------------------------------------
-# Write one tick  (no Kalman, just bid/ask/mid/spread)
+# Write one tick  (fast path, no duplicate SELECT)
 # --------------------------------------------------
 def writeTick(timestamp, _symbolId, bid, ask):
     global lastValidBid, lastValidAsk, conn
@@ -106,7 +106,7 @@ def writeTick(timestamp, _symbolId, bid, ask):
     elif ask != 0.0:
         lastValidAsk = ask
 
-    # If still missing (first tick, etc.), just skip
+    # If still missing (first tick etc.), just skip
     if bid == 0.0 or ask == 0.0:
         print("⚠️ Skipping tick with no valid bid/ask", flush=True)
         return
@@ -116,7 +116,7 @@ def writeTick(timestamp, _symbolId, bid, ask):
     sydney_tz = pytz.timezone("Australia/Sydney")
     sydney_dt = utc_dt.astimezone(sydney_tz)
 
-    # Scaling (cTrader prices are in 1e-5 units)
+    # Scale cTrader prices from 1e-5 units
     bidFloat = bid / 100000.0
     askFloat = ask / 100000.0
     mid = round((bidFloat + askFloat) / 2.0, 2)
@@ -125,19 +125,6 @@ def writeTick(timestamp, _symbolId, bid, ask):
     try:
         ensure_conn()
         with conn.cursor() as c:
-            # avoid duplicates
-            c.execute(
-                """
-                SELECT 1 FROM ticks
-                WHERE symbol = %s AND timestamp = %s AND bid = %s AND ask = %s
-                LIMIT 1
-                """,
-                ("XAUUSD", sydney_dt, bidFloat, askFloat),
-            )
-            if c.fetchone():
-                return
-
-            # Insert simple tick (no Kalman columns)
             c.execute(
                 """
                 INSERT INTO ticks (symbol, timestamp, bid, ask, mid, spread)
