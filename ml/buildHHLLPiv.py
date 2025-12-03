@@ -8,7 +8,7 @@ def Main():
     Cur = Conn.cursor()
 
     print("Truncating hhll_piv...")
-    Cur.execute("TRUNCATE TABLE hhll_piv;")
+    Cur.execute("TRUNCATE TABLE hhll_piv CASCADE;")
     Conn.commit()
 
     print("Loading piv_swings ordered by swing_index...")
