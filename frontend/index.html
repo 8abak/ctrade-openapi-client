@@ -1,113 +1,142 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8" />
-    <title>datavis.au – Gold Review/Live</title>
-
-    <!-- ECharts -->
-    <script src="https://cdn.jsdelivr.net/npm/echarts/dist/echarts.min.js"></script>
-
-    <!-- Layers must load before core so core can call ChartLayers.* -->
-    <script src="chart-layers.js"></script>
-    <script src="chart-core.js"></script>
-
-    <style>
-        body {
-            margin: 0;
-            background: #111;
-            color: #eee;
-            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        }
-
-        .topbar {
-            padding: 8px 12px;
-            background: #222;
-            display: flex;
-            align-items: center;
-            gap: 14px;
-            flex-wrap: wrap;
-            border-bottom: 1px solid #333;
-            font-size: 13px;
-        }
-
-        .topbar label {
-            display: inline-flex;
-            align-items: center;
-            gap: 4px;
-        }
-
-        .topbar input[type="checkbox"] {
-            transform: scale(1.1);
-        }
-
-        .topbar input[type="number"],
-        .topbar input[type="text"] {
-            background: #111;
-            color: #eee;
-            border: 1px solid #444;
-            padding: 3px 6px;
-            border-radius: 3px;
-            font-size: 12px;
-            width: 90px;
-        }
-
-        .topbar button {
-            padding: 5px 10px;
-            background: #333;
-            color: #fff;
-            border: 1px solid #555;
-            border-radius: 3px;
-            cursor: pointer;
-            font-size: 12px;
-        }
-
-        .topbar button:hover {
-            background: #444;
-        }
-
-        .spacer {
-            flex-grow: 1;
-        }
-
-        #chart {
-            width: 100%;
-            height: calc(100vh - 46px);
-        }
-    </style>
+  <meta charset="UTF-8" />
+  <title>datavis.au – Gold Live / Review</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      background: #050912;
+      color: #ddd;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    .topbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      background: #0c101c;
+      border-bottom: 1px solid #222;
+      font-size: 13px;
+      box-sizing: border-box;
+    }
+    .topbar input[type="number"] {
+      width: 90px;
+      padding: 3px 6px;
+      border-radius: 4px;
+      border: 1px solid #333;
+      background: #050912;
+      color: #eee;
+    }
+    .btn {
+      padding: 4px 10px;
+      border-radius: 4px;
+      border: 1px solid #444;
+      background: #101626;
+      color: #eee;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .btn:hover {
+      background: #1a2336;
+    }
+    .btn-primary {
+      border-color: #3ba272;
+      background: #173223;
+    }
+    .btn-primary:hover {
+      background: #21442f;
+    }
+    .spacer {
+      flex: 1;
+    }
+    #chart {
+      width: 100%;
+      height: calc(100% - 40px); /* topbar height */
+    }
+  </style>
 </head>
-
 <body>
-    <div class="topbar">
-        <!-- Mode controls -->
-        <label><input type="checkbox" id="chkLive" checked /> Live</label>
+  <div class="topbar">
+    <label>
+      Jump to tick:
+      <input id="jumpInput" type="number" value="20000" />
+    </label>
+    <label>
+      Chunk size:
+      <input id="chunkInput" type="number" value="5000" />
+    </label>
 
-        <label>
-            Jump to tick:
-            <input type="number" id="inputJumpId" placeholder="tick id" />
-        </label>
+    <button id="btnLoad" class="btn">Load</button>
+    <button id="btnLoadBack" class="btn">Load more (back)</button>
 
-        <label>
-            Chunk size:
-            <input type="number" id="inputChunk" value="5000" min="500" step="500" />
-        </label>
+    <span style="width:1px;height:22px;background:#333;margin:0 6px;"></span>
 
-        <button id="btnJump">Load</button>
-        <button id="btnLoadMore">Load more (back)</button>
+    <button id="btnRun" class="btn btn-primary">Run</button>
+    <button id="btnStop" class="btn">Stop</button>
 
-        <div class="spacer"></div>
+    <div class="spacer"></div>
 
-        <!-- Run / Stop -->
-        <button id="btnRun">Run</button>
-        <button id="btnStop">Stop</button>
+    <!-- Optional: quick links -->
+    <a href="/sql.html" class="btn" style="text-decoration:none;">SQL</a>
+    <a href="/review.html" class="btn" style="text-decoration:none;">Review</a>
+  </div>
 
-        <!-- Layer toggles -->
-        <label><input type="checkbox" id="chkTicks" checked /> Ticks</label>
-        <label><input type="checkbox" id="chkPivHiLo" checked /> Hi/Lo Pivots</label>
-        <label><input type="checkbox" id="chkPivSwings" checked /> Swings</label>
-        <label><input type="checkbox" id="chkHHLL" checked /> HH/HL/LH/LL</label>
-        <label><input type="checkbox" id="chkZones" checked /> Zones</label>
-    </div>
+  <div id="chart"></div>
 
-    <div id="chart"></div>
+  <!-- Adjust paths if needed -->
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+  <script src="chart-core.js"></script>
+
+  <script>
+    // ---------- Wiring with ChartCore ----------
+
+    ChartCore.init("chart");
+
+    let currentFromId = Number(document.getElementById("jumpInput").value) || 1;
+
+    function getChunkSize() {
+      return Number(document.getElementById("chunkInput").value) || 5000;
+    }
+
+    async function loadWindowAt(fromId) {
+      const chunk = getChunkSize();
+      currentFromId = fromId;
+      document.getElementById("jumpInput").value = String(currentFromId);
+      try {
+        await ChartCore.loadWindow(currentFromId, chunk);
+      } catch (err) {
+        console.error("loadWindow error:", err);
+      }
+    }
+
+    // Initial static window
+    loadWindowAt(currentFromId);
+
+    // Buttons
+    document.getElementById("btnLoad").onclick = function () {
+      const fromId = Number(document.getElementById("jumpInput").value) || 1;
+      loadWindowAt(fromId);
+    };
+
+    document.getElementById("btnLoadBack").onclick = function () {
+      const chunk = getChunkSize();
+      const newFrom = Math.max(1, currentFromId - chunk);
+      loadWindowAt(newFrom);
+    };
+
+    document.getElementById("btnRun").onclick = function () {
+      ChartCore.startLive({ limit: getChunkSize(), intervalMs: 2000 });
+    };
+
+    document.getElementById("btnStop").onclick = function () {
+      ChartCore.stopLive();
+      // after stopping, reload the last review window so you can study it
+      loadWindowAt(currentFromId);
+    };
+  </script>
 </body>
 </html>
