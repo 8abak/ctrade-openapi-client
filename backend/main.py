@@ -241,7 +241,7 @@ def api_sql_exec(
 
 
 # ----------------------------- Review API -----------------------------
-# Used by index.html / chart-core.js (historical windows, not streaming).
+# Used by review.html / review-core.js (no live stream, just windows).
 
 @app.get("/api/review/window")
 def api_review_window(
@@ -249,18 +249,18 @@ def api_review_window(
     window: int = Query(5000, ge=100, le=50000),
 ):
     """
-    Extended historical review window over ticks.
+    Historical review window over ticks.
 
     Returns JSON:
       {
-        "ticks":       [...],
-        "segs":        [...],  # kalseg (old, if exists)
-        "zones":       [...],  # zones  (old, if exists)
+        "ticks":      [...],
+        "segs":       [...],  # kalseg (old, if exists)
+        "zones":      [...],  # zones  (old, if exists)
 
-        "piv_hilo":    [...],  # local highs/lows
-        "piv_swings":  [...],  # swing points
-        "hhll":        [...],  # HH/HL/LH/LL pivots
-        "zones_hhll":  [...]   # HH/LL zones
+        "piv_hilo":   [...],  # local highs/lows (if piv_hilo exists)
+        "piv_swings": [...],  # swing pivots      (if piv_swings exists)
+        "hhll":       [...],  # HH/HL/LH/LL       (if hhll_piv exists)
+        "zones_hhll": [...]   # HH/LL zones       (if zones_hhll exists)
       }
     """
     to_id = from_id + window - 1
@@ -275,7 +275,7 @@ def api_review_window(
 
     with dict_cur(conn) as cur:
         # ------------------------------------------------
-        # 1) Ticks
+        # Ticks
         # ------------------------------------------------
         cur.execute(
             f"""
@@ -292,7 +292,7 @@ def api_review_window(
         ticks = cur.fetchall()
 
         if not ticks:
-            # No data in this window: everything else will be empty too.
+            # Nothing in this range – return empty but valid payload
             return {
                 "ticks":      [],
                 "segs":       [],
@@ -303,20 +303,6 @@ def api_review_window(
                 "zones_hhll": [],
             }
 
-        # we’ll need the time range for zones_hhll
-        cur.execute(
-            """
-            SELECT MIN(timestamp) AS min_ts,
-                   MAX(timestamp) AS max_ts
-            FROM ticks
-            WHERE id BETWEEN %s AND %s
-            """,
-            (from_id, to_id),
-        )
-        ts_row = cur.fetchone()
-        tick_ts_min = ts_row["min_ts"]
-        tick_ts_max = ts_row["max_ts"]
-
         # normalize ticks (floats + kal + spread + ts ISO)
         for r in ticks:
             if isinstance(r.get("mid"), Decimal):
@@ -326,7 +312,7 @@ def api_review_window(
                 if isinstance(r.get("kal"), Decimal):
                     r["kal"] = float(r["kal"])
             else:
-                # mirror mid so frontend always has kal value
+                # mirror mid so frontend always has a kal value
                 r["kal"] = r.get("mid")
 
             if has_bid and isinstance(r.get("bid"), Decimal):
@@ -349,98 +335,126 @@ def api_review_window(
             if isinstance(ts, (datetime, date)):
                 r["ts"] = ts.isoformat()
 
+        # For other tables we can safely use the tick id range
+        window_start = int(ticks[0]["id"])
+        window_end = int(ticks[-1]["id"])
+
         # ------------------------------------------------
-        # 2) Old kalseg segments (optional)
+        # Old kalseg segments (if present)
         # ------------------------------------------------
         if _table_exists(conn, "kalseg"):
             cur.execute(
                 """
                 SELECT id, start_id, end_id, direction
                 FROM kalseg
-                WHERE NOT (end_id < %s OR start_id > %s)
+                WHERE end_id   >= %s
+                  AND start_id <= %s
                 ORDER BY start_id
                 """,
-                (from_id, to_id),
+                (window_start, window_end),
             )
             segs = cur.fetchall()
         else:
             segs = []
 
         # ------------------------------------------------
-        # 3) Old zones (optional)
+        # Old zones (if present)
         # ------------------------------------------------
         if _table_exists(conn, "zones"):
             cur.execute(
                 """
                 SELECT id, start_id, end_id, direction, zone_type
                 FROM zones
-                WHERE NOT (end_id < %s OR start_id > %s)
+                WHERE end_id   >= %s
+                  AND start_id <= %s
                 ORDER BY start_id
                 """,
-                (from_id, to_id),
+                (window_start, window_end),
             )
             zones = cur.fetchall()
         else:
             zones = []
 
         # ------------------------------------------------
-        # 4) NEW: piv_hilo (raw local highs/lows)
+        # NEW: piv_hilo (raw local highs/lows) – only if table exists
         # ------------------------------------------------
         if _table_exists(conn, "piv_hilo"):
             cur.execute(
                 """
-                SELECT tick_id, ts, mid, ptype, win_left, win_right
+                SELECT id,
+                       tick_id,
+                       ts,
+                       mid,
+                       ptype,
+                       win_left,
+                       win_right
                 FROM piv_hilo
                 WHERE tick_id BETWEEN %s AND %s
                 ORDER BY tick_id
                 """,
-                (from_id, to_id),
+                (window_start, window_end),
             )
             piv_hilo = cur.fetchall()
         else:
             piv_hilo = []
 
         # ------------------------------------------------
-        # 5) NEW: piv_swings
+        # NEW: piv_swings – swing pivots (uses ptype, not stype)
         # ------------------------------------------------
         if _table_exists(conn, "piv_swings"):
             cur.execute(
                 """
-                SELECT id, tick_id, ts, mid, stype
+                SELECT id,
+                       pivot_id,
+                       tick_id,
+                       ts,
+                       mid,
+                       ptype,
+                       swing_index
                 FROM piv_swings
                 WHERE tick_id BETWEEN %s AND %s
                 ORDER BY tick_id
                 """,
-                (from_id, to_id),
+                (window_start, window_end),
             )
             piv_swings = cur.fetchall()
         else:
             piv_swings = []
 
         # ------------------------------------------------
-        # 6) NEW: hhll_piv → hhll (HH/HL/LH/LL)
+        # NEW: hhll_piv → hhll (HH/HL/LH/LL)
         # ------------------------------------------------
         if _table_exists(conn, "hhll_piv"):
             cur.execute(
                 """
-                SELECT id, tick_id, ts, mid, class_text
+                SELECT id,
+                       swing_id,
+                       tick_id,
+                       ts,
+                       mid,
+                       ptype,
+                       class,
+                       class_text
                 FROM hhll_piv
                 WHERE tick_id BETWEEN %s AND %s
                 ORDER BY tick_id
                 """,
-                (from_id, to_id),
+                (window_start, window_end),
             )
             hhll = cur.fetchall()
         else:
             hhll = []
 
         # ------------------------------------------------
-        # 7) NEW: zones_hhll – time/price rectangles on hhll
+        # NEW: zones_hhll – time/price rectangles built on hhll
+        #      (filter using start_tick_id / end_tick_id)
         # ------------------------------------------------
-        if _table_exists(conn, "zones_hhll") and tick_ts_min and tick_ts_max:
+        if _table_exists(conn, "zones_hhll"):
             cur.execute(
                 """
                 SELECT id,
+                       start_tick_id,
+                       end_tick_id,
                        start_time,
                        end_time,
                        top_price,
@@ -448,11 +462,11 @@ def api_review_window(
                        state,
                        break_dir
                 FROM zones_hhll
-                WHERE end_time   >= %s
-                  AND start_time <= %s
-                ORDER BY start_time
+                WHERE end_tick_id   >= %s
+                  AND start_tick_id <= %s
+                ORDER BY start_tick_id
                 """,
-                (tick_ts_min, tick_ts_max),
+                (window_start, window_end),
             )
             zones_hhll = cur.fetchall()
         else:
