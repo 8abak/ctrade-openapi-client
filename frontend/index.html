@@ -16,12 +16,14 @@
     .topbar {
       display: flex;
       align-items: center;
-      gap: 8px;
+      gap: 6px;
       padding: 8px 12px;
       background: #0c101c;
       border-bottom: 1px solid #222;
       font-size: 13px;
       box-sizing: border-box;
+      color: #ccc;
+      flex-wrap: wrap;
     }
     .topbar input[type="number"] {
       width: 90px;
@@ -47,15 +49,23 @@
       border-color: #3ba272;
       background: #173223;
     }
-    .btn-primary:hover {
-      background: #21442f;
+    .btn-primary.running {
+      background: #3ba272;
+      border-color: #3ba272;
+      color: #010305;
     }
     .spacer {
       flex: 1;
+      min-width: 10px;
     }
     #chart {
       width: 100%;
-      height: calc(100% - 40px); /* topbar height */
+      height: calc(100% - 40px);
+    }
+    .chk-label {
+      display: flex;
+      align-items: center;
+      gap: 2px;
     }
   </style>
 </head>
@@ -73,30 +83,45 @@
     <button id="btnLoad" class="btn">Load</button>
     <button id="btnLoadBack" class="btn">Load more (back)</button>
 
-    <span style="width:1px;height:22px;background:#333;margin:0 6px;"></span>
+    <button id="btnRunStop" class="btn btn-primary">Run</button>
 
-    <button id="btnRun" class="btn btn-primary">Run</button>
-    <button id="btnStop" class="btn">Stop</button>
+    <!-- visibility toggles -->
+    <label class="chk-label">
+      <input type="checkbox" id="chkMid" checked /> Mid
+    </label>
+    <label class="chk-label">
+      <input type="checkbox" id="chkKal" checked /> Kal
+    </label>
+    <label class="chk-label">
+      <input type="checkbox" id="chkPivHi" checked /> Hi Piv
+    </label>
+    <label class="chk-label">
+      <input type="checkbox" id="chkPivLo" checked /> Lo Piv
+    </label>
+    <label class="chk-label">
+      <input type="checkbox" id="chkSwings" checked /> Swings
+    </label>
+    <label class="chk-label">
+      <input type="checkbox" id="chkZonesHhll" checked /> Zones
+    </label>
 
     <div class="spacer"></div>
 
-    <!-- Optional: quick links -->
     <a href="/sql.html" class="btn" style="text-decoration:none;">SQL</a>
     <a href="/review.html" class="btn" style="text-decoration:none;">Review</a>
   </div>
 
   <div id="chart"></div>
 
-  <!-- Adjust paths if needed -->
+  <!-- scripts -->
   <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
   <script src="chart-core.js"></script>
 
   <script>
-    // ---------- Wiring with ChartCore ----------
-
     ChartCore.init("chart");
 
     let currentFromId = Number(document.getElementById("jumpInput").value) || 1;
+    let running = false;
 
     function getChunkSize() {
       return Number(document.getElementById("chunkInput").value) || 5000;
@@ -113,10 +138,10 @@
       }
     }
 
-    // Initial static window
+    // initial window
     loadWindowAt(currentFromId);
 
-    // Buttons
+    // buttons
     document.getElementById("btnLoad").onclick = function () {
       const fromId = Number(document.getElementById("jumpInput").value) || 1;
       loadWindowAt(fromId);
@@ -128,15 +153,35 @@
       loadWindowAt(newFrom);
     };
 
-    document.getElementById("btnRun").onclick = function () {
-      ChartCore.startLive({ limit: getChunkSize(), intervalMs: 2000 });
+    const btnRunStop = document.getElementById("btnRunStop");
+    btnRunStop.onclick = function () {
+      running = !running;
+      if (running) {
+        btnRunStop.textContent = "Stop";
+        btnRunStop.classList.add("running");
+        ChartCore.startLive({ limit: getChunkSize(), intervalMs: 2000 });
+      } else {
+        btnRunStop.textContent = "Run";
+        btnRunStop.classList.remove("running");
+        ChartCore.stopLive();
+        // After stopping, keep the last live window as review;
+        // user can now scroll / load back etc.
+      }
     };
 
-    document.getElementById("btnStop").onclick = function () {
-      ChartCore.stopLive();
-      // after stopping, reload the last review window so you can study it
-      loadWindowAt(currentFromId);
-    };
+    // visibility checkboxes
+    document.getElementById("chkMid").onchange = (e) =>
+      ChartCore.setVisibility("mid", e.target.checked);
+    document.getElementById("chkKal").onchange = (e) =>
+      ChartCore.setVisibility("kal", e.target.checked);
+    document.getElementById("chkPivHi").onchange = (e) =>
+      ChartCore.setVisibility("piv_hi", e.target.checked);
+    document.getElementById("chkPivLo").onchange = (e) =>
+      ChartCore.setVisibility("piv_lo", e.target.checked);
+    document.getElementById("chkSwings").onchange = (e) =>
+      ChartCore.setVisibility("swings", e.target.checked);
+    document.getElementById("chkZonesHhll").onchange = (e) =>
+      ChartCore.setVisibility("zones_hhll", e.target.checked);
   </script>
 </body>
 </html>
