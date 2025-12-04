@@ -241,10 +241,8 @@ def api_sql_exec(
 
 
 # ----------------------------- Review API -----------------------------
-# Used by review.html / review-core.js (no live stream, just windows).
+# Used by index.html / chart-core.js (historical windows, not streaming).
 
-
-# patch for review window
 @app.get("/api/review/window")
 def api_review_window(
     from_id: int = Query(..., description="Starting tick id (inclusive)"),
@@ -256,19 +254,18 @@ def api_review_window(
     Returns JSON:
       {
         "ticks":       [...],
-        "segs":        [...],  # kalseg (old)
-        "zones":       [...],  # zones (old)
+        "segs":        [...],  # kalseg (old, if exists)
+        "zones":       [...],  # zones  (old, if exists)
 
-        "piv_hilo":    [...],  # NEW local highs/lows
-        "piv_swings":  [...],  # NEW swing points
-        "hhll":        [...],  # NEW HH/HL/LH/LL pivots
-        "zones_hhll":  [...]   # NEW HH/LL zones
+        "piv_hilo":    [...],  # local highs/lows
+        "piv_swings":  [...],  # swing points
+        "hhll":        [...],  # HH/HL/LH/LL pivots
+        "zones_hhll":  [...]   # HH/LL zones
       }
     """
     to_id = from_id + window - 1
 
     conn = get_conn()
-    # Reuse the same detection as live_window
     ts_col, mid_expr, (has_bid, has_ask) = _ts_mid_cols(conn)
     has_kal = _ticks_has_kal(conn)
 
@@ -278,7 +275,7 @@ def api_review_window(
 
     with dict_cur(conn) as cur:
         # ------------------------------------------------
-        # Ticks
+        # 1) Ticks
         # ------------------------------------------------
         cur.execute(
             f"""
@@ -293,6 +290,32 @@ def api_review_window(
             (from_id, to_id),
         )
         ticks = cur.fetchall()
+
+        if not ticks:
+            # No data in this window: everything else will be empty too.
+            return {
+                "ticks":      [],
+                "segs":       [],
+                "zones":      [],
+                "piv_hilo":   [],
+                "piv_swings": [],
+                "hhll":       [],
+                "zones_hhll": [],
+            }
+
+        # we’ll need the time range for zones_hhll
+        cur.execute(
+            """
+            SELECT MIN(timestamp) AS min_ts,
+                   MAX(timestamp) AS max_ts
+            FROM ticks
+            WHERE id BETWEEN %s AND %s
+            """,
+            (from_id, to_id),
+        )
+        ts_row = cur.fetchone()
+        tick_ts_min = ts_row["min_ts"]
+        tick_ts_max = ts_row["max_ts"]
 
         # normalize ticks (floats + kal + spread + ts ISO)
         for r in ticks:
@@ -327,7 +350,7 @@ def api_review_window(
                 r["ts"] = ts.isoformat()
 
         # ------------------------------------------------
-        # Old kalseg segments
+        # 2) Old kalseg segments (optional)
         # ------------------------------------------------
         if _table_exists(conn, "kalseg"):
             cur.execute(
@@ -344,7 +367,7 @@ def api_review_window(
             segs = []
 
         # ------------------------------------------------
-        # Old zones
+        # 3) Old zones (optional)
         # ------------------------------------------------
         if _table_exists(conn, "zones"):
             cur.execute(
@@ -361,7 +384,7 @@ def api_review_window(
             zones = []
 
         # ------------------------------------------------
-        # NEW: piv_hilo (raw local highs/lows)
+        # 4) NEW: piv_hilo (raw local highs/lows)
         # ------------------------------------------------
         if _table_exists(conn, "piv_hilo"):
             cur.execute(
@@ -378,7 +401,7 @@ def api_review_window(
             piv_hilo = []
 
         # ------------------------------------------------
-        # NEW: piv_swings
+        # 5) NEW: piv_swings
         # ------------------------------------------------
         if _table_exists(conn, "piv_swings"):
             cur.execute(
@@ -395,7 +418,7 @@ def api_review_window(
             piv_swings = []
 
         # ------------------------------------------------
-        # NEW: hhll_piv → hhll (HH/HL/LH/LL)
+        # 6) NEW: hhll_piv → hhll (HH/HL/LH/LL)
         # ------------------------------------------------
         if _table_exists(conn, "hhll_piv"):
             cur.execute(
@@ -412,9 +435,9 @@ def api_review_window(
             hhll = []
 
         # ------------------------------------------------
-        # NEW: zones_hhll – time/price rectangles built on hhll
+        # 7) NEW: zones_hhll – time/price rectangles on hhll
         # ------------------------------------------------
-        if _table_exists(conn, "zones_hhll"):
+        if _table_exists(conn, "zones_hhll") and tick_ts_min and tick_ts_max:
             cur.execute(
                 """
                 SELECT id,
@@ -425,14 +448,11 @@ def api_review_window(
                        state,
                        break_dir
                 FROM zones_hhll
-                WHERE NOT (
-                    end_time   < (SELECT MIN(timestamp) FROM ticks WHERE id BETWEEN %s AND %s)
-                    OR
-                    start_time > (SELECT MAX(timestamp) FROM ticks WHERE id BETWEEN %s AND %s)
-                )
+                WHERE end_time   >= %s
+                  AND start_time <= %s
                 ORDER BY start_time
                 """,
-                (from_id, to_id, from_id, to_id),
+                (tick_ts_min, tick_ts_max),
             )
             zones_hhll = cur.fetchall()
         else:
@@ -447,6 +467,7 @@ def api_review_window(
         "hhll":       _jsonable(hhll),
         "zones_hhll": _jsonable(zones_hhll),
     }
+
 
 
 
