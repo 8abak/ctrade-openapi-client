@@ -5,8 +5,7 @@
 // - Live mode (poll /api/live_window)
 // - Review mode (load /api/review/window)
 // - Overlays: piv_hilo, piv_swings, hhll_piv, zones_hhll
-// - Tooltip shows enabled overlays; date & time separated; no timezone suffix
-// - All numbers shown as integers (rounded)
+// - Tooltip shows enabled overlays; date & time separated; grid at $1 steps
 
 window.ChartCore = (function () {
   let chart = null;
@@ -74,7 +73,6 @@ window.ChartCore = (function () {
             backgroundColor: "#333"
           }
         },
-        // custom formatter – we’ll fill it in render()
         formatter: null
       },
       grid: {
@@ -90,7 +88,6 @@ window.ChartCore = (function () {
         axisLabel: {
           color: "#999",
           formatter: function (value) {
-            // show just time hh:mm:ss on axis
             const dt = formatDateTime(value);
             return dt.time || value;
           }
@@ -102,6 +99,7 @@ window.ChartCore = (function () {
         axisLine: { lineStyle: { color: "#555" } },
         axisLabel: {
           color: "#999",
+          // grid labels at whole dollars:
           formatter: function (val) {
             return Math.round(val).toString();
           }
@@ -135,6 +133,7 @@ window.ChartCore = (function () {
     let min = Math.min(...values);
     let max = Math.max(...values);
     if (!isFinite(min) || !isFinite(max)) return { min: 0, max: 1 };
+    // snap chart frame to whole dollars
     min = Math.floor(min) - 1;
     max = Math.ceil(max) + 1;
     if (min === max) max = min + 2;
@@ -143,8 +142,14 @@ window.ChartCore = (function () {
 
   function buildSeries() {
     const xVals = state.ticks.map((t) => t.ts);
-    const midData = state.ticks.map((t) => (t.mid != null ? Math.round(t.mid) : null));
-    const kalData = state.ticks.map((t) => (t.kal != null ? Math.round(t.kal) : null));
+
+    // KEEP REAL DECIMAL VALUES HERE
+    const midData = state.ticks.map((t) =>
+      t.mid != null ? Number(t.mid) : null
+    );
+    const kalData = state.ticks.map((t) =>
+      t.kal != null ? Number(t.kal) : null
+    );
 
     // Map tickId -> index on x axis for overlays
     const idxByTickId = new Map();
@@ -152,13 +157,13 @@ window.ChartCore = (function () {
       if (t.id != null) idxByTickId.set(Number(t.id), idx);
     });
 
-    // piv_hilo scatter (highs vs lows)
+    // piv_hilo scatter (highs vs lows) – decimal
     const pivHi = [];
     const pivLo = [];
     state.pivHilo.forEach((p) => {
       const i = idxByTickId.get(Number(p.tick_id));
       if (i == null) return;
-      const y = p.mid != null ? Math.round(p.mid) : null;
+      const y = p.mid != null ? Number(p.mid) : null;
       if (y == null) return;
       if (Number(p.ptype) > 0) {
         pivHi.push([xVals[i], y, p]);
@@ -167,12 +172,12 @@ window.ChartCore = (function () {
       }
     });
 
-    // piv_swings scatter
+    // piv_swings scatter – decimal
     const swings = [];
     state.pivSwings.forEach((p) => {
       const i = idxByTickId.get(Number(p.tick_id));
       if (i == null) return;
-      const y = p.mid != null ? Math.round(p.mid) : null;
+      const y = p.mid != null ? Number(p.mid) : null;
       if (y == null) return;
       swings.push([xVals[i], y, p]);
     });
@@ -182,7 +187,7 @@ window.ChartCore = (function () {
     state.hhll.forEach((p) => {
       const i = idxByTickId.get(Number(p.tick_id));
       if (i == null) return;
-      const y = p.mid != null ? Math.round(p.mid) : null;
+      const y = p.mid != null ? Number(p.mid) : null;
       if (y == null) return;
       const key = p.class_text || "HHLL";
       if (!hhllMap[key]) hhllMap[key] = [];
@@ -192,12 +197,13 @@ window.ChartCore = (function () {
     // zones_hhll as markArea segments
     const zoneAreas = [];
     state.zonesHhll.forEach((z) => {
-      // We use times for x, prices for y
       const start = z.start_time || z.start_ts || null;
       const end = z.end_time || z.end_ts || null;
       if (!start || !end) return;
-      const top = z.top_price != null ? Math.round(z.top_price) : null;
-      const bot = z.bot_price != null ? Math.round(z.bot_price) : null;
+      const top =
+        z.top_price != null ? Number(z.top_price) : null;
+      const bot =
+        z.bot_price != null ? Number(z.bot_price) : null;
       if (top == null || bot == null) return;
       const yTop = Math.max(top, bot);
       const yBot = Math.min(top, bot);
@@ -209,7 +215,7 @@ window.ChartCore = (function () {
 
     const series = [];
 
-    // main lines
+    // main lines – DECIMALS
     series.push({
       id: "mid",
       name: "Mid",
@@ -260,7 +266,7 @@ window.ChartCore = (function () {
     });
 
     // HHLL classes – one series per class_text
-    Object.keys(hhllMap).forEach((cls, idx) => {
+    Object.keys(hhllMap).forEach((cls) => {
       series.push({
         id: "hhll_" + cls,
         name: "HHLL " + cls,
@@ -291,30 +297,31 @@ window.ChartCore = (function () {
 
   function buildTooltipFormatter(xVals) {
     return function (params) {
-      // params is array of points on same x
       if (!params || !params.length) return "";
 
-      // Use first param's x value as ts
       const ts = params[0].axisValue || params[0].data[0];
       const dt = formatDateTime(ts);
-      let html = `<div style="font-size:12px;">` +
+      let html =
+        `<div style="font-size:12px;">` +
         `<div>${dt.date}</div>` +
         `<div>${dt.time}</div><hr/>`;
 
-      // Group overlay payloads
       const extras = [];
 
       params.forEach((p) => {
         const seriesId = p.seriesId || p.seriesName;
         const yVal = Array.isArray(p.data) ? p.data[1] : p.data;
+        const yText =
+          yVal == null ? "" : Number(yVal).toFixed(2);
+
         if (seriesId === "mid" || seriesId === "kal") {
-          html += `<div>${p.marker} ${p.seriesName}: ${Math.round(yVal)}</div>`;
+          html += `<div>${p.marker} ${p.seriesName}: ${yText}</div>`;
         } else if (seriesId === "piv_hi" || seriesId === "piv_lo") {
           const payload = Array.isArray(p.data) ? p.data[2] : null;
           if (payload) {
             extras.push({
               label: "piv_hilo",
-              text: `${seriesId === "piv_hi" ? "High" : "Low"} piv – mid:${Math.round(yVal)} ptype:${payload.ptype} winL:${payload.win_left} winR:${payload.win_right}`
+              text: `${seriesId === "piv_hi" ? "High" : "Low"} piv – mid:${yText} ptype:${payload.ptype} winL:${payload.win_left} winR:${payload.win_right}`
             });
           }
         } else if (seriesId === "swings") {
@@ -322,7 +329,7 @@ window.ChartCore = (function () {
           if (payload) {
             extras.push({
               label: "swings",
-              text: `Swing – mid:${Math.round(yVal)} ptype:${payload.ptype} swing:${payload.swing_index}`
+              text: `Swing – mid:${yText} ptype:${payload.ptype} swing:${payload.swing_index}`
             });
           }
         } else if (String(seriesId).startsWith("hhll_")) {
@@ -330,7 +337,7 @@ window.ChartCore = (function () {
           if (payload) {
             extras.push({
               label: "hhll",
-              text: `HHLL – mid:${Math.round(yVal)} class:${payload.class_text} ptype:${payload.ptype}`
+              text: `HHLL – mid:${yText} class:${payload.class_text} ptype:${payload.ptype}`
             });
           }
         }
@@ -414,7 +421,6 @@ window.ChartCore = (function () {
       clearInterval(state.liveTimer);
       state.liveTimer = null;
     }
-    // first immediate poll
     pollLiveOnce();
     state.liveTimer = setInterval(pollLiveOnce, intervalMs);
   }
