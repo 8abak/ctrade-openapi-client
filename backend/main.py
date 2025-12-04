@@ -268,23 +268,24 @@ def api_review_window(
     to_id = from_id + window - 1
 
     conn = get_conn()
+    # Reuse the same detection as live_window
+    ts_col, mid_expr, (has_bid, has_ask) = _ts_mid_cols(conn)
+    has_kal = _ticks_has_kal(conn)
+
+    bid_sel = ", bid" if has_bid else ""
+    ask_sel = ", ask" if has_ask else ""
+    kal_sel = ", kal" if has_kal else ""
+
     with dict_cur(conn) as cur:
         # ------------------------------------------------
         # Ticks
         # ------------------------------------------------
         cur.execute(
-            """
+            f"""
             SELECT id,
-                   timestamp AS ts,
-                   mid,
-                   bid,
-                   ask,
-                   kal,
-                   kal_fast,
-                   kal_slow,
-                   spread,
-                   kal_fast_resid,
-                   kal_slow_resid
+                   {ts_col}   AS ts,
+                   {mid_expr} AS mid
+                   {kal_sel}{bid_sel}{ask_sel}
             FROM ticks
             WHERE id BETWEEN %s AND %s
             ORDER BY id ASC
@@ -293,10 +294,37 @@ def api_review_window(
         )
         ticks = cur.fetchall()
 
-        # Normalize timestamps so frontend always gets ISO strings
+        # normalize ticks (floats + kal + spread + ts ISO)
         for r in ticks:
-            if isinstance(r.get("ts"), (datetime, date)):
-                r["ts"] = r["ts"].isoformat()
+            if isinstance(r.get("mid"), Decimal):
+                r["mid"] = float(r["mid"])
+
+            if has_kal:
+                if isinstance(r.get("kal"), Decimal):
+                    r["kal"] = float(r["kal"])
+            else:
+                # mirror mid so frontend always has kal value
+                r["kal"] = r.get("mid")
+
+            if has_bid and isinstance(r.get("bid"), Decimal):
+                r["bid"] = float(r["bid"])
+            if has_ask and isinstance(r.get("ask"), Decimal):
+                r["ask"] = float(r["ask"])
+
+            r["spread"] = (
+                (r.get("ask") - r.get("bid"))
+                if (
+                    has_bid
+                    and has_ask
+                    and r.get("ask") is not None
+                    and r.get("bid") is not None
+                )
+                else None
+            )
+
+            ts = r.get("ts")
+            if isinstance(ts, (datetime, date)):
+                r["ts"] = ts.isoformat()
 
         # ------------------------------------------------
         # Old kalseg segments
@@ -397,8 +425,11 @@ def api_review_window(
                        state,
                        break_dir
                 FROM zones_hhll
-                WHERE NOT (end_time < (SELECT MIN(timestamp) FROM ticks WHERE id BETWEEN %s AND %s)
-                           OR start_time > (SELECT MAX(timestamp) FROM ticks WHERE id BETWEEN %s AND %s))
+                WHERE NOT (
+                    end_time   < (SELECT MIN(timestamp) FROM ticks WHERE id BETWEEN %s AND %s)
+                    OR
+                    start_time > (SELECT MAX(timestamp) FROM ticks WHERE id BETWEEN %s AND %s)
+                )
                 ORDER BY start_time
                 """,
                 (from_id, to_id, from_id, to_id),
@@ -416,6 +447,7 @@ def api_review_window(
         "hhll":       _jsonable(hhll),
         "zones_hhll": _jsonable(zones_hhll),
     }
+
 
 
 
