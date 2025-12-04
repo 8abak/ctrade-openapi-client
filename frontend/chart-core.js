@@ -1,11 +1,13 @@
 // PATH: frontend/chart-core.js
 // ECharts core for datavis.au – live + review
 // - Dark theme
-// - Dynamic Y range (min-1 .. max+1) based on visible prices
-// - Live mode (poll /api/live_window)
-// - Review mode (load /api/review/window)
+// - Grid at integer dollars, data kept as real decimals
+// - Vertical + horizontal zoom
+// - Live mode (last N ticks, auto-shift)
+// - Review window mode (/api/review/window)
 // - Overlays: piv_hilo, piv_swings, hhll_piv, zones_hhll
-// - Tooltip shows enabled overlays; date & time separated; grid at $1 steps
+// - Tooltip: shows ID at top, date/time on two lines, extra tables when enabled
+// - Window summary callback for "X ticks from A to B" display
 
 window.ChartCore = (function () {
   let chart = null;
@@ -19,7 +21,8 @@ window.ChartCore = (function () {
     zonesHhll: [],
     lastTickId: null,
     liveTimer: null,
-    liveLimit: 5000
+    liveLimit: 4000,
+    windowListener: null // fn(summaryText, info)
   };
 
   // ---------- Helpers ----------
@@ -37,15 +40,15 @@ window.ChartCore = (function () {
   }
 
   function formatDateTime(ts) {
-    // ts like "2025-12-04T17:47:42.593000+11:00"
+    // ts: "2025-12-04T17:47:42.593000+11:00"
     if (!ts || typeof ts !== "string") return { date: "", time: "" };
     const tParts = ts.split("T");
     if (tParts.length < 2) return { date: ts, time: "" };
 
     const date = tParts[0];
-
     let rest = tParts[1];
-    // strip timezone
+
+    // strip timezone (+11:00 / -05:00)
     const plusIdx = rest.indexOf("+");
     const minusIdx = rest.indexOf("-");
     let cut = rest.length;
@@ -53,11 +56,27 @@ window.ChartCore = (function () {
     if (minusIdx > 0 && minusIdx < cut) cut = minusIdx;
     rest = rest.slice(0, cut);
 
-    // keep hh:mm:ss
+    // strip fractional seconds
     const dotIdx = rest.indexOf(".");
     if (dotIdx > -1) rest = rest.slice(0, dotIdx);
 
     return { date, time: rest };
+  }
+
+  function notifyWindowChange() {
+    if (!state.windowListener) return;
+    const n = state.ticks.length;
+    let firstId = null;
+    let lastId = null;
+    if (n > 0) {
+      firstId = state.ticks[0].id;
+      lastId = state.ticks[n - 1].id;
+    }
+    const summary =
+      n > 0
+        ? `${n} ticks from ${firstId} to ${lastId}`
+        : "No ticks loaded";
+    state.windowListener(summary, { count: n, firstId, lastId });
   }
 
   function buildBaseOption() {
@@ -96,23 +115,43 @@ window.ChartCore = (function () {
       },
       yAxis: {
         type: "value",
+        scale: true, // allow vertical zoom
         axisLine: { lineStyle: { color: "#555" } },
         axisLabel: {
           color: "#999",
-          // grid labels at whole dollars:
+          // grid labels snapped to whole dollars
           formatter: function (val) {
             return Math.round(val).toString();
           }
         },
-        splitLine: { show: true, lineStyle: { color: "#111" } }
+        splitLine: { show: true, lineStyle: { color: "#111" } },
+        // min/max based on *visible* range (so vertical zoom works)
+        min: function (val) {
+          return Math.floor(val.min) - 1;
+        },
+        max: function (val) {
+          return Math.ceil(val.max) + 1;
+        }
       },
       dataZoom: [
+        // horizontal inside zoom
         {
           type: "inside",
+          xAxisIndex: 0,
+          filterMode: "none",
           throttle: 50
         },
+        // vertical inside zoom
+        {
+          type: "inside",
+          yAxisIndex: 0,
+          filterMode: "none",
+          throttle: 50
+        },
+        // bottom slider (x only)
         {
           type: "slider",
+          xAxisIndex: 0,
           height: 20,
           bottom: 30
         }
@@ -121,29 +160,10 @@ window.ChartCore = (function () {
     };
   }
 
-  function computeYBounds() {
-    const values = [];
-    state.ticks.forEach((t) => {
-      if (t.mid != null) values.push(Number(t.mid));
-      if (t.kal != null) values.push(Number(t.kal));
-      if (t.bid != null) values.push(Number(t.bid));
-      if (t.ask != null) values.push(Number(t.ask));
-    });
-    if (!values.length) return { min: 0, max: 1 };
-    let min = Math.min(...values);
-    let max = Math.max(...values);
-    if (!isFinite(min) || !isFinite(max)) return { min: 0, max: 1 };
-    // snap chart frame to whole dollars
-    min = Math.floor(min) - 1;
-    max = Math.ceil(max) + 1;
-    if (min === max) max = min + 2;
-    return { min, max };
-  }
-
   function buildSeries() {
     const xVals = state.ticks.map((t) => t.ts);
 
-    // KEEP REAL DECIMAL VALUES HERE
+    // REAL decimal values
     const midData = state.ticks.map((t) =>
       t.mid != null ? Number(t.mid) : null
     );
@@ -151,13 +171,13 @@ window.ChartCore = (function () {
       t.kal != null ? Number(t.kal) : null
     );
 
-    // Map tickId -> index on x axis for overlays
+    // Map tickId -> index on x axis
     const idxByTickId = new Map();
     state.ticks.forEach((t, idx) => {
       if (t.id != null) idxByTickId.set(Number(t.id), idx);
     });
 
-    // piv_hilo scatter (highs vs lows) – decimal
+    // piv_hilo
     const pivHi = [];
     const pivLo = [];
     state.pivHilo.forEach((p) => {
@@ -172,7 +192,7 @@ window.ChartCore = (function () {
       }
     });
 
-    // piv_swings scatter – decimal
+    // piv_swings
     const swings = [];
     state.pivSwings.forEach((p) => {
       const i = idxByTickId.get(Number(p.tick_id));
@@ -182,7 +202,7 @@ window.ChartCore = (function () {
       swings.push([xVals[i], y, p]);
     });
 
-    // hhll scatter – coloured by class_text
+    // hhll_piv by class_text
     const hhllMap = {};
     state.hhll.forEach((p) => {
       const i = idxByTickId.get(Number(p.tick_id));
@@ -194,16 +214,14 @@ window.ChartCore = (function () {
       hhllMap[key].push([xVals[i], y, p]);
     });
 
-    // zones_hhll as markArea segments
+    // zones_hhll as markArea
     const zoneAreas = [];
     state.zonesHhll.forEach((z) => {
       const start = z.start_time || z.start_ts || null;
       const end = z.end_time || z.end_ts || null;
       if (!start || !end) return;
-      const top =
-        z.top_price != null ? Number(z.top_price) : null;
-      const bot =
-        z.bot_price != null ? Number(z.bot_price) : null;
+      const top = z.top_price != null ? Number(z.top_price) : null;
+      const bot = z.bot_price != null ? Number(z.bot_price) : null;
       if (top == null || bot == null) return;
       const yTop = Math.max(top, bot);
       const yBot = Math.min(top, bot);
@@ -215,7 +233,7 @@ window.ChartCore = (function () {
 
     const series = [];
 
-    // main lines – DECIMALS
+    // main lines
     series.push({
       id: "mid",
       name: "Mid",
@@ -239,7 +257,7 @@ window.ChartCore = (function () {
     // Hi / Lo pivots
     series.push({
       id: "piv_hi",
-      name: "Hi/Lo Pivots (Hi)",
+      name: "Hi Piv",
       type: "scatter",
       symbolSize: 6,
       data: pivHi,
@@ -248,7 +266,7 @@ window.ChartCore = (function () {
 
     series.push({
       id: "piv_lo",
-      name: "Hi/Lo Pivots (Lo)",
+      name: "Lo Piv",
       type: "scatter",
       symbolSize: 6,
       data: pivLo,
@@ -277,10 +295,10 @@ window.ChartCore = (function () {
       });
     });
 
-    // Zones as markArea on an "empty" series
+    // Zones as markArea on an "empty" line series
     series.push({
       id: "zones_hhll",
-      name: "Zones HHLL",
+      name: "Zones",
       type: "line",
       data: [],
       markArea: {
@@ -299,10 +317,17 @@ window.ChartCore = (function () {
     return function (params) {
       if (!params || !params.length) return "";
 
-      const ts = params[0].axisValue || params[0].data[0];
+      const first = params[0];
+      const index = first.dataIndex != null ? first.dataIndex : 0;
+      const tick = state.ticks[index] || {};
+      const tickId = tick.id;
+
+      const ts = first.axisValue || first.data[0];
       const dt = formatDateTime(ts);
+
       let html =
         `<div style="font-size:12px;">` +
+        `<div><strong>ID: ${tickId != null ? tickId : "?"}</strong></div>` +
         `<div>${dt.date}</div>` +
         `<div>${dt.time}</div><hr/>`;
 
@@ -321,7 +346,7 @@ window.ChartCore = (function () {
           if (payload) {
             extras.push({
               label: "piv_hilo",
-              text: `${seriesId === "piv_hi" ? "High" : "Low"} piv – mid:${yText} ptype:${payload.ptype} winL:${payload.win_left} winR:${payload.win_right}`
+              text: `${seriesId === "piv_hi" ? "High" : "Low"} Piv — mid:${yText} ptype:${payload.ptype} winL:${payload.win_left} winR:${payload.win_right}`
             });
           }
         } else if (seriesId === "swings") {
@@ -329,7 +354,7 @@ window.ChartCore = (function () {
           if (payload) {
             extras.push({
               label: "swings",
-              text: `Swing – mid:${yText} ptype:${payload.ptype} swing:${payload.swing_index}`
+              text: `Swing — mid:${yText} ptype:${payload.ptype} swing:${payload.swing_index}`
             });
           }
         } else if (String(seriesId).startsWith("hhll_")) {
@@ -337,7 +362,7 @@ window.ChartCore = (function () {
           if (payload) {
             extras.push({
               label: "hhll",
-              text: `HHLL – mid:${yText} class:${payload.class_text} ptype:${payload.ptype}`
+              text: `HHLL — mid:${yText} class:${payload.class_text} ptype:${payload.ptype}`
             });
           }
         }
@@ -359,15 +384,13 @@ window.ChartCore = (function () {
     if (!chart) return;
     const option = buildBaseOption();
     const { series, xVals } = buildSeries();
-    const bounds = computeYBounds();
 
     option.xAxis.data = xVals;
-    option.yAxis.min = bounds.min;
-    option.yAxis.max = bounds.max;
     option.series = series;
     option.tooltip.formatter = buildTooltipFormatter(xVals);
 
     chart.setOption(option, true);
+    notifyWindowChange();
   }
 
   function renderLive(ticks) {
@@ -387,7 +410,9 @@ window.ChartCore = (function () {
   // ---------- Public API ----------
 
   async function loadWindow(fromId, window) {
-    const res = await fetch(`/api/review/window?from_id=${fromId}&window=${window}`);
+    const res = await fetch(
+      `/api/review/window?from_id=${fromId}&window=${window}`
+    );
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
 
@@ -397,7 +422,9 @@ window.ChartCore = (function () {
     state.pivSwings = data.piv_swings || [];
     state.hhll = data.hhll || [];
     state.zonesHhll = data.zones_hhll || [];
-    state.lastTickId = state.ticks.length ? state.ticks[state.ticks.length - 1].id : null;
+    state.lastTickId = state.ticks.length
+      ? state.ticks[state.ticks.length - 1].id
+      : null;
 
     render();
   }
@@ -415,7 +442,7 @@ window.ChartCore = (function () {
 
   function startLive(opts) {
     const intervalMs = (opts && opts.intervalMs) || 2000;
-    state.liveLimit = (opts && opts.limit) || state.liveLimit || 5000;
+    state.liveLimit = (opts && opts.limit) || state.liveLimit || 4000;
 
     if (state.liveTimer) {
       clearInterval(state.liveTimer);
@@ -433,17 +460,26 @@ window.ChartCore = (function () {
     state.mode = "review";
   }
 
-  function setVisibility(seriesId, visible) {
+  function setVisibility(idOrPrefix, visible) {
     if (!chart) return;
     const opt = chart.getOption();
     if (!opt || !opt.series) return;
 
     opt.series.forEach((s) => {
-      if (s.id === seriesId) {
+      if (
+        s.id === idOrPrefix ||
+        (idOrPrefix && s.id && s.id.startsWith(idOrPrefix))
+      ) {
         s.show = visible;
       }
     });
     chart.setOption({ series: opt.series }, false);
+  }
+
+  function onWindowChange(fn) {
+    state.windowListener = fn || null;
+    // fire immediately with current state
+    notifyWindowChange();
   }
 
   return {
@@ -453,6 +489,7 @@ window.ChartCore = (function () {
     loadWindow,
     startLive,
     stopLive,
-    setVisibility
+    setVisibility,
+    onWindowChange
   };
 })();
