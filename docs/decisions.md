@@ -1,0 +1,63 @@
+<!-- docs/decisions.md -->
+
+# Architectural and Structural Decisions — Segmeling / datavis.au
+
+This file records every decision that affects the architecture, database schema, API surface, or development workflow.
+
+Format:
+
+- YYYY-MM-DD — [Area] — Title  
+  - Context:  
+  - Decision:  
+  - Consequences:  
+
+New decisions must be appended to this file in chronological order.
+
+---
+
+## 2025-12-06 — [DB] — Live Schema Snapshot System
+
+- Context:  
+  We require always-current documentation of all tables, columns, indexes, and constraints in the `trading` PostgreSQL database.
+
+- Decision:  
+  `docs/db-schema.txt` is regenerated on every deployment by running `python -m jobs.buildSchema` on the EC2 instance. This file is the canonical representation of the database schema.
+
+- Consequences:  
+  - All SQL and database-related code must be written to match `docs/db-schema.txt`.  
+  - Custom GPTs must read `docs/db-schema.txt` before generating SQL or schema changes.  
+  - Schema modifications must be followed by a rebuild of `docs/db-schema.txt`.
+
+---
+
+## 2025-12-06 — [API] — Route and DB Function Mapping
+
+- Context:  
+  It was difficult to track which API routes and DB helper functions existed, leading to unused endpoints and confusion.
+
+- Decision:  
+  `jobs/buildRoots.py` generates `docs/routes-and-db.txt`, listing all detected HTTP routes in `backend/main.py` and DB helper functions in `backend/db.py`.
+
+- Consequences:  
+  - Custom GPTs must read `docs/routes-and-db.txt` before adding, changing, or removing routes or DB helpers.  
+  - Redundant or obsolete routes can be identified and removed in a controlled way.  
+  - New routes must be consistent with the existing mapping.
+
+---
+
+## 2025-12-06 — [Frontend] — Centralized Chart Logic
+
+- Context:  
+  Chart behavior had been implemented in multiple JS files, making it hard to keep zoom, pan, and overlays consistent.
+
+- Decision:  
+  All chart behavior is consolidated into `frontend/chart-core.js`. Page-specific files (`tick-core.js`, `htick-core.js`, `review-core.js`) are responsible only for page logic and must use the public API of `chart-core.js`.
+
+- Consequences:  
+  - Any change to chart behavior (zoom, pan, tooltip, overlays) must be made in `chart-core.js`.  
+  - Page files must not implement their own chart engines.  
+  - Custom GPTs must preserve this separation and may not duplicate chart logic across files.
+
+---
+
+(Add new decisions below as architecture and workflow evolve.)

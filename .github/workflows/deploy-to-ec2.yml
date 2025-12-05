@@ -25,6 +25,10 @@ jobs:
             echo "🛠 Building version.json..."
             node scripts/buildVersions.js || echo "⚠️ Failed to build version.json"
 
+            #Run schema + route docs builders.
+            python -m jobs.buildSchema
+            python -m jobs.buildRoots
+
             # Detect changed files in latest commit
             changed=$(git diff --name-only HEAD@{1})
 
