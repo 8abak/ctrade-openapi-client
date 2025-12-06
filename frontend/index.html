@@ -1,307 +1,274 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
+  <meta charset="utf-8" />
   <title>segmeling / datavis.au</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root {
+      color-scheme: dark;
       --bg: #050912;
-      --bg-alt: #0b1018;
-      --border: #202533;
-      --accent: #58a6ff;
-      --accent-soft: rgba(88, 166, 255, 0.12);
-      --text: #c9d1d9;
-      --text-muted: #8b949e;
-      --danger: #f85149;
+      --bg-alt: #0b111f;
+      --fg: #e5e7eb;
+      --muted: #9ca3af;
+      --accent: #38bdf8;
+      --accent-soft: rgba(56,189,248,0.15);
+      --border: #1f2933;
+      --danger: #f97373;
+      --ok: #22c55e;
+      --control-bg: #020617;
     }
-
     * {
       box-sizing: border-box;
     }
-
-    html, body {
-      margin: 0;
-      padding: 0;
-      height: 100%;
-      background: var(--bg);
-      color: var(--text);
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
-        system-ui, sans-serif;
-    }
-
     body {
+      margin: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+        sans-serif;
+      background: var(--bg);
+      color: var(--fg);
+    }
+    .page {
+      min-height: 100vh;
       display: flex;
       flex-direction: column;
     }
-
-    .app {
-      display: flex;
-      flex-direction: column;
-      height: 100%;
-      max-height: 100%;
-    }
-
-    .app-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 8px 16px;
-      background: var(--bg-alt);
-      border-bottom: 1px solid var(--border);
-      gap: 16px;
-    }
-
-    .app-title {
-      font-size: 16px;
-      font-weight: 600;
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
-      color: var(--text-muted);
-    }
-
-    .app-title span {
-      color: var(--text);
-    }
-
-    .controls-row {
+    .top-bar {
       display: flex;
       flex-wrap: wrap;
       align-items: center;
-      gap: 12px;
-      font-size: 12px;
+      gap: 0.75rem;
+      padding: 0.6rem 0.9rem;
+      border-bottom: 1px solid var(--border);
+      background: radial-gradient(circle at top left, #111827, #020617);
     }
-
-    .controls-group {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 4px 8px;
-      border-radius: 4px;
-      background: rgba(11, 16, 24, 0.9);
-      border: 1px solid rgba(32, 37, 51, 0.9);
-    }
-
-    .controls-group label {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      cursor: pointer;
-      white-space: nowrap;
-    }
-
-    .controls-group-title {
-      font-size: 11px;
+    .brand {
+      font-weight: 600;
+      letter-spacing: 0.06em;
       text-transform: uppercase;
-      letter-spacing: 0.08em;
-      color: var(--text-muted);
-      margin-right: 4px;
+      font-size: 0.8rem;
+      color: var(--muted);
+      padding-right: 0.9rem;
+      border-right: 1px solid var(--border);
+      margin-right: 0.4rem;
     }
-
-    .mode-select {
-      display: inline-flex;
+    .top-group {
+      display: flex;
       align-items: center;
-      gap: 6px;
-      padding: 4px 8px;
-      border-radius: 4px;
-      background: rgba(11, 16, 24, 0.9);
-      border: 1px solid rgba(32, 37, 51, 0.9);
-      font-size: 12px;
+      flex-wrap: wrap;
+      gap: 0.5rem;
     }
-
-    .mode-select select {
-      background: transparent;
-      border: 1px solid var(--border);
-      border-radius: 3px;
-      color: var(--text);
-      font-size: 12px;
-      padding: 2px 6px;
-      outline: none;
+    .top-group label {
+      font-size: 0.8rem;
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+      gap: 0.3rem;
     }
-
-    .btn {
-      border-radius: 4px;
+    select,
+    input[type="number"] {
+      background: var(--control-bg);
+      border-radius: 0.4rem;
       border: 1px solid var(--border);
-      background: rgba(15, 23, 42, 0.9);
-      color: var(--text);
-      padding: 4px 10px;
-      font-size: 12px;
+      color: var(--fg);
+      padding: 0.15rem 0.4rem;
+      font-size: 0.8rem;
+    }
+    input[type="number"] {
+      width: 5rem;
+    }
+    button {
       cursor: pointer;
+      border-radius: 999px;
+      border: 1px solid transparent;
+      padding: 0.25rem 0.8rem;
+      font-size: 0.8rem;
       display: inline-flex;
       align-items: center;
-      gap: 6px;
-      transition: background 0.12s ease, border-color 0.12s ease, transform 0.08s ease;
+      gap: 0.25rem;
+      background: var(--control-bg);
+      color: var(--fg);
+      transition: background 0.12s, border-color 0.12s, transform 0.05s;
     }
-
-    .btn:active {
-      transform: translateY(1px);
+    button:active {
+      transform: scale(0.97);
     }
-
     .btn-run {
       border-color: var(--accent);
       background: var(--accent-soft);
       color: var(--accent);
+      font-weight: 600;
     }
-
     .btn-stop {
       border-color: var(--danger);
-      background: rgba(248, 81, 73, 0.08);
+      background: rgba(239,68,68,0.15);
       color: var(--danger);
+      font-weight: 600;
     }
-
-    .btn span.dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 999px;
-      background: currentColor;
-      display: inline-block;
+    .btn-compact {
+      padding-inline: 0.6rem;
+      font-size: 0.78rem;
     }
-
-    .app-main {
-      flex: 1 1 auto;
-      min-height: 0;
+    .toggles-row {
       display: flex;
-      flex-direction: column;
+      flex-wrap: wrap;
+      gap: 1rem;
+      padding: 0.4rem 0.9rem 0.2rem;
+      border-bottom: 1px solid var(--border);
+      background: linear-gradient(to right, #020617, #020617);
     }
-
-    .chart-wrapper {
-      flex: 1 1 auto;
-      min-height: 0;
-      position: relative;
-    }
-
-    #segmeling-chart {
-      position: absolute;
-      inset: 0;
-    }
-
-    .app-footer {
-      padding: 4px 10px;
-      font-size: 11px;
-      color: var(--text-muted);
-      border-top: 1px solid var(--border);
-      background: var(--bg-alt);
+    .toggle-group {
       display: flex;
+      flex-wrap: wrap;
       align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      min-height: 24px;
+      gap: 0.45rem;
+      font-size: 0.8rem;
     }
-
-    #status-line {
-      white-space: nowrap;
+    .toggle-title {
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-size: 0.75rem;
+      color: var(--muted);
+      margin-right: 0.2rem;
+    }
+    .toggle-group label {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      cursor: pointer;
+    }
+    .toggle-group input[type="checkbox"] {
+      width: 0.9rem;
+      height: 0.9rem;
+      accent-color: var(--accent);
+    }
+    .chart-container {
+      flex: 1 1 auto;
+      padding: 0.6rem 0.9rem 0.2rem;
+    }
+    #segmeling-chart {
+      width: 100%;
+      height: calc(100vh - 145px);
+      min-height: 320px;
+      border-radius: 0.75rem;
+      border: 1px solid var(--border);
+      background: #020617;
       overflow: hidden;
-      text-overflow: ellipsis;
     }
-
-    .footer-meta {
-      white-space: nowrap;
-      opacity: 0.7;
+    .status-line {
+      font-size: 0.8rem;
+      color: var(--muted);
+      padding: 0.3rem 0.95rem 0.7rem;
+      border-top: 1px solid #020617;
+      background: #020617;
     }
-
-    @media (max-width: 900px) {
-      .app-header {
-        flex-direction: column;
+    @media (max-width: 720px) {
+      #segmeling-chart {
+        height: calc(100vh - 180px);
+      }
+      .top-bar {
         align-items: flex-start;
-      }
-      .controls-row {
-        width: 100%;
-        justify-content: space-between;
-      }
-    }
-
-    @media (max-width: 600px) {
-      .controls-row {
-        flex-direction: column;
-        align-items: stretch;
-      }
-      .controls-group, .mode-select {
-        width: 100%;
-        justify-content: space-between;
       }
     }
   </style>
 </head>
 <body>
-  <div class="app">
-    <header class="app-header">
-      <div class="app-title">
-        segmeling / <span>datavis.au</span>
-      </div>
-      <div class="controls-row">
-        <div class="mode-select">
-          <span class="controls-group-title">Mode</span>
+  <div class="page">
+    <header class="top-bar">
+      <div class="brand">SEGEMLING / DATAVIS.AU</div>
+
+      <div class="top-group">
+        <label>
+          Mode
           <select id="mode-select">
             <option value="live">Live</option>
             <option value="review">Review</option>
           </select>
-        </div>
+        </label>
 
-        <button id="btn-run-stop" class="btn btn-run" type="button">
-          <span class="dot"></span>
+        <button id="btn-run-stop" class="btn-run">
           <span class="label">Run</span>
         </button>
+      </div>
 
-        <div class="controls-group">
-          <span class="controls-group-title">Price</span>
-          <label>
-            <input type="checkbox" data-layer-group="bid" checked />
-            Bid
-          </label>
-          <label>
-            <input type="checkbox" data-layer-group="ask" checked />
-            Ask
-          </label>
-          <label>
-            <input type="checkbox" data-layer-group="mid" checked />
-            Mid
-          </label>
-          <label>
-            <input type="checkbox" data-layer-group="kal" checked />
-            Kal
-          </label>
-        </div>
-
-        <div class="controls-group">
-          <span class="controls-group-title">Overlays</span>
-          <label>
-            <input type="checkbox" data-layer-group="pivots" checked />
-            Pivots
-          </label>
-          <label>
-            <input type="checkbox" data-layer-group="swings" checked />
-            Swings / HHLL
-          </label>
-          <label>
-            <input type="checkbox" data-layer-group="zones" checked />
-            Zones
-          </label>
-        </div>
+      <!-- NEW: Review jump controls -->
+      <div class="top-group" style="margin-left:auto; gap:0.5rem;">
+        <label>
+          From Id
+          <input
+            id="review-from-id"
+            type="number"
+            min="1"
+            step="1"
+            inputmode="numeric"
+          />
+        </label>
+        <label>
+          Window
+          <input
+            id="review-window"
+            type="number"
+            min="1"
+            step="1"
+            inputmode="numeric"
+          />
+        </label>
+        <button id="btn-review-jump" class="btn-compact">
+          Jump
+        </button>
       </div>
     </header>
 
-    <main class="app-main">
-      <div class="chart-wrapper">
-        <div id="segmeling-chart"></div>
+    <div class="toggles-row">
+      <div class="toggle-group">
+        <span class="toggle-title">Price</span>
+        <label>
+          <input type="checkbox" data-layer-group="bid" checked />
+          Bid
+        </label>
+        <label>
+          <input type="checkbox" data-layer-group="ask" checked />
+          Ask
+        </label>
+        <label>
+          <input type="checkbox" data-layer-group="mid" checked />
+          Mid
+        </label>
+        <label>
+          <input type="checkbox" data-layer-group="kal" checked />
+          Kal
+        </label>
       </div>
+
+      <div class="toggle-group">
+        <span class="toggle-title">Overlays</span>
+        <label>
+          <input type="checkbox" data-layer-group="pivots" checked />
+          Pivots
+        </label>
+        <label>
+          <input type="checkbox" data-layer-group="swings" checked />
+          Swings / HHLL
+        </label>
+        <label>
+          <input type="checkbox" data-layer-group="zones" checked />
+          Zones
+        </label>
+      </div>
+    </div>
+
+    <main class="chart-container">
+      <div id="segmeling-chart"></div>
     </main>
 
-    <footer class="app-footer">
-      <div id="status-line">
-        Initialising…
-      </div>
-      <div class="footer-meta">
-        Unified index • LIVE / REVIEW + RUN / STOP
-      </div>
+    <footer id="status-line" class="status-line">
+      Initialising…
     </footer>
   </div>
 
-  <!-- Script load order as requested -->
+  <!-- ECharts + core scripts -->
   <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
   <script src="chart-core.js"></script>
-  <script src="chart-layers.js"></script>
-  <script src="live-core.js"></script>
-  <script src="review-core.js"></script>
   <script src="index-core.js"></script>
 </body>
 </html>

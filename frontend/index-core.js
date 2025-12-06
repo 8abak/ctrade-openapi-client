@@ -1,6 +1,5 @@
 // PATH: frontend/index-core.js
 // Unified controller for segmeling index.html – Live/Review + Run/Stop
-
 (function () {
   if (!window.ChartCore) {
     console.error("index-core: ChartCore not found");
@@ -8,11 +7,15 @@
   }
 
   const state = {
-    dataMode: "live",           // "live" | "review"
-    runState: "run",            // "run" | "stop"
+    // data mode
+    dataMode: "live", // "live" | "review"
+
+    // run control
+    runState: "run", // "run" | "stop"
 
     // live settings
-    liveLimit: 400,
+    // NEW: default to 2000 ticks for unified index
+    liveLimit: 2000,
     liveIntervalMs: 1500,
 
     // review settings
@@ -20,7 +23,7 @@
     reviewStepTicks: 1,
     reviewStepMs: 1500,
     reviewTimer: null,
-    reviewFromId: null,         // first tick id of current window in review mode
+    reviewFromId: null, // first tick id of current window in review mode
 
     // last known window meta from ChartCore
     lastCount: 0,
@@ -34,6 +37,11 @@
     runStopBtn: null,
     statusLine: null,
     layerCheckboxes: [],
+
+    // NEW: Review jump controls
+    reviewFromInput: null,
+    reviewWindowInput: null,
+    reviewJumpBtn: null,
   };
 
   function $(sel) {
@@ -48,6 +56,11 @@
     dom.layerCheckboxes = Array.from(
       document.querySelectorAll("input[data-layer-group]")
     );
+
+    // NEW: review controls
+    dom.reviewFromInput = $("#review-from-id");
+    dom.reviewWindowInput = $("#review-window");
+    dom.reviewJumpBtn = $("#btn-review-jump");
   }
 
   function stopReviewPlayback() {
@@ -109,6 +122,7 @@
 
     applyRunState();
     updateStatusLine();
+    syncReviewControlsFromState();
   }
 
   function setRunState(runState) {
@@ -138,7 +152,9 @@
         // STOP + LIVE: single snapshot, no polling
         ChartCore.loadLiveOnce({
           limit: state.liveLimit,
-        }).catch((err) => console.error("index-core: loadLiveOnce error", err));
+        }).catch((err) =>
+          console.error("index-core: loadLiveOnce error", err)
+        );
       }
       return;
     }
@@ -174,6 +190,7 @@
       ChartCore.setVisibility("swings", on);
       return;
     }
+
     // direct mapping
     ChartCore.setVisibility(group, on);
   }
@@ -200,7 +217,6 @@
     const count = state.lastCount;
     const firstId = state.lastFirstId;
     const lastId = state.lastLastId;
-
     const modeText = state.dataMode.toUpperCase();
     const runText = state.runState.toUpperCase();
 
@@ -210,6 +226,52 @@
     }
 
     dom.statusLine.textContent = `${count} ticks from ${firstId} to ${lastId} (${modeText}, ${runText})`;
+  }
+
+  // NEW: sync review controls <-> state
+  function syncReviewControlsFromState() {
+    if (dom.reviewFromInput) {
+      const val =
+        state.reviewFromId != null ? state.reviewFromId : state.lastFirstId;
+      dom.reviewFromInput.value = val != null ? String(val) : "1";
+    }
+    if (dom.reviewWindowInput) {
+      dom.reviewWindowInput.value = String(state.reviewWindow || 400);
+    }
+  }
+
+  // NEW: explicit Jump handler for REVIEW mode
+  function handleReviewJump() {
+    if (!dom.reviewFromInput || !dom.reviewWindowInput) return;
+
+    const fromRaw = dom.reviewFromInput.value.trim();
+    const winRaw = dom.reviewWindowInput.value.trim();
+
+    let fromId = parseInt(fromRaw, 10);
+    if (!Number.isFinite(fromId) || fromId < 1) {
+      fromId = 1;
+    }
+
+    let windowSize = parseInt(winRaw, 10);
+    if (!Number.isFinite(windowSize) || windowSize < 1) {
+      windowSize = state.reviewWindow || 400;
+    }
+
+    state.reviewFromId = fromId;
+    state.reviewWindow = windowSize;
+
+    // ensure UI reflects any normalization
+    syncReviewControlsFromState();
+
+    // Feature is defined for REVIEW mode; if currently LIVE, switch.
+    if (state.dataMode !== "review") {
+      setDataMode("review");
+      // setDataMode will call applyRunState(), which uses the updated reviewFromId/window
+      return;
+    }
+
+    // Already in REVIEW: just re-apply run state with new window
+    applyRunState();
   }
 
   function wireEvents() {
@@ -234,6 +296,24 @@
         toggleLayer(group, on);
       });
     });
+
+    // NEW: Jump button
+    if (dom.reviewJumpBtn) {
+      dom.reviewJumpBtn.addEventListener("click", () => {
+        handleReviewJump();
+      });
+    }
+
+    // Optional: allow Enter key on either review input to trigger Jump
+    [dom.reviewFromInput, dom.reviewWindowInput].forEach((input) => {
+      if (!input) return;
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          handleReviewJump();
+        }
+      });
+    });
   }
 
   function initChartCore() {
@@ -244,15 +324,19 @@
       state.lastCount = meta.count || 0;
       state.lastFirstId = meta.firstId;
       state.lastLastId = meta.lastId;
+
       if (state.dataMode === "review" && meta.firstId != null) {
         state.reviewFromId = meta.firstId;
+        syncReviewControlsFromState();
       }
+
       updateStatusLine();
     });
   }
 
   function init() {
     initDom();
+
     if (!dom.chartEl) {
       console.error("index-core: chart container not found");
       return;
@@ -266,8 +350,9 @@
     if (dom.modeSelect && dom.modeSelect.value !== state.dataMode) {
       dom.modeSelect.value = state.dataMode;
     }
+    syncReviewControlsFromState();
 
-    // kick off data based on initial state (LIVE + RUN)
+    // kick off data based on initial state (LIVE + RUN; last 2000 ticks)
     applyRunState();
     updateStatusLine();
   }
