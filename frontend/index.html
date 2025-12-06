@@ -1,22 +1,307 @@
-<div id="top-bar">
-  Jump to tick: <input id="jumpTick" type="number" value="20000" />
-  Chunk size: <input id="chunkSize" type="number" value="5000" />
-  <button id="btnLoad">Load</button>
-  <button id="btnLoadBack">Load more (back)</button>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>segmeling / datavis.au</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    :root {
+      --bg: #050912;
+      --bg-alt: #0b1018;
+      --border: #202533;
+      --accent: #58a6ff;
+      --accent-soft: rgba(88, 166, 255, 0.12);
+      --text: #c9d1d9;
+      --text-muted: #8b949e;
+      --danger: #f85149;
+    }
 
-  <button id="btnRun" data-running="1">Run</button>
+    * {
+      box-sizing: border-box;
+    }
 
-  <label><input id="chkMid" type="checkbox" checked /> Mid</label>
-  <label><input id="chkKal" type="checkbox" checked /> Kal</label>
-  <label><input id="chkHiPiv" type="checkbox" checked /> Hi Piv</label>
-  <label><input id="chkLoPiv" type="checkbox" checked /> Lo Piv</label>
-  <label><input id="chkSwings" type="checkbox" checked /> Swings</label>
-  <label><input id="chkZones" type="checkbox" checked /> Zones</label>
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+        system-ui, sans-serif;
+    }
 
-  <!-- status line -->
-  <span id="windowInfo" style="margin-left:20px; color:#aaa;"></span>
+    body {
+      display: flex;
+      flex-direction: column;
+    }
 
-  <!-- existing SQL / Review buttons on the right as you already have -->
-</div>
+    .app {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      max-height: 100%;
+    }
 
-<div id="chart" style="width:100%; height: calc(100vh - 80px);"></div>
+    .app-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 16px;
+      background: var(--bg-alt);
+      border-bottom: 1px solid var(--border);
+      gap: 16px;
+    }
+
+    .app-title {
+      font-size: 16px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+    }
+
+    .app-title span {
+      color: var(--text);
+    }
+
+    .controls-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 12px;
+      font-size: 12px;
+    }
+
+    .controls-group {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 8px;
+      border-radius: 4px;
+      background: rgba(11, 16, 24, 0.9);
+      border: 1px solid rgba(32, 37, 51, 0.9);
+    }
+
+    .controls-group label {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .controls-group-title {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-muted);
+      margin-right: 4px;
+    }
+
+    .mode-select {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 8px;
+      border-radius: 4px;
+      background: rgba(11, 16, 24, 0.9);
+      border: 1px solid rgba(32, 37, 51, 0.9);
+      font-size: 12px;
+    }
+
+    .mode-select select {
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      color: var(--text);
+      font-size: 12px;
+      padding: 2px 6px;
+      outline: none;
+    }
+
+    .btn {
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      background: rgba(15, 23, 42, 0.9);
+      color: var(--text);
+      padding: 4px 10px;
+      font-size: 12px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: background 0.12s ease, border-color 0.12s ease, transform 0.08s ease;
+    }
+
+    .btn:active {
+      transform: translateY(1px);
+    }
+
+    .btn-run {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+      color: var(--accent);
+    }
+
+    .btn-stop {
+      border-color: var(--danger);
+      background: rgba(248, 81, 73, 0.08);
+      color: var(--danger);
+    }
+
+    .btn span.dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: currentColor;
+      display: inline-block;
+    }
+
+    .app-main {
+      flex: 1 1 auto;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .chart-wrapper {
+      flex: 1 1 auto;
+      min-height: 0;
+      position: relative;
+    }
+
+    #segmeling-chart {
+      position: absolute;
+      inset: 0;
+    }
+
+    .app-footer {
+      padding: 4px 10px;
+      font-size: 11px;
+      color: var(--text-muted);
+      border-top: 1px solid var(--border);
+      background: var(--bg-alt);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-height: 24px;
+    }
+
+    #status-line {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .footer-meta {
+      white-space: nowrap;
+      opacity: 0.7;
+    }
+
+    @media (max-width: 900px) {
+      .app-header {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+      .controls-row {
+        width: 100%;
+        justify-content: space-between;
+      }
+    }
+
+    @media (max-width: 600px) {
+      .controls-row {
+        flex-direction: column;
+        align-items: stretch;
+      }
+      .controls-group, .mode-select {
+        width: 100%;
+        justify-content: space-between;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="app-header">
+      <div class="app-title">
+        segmeling / <span>datavis.au</span>
+      </div>
+      <div class="controls-row">
+        <div class="mode-select">
+          <span class="controls-group-title">Mode</span>
+          <select id="mode-select">
+            <option value="live">Live</option>
+            <option value="review">Review</option>
+          </select>
+        </div>
+
+        <button id="btn-run-stop" class="btn btn-run" type="button">
+          <span class="dot"></span>
+          <span class="label">Run</span>
+        </button>
+
+        <div class="controls-group">
+          <span class="controls-group-title">Price</span>
+          <label>
+            <input type="checkbox" data-layer-group="bid" checked />
+            Bid
+          </label>
+          <label>
+            <input type="checkbox" data-layer-group="ask" checked />
+            Ask
+          </label>
+          <label>
+            <input type="checkbox" data-layer-group="mid" checked />
+            Mid
+          </label>
+          <label>
+            <input type="checkbox" data-layer-group="kal" checked />
+            Kal
+          </label>
+        </div>
+
+        <div class="controls-group">
+          <span class="controls-group-title">Overlays</span>
+          <label>
+            <input type="checkbox" data-layer-group="pivots" checked />
+            Pivots
+          </label>
+          <label>
+            <input type="checkbox" data-layer-group="swings" checked />
+            Swings / HHLL
+          </label>
+          <label>
+            <input type="checkbox" data-layer-group="zones" checked />
+            Zones
+          </label>
+        </div>
+      </div>
+    </header>
+
+    <main class="app-main">
+      <div class="chart-wrapper">
+        <div id="segmeling-chart"></div>
+      </div>
+    </main>
+
+    <footer class="app-footer">
+      <div id="status-line">
+        Initialising…
+      </div>
+      <div class="footer-meta">
+        Unified index • LIVE / REVIEW + RUN / STOP
+      </div>
+    </footer>
+  </div>
+
+  <!-- Script load order as requested -->
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+  <script src="chart-core.js"></script>
+  <script src="chart-layers.js"></script>
+  <script src="live-core.js"></script>
+  <script src="review-core.js"></script>
+  <script src="index-core.js"></script>
+</body>
+</html>

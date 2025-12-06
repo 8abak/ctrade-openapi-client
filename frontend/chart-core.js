@@ -15,6 +15,7 @@ window.ChartCore = (function () {
     liveTimer: null,
     liveLimit: 5000,
     windowChangeHandler: null, // callback(info)
+    hasInit: false, // tracks whether we've set the base option (for zoom preservation)
   };
 
   // ---------- Helpers ----------
@@ -27,6 +28,7 @@ window.ChartCore = (function () {
       return null;
     }
     chart = echarts.init(dom, null, { useDirtyRect: true });
+    state.hasInit = false;
     window.addEventListener("resize", () => chart && chart.resize());
     return chart;
   }
@@ -35,10 +37,9 @@ window.ChartCore = (function () {
     if (!ts || typeof ts !== "string") return { date: "", time: "" };
     const tParts = ts.split("T");
     if (tParts.length < 2) return { date: ts, time: "" };
-
     const date = tParts[0];
-
     let rest = tParts[1];
+
     const plusIdx = rest.indexOf("+");
     const minusIdx = rest.indexOf("-");
     let cut = rest.length;
@@ -92,7 +93,7 @@ window.ChartCore = (function () {
         axisLabel: {
           color: "#999",
           formatter: function (val) {
-            return Math.round(val).toString();
+            return "$" + Math.round(val).toString();
           },
         },
         splitLine: { show: true, lineStyle: { color: "#111" } },
@@ -111,7 +112,7 @@ window.ChartCore = (function () {
           bottom: 30,
         },
         {
-          // NEW: vertical zoom
+          // vertical zoom
           type: "inside",
           yAxisIndex: 0,
           filterMode: "none",
@@ -130,13 +131,28 @@ window.ChartCore = (function () {
       if (t.ask != null) values.push(Number(t.ask));
     });
     if (!values.length) return { min: 0, max: 1 };
+
     let min = Math.min(...values);
     let max = Math.max(...values);
     if (!isFinite(min) || !isFinite(max)) return { min: 0, max: 1 };
+
     min = Math.floor(min) - 1;
     max = Math.ceil(max) + 1;
     if (min === max) max = min + 2;
     return { min, max };
+  }
+
+  function computeYAxisStep(min, max) {
+    const range = Math.max(1, max - min);
+    // simple "nice" integer step selection
+    if (range <= 10) return 1;
+    if (range <= 20) return 2;
+    if (range <= 50) return 5;
+    if (range <= 100) return 10;
+    if (range <= 200) return 20;
+    if (range <= 500) return 50;
+    if (range <= 1000) return 100;
+    return Math.pow(10, Math.floor(Math.log10(range)) - 1);
   }
 
   function buildSeries() {
@@ -144,10 +160,25 @@ window.ChartCore = (function () {
 
     // include payload with id so tooltip can show it
     const midData = state.ticks.map((t) =>
-      t.mid != null ? [t.ts, Number(t.mid), { id: t.id }] : [t.ts, null, { id: t.id }]
+      t.mid != null
+        ? [t.ts, Number(t.mid), { id: t.id }]
+        : [t.ts, null, { id: t.id }]
     );
     const kalData = state.ticks.map((t) =>
-      t.kal != null ? [t.ts, Number(t.kal), { id: t.id }] : [t.ts, null, { id: t.id }]
+      t.kal != null
+        ? [t.ts, Number(t.kal), { id: t.id }]
+        : [t.ts, null, { id: t.id }]
+    );
+
+    const bidData = state.ticks.map((t) =>
+      t.bid != null
+        ? [t.ts, Number(t.bid), { id: t.id }]
+        : [t.ts, null, { id: t.id }]
+    );
+    const askData = state.ticks.map((t) =>
+      t.ask != null
+        ? [t.ts, Number(t.ask), { id: t.id }]
+        : [t.ts, null, { id: t.id }]
     );
 
     // tickId -> index map for overlays
@@ -214,6 +245,32 @@ window.ChartCore = (function () {
     const series = [];
 
     // main lines
+    if (bidData.some((d) => d[1] != null)) {
+      series.push({
+        id: "bid",
+        name: "Bid",
+        type: "line",
+        showSymbol: false,
+        data: bidData,
+        lineStyle: { width: 1.0 },
+        smooth: true,
+        show: true,
+      });
+    }
+
+    if (askData.some((d) => d[1] != null)) {
+      series.push({
+        id: "ask",
+        name: "Ask",
+        type: "line",
+        showSymbol: false,
+        data: askData,
+        lineStyle: { width: 1.0 },
+        smooth: true,
+        show: true,
+      });
+    }
+
     series.push({
       id: "mid",
       name: "Mid",
@@ -300,11 +357,13 @@ window.ChartCore = (function () {
   }
 
   function buildTooltipFormatter(xVals, ticks) {
-    // ts -> [id, mid, kal]
+    // ts -> detailed info
     const infoByTs = new Map();
     ticks.forEach((t) => {
       infoByTs.set(t.ts, {
         id: t.id,
+        bid: t.bid != null ? Number(t.bid) : null,
+        ask: t.ask != null ? Number(t.ask) : null,
         mid: t.mid != null ? Number(t.mid) : null,
         kal: t.kal != null ? Number(t.kal) : null,
       });
@@ -314,16 +373,17 @@ window.ChartCore = (function () {
       if (!params || !params.length) return "";
 
       const first = params[0];
-      const ts = first.axisValue || (Array.isArray(first.data) ? first.data[0] : null);
+      const ts =
+        first.axisValue || (Array.isArray(first.data) ? first.data[0] : null);
       const dt = formatDateTime(ts);
       const info = infoByTs.get(ts) || {};
       const idText = info.id != null ? info.id : "";
 
-      let html =
-        `<div style="font-size:12px;">` +
-        `<div><b>Id: ${idText}</b></div>` +
-        `<div>${dt.date}</div>` +
-        `<div>${dt.time}</div><hr/>`;
+      let html = "";
+      html += `<div><strong>Id:</strong> ${idText}</div>`;
+      if (dt.date) html += `<div>${dt.date}</div>`;
+      if (dt.time) html += `<div>${dt.time}</div>`;
+      html += `<div>* * *</div>`;
 
       const extras = [];
 
@@ -333,7 +393,12 @@ window.ChartCore = (function () {
         const yVal = Array.isArray(data) ? data[1] : data;
         const yText = yVal == null ? "" : Number(yVal).toFixed(2);
 
-        if (seriesId === "mid" || seriesId === "kal") {
+        if (
+          seriesId === "mid" ||
+          seriesId === "kal" ||
+          seriesId === "bid" ||
+          seriesId === "ask"
+        ) {
           html += `<div>${p.marker} ${p.seriesName}: ${yText}</div>`;
         } else if (seriesId === "piv_hi" || seriesId === "piv_lo") {
           const payload = Array.isArray(data) ? data[2] : null;
@@ -360,11 +425,12 @@ window.ChartCore = (function () {
       });
 
       if (extras.length) {
-        html += "<hr/>";
-        extras.forEach((e) => (html += `<div>${e}</div>`));
+        html += `<div>* * *</div>`;
+        extras.forEach((e) => {
+          html += `<div>${e}</div>`;
+        });
       }
 
-      html += "</div>";
       return html;
     };
   }
@@ -383,17 +449,55 @@ window.ChartCore = (function () {
 
   function render() {
     if (!chart) return;
-    const option = buildBaseOption();
+
     const { series, xVals } = buildSeries();
     const bounds = computeYBounds();
+    const step = computeYAxisStep(bounds.min, bounds.max);
 
-    option.xAxis.data = xVals;
-    option.yAxis.min = bounds.min;
-    option.yAxis.max = bounds.max;
-    option.series = series;
-    option.tooltip.formatter = buildTooltipFormatter(xVals, state.ticks);
+    const yAxisPatch = {
+      min: bounds.min,
+      max: bounds.max,
+      minInterval: 1,
+      interval: step,
+      axisLabel: {
+        color: "#999",
+        formatter: function (val) {
+          return "$" + Math.round(val).toString();
+        },
+      },
+      splitLine: { show: true, lineStyle: { color: "#111" } },
+    };
 
-    chart.setOption(option, true);
+    const tooltip = {
+      formatter: buildTooltipFormatter(xVals, state.ticks),
+    };
+
+    if (!state.hasInit) {
+      const option = buildBaseOption();
+      option.xAxis.data = xVals;
+      option.yAxis.min = yAxisPatch.min;
+      option.yAxis.max = yAxisPatch.max;
+      option.yAxis.minInterval = yAxisPatch.minInterval;
+      option.yAxis.interval = yAxisPatch.interval;
+      option.yAxis.axisLabel = yAxisPatch.axisLabel;
+      option.yAxis.splitLine = yAxisPatch.splitLine;
+      option.series = series;
+      option.tooltip = Object.assign(option.tooltip || {}, tooltip);
+
+      chart.setOption(option, true);
+      state.hasInit = true;
+    } else {
+      chart.setOption(
+        {
+          xAxis: { data: xVals },
+          yAxis: yAxisPatch,
+          series,
+          tooltip,
+        },
+        false // preserve dataZoom / view window
+      );
+    }
+
     notifyWindowChange();
   }
 
@@ -424,7 +528,9 @@ window.ChartCore = (function () {
     state.pivSwings = data.piv_swings || [];
     state.hhll = data.hhll || [];
     state.zonesHhll = data.zones_hhll || [];
-    state.lastTickId = state.ticks.length ? state.ticks[state.ticks.length - 1].id : null;
+    state.lastTickId = state.ticks.length
+      ? state.ticks[state.ticks.length - 1].id
+      : null;
 
     render();
   }
@@ -440,6 +546,19 @@ window.ChartCore = (function () {
     renderLive(data.ticks || []);
   }
 
+  async function loadLiveOnce(opts) {
+    const limit = (opts && opts.limit) || state.liveLimit || 5000;
+    const url = `/api/live_window?limit=${limit}`;
+    const res = await fetch(url);
+    if (!res.ok) {
+      console.error("Live one-shot error", res.status);
+      return;
+    }
+    const data = await res.json();
+    state.liveLimit = limit;
+    renderLive(data.ticks || []);
+  }
+
   function startLive(opts) {
     const intervalMs = (opts && opts.intervalMs) || 2000;
     state.liveLimit = (opts && opts.limit) || state.liveLimit || 5000;
@@ -448,6 +567,8 @@ window.ChartCore = (function () {
       clearInterval(state.liveTimer);
       state.liveTimer = null;
     }
+
+    // initial fetch
     pollLiveOnce();
     state.liveTimer = setInterval(pollLiveOnce, intervalMs);
   }
@@ -469,9 +590,15 @@ window.ChartCore = (function () {
     opt.series.forEach((s) => {
       const id = s.id || "";
       const name = s.name || "";
-
       let belongs = false;
+
       switch (group) {
+        case "bid":
+          belongs = id === "bid" || name === "Bid";
+          break;
+        case "ask":
+          belongs = id === "ask" || name === "Ask";
+          break;
         case "mid":
           belongs = id === "mid" || name === "Mid";
           break;
@@ -497,6 +624,7 @@ window.ChartCore = (function () {
         default:
           break;
       }
+
       if (belongs) {
         s.show = visible;
       }
@@ -519,5 +647,6 @@ window.ChartCore = (function () {
     stopLive,
     setVisibility,
     setWindowChangeHandler,
+    loadLiveOnce, // new, used by index-core for LIVE + STOP
   };
 })();
