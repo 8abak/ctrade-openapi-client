@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Hello Segmeling – ChartCore Sandbox</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      background: #0d1117; /* dark theme to match live.html */
+      color: #c9d1d9;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    }
+    body {
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      padding: 8px 16px;
+      text-align: center;
+      font-size: 20px;
+      font-weight: 600;
+      border-bottom: 1px solid #30363d;
+    }
+    #chart {
+      flex: 1 1 auto;
+      min-height: 0;
+    }
+    footer {
+      padding: 4px 12px;
+      font-size: 11px;
+      text-align: right;
+      border-top: 1px solid #30363d;
+      background: #0d1117;
+      color: #8b949e;
+    }
+  </style>
+</head>
+<body>
+  <header>Hello Segmeling</header>
+
+  <div id="chart"></div>
+
+  <footer>version: 2025-12-06T00:00:00Z</footer>
+
+  <!-- ECharts + ChartCore (included as in live.html: ChartCore from same folder) -->
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+  <script src="chart-core.js"></script>
+
+  <script>
+    document.addEventListener("DOMContentLoaded", function () {
+      // Initialize ChartCore on the chart div (using its public API)
+      ChartCore.init("chart");
+
+      // Get the underlying ECharts instance and plot an empty chart
+      var chartDom = document.getElementById("chart");
+      var chart = echarts.getInstanceByDom(chartDom);
+      if (!chart) {
+        // Fallback: if for some reason ChartCore didn't create it, create directly
+        chart = echarts.init(chartDom);
+      }
+
+      // Empty chart with correct axes and $1 gridlines
+      var option = {
+        backgroundColor: "#0d1117",
+        animation: false,
+        grid: {
+          left: 60,
+          right: 20,
+          top: 20,
+          bottom: 60
+        },
+        xAxis: {
+          type: "time",
+          axisLine: { lineStyle: { color: "#8b949e" } },
+          axisLabel: { color: "#8b949e" },
+          splitLine: { show: true, lineStyle: { color: "#30363d" } }
+        },
+        yAxis: {
+          type: "value",
+          min: 0,
+          max: 10,
+          interval: 1,                   // $1 gridlines
+          axisLine: { lineStyle: { color: "#8b949e" } },
+          axisLabel: {
+            color: "#8b949e",
+            formatter: function (val) {
+              return "$" + val.toFixed(0);
+            }
+          },
+          splitLine: { show: true, lineStyle: { color: "#30363d" } }
+        },
+        dataZoom: [
+          { type: "inside", throttle: 50 },
+          { type: "slider", bottom: 30, height: 18 }
+        ],
+        series: []
+      };
+
+      chart.setOption(option);
+    });
+  </script>
+</body>
+</html>

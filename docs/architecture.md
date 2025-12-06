@@ -227,6 +227,22 @@ Typical flow:
 
 4. Backend services (e.g., `backend.service`) are restarted via `systemctl`.
 
+## Online Source of Truth (GitHub)
+
+All code and docs for this project live in the public repo:
+
+- https://github.com/8abak/ctrade-openapi-client
+
+Automated tools (including Custom GPTs) must read files directly from GitHub using:
+
+- GitHub contents API for listing folders:
+  - https://api.github.com/repos/8abak/ctrade-openapi-client/contents/<folder>
+
+- Raw URLs for file contents:
+  - https://raw.githubusercontent.com/8abak/ctrade-openapi-client/main/<path>
+
+
+
 Custom GPTs must respect this deployment pattern when suggesting DevOps changes or job automation.
 
 ---
