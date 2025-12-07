@@ -1,0 +1,167 @@
+=== DATABASE SCHEMA SNAPSHOT (LATEST) ===
+Generated at: 2025-12-07 15:55:02.367136+11:00
+Schema: public
+
+=== TABLES & COLUMNS ===
+
+Table: hhll_piv
+---------------
+  pos | column_name | data_type | len/prec/scale | nullable | default
+  -------------------------------------------------------------------
+    1 | id           | bigint     | 64/0          | NO       | nextval('hhll_piv_id_seq'::regclass)
+    2 | swing_id     | bigint     | 64/0          | NO       | 
+    3 | tick_id      | bigint     | 64/0          | NO       | 
+    4 | ts           | timestamp with time zone |               | NO       | 
+    5 | mid          | numeric    | 10/2          | NO       | 
+    6 | ptype        | smallint   | 16/0          | NO       | 
+    7 | class        | smallint   | 16/0          | NO       | 
+    8 | class_text   | text       |               | NO       | 
+
+Table: piv_hilo
+---------------
+  pos | column_name | data_type | len/prec/scale | nullable | default
+  -------------------------------------------------------------------
+    1 | id           | bigint     | 64/0          | NO       | nextval('piv_hilo_id_seq'::regclass)
+    2 | tick_id      | bigint     | 64/0          | NO       | 
+    3 | ts           | timestamp with time zone |               | NO       | 
+    4 | mid          | numeric    | 10/2          | NO       | 
+    5 | ptype        | smallint   | 16/0          | NO       | 
+    6 | win_left     | smallint   | 16/0          | NO       | 
+    7 | win_right    | smallint   | 16/0          | NO       | 
+
+Table: piv_swings
+-----------------
+  pos | column_name | data_type | len/prec/scale | nullable | default
+  -------------------------------------------------------------------
+    1 | id           | bigint     | 64/0          | NO       | nextval('piv_swings_id_seq'::regclass)
+    2 | pivot_id     | bigint     | 64/0          | NO       | 
+    3 | tick_id      | bigint     | 64/0          | NO       | 
+    4 | ts           | timestamp with time zone |               | NO       | 
+    5 | mid          | numeric    | 10/2          | NO       | 
+    6 | ptype        | smallint   | 16/0          | NO       | 
+    7 | swing_index  | bigint     | 64/0          | NO       | 
+
+Table: ticks
+------------
+  pos | column_name | data_type | len/prec/scale | nullable | default
+  -------------------------------------------------------------------
+    1 | id           | bigint     | 64/0          | NO       | nextval('ticks_rebuild_id_seq'::regclass)
+    2 | symbol       | text       |               | YES      | 
+    3 | timestamp    | timestamp with time zone |               | YES      | 
+    4 | bid          | double precision | 53            | YES      | 
+    5 | ask          | double precision | 53            | YES      | 
+    6 | kal          | double precision | 53            | YES      | 
+    7 | mid          | double precision | 53            | YES      | 
+    8 | spread       | double precision | 53            | YES      | 
+    9 | kal_fast     | double precision | 53            | YES      | 
+   10 | kal_slow     | double precision | 53            | YES      | 
+   11 | kal_fast_resid | double precision | 53            | YES      | 
+   12 | kal_slow_resid | double precision | 53            | YES      | 
+
+Table: zones_hhll
+-----------------
+  pos | column_name | data_type | len/prec/scale | nullable | default
+  -------------------------------------------------------------------
+    1 | id           | bigint     | 64/0          | NO       | nextval('zones_hhll_id_seq'::regclass)
+    2 | start_tick_id | bigint     | 64/0          | NO       | 
+    3 | end_tick_id  | bigint     | 64/0          | YES      | 
+    4 | start_time   | timestamp with time zone |               | NO       | 
+    5 | end_time     | timestamp with time zone |               | YES      | 
+    6 | top_price    | numeric    | 10/2          | NO       | 
+    7 | bot_price    | numeric    | 10/2          | NO       | 
+    8 | top_pivot_id | bigint     | 64/0          | NO       | 
+    9 | bot_pivot_id | bigint     | 64/0          | NO       | 
+   10 | n_ticks      | bigint     | 64/0          | NO       | 
+   11 | break_dir    | smallint   | 16/0          | YES      | 
+   12 | break_tick_id | bigint     | 64/0          | YES      | 
+   13 | break_time   | timestamp with time zone |               | YES      | 
+   14 | state        | text       |               | NO       | 
+   15 | activate_time | timestamp with time zone |               | YES      | 
+   16 | invalidate_time | timestamp with time zone |               | YES      | 
+   17 | invalidate_tick | bigint     | 64/0          | YES      | 
+
+=== INDEXES ===
+
+Table: hhll_piv
+---------------
+  Index: hhll_piv_pkey [PRIMARY, UNIQUE]
+  CREATE UNIQUE INDEX hhll_piv_pkey ON public.hhll_piv USING btree (id)
+
+Table: piv_hilo
+---------------
+  Index: piv_hilo_pkey [PRIMARY, UNIQUE]
+  CREATE UNIQUE INDEX piv_hilo_pkey ON public.piv_hilo USING btree (id)
+
+Table: piv_swings
+-----------------
+  Index: piv_swings_pkey [PRIMARY, UNIQUE]
+  CREATE UNIQUE INDEX piv_swings_pkey ON public.piv_swings USING btree (id)
+
+Table: ticks
+------------
+  Index: ticks_rebuild_pkey [PRIMARY, UNIQUE]
+  CREATE UNIQUE INDEX ticks_rebuild_pkey ON public.ticks USING btree (id)
+
+Table: zones_hhll
+-----------------
+  Index: zones_hhll_pkey [PRIMARY, UNIQUE]
+  CREATE UNIQUE INDEX zones_hhll_pkey ON public.zones_hhll USING btree (id)
+
+=== CONSTRAINTS ===
+
+Table: hhll_piv
+---------------
+  CHECK        2200_74326_1_not_null
+  CHECK        2200_74326_2_not_null
+  CHECK        2200_74326_3_not_null
+  CHECK        2200_74326_4_not_null
+  CHECK        2200_74326_5_not_null
+  CHECK        2200_74326_6_not_null
+  CHECK        2200_74326_7_not_null
+  CHECK        2200_74326_8_not_null
+  PRIMARY KEY  hhll_piv_pkey on id -> hhll_piv(id)
+  FOREIGN KEY  hhll_piv_swing_id_fkey on swing_id -> piv_swings(id)
+
+Table: piv_hilo
+---------------
+  CHECK        2200_74302_1_not_null
+  CHECK        2200_74302_2_not_null
+  CHECK        2200_74302_3_not_null
+  CHECK        2200_74302_4_not_null
+  CHECK        2200_74302_5_not_null
+  CHECK        2200_74302_6_not_null
+  CHECK        2200_74302_7_not_null
+  PRIMARY KEY  piv_hilo_pkey on id -> piv_hilo(id)
+  FOREIGN KEY  piv_hilo_tick_id_fkey on tick_id -> ticks(id)
+
+Table: piv_swings
+-----------------
+  CHECK        2200_74314_1_not_null
+  CHECK        2200_74314_2_not_null
+  CHECK        2200_74314_3_not_null
+  CHECK        2200_74314_4_not_null
+  CHECK        2200_74314_5_not_null
+  CHECK        2200_74314_6_not_null
+  CHECK        2200_74314_7_not_null
+  FOREIGN KEY  piv_swings_pivot_id_fkey on pivot_id -> piv_hilo(id)
+  PRIMARY KEY  piv_swings_pkey on id -> piv_swings(id)
+
+Table: ticks
+------------
+  CHECK        2200_74268_1_not_null
+  PRIMARY KEY  ticks_rebuild_pkey on id -> ticks(id)
+
+Table: zones_hhll
+-----------------
+  CHECK        2200_74340_10_not_null
+  CHECK        2200_74340_14_not_null
+  CHECK        2200_74340_1_not_null
+  CHECK        2200_74340_2_not_null
+  CHECK        2200_74340_4_not_null
+  CHECK        2200_74340_6_not_null
+  CHECK        2200_74340_7_not_null
+  CHECK        2200_74340_8_not_null
+  CHECK        2200_74340_9_not_null
+  FOREIGN KEY  zones_hhll_bot_pivot_id_fkey on bot_pivot_id -> hhll_piv(id)
+  PRIMARY KEY  zones_hhll_pkey on id -> zones_hhll(id)
+  FOREIGN KEY  zones_hhll_top_pivot_id_fkey on top_pivot_id -> hhll_piv(id)
