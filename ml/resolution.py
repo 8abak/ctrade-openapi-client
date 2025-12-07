@@ -1,46 +1,105 @@
-# ml/resolution.py
+"""
+ml.resolution
+
+Streaming, low-pressure 3-level resolution builder based purely on
+local highs/lows, writing directly into the DB.
+
+Levels
+------
+
+1) Micro (from ticks → hhll_piv)
+   - Sliding window of 21 ticks (10 left, 10 right + center).
+   - If the center tick is the strict maximum in that window → HIGH.
+   - If the center tick is the strict minimum in that window → LOW.
+   - Ticks are streamed in small batches; only a small overlap is kept
+     in memory, so this can run over full history.
+
+   Inserts into: hhll_piv(tick_id, ts, mid, ptype)
+
+2) Middle (from Micro → piv_hilo)
+   - Take full Micro list (in memory; much smaller than ticks).
+   - Split into highs and lows.
+   - For each type separately, use a 7-pivot window (3 left, 3 right):
+       - center is strict max among 7 -> middle HIGH
+       - center is strict min among 7 -> middle LOW
+   - Merge highs + lows, enforce alternation (H/L/H/L...).
+
+   Inserts into: piv_hilo(tick_id, ts, mid, ptype, win_left, win_right)
+
+3) Macro (from Middle → piv_swings)
+   - Same algorithm on Middle pivots to generate Macro pivots.
+
+   Inserts into: piv_swings(tick_id, ts, mid, ptype, swing_index)
+
+Journaling
+----------
+
+Every `--log-every N` pivots per level, we log a line:
+
+    TIMESTAMP [INFO] micro pivot #200: tick_id=123456 ts=... price=...
+
+So the log itself becomes a simple journal of progress.
+
+CLI
+---
+
+    python -m ml.resolution --symbol XAUUSD \
+        --batch-size 5000 --log-every 200 --log-level INFO
+
+Run in background gently:
+
+    nohup nice -n 10 python -m ml.resolution --symbol XAUUSD \
+        --batch-size 5000 --log-every 200 --log-level INFO \
+        > resolution.log 2>&1 &
+
+If your tables have extra NOT NULL columns, adjust the INSERT column
+lists in:
+
+    _insert_micro_batch
+    _insert_middle_batch
+    _insert_macro_batch
+"""
 
 from __future__ import annotations
 
 import argparse
 import logging
+import time
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple
+from typing import Iterable, List, Optional, Sequence, Tuple
 
 from backend.db import get_conn, dict_cur
 
+
 # ---------------------------------------------------------------------------
-# Configuration for peer windows
+# Configuration
 # ---------------------------------------------------------------------------
 
-# Micro: how many *ticks on each side* to consider as peers
-MICRO_TICK_PEERS = 5          # → window size = 2*5 + 1 = 11
-
-# Middle: how many *micro pivots of same type* on each side
-MIDDLE_MICRO_PEERS = 3
-
-# Macro: how many *middle pivots of same type* on each side
-MACRO_MIDDLE_PEERS = 3
+# Window radii
+MICRO_TICK_RADIUS = 10   # 2*10 + 1 = 21 ticks, center is the 11th
+MIDDLE_PIVOT_RADIUS = 3  # 2*3 + 1 = 7 pivots
+MACRO_PIVOT_RADIUS = 3   # same as middle
 
 
 # ---------------------------------------------------------------------------
-# Basic data structures
+# Data structures
 # ---------------------------------------------------------------------------
 
 @dataclass
 class TickPoint:
     id: int
-    ts: object  # datetime
+    ts: object   # datetime in practice
     price: float
 
 
 @dataclass
 class Pivot:
-    id: Optional[int]         # DB id if exists, None for in-memory-only
+    """Generic pivot representation."""
+    seq_id: int          # running sequence id per level (1-based)
     tick_id: int
     ts: object
     price: float
-    ptype: int                # +1 = HIGH, -1 = LOW
+    ptype: int           # +1 = HIGH, -1 = LOW
 
     @property
     def is_high(self) -> bool:
@@ -51,426 +110,418 @@ class Pivot:
         return self.ptype < 0
 
 
-@dataclass
-class AggregatedPivot(Pivot):
-    """
-    Pivot at a coarser resolution with a range of underlying ids.
-    For Middle level: source_* are hhll_piv.id ranges.
-    For Macro level: source_* are piv_hilo.id ranges (and we can also
-    derive min/max hhll_piv.id).
-    """
-    source_min_id: int
-    source_max_id: int
-    # For Macro we may also carry hhll ranges in memory if desired.
-
-
 # ---------------------------------------------------------------------------
-# Core helpers: local extrema selection
+# Helpers
 # ---------------------------------------------------------------------------
 
-def _local_max_indices(values: Sequence[float], peer_radius: int) -> List[int]:
-    """
-    Return indices i such that values[i] is strictly greater than all
-    values in the window [i-peer_radius, i+peer_radius] (excluding i).
-    """
-    n = len(values)
-    result: List[int] = []
-    for i in range(n):
-        left = max(0, i - peer_radius)
-        right = min(n - 1, i + peer_radius)
-        v = values[i]
-        is_max = True
-        for j in range(left, right + 1):
-            if j == i:
-                continue
-            if values[j] >= v:
-                is_max = False
-                break
-        if is_max:
-            result.append(i)
-    return result
+def _is_strict_max(values: Sequence[float], center_idx: int, radius: int) -> bool:
+    """Check if values[center_idx] is strict max in its 2*radius+1 window."""
+    v = values[center_idx]
+    left = max(0, center_idx - radius)
+    right = min(len(values) - 1, center_idx + radius)
+    for j in range(left, right + 1):
+        if j == center_idx:
+            continue
+        if values[j] >= v:
+            return False
+    return True
 
 
-def _local_min_indices(values: Sequence[float], peer_radius: int) -> List[int]:
-    """
-    Return indices i such that values[i] is strictly smaller than all
-    values in the window [i-peer_radius, i+peer_radius] (excluding i).
-    """
-    n = len(values)
-    result: List[int] = []
-    for i in range(n):
-        left = max(0, i - peer_radius)
-        right = min(n - 1, i + peer_radius)
-        v = values[i]
-        is_min = True
-        for j in range(left, right + 1):
-            if j == i:
-                continue
-            if values[j] <= v:
-                is_min = False
-                break
-        if is_min:
-            result.append(i)
-    return result
+def _is_strict_min(values: Sequence[float], center_idx: int, radius: int) -> bool:
+    """Check if values[center_idx] is strict min in its 2*radius+1 window."""
+    v = values[center_idx]
+    left = max(0, center_idx - radius)
+    right = min(len(values) - 1, center_idx + radius)
+    for j in range(left, right + 1):
+        if j == center_idx:
+            continue
+        if values[j] <= v:
+            return False
+    return True
 
 
 def _enforce_alternation(pivots: List[Pivot]) -> List[Pivot]:
     """
     Ensure HIGH/LOW alternation by removing weaker duplicates of same type.
-    Assumes pivots are sorted by time/id.
+    Assumes pivots are sorted by time / tick_id.
     """
     if not pivots:
         return pivots
 
     result: List[Pivot] = [pivots[0]]
+    seq_counter = 1
+    result[0].seq_id = seq_counter
+
     for p in pivots[1:]:
         last = result[-1]
         if p.ptype == last.ptype:
-            # Same type: keep the more extreme
+            # Same type (HH or LL). Keep the more extreme.
             if p.is_high:
-                # keep the higher high
+                # keep higher high
                 if p.price > last.price:
+                    seq_counter += 1
+                    p.seq_id = seq_counter
                     result[-1] = p
             else:
-                # keep the lower low
+                # keep lower low
                 if p.price < last.price:
+                    seq_counter += 1
+                    p.seq_id = seq_counter
                     result[-1] = p
         else:
+            seq_counter += 1
+            p.seq_id = seq_counter
             result.append(p)
+
     return result
 
 
 # ---------------------------------------------------------------------------
-# DB fetch helpers (adapt column names to actual schema)
+# DB access
 # ---------------------------------------------------------------------------
 
-def fetch_ticks(
+def stream_ticks(
     conn,
     symbol: str,
-    tick_from: Optional[int] = None,
-    tick_to: Optional[int] = None,
-) -> List[TickPoint]:
+    tick_from: Optional[int],
+    tick_to: Optional[int],
+    batch_size: int,
+) -> Iterable[List[TickPoint]]:
     """
-    Load ticks for a symbol. Adjust column names (timestamp/mid) to your schema.
-    """
-    sql = """
-        SELECT id, timestamp, mid
-        FROM ticks
-        WHERE symbol = %s
-    """
-    params: List[object] = [symbol]
-    if tick_from is not None:
-        sql += " AND id >= %s"
-        params.append(tick_from)
-    if tick_to is not None:
-        sql += " AND id <= %s"
-        params.append(tick_to)
-    sql += " ORDER BY id"
+    Generator yielding ticks in batches, ordered by id.
 
+    Always fetches "id > last_id" to avoid OFFSET scans.
+    """
     cur = dict_cur(conn)
-    cur.execute(sql, params)
-    rows = cur.fetchall()
-    return [TickPoint(id=r["id"], ts=r["timestamp"], price=float(r["mid"])) for r in rows]
+    last_id: Optional[int] = None
+
+    while True:
+        params = [symbol]
+        sql = """
+            SELECT id, timestamp, mid
+            FROM ticks
+            WHERE symbol = %s
+        """
+        if tick_from is not None:
+            sql += " AND id >= %s"
+            params.append(tick_from)
+        if tick_to is not None:
+            sql += " AND id <= %s"
+            params.append(tick_to)
+        if last_id is not None:
+            sql += " AND id > %s"
+            params.append(last_id)
+        sql += " ORDER BY id LIMIT %s"
+        params.append(batch_size)
+
+        cur.execute(sql, params)
+        rows = cur.fetchall()
+        if not rows:
+            break
+
+        ticks = [TickPoint(id=r["id"], ts=r["timestamp"], price=float(r["mid"])) for r in rows]
+        last_id = ticks[-1].id
+        yield ticks
+
+        # very small sleep to avoid hammering DB
+        time.sleep(0.01)
 
 
-def fetch_micro_from_db(
+# ---------------------------------------------------------------------------
+# Level 1: Micro pivots from streaming ticks (writes to hhll_piv)
+# ---------------------------------------------------------------------------
+
+def build_micro_pivots_streaming(
     conn,
     symbol: str,
-    micro_from_id: Optional[int] = None,
-    micro_to_id: Optional[int] = None,
+    tick_from: Optional[int],
+    tick_to: Optional[int],
+    batch_size: int,
+    log_every: int,
+    insert_batch_size: int,
 ) -> List[Pivot]:
     """
-    Load existing Micro pivots (hhll_piv) by joining via ticks to filter by symbol.
-    Adjust column names (tick_id, ts, mid, ptype) to your schema.
-    """
-    sql = """
-        SELECT h.id, h.tick_id, h.ts, h.mid::float AS price, h.ptype
-        FROM hhll_piv h
-        JOIN ticks t ON t.id = h.tick_id
-        WHERE t.symbol = %s
-    """
-    params: List[object] = [symbol]
-    if micro_from_id is not None:
-        sql += " AND h.id >= %s"
-        params.append(micro_from_id)
-    if micro_to_id is not None:
-        sql += " AND h.id <= %s"
-        params.append(micro_to_id)
-    sql += " ORDER BY h.id"
+    Stream ticks in small batches, keeping only a small overlap in memory.
 
-    cur = dict_cur(conn)
-    cur.execute(sql, params)
-    rows = cur.fetchall()
-    return [
-        Pivot(
-            id=r["id"],
-            tick_id=r["tick_id"],
-            ts=r["ts"],
-            price=float(r["price"]),
-            ptype=int(r["ptype"]),
-        )
-        for r in rows
-    ]
+    For each tick that has MICRO_TICK_RADIUS neighbours on both sides
+    (i.e. full 21-tick window), check:
+      - strict maximum  -> HIGH
+      - strict minimum  -> LOW
 
+    Writes to hhll_piv as pivots are found, in batched INSERTs.
 
-def fetch_middle_from_db(
-    conn,
-    symbol: str,
-    middle_from_id: Optional[int] = None,
-    middle_to_id: Optional[int] = None,
-) -> List[Pivot]:
+    Returns a list of Micro pivots (in memory).
     """
-    Load existing Middle pivots (piv_hilo). Adjust names to schema.
-    """
-    sql = """
-        SELECT p.id, p.tick_id, p.ts, p.mid::float AS price, p.ptype
-        FROM piv_hilo p
-        JOIN ticks t ON t.id = p.tick_id
-        WHERE t.symbol = %s
-    """
-    params: List[object] = [symbol]
-    if middle_from_id is not None:
-        sql += " AND p.id >= %s"
-        params.append(middle_from_id)
-    if middle_to_id is not None:
-        sql += " AND p.id <= %s"
-        params.append(middle_to_id)
-    sql += " ORDER BY p.id"
+    radius = MICRO_TICK_RADIUS
+    buffer: List[TickPoint] = []   # tail + current batch
+    micro: List[Pivot] = []
+    seq_counter = 0
 
-    cur = dict_cur(conn)
-    cur.execute(sql, params)
-    rows = cur.fetchall()
-    return [
-        Pivot(
-            id=r["id"],
-            tick_id=r["tick_id"],
-            ts=r["ts"],
-            price=float(r["price"]),
-            ptype=int(r["ptype"]),
-        )
-        for r in rows
-    ]
+    insert_rows: List[Tuple[int, object, float, int]] = []  # tick_id, ts, mid, ptype
+
+    for batch in stream_ticks(conn, symbol, tick_from, tick_to, batch_size):
+        buffer = buffer + batch
+        prices = [t.price for t in buffer]
+
+        # We leave last 2*radius ticks unprocessed to keep enough context
+        # for the next batch.
+        max_process_idx = max(-1, len(buffer) - 2 * radius - 1)
+
+        for idx in range(radius, max_process_idx + 1):
+            if not (idx - radius >= 0 and idx + radius < len(buffer)):
+                continue
+
+            price = prices[idx]
+            is_high = _is_strict_max(prices, idx, radius)
+            is_low = _is_strict_min(prices, idx, radius)
+
+            if not (is_high or is_low):
+                continue
+
+            ptype = +1 if is_high else -1
+            center = buffer[idx]
+            seq_counter += 1
+
+            pivot = Pivot(
+                seq_id=seq_counter,
+                tick_id=center.id,
+                ts=center.ts,
+                price=price,
+                ptype=ptype,
+            )
+            micro.append(pivot)
+
+            # Stage for DB insert
+            insert_rows.append((center.id, center.ts, price, ptype))
+
+            if seq_counter % log_every == 0:
+                logging.info(
+                    "micro pivot #%d: tick_id=%d ts=%s price=%.5f",
+                    seq_counter,
+                    center.id,
+                    center.ts,
+                    center.price,
+                )
+
+            if len(insert_rows) >= insert_batch_size:
+                _insert_micro_batch(conn, insert_rows)
+                insert_rows.clear()
+
+        # Keep only last 2*radius ticks as overlap for next batch
+        if len(buffer) > 2 * radius:
+            buffer = buffer[-2 * radius :]
+
+    # Flush remaining inserts
+    if insert_rows:
+        _insert_micro_batch(conn, insert_rows)
+        insert_rows.clear()
+
+    # Final alternation cleanup (does NOT touch DB rows, only in-memory list)
+    micro.sort(key=lambda p: (p.ts, p.tick_id))
+    micro = _enforce_alternation(micro)
+
+    logging.info("micro pivots done for %s: count=%d", symbol, len(micro))
+    return micro
 
 
 # ---------------------------------------------------------------------------
-# Micro level: ticks → in-memory Micro pivots
+# Level 2 and 3: generic local-extrema on pivots (with DB inserts)
 # ---------------------------------------------------------------------------
 
-def build_micro_pivots_from_ticks(
-    conn,
-    symbol: str,
-    tick_from: Optional[int] = None,
-    tick_to: Optional[int] = None,
-) -> List[Pivot]:
-    """
-    New Micro algorithm:
-      - Look at tick series.
-      - Micro highs: each tick whose price is higher than all its
-        MICRO_TICK_PEERS ticks on each side.
-      - Micro lows: each tick whose price is lower than all its peers.
-      - Enforce alternation.
-    Returns in-memory Pivot objects (no DB writes here).
-    """
-    ticks = fetch_ticks(conn, symbol, tick_from, tick_to)
-    if not ticks:
-        logging.info("No ticks for %s in [%s, %s]", symbol, tick_from, tick_to)
-        return []
-
-    prices = [t.price for t in ticks]
-    high_idx = _local_max_indices(prices, MICRO_TICK_PEERS)
-    low_idx = _local_min_indices(prices, MICRO_TICK_PEERS)
-
-    pivots: List[Pivot] = []
-    for i in high_idx:
-        t = ticks[i]
-        pivots.append(Pivot(
-            id=None,
-            tick_id=t.id,
-            ts=t.ts,
-            price=t.price,
-            ptype=+1,
-        ))
-    for i in low_idx:
-        t = ticks[i]
-        pivots.append(Pivot(
-            id=None,
-            tick_id=t.id,
-            ts=t.ts,
-            price=t.price,
-            ptype=-1,
-        ))
-
-    # Sort by time / id and enforce HIGH/LOW alternation
-    pivots.sort(key=lambda p: (p.ts, p.tick_id))
-    pivots = _enforce_alternation(pivots)
-
-    logging.info(
-        "Micro (in-memory) for %s: ticks=%d → micro_pivots=%d",
-        symbol, len(ticks), len(pivots),
-    )
-    return pivots
-
-
-# ---------------------------------------------------------------------------
-# Middle level: Micro pivots → Middle pivots (peer-based)
-# ---------------------------------------------------------------------------
-
-def _select_from_same_type_peers(
+def _build_level_from_pivots(
+    base_level_name: str,
+    level_name: str,
     pivots: List[Pivot],
-    peer_radius: int,
-    is_high: bool,
-) -> List[AggregatedPivot]:
+    radius: int,
+    log_every: int,
+) -> List[Pivot]:
     """
-    Given only highs or only lows (sorted by time), select those that are
-    local extremes among their same-type peers.
-    Returns AggregatedPivot with source_min_id/source_max_id representing
-    min/max *id* of underlying pivots in the peer window.
+    Generic builder for Middle/Macro levels:
+
+    - Split input pivots into highs and lows.
+    - For each group (highs, lows), use a sliding window of
+      2*radius+1 SAME-TYPE pivots and mark center as pivot if it is
+      strict max/min.
+    - Merge highs + lows, sort by time, enforce alternation.
     """
     if not pivots:
+        logging.info("%s: no input pivots; returning empty list", level_name)
         return []
 
-    prices = [p.price for p in pivots]
-    if is_high:
-        idx = _local_max_indices(prices, peer_radius)
-    else:
-        idx = _local_min_indices(prices, peer_radius)
+    # Sort by time / tick_id just in case
+    pivots.sort(key=lambda p: (p.ts, p.tick_id))
 
-    agg: List[AggregatedPivot] = []
-    n = len(pivots)
-    for k in idx:
-        left = max(0, k - peer_radius)
-        right = min(n - 1, k + peer_radius)
-        window = pivots[left:right+1]
-        min_id = min(p.id for p in window if p.id is not None)
-        max_id = max(p.id for p in window if p.id is not None)
-        p = pivots[k]
-        agg.append(
-            AggregatedPivot(
-                id=p.id,
-                tick_id=p.tick_id,
-                ts=p.ts,
-                price=p.price,
-                ptype=p.ptype,
-                source_min_id=min_id,
-                source_max_id=max_id,
+    highs = [p for p in pivots if p.is_high]
+    lows = [p for p in pivots if p.is_low]
+
+    def select_extrema(input_pivots: List[Pivot], is_high: bool) -> List[Pivot]:
+        if not input_pivots:
+            return []
+
+        values = [p.price for p in input_pivots]
+        selected: List[Pivot] = []
+        n = len(input_pivots)
+        seq_counter = 0
+
+        for idx in range(radius, n - radius):
+            if is_high:
+                if not _is_strict_max(values, idx, radius):
+                    continue
+            else:
+                if not _is_strict_min(values, idx, radius):
+                    continue
+
+            base_p = input_pivots[idx]
+            seq_counter += 1
+            p = Pivot(
+                seq_id=seq_counter,   # temporary; re-assigned after merge
+                tick_id=base_p.tick_id,
+                ts=base_p.ts,
+                price=base_p.price,
+                ptype=base_p.ptype,
             )
-        )
-    return agg
+            selected.append(p)
 
+        return selected
 
-def build_middle_from_micro(
-    conn,
-    symbol: str,
-    micro_from_id: Optional[int] = None,
-    micro_to_id: Optional[int] = None,
-) -> List[AggregatedPivot]:
-    """
-    New Middle algorithm:
-      - Take Micro pivots from hhll_piv (DB).
-      - Among Micro highs, select those that are higher than their
-        MIDDLE_MICRO_PEERS same-type Micro highs.
-      - Same for lows.
-      - Enforce alternation.
-    Returns in-memory AggregatedPivot list.
-    """
-    micro = fetch_micro_from_db(conn, symbol, micro_from_id, micro_to_id)
-    if not micro:
-        logging.info("No micro pivots for %s", symbol)
-        return []
+    level_highs = select_extrema(highs, is_high=True)
+    level_lows = select_extrema(lows, is_high=False)
 
-    micro.sort(key=lambda p: (p.ts, p.id))
+    combined: List[Pivot] = level_highs + level_lows
+    combined.sort(key=lambda p: (p.ts, p.tick_id))
 
-    micro_highs = [p for p in micro if p.is_high]
-    micro_lows = [p for p in micro if p.is_low]
+    # enforce alternation and assign seq_ids
+    combined = _enforce_alternation(combined)
 
-    mid_highs = _select_from_same_type_peers(micro_highs, MIDDLE_MICRO_PEERS, is_high=True)
-    mid_lows = _select_from_same_type_peers(micro_lows, MIDDLE_MICRO_PEERS, is_high=False)
-
-    middle: List[AggregatedPivot] = mid_highs + mid_lows
-    middle.sort(key=lambda p: (p.ts, p.id))
-    middle = [_as_agg(p) for p in _enforce_alternation(middle)]
+    # Logging
+    for p in combined:
+        if p.seq_id % log_every == 0:
+            logging.info(
+                "%s pivot #%d: tick_id=%d ts=%s price=%.5f",
+                level_name,
+                p.seq_id,
+                p.tick_id,
+                p.ts,
+                p.price,
+            )
 
     logging.info(
-        "Middle (in-memory) for %s: micro=%d → middle=%d",
-        symbol, len(micro), len(middle),
+        "%s pivots from %s: in=%d out=%d",
+        level_name,
+        base_level_name,
+        len(pivots),
+        len(combined),
     )
-    return middle
+    return combined
 
 
-def _as_agg(p: Pivot) -> AggregatedPivot:
-    if isinstance(p, AggregatedPivot):
-        return p
-    # If no source range was set (rare case), default to [id,id]
-    assert p.id is not None, "Pivot must have id to be aggregated"
-    return AggregatedPivot(
-        id=p.id,
-        tick_id=p.tick_id,
-        ts=p.ts,
-        price=p.price,
-        ptype=p.ptype,
-        source_min_id=p.id,
-        source_max_id=p.id,
+def build_middle_pivots(
+    micro: List[Pivot],
+    log_every: int,
+) -> List[Pivot]:
+    return _build_level_from_pivots(
+        base_level_name="micro",
+        level_name="middle",
+        pivots=micro,
+        radius=MIDDLE_PIVOT_RADIUS,
+        log_every=log_every,
+    )
+
+
+def build_macro_pivots(
+    middle: List[Pivot],
+    log_every: int,
+) -> List[Pivot]:
+    return _build_level_from_pivots(
+        base_level_name="middle",
+        level_name="macro",
+        pivots=middle,
+        radius=MACRO_PIVOT_RADIUS,
+        log_every=log_every,
     )
 
 
 # ---------------------------------------------------------------------------
-# Macro level: Middle pivots → Macro pivots (peer-based)
+# DB insert helpers for each level
 # ---------------------------------------------------------------------------
 
-def build_macro_from_middle(
-    conn,
-    symbol: str,
-    middle_from_id: Optional[int] = None,
-    middle_to_id: Optional[int] = None,
-) -> List[AggregatedPivot]:
+def _insert_micro_batch(conn, rows: List[Tuple[int, object, float, int]]) -> None:
     """
-    New Macro algorithm:
-      - Take Middle pivots from piv_hilo (DB).
-      - Among Middle highs, select those that are higher than their
-        MACRO_MIDDLE_PEERS same-type Middle highs.
-      - Same for lows.
-      - Enforce alternation.
-    Returns AggregatedPivot list with source_min_id/source_max_id in
-    terms of piv_hilo.id.
+    Insert a batch of Micro pivots into hhll_piv.
+
+    Assumes table has at least: tick_id, ts, mid, ptype.
+    Adjust column list if your schema differs.
     """
-    middle = fetch_middle_from_db(conn, symbol, middle_from_id, middle_to_id)
-    if not middle:
-        logging.info("No middle pivots for %s", symbol)
-        return []
+    if not rows:
+        return
+    sql = """
+        INSERT INTO hhll_piv (tick_id, ts, mid, ptype)
+        VALUES (%s, %s, %s, %s)
+    """
+    cur = conn.cursor()
+    cur.executemany(sql, rows)
+    conn.commit()
 
-    middle.sort(key=lambda p: (p.ts, p.id))
 
-    mid_highs = [p for p in middle if p.is_high]
-    mid_lows = [p for p in middle if p.is_low]
+def _insert_middle_batch(conn, pivots: List[Pivot]) -> None:
+    """
+    Insert Middle pivots into piv_hilo.
 
-    mac_highs = _select_from_same_type_peers(mid_highs, MACRO_MIDDLE_PEERS, is_high=True)
-    mac_lows = _select_from_same_type_peers(mid_lows, MACRO_MIDDLE_PEERS, is_high=False)
+    Assumes table has at least: tick_id, ts, mid, ptype, win_left, win_right.
+    win_left / win_right are set to the peer radius (3).
+    """
+    if not pivots:
+        return
+    sql = """
+        INSERT INTO piv_hilo (tick_id, ts, mid, ptype, win_left, win_right)
+        VALUES (%s, %s, %s, %s, %s, %s)
+    """
+    params = [
+        (p.tick_id, p.ts, p.price, p.ptype, MIDDLE_PIVOT_RADIUS, MIDDLE_PIVOT_RADIUS)
+        for p in pivots
+    ]
+    cur = conn.cursor()
+    cur.executemany(sql, params)
+    conn.commit()
 
-    macro: List[AggregatedPivot] = mac_highs + mac_lows
-    macro.sort(key=lambda p: (p.ts, p.id))
-    macro = [_as_agg(p) for p in _enforce_alternation(macro)]
 
-    logging.info(
-        "Macro (in-memory) for %s: middle=%d → macro=%d",
-        symbol, len(middle), len(macro),
-    )
-    return macro
+def _insert_macro_batch(conn, pivots: List[Pivot]) -> None:
+    """
+    Insert Macro pivots into piv_swings.
+
+    Assumes table has at least: tick_id, ts, mid, ptype, swing_index.
+
+    Note: we *do not* set pivot_id here because the schema/constraints
+    for piv_swings are not fully known in this context. If pivot_id is
+    NOT NULL or has FK constraints, adjust this function accordingly.
+    """
+    if not pivots:
+        return
+    sql = """
+        INSERT INTO piv_swings (tick_id, ts, mid, ptype, swing_index)
+        VALUES (%s, %s, %s, %s, %s)
+    """
+    params = [
+        (p.tick_id, p.ts, p.price, p.ptype, p.seq_id)
+        for p in pivots
+    ]
+    cur = conn.cursor()
+    cur.executemany(sql, params)
+    conn.commit()
 
 
 # ---------------------------------------------------------------------------
-# CLI (analysis only – DB writes can be added later)
+# CLI
 # ---------------------------------------------------------------------------
 
 def parse_args(argv=None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="High/low based 3-level resolution")
-    p.add_argument("--symbol", required=True)
-    p.add_argument("--from-tick", type=int, default=None)
-    p.add_argument("--to-tick", type=int, default=None)
-    p.add_argument(
-        "--levels",
-        default="all",
-        help="Comma-separated subset of {micro,middle,macro,all}",
-    )
+    p = argparse.ArgumentParser(description="Streaming, low-pressure resolution builder")
+    p.add_argument("--symbol", required=True, help="Instrument symbol, e.g. XAUUSD")
+    p.add_argument("--from-tick", type=int, default=None, help="Lower bound on tick id (inclusive)")
+    p.add_argument("--to-tick", type=int, default=None, help="Upper bound on tick id (inclusive)")
+    p.add_argument("--batch-size", type=int, default=5000, help="Tick batch size per DB fetch")
+    p.add_argument("--insert-batch-size", type=int, default=500, help="Micro insert batch size")
+    p.add_argument("--log-every", type=int, default=200, help="Log every N pivots per level")
     p.add_argument(
         "--log-level",
         default="INFO",
@@ -485,25 +536,43 @@ def main(argv=None) -> None:
         level=getattr(logging, args.log_level.upper(), logging.INFO),
         format="%(asctime)s [%(levelname)s] %(message)s",
     )
-    levels = {l.strip().lower() for l in args.levels.split(",")}
-    if "all" in levels:
-        levels = {"micro", "middle", "macro"}
 
     conn = get_conn()
 
-    if "micro" in levels:
-        _ = build_micro_pivots_from_ticks(
-            conn,
-            args.symbol,
-            args.from_tick,
-            args.to_tick,
-        )
+    logging.info(
+        "Starting resolution build for %s (ticks [%s, %s], batch_size=%d)",
+        args.symbol,
+        args.from_tick,
+        args.to_tick,
+        args.batch_size,
+    )
 
-    if "middle" in levels:
-        _ = build_middle_from_micro(conn, args.symbol)
+    # Level 1: Micro (writes to hhll_piv)
+    micro = build_micro_pivots_streaming(
+        conn=conn,
+        symbol=args.symbol,
+        tick_from=args.from_tick,
+        tick_to=args.to_tick,
+        batch_size=args.batch_size,
+        log_every=args.log_every,
+        insert_batch_size=args.insert_batch_size,
+    )
 
-    if "macro" in levels:
-        _ = build_macro_from_middle(conn, args.symbol)
+    # Level 2: Middle (writes to piv_hilo)
+    middle = build_middle_pivots(micro, log_every=args.log_every)
+    _insert_middle_batch(conn, middle)
+
+    # Level 3: Macro (writes to piv_swings)
+    macro = build_macro_pivots(middle, log_every=args.log_every)
+    _insert_macro_batch(conn, macro)
+
+    logging.info(
+        "Finished all levels for %s: micro=%d, middle=%d, macro=%d",
+        args.symbol,
+        len(micro),
+        len(middle),
+        len(macro),
+    )
 
 
 if __name__ == "__main__":
