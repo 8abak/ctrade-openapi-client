@@ -44,6 +44,11 @@ window.ChartCore = (function () {
     }
 
     chart = echarts.init(dom, null, { useDirtyRect: true });
+    chart.on('dataZoom', function () {
+        // Recompute Y bounds for the new visible X window
+        recomputeYFromVisibleWindow(chart, state);
+    });
+
     state.hasInit = false;
 
     window.addEventListener("resize", () => chart && chart.resize());
@@ -74,6 +79,106 @@ window.ChartCore = (function () {
 
     return { date, time: rest };
   }
+
+  // Recompute Y-axis bounds based only on ticks currently visible on the X-axis
+  function recomputeYFromVisibleWindow(chart, state) {
+      if (!chart || !state || !state.ticks || !state.ticks.length) {
+          return;
+      }
+
+      let minX;
+      let maxX;
+
+      try {
+          // Preferred: use the xAxis scale extent (data space)
+          const xComp = chart.getModel().getComponent('xAxis');
+          if (xComp && xComp.axis && xComp.axis.scale) {
+              const extent = xComp.axis.scale.getExtent();
+              if (extent && extent.length === 2) {
+                  minX = extent[0];
+                  maxX = extent[1];
+              }
+          }
+      } catch (e) {
+          // fall through to pixel-based method
+      }
+
+      if (!Number.isFinite(minX) || !Number.isFinite(maxX)) {
+          // Fallback: derive data extent from pixel coordinates
+          try {
+              // Left/right of the plotting area
+              const grid = chart.getModel().getComponent('grid');
+              let leftPx = 0;
+              let rightPx = chart.getWidth();
+
+              if (grid && grid.coordinateSystem && grid.coordinateSystem.getRect) {
+                  const rect = grid.coordinateSystem.getRect();
+                  leftPx = rect.x;
+                  rightPx = rect.x + rect.width;
+              }
+
+              const dataExtent = chart.convertFromPixel(
+                  { xAxisIndex: 0 },
+                  [leftPx, rightPx]
+              );
+
+              if (Array.isArray(dataExtent) && dataExtent.length === 2) {
+                  minX = dataExtent[0];
+                  maxX = dataExtent[1];
+              }
+          } catch (e) {
+              // If we can't get a sane x-range, bail out and don't touch Y-axis
+              return;
+          }
+      }
+
+      if (!Number.isFinite(minX) || !Number.isFinite(maxX)) {
+          return;
+      }
+
+      // IMPORTANT: adjust this predicate to whatever field you actually use on X
+      // (id, ts, index, etc.) – the goal is to keep it consistent with your series data.
+      const windowTicks = state.ticks.filter(t => {
+          const x = t.id ?? t.ts ?? t.x;
+          return x >= minX && x <= maxX;
+      });
+
+      if (!windowTicks.length) {
+          return;
+      }
+
+      // Collect all price-like values from the visible ticks
+      const ys = windowTicks
+          .map(t => [t.bid, t.ask, t.mid, t.kal])
+          .flat()
+          .filter(v => v != null && !Number.isNaN(v));
+
+      if (!ys.length) {
+          return;
+      }
+
+      const minY = Math.min(...ys);
+      const maxY = Math.max(...ys);
+
+      if (!Number.isFinite(minY) || !Number.isFinite(maxY)) {
+          return;
+      }
+
+      const paddedMin = Math.floor(minY);
+      const paddedMax = Math.ceil(maxY);
+
+      // Merge into existing option so zoom is not reset
+      chart.setOption(
+          {
+              yAxis: {
+                  min: paddedMin,
+                  max: paddedMax,
+              },
+          },
+          false // notMerge = false → merge with current option, keep zoom
+      );
+  }
+
 
   function buildBaseOption() {
     return {
