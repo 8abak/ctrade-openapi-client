@@ -1,0 +1,26 @@
+=== ROUTES & DB HELPERS OVERVIEW (LATEST) ===
+
+=== HTTP ROUTES (backend/main.py) ===
+file | method | path | handler
+------------------------------
+main.py | GET    | /                              | root
+main.py | GET    | /api/live_window               | api_live_window
+main.py | GET    | /api/review/window             | api_review_window
+main.py | GET    | /api/sql                       | api_sql_get
+main.py | POST   | /api/sql                       | api_sql_post
+main.py | POST   | /api/sql/exec                  | api_sql_exec
+main.py | GET    | /api/sql/tables                | api_sql_tables
+main.py | GET    | /sqlvw/query                   | sqlvw_query
+main.py | GET    | /sqlvw/tables                  | sqlvw_tables
+main.py | GET    | /version                       | get_version
+
+=== DB FUNCTIONS (backend/db.py) ===
+file | function | args
+----------------------
+db.py | columns_exist        | (conn, table, cols)
+db.py | detect_bid_ask       | (conn)
+db.py | detect_mid_expr      | (conn)
+db.py | detect_ts_col        | (conn)
+db.py | dict_cur             | (conn)
+db.py | get_conn             | ()
+db.py | scalar               | (conn, sql, params)
