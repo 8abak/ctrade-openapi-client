@@ -10,7 +10,7 @@ Relies on:
 from pathlib import Path
 from textwrap import indent
 
-from db import get_conn  # adjust if your helper name/path is slightly different
+from backend.db import get_conn  # adjust if your helper name/path is slightly different
 
 
 SCHEMA_COLUMNS_SQL = """
