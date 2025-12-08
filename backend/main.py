@@ -188,7 +188,7 @@ def api_evals_window(
         tick_from, tick_to = tick_to, tick_from
 
     conn = get_conn()
-    with conn.cursor(cursor_factory=psycopg.rows.dict_row) as cur:
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
         cur.execute(
             """
             SELECT
