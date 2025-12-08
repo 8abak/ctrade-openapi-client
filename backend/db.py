@@ -2,6 +2,7 @@
 import os
 import psycopg2
 import psycopg2.extras
+from typing import List, Optional, Dict, Any
 
 # Tiny DB helper used by backend modules
 # Reads DATABASE_URL or falls back to a sensible local default.

@@ -1,4 +1,21 @@
 <!-- docs/decisions.md -->
+## 2025-12-09 — [Structure] — Peer-Based Tick Importance (evals)
+
+- Context:  
+  Legacy structural layers (zones, pivots, swings, levels, etc.) for XAUUSD are being replaced by a peer-comparison importance ladder, driven purely by tick prices. Existing structure tables are no longer used in new ML/visualisation flows.
+
+- Decision:  
+  Introduce a new core table `evals` with 1:1 grain to `ticks.id` for XAUUSD.  
+  - Phase A computes `base_sign`, `level` (0/1), and `signed_importance` per tick, with `mid` and `timestamp` denormalised from `ticks`.  
+  - Phase B iteratively promotes ticks to higher levels using odd-sized, sign-consistent windows of peers, with monotone level increases and immutable sign.  
+  - Legacy pivot / swing / zone / level tables for XAUUSD are dropped, and routes/views depending on them are removed. All structural overlays must come from `evals`.
+
+- Consequences:  
+  - `evals` becomes the single source of truth for structural importance for XAUUSD.  
+  - Jobs are added to maintain `evals` in batch mode (`python -m jobs.build_evals`).  
+  - A new backend route `/api/evals` exposes evals for charting and ML.  
+  - Frontend overlays for structural points now query `/api/evals` and no longer use `zones`, `piv*`, `swg*`, or other legacy structure tables.
+
 
 # Architectural and Structural Decisions — Segmeling / datavis.au
 
