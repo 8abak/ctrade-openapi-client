@@ -172,6 +172,52 @@ def api_sql_get(q: str = ""):
         return {"rows": _jsonable(cur.fetchall())}
 
 
+@app.get("/api/evals/window")
+def api_evals_window(
+    tick_from: int = Query(..., ge=1),
+    tick_to: int = Query(..., ge=1),
+    min_level: int = Query(1, ge=1),
+):
+    """
+    Return all evals between tick_from and tick_to (inclusive),
+    filtered by level >= min_level.
+    """
+    if tick_to < tick_from:
+        tick_from, tick_to = tick_to, tick_from
+
+    with db.get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    tick_id,
+                    mid,
+                    timestamp,
+                    base_sign,
+                    level,
+                    signed_importance,
+                    promotion_path,
+                    computed_at
+                FROM evals
+                WHERE tick_id BETWEEN %s AND %s
+                  AND level >= %s
+                ORDER BY tick_id, level
+                """,
+                (tick_from, tick_to, min_level),
+            )
+            rows = cur.fetchall()
+
+    # rows are dict_row, FastAPI will JSON encode them
+    return {
+        "tick_from": tick_from,
+        "tick_to": tick_to,
+        "min_level": min_level,
+        "evals": rows,
+    }
+    
+    
+    
 @app.post("/api/sql")
 def api_sql_post(sql: str = Body("", embed=True)):
     """
