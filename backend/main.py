@@ -15,6 +15,8 @@ from fastapi import FastAPI, Body, Query, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+import psycopg.rows
+
 from backend.db import (
     get_conn,
     dict_cur,
