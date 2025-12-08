@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Segmeling – Evals Viewer</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Simple dark style -->
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #050608;
+        --panel: #11151c;
+        --text: #f5f7ff;
+        --accent: #2f88ff;
+        --border: #303540;
+        --muted: #777f90;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+        background: radial-gradient(circle at top left, #101524, #050608 60%);
+        color: var(--text);
+      }
+      header {
+        padding: 12px 18px;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        gap: 16px;
+      }
+      header h1 {
+        font-size: 18px;
+        margin: 0;
+        font-weight: 600;
+      }
+      header .subtitle {
+        font-size: 13px;
+        color: var(--muted);
+      }
+      main {
+        display: flex;
+        flex-direction: column;
+        height: calc(100vh - 52px);
+      }
+      #controls {
+        padding: 10px 18px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px 16px;
+        align-items: center;
+        background: rgba(5, 8, 15, 0.9);
+        border-bottom: 1px solid var(--border);
+      }
+      #controls label {
+        font-size: 13px;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+      #controls input[type="number"] {
+        width: 130px;
+        padding: 3px 6px;
+        border-radius: 4px;
+        border: 1px solid var(--border);
+        background: #05070d;
+        color: var(--text);
+        font-size: 13px;
+      }
+      #controls input[type="number"]:focus {
+        outline: 1px solid var(--accent);
+        border-color: var(--accent);
+      }
+      #controls button {
+        padding: 6px 10px;
+        border-radius: 4px;
+        border: 1px solid var(--accent);
+        background: var(--accent);
+        color: #fff;
+        cursor: pointer;
+        font-size: 13px;
+        font-weight: 500;
+      }
+      #controls button.secondary {
+        border-color: var(--border);
+        background: transparent;
+        color: var(--muted);
+      }
+      #controls button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      #status {
+        font-size: 12px;
+        color: var(--muted);
+        min-width: 160px;
+      }
+      #chart {
+        flex: 1;
+        min-height: 200px;
+      }
+      #chart {
+        width: 100%;
+        height: 100%;
+      }
+      @media (max-width: 700px) {
+        #controls {
+          align-items: flex-start;
+        }
+      }
+    </style>
+    <!-- ECharts -->
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+    <script defer src="evals-core.js"></script>
+  </head>
+  <body>
+    <header>
+      <h1>Segmeling – Evals</h1>
+      <div class="subtitle">
+        Dot cloud by level (size) and sign (color). Window-based on ticks.
+      </div>
+    </header>
+    <main>
+      <section id="controls">
+        <label>
+          tick_from
+          <input
+            id="tick-from"
+            type="number"
+            step="1"
+            placeholder="start tick id"
+          />
+        </label>
+        <label>
+          tick_to
+          <input
+            id="tick-to"
+            type="number"
+            step="1"
+            placeholder="end tick id"
+          />
+        </label>
+        <label>
+          min_level
+          <input
+            id="min-level"
+            type="number"
+            min="1"
+            max="8"
+            step="1"
+            value="1"
+          />
+        </label>
+        <button id="btn-load">Load window</button>
+        <button id="btn-last" class="secondary">
+          Last N ticks (auto)
+        </button>
+        <div id="status"></div>
+      </section>
+      <section id="chart"></section>
+    </main>
+  </body>
+</html>
