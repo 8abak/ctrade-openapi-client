@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Confirm Lab</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- ECharts -->
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      margin: 0;
+      padding: 0;
+      background: #0b0c10;
+      color: #e5e5e5;
+    }
+    header {
+      padding: 10px 16px;
+      border-bottom: 1px solid #222;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    label {
+      font-size: 13px;
+    }
+    input, button {
+      background: #111;
+      border: 1px solid #333;
+      color: #e5e5e5;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 13px;
+    }
+    button {
+      cursor: pointer;
+    }
+    #chart-container {
+      width: 100%;
+      height: calc(100vh - 70px);
+    }
+    .badge {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 11px;
+      margin-right: 6px;
+    }
+    .badge-long { background: #005f3b; }
+    .badge-short { background: #7a001e; }
+    .meta-line { font-size: 12px; margin-top: 4px; }
+  </style>
+</head>
+<body>
+  <header>
+    <label>
+      Symbol:
+      <input id="symbolInput" value="XAUUSD" size="8">
+    </label>
+    <label>
+      Dataset:
+      <input id="datasetInput"
+             value="confirm_spots_XAUUSD_tags_1_300.csv"
+             size="40">
+    </label>
+    <label>
+      Tag index:
+      <input id="tagInput" type="number" value="1" min="1" style="width:70px;">
+    </label>
+    <label>
+      <input id="showTagsInput" type="checkbox" checked>
+      Show eval tags (L2+)
+    </label>
+    <button id="loadBtn">Load</button>
+    <div id="info" class="meta-line"></div>
+  </header>
+
+  <div id="chart-container"></div>
+
+  <script src="confirm.js"></script>
+</body>
+</html>
