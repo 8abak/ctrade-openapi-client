@@ -1,42 +1,34 @@
 # jobs/buildConfirmSpots.py
 #
-# Build "confirmation spot" labels from evals (L5+) and ticks.
+# Build "confirmation spot" labels from evals (L5+) and ticks, pivot by pivot.
 #
-# Usage examples (from repo root):
+# Usage example (from repo root):
 #
-#   # Process tags 1..300 within a date window
-#   python -m jobs.buildConfirmSpots \
-#       --symbol XAUUSD \
-#       --start 2025-07-01T00:00:00Z \
-#       --end   2025-07-02T00:00:00Z \
-#       --start-tag 1 \
-#       --num-tags 300 \
-#       --out-dir train/confirm_spots_v3
-#
-#   # Process tags 1..300 over ALL data for that symbol (no date filters)
+#   # Process tags (L5+ pivots) 1..300
 #   python -m jobs.buildConfirmSpots \
 #       --symbol XAUUSD \
 #       --start-tag 1 \
 #       --num-tags 300 \
-#       --out-dir train/confirm_spots_v3
+#       --out-dir train/confirm_spots_tags
 #
 # Behaviour:
-#   1) Loads eval ticks from DB for a symbol (optionally time-bounded).
-#   2) Finds L5+ pivot anchors that are local extrema in +/- W_loc ticks.
-#   3) Treats each pivot as a "tag"; tags are 1-based indexes in pivot list.
-#   4) Processes only pivots in [start_tag, start_tag + num_tags).
-#   5) For each pivot, detects the confirmation pattern (using level>=2).
-#   6) Computes trade outcome aiming to capture a fraction of the wave.
-#   7) Writes ONE ROW PER PIVOT directly to CSV (streaming, no big row list).
-#   8) Only pivot_time is an absolute datetime; all other timings are
-#      durations from the pivot (pivot -> L1/H1/confirm/exit).
+#   1) Fetch ordered L5+ pivots ("tags") for the symbol.
+#   2) For each pivot in [start_tag, start_tag + num_tags):
+#        - Find 3 previous L2+ evals and 3 next L4+ evals to define [start_ts, end_ts].
+#        - Load eval ticks only in [start_ts, end_ts].
+#        - Classify pivot as local high/low in that window.
+#        - Detect confirmation pattern (L2 structure, half-wave exit).
+#        - Append one row to CSV, with durations from pivot:
+#            dur_pivot_to_L1_sec, dur_pivot_to_H1_sec,
+#            dur_pivot_to_confirm_sec, dur_pivot_to_exit_sec.
+#   3) Never hold more than one pivot-window in memory.
 
 from __future__ import annotations
 
 import argparse
 import csv
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
@@ -52,11 +44,10 @@ from backend import db as dbmod  # type: ignore
 
 @dataclass
 class ConfirmConfig:
-    # Local extremum window: number of ticks before/after pivot.
-    # This is your "tick window before and after around 400 ticks".
+    # Local extremum window (in ticks) around pivot, inside the small segment.
     W_loc: int = 400
 
-    # Search horizons (number of ticks) for each stage
+    # Search horizons (ticks) for pattern stages INSIDE the small segment
     N1: int = 200   # first drop / first push after pivot
     N2: int = 200   # retest high/low after L1/H1
     N3: int = 400   # confirmation horizon after retest
@@ -64,28 +55,27 @@ class ConfirmConfig:
     # Wave scanning horizon after confirmation (ticks)
     N_wave: int = 800
 
-    # Target fraction of the move we want to capture.
-    # 0.5 = aim to get at least half of the move after confirmation.
+    # Target fraction of maximal favourable move after confirmation
     target_frac_of_wave: float = 0.5
 
     # Price thresholds (all in price units)
     drop_min: float = 0.5       # min H0->L1 (short) or L0->H1 (long)
     bounce_min: float = 0.3     # min L1->H1 (short) or H1->L1 (long)
     small_buffer: float = 0.1   # H1 lower than H0 (short), or L1 higher than L0 (long)
-    break_buffer: float = 0.0   # amount beyond L1/H1 for a "real" break (0.0 = at L1)
+    break_buffer: float = 0.0   # confirmation trigger at L1 (or slightly beyond)
 
     SL_buffer: float = 0.5      # stop distance beyond H0/L0
 
     # Trading costs (spread + fees) in price units
     cost_per_trade: float = 0.1
 
-    # Minimum eval level to treat as "level two" structure.
+    # Minimum eval level to treat as "L2 structure".
     min_struct_level: int = 2
 
 
 @dataclass
 class EvalTick:
-    idx: int           # index in in-memory list
+    idx: int           # index in in-memory list (segment-local)
     tick_id: int
     ts: datetime
     mid: float
@@ -93,21 +83,131 @@ class EvalTick:
 
 
 # ---------------------------------------------------------------------------
-# DB loading
+# DB helpers
 # ---------------------------------------------------------------------------
 
-def load_eval_ticks(
+def get_l5_pivots(
     conn,
-    symbol: Optional[str],
-    start_ts: Optional[datetime],
-    end_ts: Optional[datetime],
+    symbol: str,
+    start_tag: int,
+    num_tags: int,
+) -> List[Dict[str, Any]]:
+    """
+    Fetch L5+ eval rows (pivots/tags) for a symbol, ordered by time,
+    and return only the pivots in [start_tag, start_tag + num_tags).
+    Tags are 1-based over all L5+ pivots for that symbol.
+    """
+
+    if start_tag < 1:
+        start_tag = 1
+
+    offset = start_tag - 1
+    limit = num_tags
+
+    sql = """
+        SELECT e.tick_id,
+               e.timestamp,
+               e.mid::double precision,
+               e.level
+        FROM evals e
+        JOIN ticks t ON e.tick_id = t.id
+        WHERE t.symbol = %(symbol)s
+          AND e.level >= 5
+        ORDER BY e.timestamp
+        OFFSET %(offset)s
+        LIMIT %(limit)s
+    """
+
+    cur = conn.cursor()
+    cur.execute(sql, {"symbol": symbol, "offset": offset, "limit": limit})
+    rows = cur.fetchall()
+
+    pivots: List[Dict[str, Any]] = []
+    # tag_index is the global tag index (1-based) for this symbol
+    for i, (tick_id, ts, mid, level) in enumerate(rows, start=start_tag):
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        pivots.append(
+            {
+                "tag_index": i,         # global L5+ tag index (1-based)
+                "pivot_tick_id": int(tick_id),
+                "pivot_time": ts,
+                "pivot_price": float(mid),
+                "pivot_eval_level": int(level),
+            }
+        )
+
+    return pivots
+
+
+def get_window_bounds_for_pivot(
+    conn,
+    symbol: str,
+    pivot_time: datetime,
+) -> Optional[Dict[str, datetime]]:
+    """
+    For a given pivot_time, find:
+      - start_ts: time of the 3rd previous L2+ eval (level >= 2),
+      - end_ts: time of the 3rd next   L4+ eval (level >= 4).
+
+    If there aren't enough points, we use what we have; if we have none on
+    one side, we return None (skip this pivot).
+    """
+
+    cur = conn.cursor()
+
+    # 3 previous L2+ (level >= 2), ordered DESC
+    sql_prev = """
+        SELECT e.timestamp
+        FROM evals e
+        JOIN ticks t ON e.tick_id = t.id
+        WHERE t.symbol = %(symbol)s
+          AND e.level >= 2
+          AND e.timestamp <= %(pivot_time)s
+        ORDER BY e.timestamp DESC
+        LIMIT 3
+    """
+    cur.execute(sql_prev, {"symbol": symbol, "pivot_time": pivot_time})
+    prev_rows = cur.fetchall()
+
+    # 3 next L4+ (level >= 4), ordered ASC
+    sql_next = """
+        SELECT e.timestamp
+        FROM evals e
+        JOIN ticks t ON e.tick_id = t.id
+        WHERE t.symbol = %(symbol)s
+          AND e.level >= 4
+          AND e.timestamp >= %(pivot_time)s
+        ORDER BY e.timestamp ASC
+        LIMIT 3
+    """
+    cur.execute(sql_next, {"symbol": symbol, "pivot_time": pivot_time})
+    next_rows = cur.fetchall()
+
+    if not prev_rows or not next_rows:
+        # Not enough structure around this pivot; skip.
+        return None
+
+    # earliest of the previous 3, latest of the next 3
+    start_ts = min(ts for (ts,) in prev_rows)
+    end_ts = max(ts for (ts,) in next_rows)
+
+    if start_ts.tzinfo is None:
+        start_ts = start_ts.replace(tzinfo=timezone.utc)
+    if end_ts.tzinfo is None:
+        end_ts = end_ts.replace(tzinfo=timezone.utc)
+
+    return {"start_ts": start_ts, "end_ts": end_ts}
+
+
+def load_segment_eval_ticks(
+    conn,
+    symbol: str,
+    start_ts: datetime,
+    end_ts: datetime,
 ) -> List[EvalTick]:
     """
-    Load eval ticks joined with ticks for a given symbol and optional time window.
-
-    Uses evals.mid, evals.level, evals.timestamp and ticks.symbol.
-
-    If start_ts/end_ts are None, that bound is not applied.
+    Load eval ticks for a symbol in [start_ts, end_ts], ordered by tick_id.
     """
 
     sql = """
@@ -117,21 +217,17 @@ def load_eval_ticks(
                e.level
         FROM evals e
         JOIN ticks t ON e.tick_id = t.id
-        WHERE (%(symbol)s IS NULL OR t.symbol = %(symbol)s)
-          AND (%(start)s IS NULL OR e.timestamp >= %(start)s)
-          AND (%(end)s   IS NULL OR e.timestamp <= %(end)s)
+        WHERE t.symbol = %(symbol)s
+          AND e.timestamp BETWEEN %(start)s AND %(end)s
         ORDER BY e.tick_id
     """
 
-    params = {"symbol": symbol, "start": start_ts, "end": end_ts}
     cur = conn.cursor()
-    cur.execute(sql, params)
-
+    cur.execute(sql, {"symbol": symbol, "start": start_ts, "end": end_ts})
     rows = cur.fetchall()
-    eval_ticks: List[EvalTick] = []
 
+    eval_ticks: List[EvalTick] = []
     for i, (tick_id, ts, mid, level) in enumerate(rows):
-        # Ensure timezone-aware UTC
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
         eval_ticks.append(
@@ -148,59 +244,48 @@ def load_eval_ticks(
 
 
 # ---------------------------------------------------------------------------
-# Step 1 – Pivot detection (L5+ local extrema in +/- W_loc ticks)
+# Pivot classification (local high/low inside the small segment)
 # ---------------------------------------------------------------------------
 
-def find_pivots(eval_ticks: List[EvalTick], cfg: ConfirmConfig) -> List[Dict[str, Any]]:
-    pivots: List[Dict[str, Any]] = []
-    W = cfg.W_loc
+def classify_pivot_type(
+    eval_ticks: List[EvalTick],
+    pivot_idx: int,
+    cfg: ConfirmConfig,
+) -> Optional[str]:
+    """
+    Determine if pivot_idx is a local high or local low in +/- W_loc ticks.
+    Returns "high", "low", or None (if neither).
+    """
+
     n = len(eval_ticks)
+    if pivot_idx < 0 or pivot_idx >= n:
+        return None
 
-    for i, et in enumerate(eval_ticks):
-        # Only consider level >= 5 as pivot anchors
-        if et.level < 5:
-            continue
+    W = cfg.W_loc
+    lo = max(0, pivot_idx - W)
+    hi = min(n - 1, pivot_idx + W)
+    window = eval_ticks[lo : hi + 1]
+    if not window:
+        return None
 
-        lo = max(0, i - W)
-        hi = min(n - 1, i + W)
+    mids = [et.mid for et in window]
+    mid_i = eval_ticks[pivot_idx].mid
+    max_mid = max(mids)
+    min_mid = min(mids)
 
-        window = eval_ticks[lo : hi + 1]
-        if not window:
-            continue
+    is_high = abs(mid_i - max_mid) < 1e-12
+    is_low = abs(mid_i - min_mid) < 1e-12
 
-        mids = [w.mid for w in window]
-        mid_i = et.mid
-        max_mid = max(mids)
-        min_mid = min(mids)
+    if not (is_high or is_low):
+        return None
 
-        # Allow exact equality for flat tops/bottoms
-        is_local_high = abs(mid_i - max_mid) < 1e-12
-        is_local_low = abs(mid_i - min_mid) < 1e-12
+    if is_high and not is_low:
+        return "high"
+    if is_low and not is_high:
+        return "low"
 
-        if not (is_local_high or is_local_low):
-            continue
-
-        # Resolve flat case arbitrarily; you can refine later
-        if is_local_high and not is_local_low:
-            ptype = "high"
-        elif is_local_low and not is_local_high:
-            ptype = "low"
-        else:
-            # Flat zone around this tick: default to "high"
-            ptype = "high"
-
-        pivots.append(
-            {
-                "pivot_idx": i,
-                "pivot_tick_id": et.tick_id,
-                "pivot_time": et.ts,
-                "pivot_price": et.mid,
-                "pivot_eval_level": et.level,
-                "pivot_type": ptype,
-            }
-        )
-
-    return pivots
+    # Flat plateau: default to high for now
+    return "high"
 
 
 # ---------------------------------------------------------------------------
@@ -209,16 +294,16 @@ def find_pivots(eval_ticks: List[EvalTick], cfg: ConfirmConfig) -> List[Dict[str
 
 def detect_confirmation_for_pivot(
     eval_ticks: List[EvalTick],
-    pivot: Dict[str, Any],
+    pivot_idx: int,
+    pivot_type: str,
     cfg: ConfirmConfig,
 ) -> Optional[Dict[str, Any]]:
-    pidx = pivot["pivot_idx"]
-    ptype = pivot["pivot_type"]
-
-    if ptype == "high":
-        return _detect_short(eval_ticks, pidx, cfg)
+    if pivot_type == "high":
+        return _detect_short(eval_ticks, pivot_idx, cfg)
+    elif pivot_type == "low":
+        return _detect_long(eval_ticks, pivot_idx, cfg)
     else:
-        return _detect_long(eval_ticks, pidx, cfg)
+        return None
 
 
 def _detect_short(
@@ -394,7 +479,7 @@ def _detect_long(
 
 
 # ---------------------------------------------------------------------------
-# Step 3 – Trade outcome metrics (half-wave style)
+# Step 3 – Trade outcome metrics (half-wave style, segment-local)
 # ---------------------------------------------------------------------------
 
 def compute_trade_metrics(
@@ -405,9 +490,9 @@ def compute_trade_metrics(
     cfg: ConfirmConfig,
 ) -> Optional[Dict[str, Any]]:
     """
-    After confirmation, look ahead up to N_wave ticks:
+    After confirmation, look ahead up to N_wave ticks INSIDE THIS SEGMENT:
 
-      - First pass: compute max favourable move (MFE_base) in that window.
+      - Pass 1: compute max favourable move (MFE_base) in that segment window.
       - If MFE_base <= 0: price never moves in our favour; exit at earliest of
         stop or the last tick in the window.
       - Else:
@@ -544,7 +629,7 @@ def compute_trade_metrics(
 
 
 # ---------------------------------------------------------------------------
-# Stats printing (using streaming accumulation)
+# Stats printing (streaming)
 # ---------------------------------------------------------------------------
 
 def print_stats_from_stream(net_values: List[float], side_counts: Counter) -> None:
@@ -590,75 +675,41 @@ def print_stats_from_stream(net_values: List[float], side_counts: Counter) -> No
 # Main
 # ---------------------------------------------------------------------------
 
-def parse_iso8601_optional(s: Optional[str]) -> Optional[datetime]:
-    if not s:
-        return None
-    if s.endswith("Z"):
-        s = s[:-1] + "+00:00"
-    dt = datetime.fromisoformat(s)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt
-
-
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--symbol", required=True, help="Symbol (e.g. XAUUSD).")
-    parser.add_argument("--start", help="Optional start ISO-8601, e.g. 2025-07-01T00:00:00Z")
-    parser.add_argument("--end", help="Optional end ISO-8601, e.g. 2025-07-02T00:00:00Z")
     parser.add_argument("--start-tag", type=int, default=1,
-                        help="1-based index of first pivot/tag to process.")
-    parser.add_argument("--num-tags", type=int, default=10**9,
-                        help="Number of pivots/tags to process.")
-    parser.add_argument("--out-dir", default="train/confirm_spots")
+                        help="1-based index of first L5+ pivot/tag to process.")
+    parser.add_argument("--num-tags", type=int, default=300,
+                        help="Number of L5+ pivots/tags to process.")
+    parser.add_argument("--out-dir", default="train/confirm_spots_tags")
     args = parser.parse_args()
-
-    start_ts = parse_iso8601_optional(args.start)
-    end_ts = parse_iso8601_optional(args.end)
 
     cfg = ConfirmConfig()
 
-    # Get DB connection (adjust if your helper is different)
     conn = dbmod.get_conn()  # type: ignore
 
-    print(f"Loading eval ticks for symbol={args.symbol} "
-          f"start={start_ts.isoformat() if start_ts else 'None'} "
-          f"end={end_ts.isoformat() if end_ts else 'None'} ...")
+    print(f"Fetching L5+ pivots for symbol={args.symbol}, "
+          f"start_tag={args.start_tag}, num_tags={args.num_tags} ...")
 
-    eval_ticks = load_eval_ticks(conn, args.symbol, start_ts, end_ts)
-    print(f"Loaded {len(eval_ticks)} eval ticks.")
-
-    if not eval_ticks:
-        print("No data in this window, exiting.")
+    pivots = get_l5_pivots(conn, args.symbol, args.start_tag, args.num_tags)
+    if not pivots:
+        print("No L5+ pivots found in this tag range, exiting.")
         return
 
-    pivots = find_pivots(eval_ticks, cfg)
-    total_pivots = len(pivots)
-    print(f"Found {total_pivots} pivot anchors (L5+ local extrema).")
-
-    if total_pivots == 0:
-        print("No pivots found, exiting.")
-        return
-
-    # Tag indexing is 1-based
-    start_tag = max(1, args.start_tag)
-    end_tag = min(total_pivots, start_tag - 1 + args.num_tags)
-    if start_tag > end_tag:
-        print(f"No pivots in requested tag range [{start_tag}, {start_tag + args.num_tags - 1}].")
-        return
-
-    print(f"Processing tags from {start_tag} to {end_tag} (inclusive).")
+    print(f"Loaded {len(pivots)} L5+ pivots for processing.")
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    label = f"{args.symbol}_{args.start or 'None'}_{args.end or 'None'}_tags_{start_tag}_{end_tag}".replace(":", "-")
+    label = f"{args.symbol}_tags_{args.start_tag}_{args.start_tag + args.num_tags - 1}"
+    label = label.replace(":", "-")
     csv_path = out_dir / f"confirm_spots_{label}.csv"
 
     fieldnames = [
-        "tag_index",                 # 1-based index of pivot/tag in this run
-        "pivot_type",
+        "tag_index",                 # global L5+ tag index (1-based)
+        "pivot_type",                # high/low
         "pivot_tick_id",
-        "pivot_time",               # actual datetime of the tag
+        "pivot_time",               # actual datetime of the pivot/tag
         "pivot_price",
         "pivot_eval_level",
         "side",
@@ -688,11 +739,39 @@ def main() -> None:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
 
-        # tag_global is the 1-based tag index in the full pivot list
-        for tag_global in range(start_tag, end_tag + 1):
-            pivot = pivots[tag_global - 1]
+        for pivot in pivots:
+            tag_index = pivot["tag_index"]
+            pivot_time = pivot["pivot_time"]
+            pivot_tick_id = pivot["pivot_tick_id"]
 
-            conf = detect_confirmation_for_pivot(eval_ticks, pivot, cfg)
+            bounds = get_window_bounds_for_pivot(conn, args.symbol, pivot_time)
+            if bounds is None:
+                # Not enough surrounding structure; skip pivot
+                continue
+
+            start_ts = bounds["start_ts"]
+            end_ts = bounds["end_ts"]
+
+            eval_ticks = load_segment_eval_ticks(conn, args.symbol, start_ts, end_ts)
+            if not eval_ticks:
+                continue
+
+            # find pivot_idx in this segment
+            pivot_idx = None
+            for et in eval_ticks:
+                if et.tick_id == pivot_tick_id:
+                    pivot_idx = et.idx
+                    break
+
+            if pivot_idx is None:
+                # Pivot not in this segment? (shouldn't happen, but be safe)
+                continue
+
+            pivot_type = classify_pivot_type(eval_ticks, pivot_idx, cfg)
+            if pivot_type is None:
+                continue
+
+            conf = detect_confirmation_for_pivot(eval_ticks, pivot_idx, pivot_type, cfg)
             if conf is None:
                 continue
 
@@ -706,25 +785,20 @@ def main() -> None:
             if trade is None:
                 continue
 
-            pivot_idx = pivot["pivot_idx"]
-            L1_idx = conf["L1_idx"]
-            H1_idx = conf["H1_idx"]
-            confirm_idx = conf["confirm_idx"]
-
             et_pivot = eval_ticks[pivot_idx]
-            et_L1 = eval_ticks[L1_idx]
-            et_H1 = eval_ticks[H1_idx]
-            et_conf = eval_ticks[confirm_idx]
+            et_L1 = eval_ticks[conf["L1_idx"]]
+            et_H1 = eval_ticks[conf["H1_idx"]]
+            et_conf = eval_ticks[conf["confirm_idx"]]
 
-            # Durations (seconds) from pivot/tag
+            # Durations from pivot
             dur_pivot_to_L1 = (et_L1.ts - et_pivot.ts).total_seconds()
             dur_pivot_to_H1 = (et_H1.ts - et_pivot.ts).total_seconds()
             dur_pivot_to_confirm = (trade["confirm_time"] - et_pivot.ts).total_seconds()
             dur_pivot_to_exit = (trade["exit_time"] - et_pivot.ts).total_seconds()
 
             row: Dict[str, Any] = {
-                "tag_index": tag_global,
-                "pivot_type": pivot["pivot_type"],
+                "tag_index": tag_index,
+                "pivot_type": pivot_type,
                 "pivot_tick_id": et_pivot.tick_id,
                 "pivot_time": et_pivot.ts.isoformat(),
                 "pivot_price": et_pivot.mid,
@@ -748,9 +822,11 @@ def main() -> None:
 
             writer.writerow(row)
 
-            # Update stats
             net_values.append(float(trade["net_return"]))
             side_counts[conf["side"]] += 1
+
+            # Optional: light progress logging
+            print(f"Processed tag {tag_index}, side={conf['side']}, net={trade['net_return']:.3f}")
 
     print_stats_from_stream(net_values, side_counts)
     print(f"Wrote {len(net_values)} confirmations to {csv_path}")
