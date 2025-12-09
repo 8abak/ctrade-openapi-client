@@ -2,22 +2,34 @@
 #
 # Build "confirmation spot" labels from evals (L5+) and ticks.
 #
-# Usage example (from repo root):
+# Usage examples (from repo root):
+#
+#   # Process tags 1..300 within a date window
 #   python -m jobs.buildConfirmSpots \
 #       --symbol XAUUSD \
-#       --start 2025-07-01T08:00:00Z \
-#       --end   2025-07-01T22:00:00Z \
-#       --out-dir train/confirm_spots
+#       --start 2025-07-01T00:00:00Z \
+#       --end   2025-07-02T00:00:00Z \
+#       --start-tag 1 \
+#       --num-tags 300 \
+#       --out-dir train/confirm_spots_v3
 #
-# Summary of behaviour:
-#   1) Loads eval ticks from DB for a symbol + time range.
+#   # Process tags 1..300 over ALL data for that symbol (no date filters)
+#   python -m jobs.buildConfirmSpots \
+#       --symbol XAUUSD \
+#       --start-tag 1 \
+#       --num-tags 300 \
+#       --out-dir train/confirm_spots_v3
+#
+# Behaviour:
+#   1) Loads eval ticks from DB for a symbol (optionally time-bounded).
 #   2) Finds L5+ pivot anchors that are local extrema in +/- W_loc ticks.
-#   3) Around each pivot, detects a confirmation pattern where:
-#        - L1 / H1 are chosen among level >= 2 ticks.
-#        - Confirmation tick is also a level >= 2 tick.
-#   4) Computes trade outcome aiming to capture at least a fraction
-#      (target_frac_of_wave) of the max favourable move after confirmation.
-#   5) Saves all confirmations to CSV and prints basic stats.
+#   3) Treats each pivot as a "tag"; tags are 1-based indexes in pivot list.
+#   4) Processes only pivots in [start_tag, start_tag + num_tags).
+#   5) For each pivot, detects the confirmation pattern (using level>=2).
+#   6) Computes trade outcome aiming to capture a fraction of the wave.
+#   7) Writes ONE ROW PER PIVOT directly to CSV (streaming, no big row list).
+#   8) Only pivot_time is an absolute datetime; all other timings are
+#      durations from the pivot (pivot -> L1/H1/confirm/exit).
 
 from __future__ import annotations
 
@@ -27,6 +39,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional, Dict, Any
+
+from collections import Counter
 
 # Adjust this import / function name if your DB helper is different.
 from backend import db as dbmod  # type: ignore
@@ -48,7 +62,6 @@ class ConfirmConfig:
     N3: int = 400   # confirmation horizon after retest
 
     # Wave scanning horizon after confirmation (ticks)
-    # Used both to measure max favourable excursion and to search for exit.
     N_wave: int = 800
 
     # Target fraction of the move we want to capture.
@@ -67,7 +80,6 @@ class ConfirmConfig:
     cost_per_trade: float = 0.1
 
     # Minimum eval level to treat as "level two" structure.
-    # If you want exactly level == 2, change this logic in code where used.
     min_struct_level: int = 2
 
 
@@ -87,13 +99,15 @@ class EvalTick:
 def load_eval_ticks(
     conn,
     symbol: Optional[str],
-    start_ts: datetime,
-    end_ts: datetime,
+    start_ts: Optional[datetime],
+    end_ts: Optional[datetime],
 ) -> List[EvalTick]:
     """
-    Load eval ticks joined with ticks for a given symbol and time window.
+    Load eval ticks joined with ticks for a given symbol and optional time window.
 
     Uses evals.mid, evals.level, evals.timestamp and ticks.symbol.
+
+    If start_ts/end_ts are None, that bound is not applied.
     """
 
     sql = """
@@ -104,7 +118,8 @@ def load_eval_ticks(
         FROM evals e
         JOIN ticks t ON e.tick_id = t.id
         WHERE (%(symbol)s IS NULL OR t.symbol = %(symbol)s)
-          AND e.timestamp BETWEEN %(start)s AND %(end)s
+          AND (%(start)s IS NULL OR e.timestamp >= %(start)s)
+          AND (%(end)s   IS NULL OR e.timestamp <= %(end)s)
         ORDER BY e.tick_id
     """
 
@@ -529,62 +544,36 @@ def compute_trade_metrics(
 
 
 # ---------------------------------------------------------------------------
-# Step 4 – Save results
+# Stats printing (using streaming accumulation)
 # ---------------------------------------------------------------------------
 
-def save_confirmations(rows: List[Dict[str, Any]], out_dir: Path, label: str) -> None:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    if not rows:
-        print("No confirmations to save.")
-        return
-
-    csv_path = out_dir / f"confirm_spots_{label}.csv"
-
-    fieldnames = list(rows[0].keys())
-    with csv_path.open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-
-    print(f"Wrote {len(rows)} confirmations to {csv_path}")
-
-
-# ---------------------------------------------------------------------------
-# Step 5 – Basic stats
-# ---------------------------------------------------------------------------
-
-def print_stats(rows: List[Dict[str, Any]]) -> None:
-    if not rows:
+def print_stats_from_stream(net_values: List[float], side_counts: Counter) -> None:
+    if not net_values:
         print("No confirmations found.")
         return
 
-    from collections import Counter
     import statistics
 
-    net = [float(r["net_return"]) for r in rows]
-    sides = [r["side"] for r in rows]
-    wins = [v for v in net if v > 0]
-
-    print(f"Total confirmations: {len(rows)}")
-    side_counts = Counter(sides)
+    print(f"Total confirmations: {len(net_values)}")
     print("By side:", dict(side_counts))
 
-    win_rate = len(wins) / len(rows) if rows else 0.0
+    wins = [v for v in net_values if v > 0]
+    win_rate = len(wins) / len(net_values) if net_values else 0.0
     print(f"Win rate (net_return > 0): {win_rate:.3f}")
 
-    print(f"Mean net_return: {statistics.mean(net):.6f}")
-    print(f"Median net_return: {statistics.median(net):.6f}")
+    print(f"Mean net_return: {statistics.mean(net_values):.6f}")
+    print(f"Median net_return: {statistics.median(net_values):.6f}")
 
     # Simple histogram
     bins = 10
-    mn, mx = min(net), max(net)
+    mn, mx = min(net_values), max(net_values)
     if mn == mx:
         print("All net_return identical (no histogram).")
         return
 
     width = (mx - mn) / bins
     hist = [0] * bins
-    for v in net:
+    for v in net_values:
         idx = int((v - mn) / width)
         if idx >= bins:
             idx = bins - 1
@@ -601,8 +590,9 @@ def print_stats(rows: List[Dict[str, Any]]) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
-def parse_iso8601(s: str) -> datetime:
-    # Accept "Z" suffix by normalizing to +00:00
+def parse_iso8601_optional(s: Optional[str]) -> Optional[datetime]:
+    if not s:
+        return None
     if s.endswith("Z"):
         s = s[:-1] + "+00:00"
     dt = datetime.fromisoformat(s)
@@ -613,14 +603,18 @@ def parse_iso8601(s: str) -> datetime:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--symbol", default=None, help="Symbol (e.g. XAUUSD). Optional.")
-    parser.add_argument("--start", required=True, help="Start ISO-8601, e.g. 2025-07-01T08:00:00Z")
-    parser.add_argument("--end", required=True, help="End ISO-8601, e.g. 2025-07-01T22:00:00Z")
+    parser.add_argument("--symbol", required=True, help="Symbol (e.g. XAUUSD).")
+    parser.add_argument("--start", help="Optional start ISO-8601, e.g. 2025-07-01T00:00:00Z")
+    parser.add_argument("--end", help="Optional end ISO-8601, e.g. 2025-07-02T00:00:00Z")
+    parser.add_argument("--start-tag", type=int, default=1,
+                        help="1-based index of first pivot/tag to process.")
+    parser.add_argument("--num-tags", type=int, default=10**9,
+                        help="Number of pivots/tags to process.")
     parser.add_argument("--out-dir", default="train/confirm_spots")
     args = parser.parse_args()
 
-    start_ts = parse_iso8601(args.start)
-    end_ts = parse_iso8601(args.end)
+    start_ts = parse_iso8601_optional(args.start)
+    end_ts = parse_iso8601_optional(args.end)
 
     cfg = ConfirmConfig()
 
@@ -628,7 +622,8 @@ def main() -> None:
     conn = dbmod.get_conn()  # type: ignore
 
     print(f"Loading eval ticks for symbol={args.symbol} "
-          f"between {start_ts.isoformat()} and {end_ts.isoformat()} ...")
+          f"start={start_ts.isoformat() if start_ts else 'None'} "
+          f"end={end_ts.isoformat() if end_ts else 'None'} ...")
 
     eval_ticks = load_eval_ticks(conn, args.symbol, start_ts, end_ts)
     print(f"Loaded {len(eval_ticks)} eval ticks.")
@@ -638,76 +633,127 @@ def main() -> None:
         return
 
     pivots = find_pivots(eval_ticks, cfg)
-    print(f"Found {len(pivots)} pivot anchors (L5+ local extrema).")
+    total_pivots = len(pivots)
+    print(f"Found {total_pivots} pivot anchors (L5+ local extrema).")
 
-    rows: List[Dict[str, Any]] = []
+    if total_pivots == 0:
+        print("No pivots found, exiting.")
+        return
 
-    for pivot in pivots:
-        conf = detect_confirmation_for_pivot(eval_ticks, pivot, cfg)
-        if conf is None:
-            continue
+    # Tag indexing is 1-based
+    start_tag = max(1, args.start_tag)
+    end_tag = min(total_pivots, start_tag - 1 + args.num_tags)
+    if start_tag > end_tag:
+        print(f"No pivots in requested tag range [{start_tag}, {start_tag + args.num_tags - 1}].")
+        return
 
-        trade = compute_trade_metrics(
-            eval_ticks,
-            conf["confirm_idx"],
-            conf["side"],
-            conf["stop_price"],
-            cfg,
-        )
-        if trade is None:
-            continue
+    print(f"Processing tags from {start_tag} to {end_tag} (inclusive).")
 
-        pivot_idx = pivot["pivot_idx"]
-        L1_idx = conf["L1_idx"]
-        H1_idx = conf["H1_idx"]
-        confirm_idx = conf["confirm_idx"]
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    label = f"{args.symbol}_{args.start or 'None'}_{args.end or 'None'}_tags_{start_tag}_{end_tag}".replace(":", "-")
+    csv_path = out_dir / f"confirm_spots_{label}.csv"
 
-        et_pivot = eval_ticks[pivot_idx]
-        et_L1 = eval_ticks[L1_idx]
-        et_H1 = eval_ticks[H1_idx]
-        et_conf = eval_ticks[confirm_idx]
+    fieldnames = [
+        "tag_index",                 # 1-based index of pivot/tag in this run
+        "pivot_type",
+        "pivot_tick_id",
+        "pivot_time",               # actual datetime of the tag
+        "pivot_price",
+        "pivot_eval_level",
+        "side",
+        "stop_price",
+        # prices of legs
+        "L1_price",
+        "H1_price",
+        "confirm_price",
+        "exit_price",
+        # durations from pivot (in seconds)
+        "dur_pivot_to_L1_sec",
+        "dur_pivot_to_H1_sec",
+        "dur_pivot_to_confirm_sec",
+        "dur_pivot_to_exit_sec",
+        # trade metrics
+        "raw_return",
+        "net_return",
+        "MFE",
+        "MAE",
+        "stop_hit",
+    ]
 
-        row: Dict[str, Any] = {
-            # Pivot info
-            "pivot_type": pivot["pivot_type"],
-            "pivot_tick_id": et_pivot.tick_id,
-            "pivot_time": et_pivot.ts.isoformat(),
-            "pivot_price": et_pivot.mid,
-            "pivot_eval_level": et_pivot.level,
-            # Pattern legs
-            "L1_tick_id": et_L1.tick_id,
-            "L1_time": et_L1.ts.isoformat(),
-            "L1_price": et_L1.mid,
-            "H1_tick_id": et_H1.tick_id,
-            "H1_time": et_H1.ts.isoformat(),
-            "H1_price": et_H1.mid,
-            # Confirmation
-            "confirm_tick_id": et_conf.tick_id,
-            "confirm_time": et_conf.ts.isoformat(),
-            "confirm_price": et_conf.mid,
-            "side": conf["side"],
-            "stop_price": conf["stop_price"],
-        }
+    net_values: List[float] = []
+    side_counts: Counter = Counter()
 
-        # Trade metrics
-        row.update(
-            {
-                "exit_time": trade["exit_time"].isoformat(),
+    with csv_path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+
+        # tag_global is the 1-based tag index in the full pivot list
+        for tag_global in range(start_tag, end_tag + 1):
+            pivot = pivots[tag_global - 1]
+
+            conf = detect_confirmation_for_pivot(eval_ticks, pivot, cfg)
+            if conf is None:
+                continue
+
+            trade = compute_trade_metrics(
+                eval_ticks,
+                conf["confirm_idx"],
+                conf["side"],
+                conf["stop_price"],
+                cfg,
+            )
+            if trade is None:
+                continue
+
+            pivot_idx = pivot["pivot_idx"]
+            L1_idx = conf["L1_idx"]
+            H1_idx = conf["H1_idx"]
+            confirm_idx = conf["confirm_idx"]
+
+            et_pivot = eval_ticks[pivot_idx]
+            et_L1 = eval_ticks[L1_idx]
+            et_H1 = eval_ticks[H1_idx]
+            et_conf = eval_ticks[confirm_idx]
+
+            # Durations (seconds) from pivot/tag
+            dur_pivot_to_L1 = (et_L1.ts - et_pivot.ts).total_seconds()
+            dur_pivot_to_H1 = (et_H1.ts - et_pivot.ts).total_seconds()
+            dur_pivot_to_confirm = (trade["confirm_time"] - et_pivot.ts).total_seconds()
+            dur_pivot_to_exit = (trade["exit_time"] - et_pivot.ts).total_seconds()
+
+            row: Dict[str, Any] = {
+                "tag_index": tag_global,
+                "pivot_type": pivot["pivot_type"],
+                "pivot_tick_id": et_pivot.tick_id,
+                "pivot_time": et_pivot.ts.isoformat(),
+                "pivot_price": et_pivot.mid,
+                "pivot_eval_level": et_pivot.level,
+                "side": conf["side"],
+                "stop_price": conf["stop_price"],
+                "L1_price": et_L1.mid,
+                "H1_price": et_H1.mid,
+                "confirm_price": et_conf.mid,
                 "exit_price": trade["exit_price"],
+                "dur_pivot_to_L1_sec": dur_pivot_to_L1,
+                "dur_pivot_to_H1_sec": dur_pivot_to_H1,
+                "dur_pivot_to_confirm_sec": dur_pivot_to_confirm,
+                "dur_pivot_to_exit_sec": dur_pivot_to_exit,
                 "raw_return": trade["raw_return"],
                 "net_return": trade["net_return"],
                 "MFE": trade["MFE"],
                 "MAE": trade["MAE"],
                 "stop_hit": trade["stop_hit"],
             }
-        )
 
-        rows.append(row)
+            writer.writerow(row)
 
-    print_stats(rows)
+            # Update stats
+            net_values.append(float(trade["net_return"]))
+            side_counts[conf["side"]] += 1
 
-    label = f"{args.symbol or 'ALL'}_{args.start}_{args.end}".replace(":", "-")
-    save_confirmations(rows, Path(args.out_dir), label)
+    print_stats_from_stream(net_values, side_counts)
+    print(f"Wrote {len(net_values)} confirmations to {csv_path}")
 
 
 if __name__ == "__main__":
