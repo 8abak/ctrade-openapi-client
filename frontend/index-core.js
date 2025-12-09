@@ -1,371 +1,414 @@
-// PATH: frontend/index-core.js
-// Unified controller for segmeling index.html – Live/Review + Run/Stop
+// frontend/evals-core.js
+// Evals visualiser for Segmeling.
+//
+// Backend contract (main.py):
+//   GET /api/evals/window
+//     ?tick_from=<int>
+//     &tick_to=<int>
+//     &min_level=<int, default 1>
+//     &max_rows=<int, default 200000>
+//   Response:
+//     {
+//       tick_from, tick_to, min_level, max_rows,
+//       truncated: bool,
+//       evals: [
+//         {
+//           id, tick_id, mid, timestamp,
+//           base_sign, level, signed_importance,
+//           promotion_path, computed_at
+//         }, ...
+//       ]
+//     }
+//
+// Also uses /api/sql?q=SELECT max(id) AS max_id FROM ticks
+
 (function () {
-  if (!window.ChartCore) {
-    console.error("index-core: ChartCore not found");
-    return;
+  // ---- Tunables -----------------------------------------------------
+
+  // How many rows we allow backend to return in one window.
+  // Should be <= default max_rows in backend.
+  const MAX_FETCH_ROWS = 200_000;
+
+  // How many points we actually plot. If we get more,
+  // we sample evenly along the array index.
+  const MAX_POINTS = 40_000;
+
+  // -------------------------------------------------------------------
+
+  let chart;
+  let statusEl;
+  let inputFrom;
+  let inputTo;
+  let inputMinLevel;
+  let btnLoad;
+  let btnLast;
+
+  // ----------------- DOM helpers -------------------------------------
+
+  function $(id) {
+    return document.getElementById(id);
   }
 
-  const state = {
-    // data mode
-    dataMode: "live", // "live" | "review"
-
-    // run control
-    runState: "run", // "run" | "stop"
-
-    // live settings
-    // NEW: default to 2000 ticks for unified index
-    liveLimit: 2000,
-    liveIntervalMs: 1500,
-
-    // review settings
-    reviewWindow: 400,
-    reviewStepTicks: 1,
-    reviewStepMs: 1500,
-    reviewTimer: null,
-    reviewFromId: null, // first tick id of current window in review mode
-
-    // last known window meta from ChartCore
-    lastCount: 0,
-    lastFirstId: null,
-    lastLastId: null,
-  };
-
-  const dom = {
-    chartEl: null,
-    modeSelect: null,
-    runStopBtn: null,
-    statusLine: null,
-    layerCheckboxes: [],
-
-    // NEW: Review jump controls
-    reviewFromInput: null,
-    reviewWindowInput: null,
-    reviewJumpBtn: null,
-  };
-
-  function $(sel) {
-    return document.querySelector(sel);
+  function setStatus(msg) {
+    if (statusEl) statusEl.textContent = msg || "";
   }
 
-  function initDom() {
-    dom.chartEl = $("#segmeling-chart");
-    dom.modeSelect = $("#mode-select");
-    dom.runStopBtn = $("#btn-run-stop");
-    dom.statusLine = $("#status-line");
-    dom.layerCheckboxes = Array.from(
-      document.querySelectorAll("input[data-layer-group]")
-    );
+  // ----------------- Visual helpers ----------------------------------
 
-    // NEW: review controls
-    dom.reviewFromInput = $("#review-from-id");
-    dom.reviewWindowInput = $("#review-window");
-    dom.reviewJumpBtn = $("#btn-review-jump");
+  function colorForSign(sign) {
+    if (sign > 0) return "#4caf50"; // up
+    if (sign < 0) return "#f44336"; // down
+    return "#9e9e9e"; // neutral / 0
   }
 
-  function stopReviewPlayback() {
-    if (state.reviewTimer) {
-      clearInterval(state.reviewTimer);
-      state.reviewTimer = null;
-    }
+  function sizeForLevel(level) {
+    const lvl = Number(level) || 1;
+    // Base 4 px plus 2 per level, clamped
+    return Math.max(4, Math.min(20, 4 + lvl * 2));
   }
 
-  function stopAllTimers() {
-    try {
-      ChartCore.stopLive();
-    } catch (err) {
-      console.error("index-core: stopLive error", err);
-    }
-    stopReviewPlayback();
-  }
-
-  function startReviewPlayback() {
-    stopReviewPlayback();
-    state.reviewTimer = setInterval(stepReviewForward, state.reviewStepMs);
-  }
-
-  function stepReviewForward() {
-    if (state.dataMode !== "review" || state.runState !== "run") {
-      stopReviewPlayback();
+  function initChart() {
+    const dom = $("chart");
+    if (!dom) {
+      console.error("evals-core: #chart not found");
       return;
     }
 
-    const baseFrom =
-      state.reviewFromId != null
-        ? state.reviewFromId
-        : state.lastFirstId != null
-        ? state.lastFirstId
-        : 1;
+    chart = echarts.init(dom, "dark");
 
-    const nextFrom = baseFrom + state.reviewStepTicks;
-
-    ChartCore.loadWindow(nextFrom, state.reviewWindow).catch((err) => {
-      console.error("index-core: review step load error", err);
-      // keep timer running; transient HTTP errors are acceptable
+    chart.setOption({
+      title: {
+        text: "Evals window",
+        left: "center",
+        textStyle: { fontSize: 14 },
+      },
+      tooltip: {
+        trigger: "item",
+        formatter: function (p) {
+          const d = p.data && p.data._meta;
+          if (!d) return "";
+          const parts = [];
+          parts.push(
+            `<b>tick</b>: ${d.tick_id} | <b>mid</b>: ${d.mid.toFixed(2)}`
+          );
+          parts.push(
+            `<b>level</b>: ${d.level} | <b>sign</b>: ${d.base_sign} | <b>imp</b>: ${d.signed_importance}`
+          );
+          if (d.promotion_path) {
+            parts.push(`<b>path</b>: ${d.promotion_path}`);
+          }
+          return parts.join("<br/>");
+        },
+      },
+      legend: {
+        type: "scroll",
+        top: 26,
+      },
+      grid: {
+        top: 60,
+        left: 60,
+        right: 20,
+        bottom: 50,
+      },
+      xAxis: {
+        type: "value",
+        name: "tick_id",
+        axisLabel: { color: "#aaa" },
+        boundaryGap: ["5%", "5%"],
+      },
+      yAxis: {
+        type: "value",
+        name: "mid price",
+        axisLabel: { color: "#aaa" },
+        scale: true,
+      },
+      dataZoom: [
+        {
+          type: "inside",
+          xAxisIndex: 0,
+        },
+        {
+          type: "slider",
+          xAxisIndex: 0,
+          height: 20,
+          bottom: 20,
+        },
+      ],
+      series: [],
     });
   }
 
-  function setDataMode(mode) {
-    if (mode !== "live" && mode !== "review") {
-      console.warn("index-core: invalid dataMode", mode);
-      return;
-    }
-    if (state.dataMode === mode) return;
+  // ----------------- Series builder ----------------------------------
 
-    stopAllTimers();
-    state.dataMode = mode;
-
-    // reflect in UI
-    if (dom.modeSelect && dom.modeSelect.value !== mode) {
-      dom.modeSelect.value = mode;
+  function buildSeries(rows) {
+    if (!chart) {
+      console.error("evals-core: chart not initialised");
+      return [];
     }
 
-    applyRunState();
-    updateStatusLine();
-    syncReviewControlsFromState();
-  }
-
-  function setRunState(runState) {
-    if (runState !== "run" && runState !== "stop") {
-      console.warn("index-core: invalid runState", runState);
-      return;
+    if (!rows || !rows.length) {
+      chart.__evalDiag = {
+        total: 0,
+        used: 0,
+        sampledFrom: 0,
+      };
+      return [];
     }
-    if (state.runState === runState) return;
 
-    state.runState = runState;
-    applyRunState();
-    updateRunStopButton();
-    updateStatusLine();
-  }
+    const total = rows.length;
 
-  function applyRunState() {
-    stopAllTimers();
+    // Down-sample if too many rows
+    let usedRows = rows;
+    let sampledFrom = total;
+    if (total > MAX_POINTS) {
+      const stride = Math.ceil(total / MAX_POINTS);
+      usedRows = rows.filter((_, idx) => idx % stride === 0);
+      sampledFrom = total;
+    }
 
-    if (state.dataMode === "live") {
-      if (state.runState === "run") {
-        // RUN + LIVE: follow the stream
-        ChartCore.startLive({
-          limit: state.liveLimit,
-          intervalMs: state.liveIntervalMs,
+    // Group by level
+    const byLevel = new Map();
+    let used = 0;
+
+    for (const r of usedRows) {
+      const tickId = Number(r.tick_id);
+      const mid = Number(r.mid);
+      const level = Number(r.level);
+      const baseSign = Number(r.base_sign);
+      const imp = Number(r.signed_importance) || 0;
+      const promotionPath = r.promotion_path;
+
+      if (!Number.isFinite(tickId) || !Number.isFinite(mid)) continue;
+      if (!Number.isFinite(level)) continue;
+
+      if (!byLevel.has(level)) byLevel.set(level, []);
+      byLevel.get(level).push({
+        tickId,
+        mid,
+        level,
+        baseSign,
+        imp,
+        promotionPath,
+      });
+      used++;
+    }
+
+    chart.__evalDiag = {
+      total,
+      used,
+      sampledFrom,
+    };
+
+    // Sort by tick_id within each level
+    for (const arr of byLevel.values()) {
+      arr.sort((a, b) => a.tickId - b.tickId);
+    }
+
+    const series = [];
+    const allPoints = [];
+
+    // Scatter per level
+    Array.from(byLevel.keys())
+      .sort((a, b) => a - b)
+      .forEach((level) => {
+        const arr = byLevel.get(level);
+        const points = arr.map((r) => {
+          const dp = {
+            value: [r.tickId, r.mid],
+            symbolSize: sizeForLevel(r.level),
+            itemStyle: { color: colorForSign(r.baseSign) },
+            _meta: {
+              tick_id: r.tickId,
+              mid: r.mid,
+              level: r.level,
+              base_sign: r.baseSign,
+              signed_importance: r.imp,
+              promotion_path: r.promotionPath,
+            },
+          };
+          allPoints.push(dp);
+          return dp;
         });
-      } else {
-        // STOP + LIVE: single snapshot, no polling
-        ChartCore.loadLiveOnce({
-          limit: state.liveLimit,
-        }).catch((err) =>
-          console.error("index-core: loadLiveOnce error", err)
-        );
+
+        series.push({
+          name: `L${level}`,
+          type: "scatter",
+          data: points,
+        });
+      });
+
+    // Sequence line across all evals
+    if (allPoints.length) {
+      const seq = allPoints
+        .slice()
+        .sort((a, b) => a._meta.tick_id - b._meta.tick_id)
+        .map((p) => p.value);
+
+      series.push({
+        name: "sequence",
+        type: "line",
+        data: seq,
+        symbol: "none",
+        lineStyle: {
+          width: 1,
+          type: "dotted",
+          color: "#8888ff",
+        },
+        emphasis: { disabled: true },
+      });
+    }
+
+    return series;
+  }
+
+  // ----------------- Backend helpers ---------------------------------
+
+  async function fetchLastTicksWindow(defaultWindow) {
+    // Use /api/sql to get MAX(id) from ticks
+    const q = "SELECT max(id) AS max_id FROM ticks";
+    const res = await fetch(`/api/sql?q=${encodeURIComponent(q)}`);
+    if (!res.ok) {
+      throw new Error("sql max(id) failed");
+    }
+    const payload = await res.json();
+    const rows = payload.rows || [];
+    if (!rows.length || rows[0].max_id == null) {
+      throw new Error("no ticks");
+    }
+    const maxId = Number(rows[0].max_id);
+    const win = defaultWindow || 50_000;
+    return {
+      tick_to: maxId,
+      tick_from: Math.max(1, maxId - win),
+    };
+  }
+
+  async function loadWindow(fromId, toId, minLevel) {
+    let start = Number(fromId);
+    let end = Number(toId);
+    const minLvl = Number(minLevel) || 1;
+
+    if (!Number.isFinite(start) || !Number.isFinite(end)) {
+      setStatus("tick_from / tick_to missing or invalid");
+      return;
+    }
+
+    if (end < start) {
+      const tmp = start;
+      start = end;
+      end = tmp;
+    }
+
+    setStatus("Loading…");
+    if (btnLoad) btnLoad.disabled = true;
+
+    try {
+      const url =
+        `/api/evals/window?tick_from=${start}` +
+        `&tick_to=${end}` +
+        `&min_level=${minLvl}` +
+        `&max_rows=${MAX_FETCH_ROWS}`;
+
+      const res = await fetch(url);
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
       }
-      return;
-    }
 
-    // REVIEW mode
-    let fromId = state.reviewFromId;
-    if (fromId == null && state.lastLastId != null) {
-      fromId = Math.max(1, state.lastLastId - state.reviewWindow + 1);
-    }
-    if (fromId == null) {
-      fromId = 1;
-    }
+      const data = await res.json();
+      const rows = data.evals || [];
 
-    ChartCore.loadWindow(fromId, state.reviewWindow).catch((err) =>
-      console.error("index-core: initial review load error", err)
-    );
+      if (!chart) initChart();
+      const series = buildSeries(rows);
+      const diag = chart.__evalDiag || {};
+      const used = diag.used || 0;
+      const sampledFrom = diag.sampledFrom || rows.length;
+      const truncated = !!data.truncated;
 
-    if (state.runState === "run") {
-      startReviewPlayback();
-    } else {
-      stopReviewPlayback();
-    }
-  }
+      let msg =
+        `Loaded ${rows.length} evals [tick ${data.tick_from}..${data.tick_to}], ` +
+        `min_level=${data.min_level}; plotted=${used}`;
 
-  function toggleLayer(group, on) {
-    // mapping from UI names to ChartCore groups
-    if (group === "pivots") {
-      ChartCore.setVisibility("hipiv", on);
-      ChartCore.setVisibility("lopiv", on);
-      return;
-    }
-    if (group === "swings") {
-      ChartCore.setVisibility("swings", on);
-      return;
-    }
+      if (sampledFrom > used) {
+        msg += ` (sampled from ${sampledFrom})`;
+      }
+      if (truncated) {
+        msg += ` – WARNING: truncated at max_rows=${data.max_rows}, narrow tick window`;
+      }
 
-    // direct mapping
-    ChartCore.setVisibility(group, on);
-  }
+      setStatus(msg);
 
-  function updateRunStopButton() {
-    if (!dom.runStopBtn) return;
-    const labelEl = dom.runStopBtn.querySelector(".label");
-    if (!labelEl) return;
-
-    if (state.runState === "run") {
-      dom.runStopBtn.classList.remove("btn-stop");
-      dom.runStopBtn.classList.add("btn-run");
-      labelEl.textContent = "Run";
-    } else {
-      dom.runStopBtn.classList.remove("btn-run");
-      dom.runStopBtn.classList.add("btn-stop");
-      labelEl.textContent = "Stop";
+      chart.setOption({
+        xAxis: {
+          min: data.tick_from,
+          max: data.tick_to,
+        },
+        series: series,
+      });
+    } catch (err) {
+      console.error("evals-core: loadWindow failed", err);
+      setStatus("Error: " + err.message);
+    } finally {
+      if (btnLoad) btnLoad.disabled = false;
     }
   }
 
-  function updateStatusLine() {
-    if (!dom.statusLine) return;
+  // ----------------- Wiring DOM events --------------------------------
 
-    const count = state.lastCount;
-    const firstId = state.lastFirstId;
-    const lastId = state.lastLastId;
-    const modeText = state.dataMode.toUpperCase();
-    const runText = state.runState.toUpperCase();
+  function wireControls() {
+    statusEl = $("status");
+    inputFrom = $("tick-from");
+    inputTo = $("tick-to");
+    inputMinLevel = $("min-level");
+    btnLoad = $("btn-load");
+    btnLast = $("btn-last");
 
-    if (!count || firstId == null || lastId == null) {
-      dom.statusLine.textContent = `No data loaded yet (${modeText}, ${runText})`;
-      return;
-    }
-
-    dom.statusLine.textContent = `${count} ticks from ${firstId} to ${lastId} (${modeText}, ${runText})`;
-  }
-
-  // NEW: sync review controls <-> state
-  function syncReviewControlsFromState() {
-    if (dom.reviewFromInput) {
-      const val =
-        state.reviewFromId != null ? state.reviewFromId : state.lastFirstId;
-      dom.reviewFromInput.value = val != null ? String(val) : "1";
-    }
-    if (dom.reviewWindowInput) {
-      dom.reviewWindowInput.value = String(state.reviewWindow || 400);
-    }
-  }
-
-  // NEW: explicit Jump handler for REVIEW mode
-  function handleReviewJump() {
-    if (!dom.reviewFromInput || !dom.reviewWindowInput) return;
-
-    const fromRaw = dom.reviewFromInput.value.trim();
-    const winRaw = dom.reviewWindowInput.value.trim();
-
-    let fromId = parseInt(fromRaw, 10);
-    if (!Number.isFinite(fromId) || fromId < 1) {
-      fromId = 1;
-    }
-
-    let windowSize = parseInt(winRaw, 10);
-    if (!Number.isFinite(windowSize) || windowSize < 1) {
-      windowSize = state.reviewWindow || 400;
-    }
-
-    state.reviewFromId = fromId;
-    state.reviewWindow = windowSize;
-
-    // ensure UI reflects any normalization
-    syncReviewControlsFromState();
-
-    // Feature is defined for REVIEW mode; if currently LIVE, switch.
-    if (state.dataMode !== "review") {
-      setDataMode("review");
-      // setDataMode will call applyRunState(), which uses the updated reviewFromId/window
-      return;
-    }
-
-    // Already in REVIEW: just re-apply run state with new window
-    applyRunState();
-  }
-
-  function wireEvents() {
-    if (dom.modeSelect) {
-      dom.modeSelect.addEventListener("change", (e) => {
-        setDataMode(e.target.value);
+    if (btnLoad) {
+      btnLoad.addEventListener("click", () => {
+        const fromId = inputFrom.value;
+        const toId = inputTo.value;
+        const minLevel = inputMinLevel.value;
+        loadWindow(fromId, toId, minLevel);
       });
     }
 
-    if (dom.runStopBtn) {
-      dom.runStopBtn.addEventListener("click", () => {
-        const next = state.runState === "run" ? "stop" : "run";
-        setRunState(next);
-      });
-    }
-
-    dom.layerCheckboxes.forEach((cb) => {
-      cb.addEventListener("change", (e) => {
-        const group = e.target.getAttribute("data-layer-group");
-        const on = !!e.target.checked;
-        if (!group) return;
-        toggleLayer(group, on);
-      });
-    });
-
-    // NEW: Jump button
-    if (dom.reviewJumpBtn) {
-      dom.reviewJumpBtn.addEventListener("click", () => {
-        handleReviewJump();
-      });
-    }
-
-    // Optional: allow Enter key on either review input to trigger Jump
-    [dom.reviewFromInput, dom.reviewWindowInput].forEach((input) => {
-      if (!input) return;
-      input.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          handleReviewJump();
+    if (btnLast) {
+      btnLast.addEventListener("click", async () => {
+        try {
+          setStatus("Finding last ticks…");
+          btnLast.disabled = true;
+          const win = await fetchLastTicksWindow(50_000);
+          inputFrom.value = win.tick_from;
+          inputTo.value = win.tick_to;
+          const minLevel = inputMinLevel.value || 1;
+          await loadWindow(win.tick_from, win.tick_to, minLevel);
+        } catch (err) {
+          console.error("evals-core: last window failed", err);
+          setStatus("Error: " + err.message);
+        } finally {
+          btnLast.disabled = false;
         }
       });
-    });
-  }
+    }
 
-  function initChartCore() {
-    ChartCore.init("segmeling-chart");
-
-    ChartCore.setWindowChangeHandler((meta) => {
-      if (!meta) return;
-      state.lastCount = meta.count || 0;
-      state.lastFirstId = meta.firstId;
-      state.lastLastId = meta.lastId;
-
-      if (state.dataMode === "review" && meta.firstId != null) {
-        state.reviewFromId = meta.firstId;
-        syncReviewControlsFromState();
+    // Auto-load last window on first load
+    (async () => {
+      try {
+        const win = await fetchLastTicksWindow(50_000);
+        inputFrom.value = win.tick_from;
+        inputTo.value = win.tick_to;
+        const minLevel = inputMinLevel.value || 1;
+        await loadWindow(win.tick_from, win.tick_to, minLevel);
+      } catch (err) {
+        console.error("evals-core: auto load failed", err);
+        setStatus("Ready (no auto window)");
       }
-
-      updateStatusLine();
-    });
+    })();
   }
 
-  function init() {
-    initDom();
+  // ----------------- Init --------------------------------------------
 
-    if (!dom.chartEl) {
-      console.error("index-core: chart container not found");
-      return;
-    }
-
-    initChartCore();
-    wireEvents();
-    updateRunStopButton();
-
-    // ensure UI reflects initial state
-    if (dom.modeSelect && dom.modeSelect.value !== state.dataMode) {
-      dom.modeSelect.value = state.dataMode;
-    }
-    syncReviewControlsFromState();
-
-    // kick off data based on initial state (LIVE + RUN; last 2000 ticks)
-    applyRunState();
-    updateStatusLine();
-  }
-
-  document.addEventListener("DOMContentLoaded", init);
-
-  // Expose for debugging/manual control
-  window.SegmelingApp = {
-    getState() {
-      return { ...state };
-    },
-    setDataMode,
-    setRunState,
-    toggleLayer,
-  };
+  document.addEventListener("DOMContentLoaded", () => {
+    initChart();
+    wireControls();
+  });
 })();
