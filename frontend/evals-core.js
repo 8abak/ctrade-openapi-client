@@ -88,11 +88,28 @@
           const d = p.data && p.data._meta;
           if (!d) return "";
 
-          // Requested format:
-          // id: ###   time: ###
-          // mid: #### imp: ###
+          // d.time is ISO like "2025-06-23T18:45:52.582000+10:00"
+          let dateStr = "";
+          let timeStr = "";
+
+          if (d.time && typeof d.time === "string") {
+            const parts = d.time.split("T");
+            if (parts.length === 2) {
+              dateStr = parts[0];
+
+              // strip timezone (everything from + or - at the end)
+              let t = parts[1].replace(/([+-]\d{2}:?\d{2}.*$)/, "");
+
+              // strip microseconds if present
+              const tParts = t.split(".");
+              timeStr = tParts[0]; // "18:45:52"
+            }
+          }
+
           return [
-            `id: ${d.id}   time: ${d.time}`,
+            `id: ${d.id}`,
+            `date: ${dateStr || d.time || ""}`,
+            `time: ${timeStr || ""}`,
             `mid: ${d.mid.toFixed(2)}   imp: ${d.signed_importance}`,
           ].join("<br/>");
         },
