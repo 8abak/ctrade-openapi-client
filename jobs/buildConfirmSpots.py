@@ -5,15 +5,18 @@
 # Usage example (from repo root):
 #   python -m jobs.buildConfirmSpots \
 #       --symbol XAUUSD \
-#       --start 2025-01-01T00:00:00Z \
-#       --end   2025-01-01T06:00:00Z \
+#       --start 2025-07-01T08:00:00Z \
+#       --end   2025-07-01T22:00:00Z \
 #       --out-dir train/confirm_spots
 #
-# This job:
+# Summary of behaviour:
 #   1) Loads eval ticks from DB for a symbol + time range.
 #   2) Finds L5+ pivot anchors that are local extrema in +/- W_loc ticks.
-#   3) Around each pivot, detects Babak's confirmation pattern (short/long).
-#   4) Computes simple trade outcome metrics from the confirmation.
+#   3) Around each pivot, detects a confirmation pattern where:
+#        - L1 / H1 are chosen among level >= 2 ticks.
+#        - Confirmation tick is also a level >= 2 tick.
+#   4) Computes trade outcome aiming to capture at least a fraction
+#      (target_frac_of_wave) of the max favourable move after confirmation.
 #   5) Saves all confirmations to CSV and prints basic stats.
 
 from __future__ import annotations
@@ -44,18 +47,28 @@ class ConfirmConfig:
     N2: int = 200   # retest high/low after L1/H1
     N3: int = 400   # confirmation horizon after retest
 
-    # Exit horizon (seconds)
-    H_exit: float = 60.0
+    # Wave scanning horizon after confirmation (ticks)
+    # Used both to measure max favourable excursion and to search for exit.
+    N_wave: int = 800
+
+    # Target fraction of the move we want to capture.
+    # 0.5 = aim to get at least half of the move after confirmation.
+    target_frac_of_wave: float = 0.5
 
     # Price thresholds (all in price units)
     drop_min: float = 0.5       # min H0->L1 (short) or L0->H1 (long)
     bounce_min: float = 0.3     # min L1->H1 (short) or H1->L1 (long)
     small_buffer: float = 0.1   # H1 lower than H0 (short), or L1 higher than L0 (long)
-    break_buffer: float = 0.1   # amount beyond L1/H1 for a "real" break
+    break_buffer: float = 0.0   # amount beyond L1/H1 for a "real" break (0.0 = at L1)
+
     SL_buffer: float = 0.5      # stop distance beyond H0/L0
 
     # Trading costs (spread + fees) in price units
     cost_per_trade: float = 0.1
+
+    # Minimum eval level to treat as "level two" structure.
+    # If you want exactly level == 2, change this logic in code where used.
+    min_struct_level: int = 2
 
 
 @dataclass
@@ -176,7 +189,7 @@ def find_pivots(eval_ticks: List[EvalTick], cfg: ConfirmConfig) -> List[Dict[str
 
 
 # ---------------------------------------------------------------------------
-# Step 2 – Confirmation pattern detection
+# Step 2 – Confirmation pattern detection (using level>=2 for L1/H1/confirm)
 # ---------------------------------------------------------------------------
 
 def detect_confirmation_for_pivot(
@@ -199,12 +212,12 @@ def _detect_short(
     cfg: ConfirmConfig,
 ) -> Optional[Dict[str, Any]]:
     """
-    Short setup around a high pivot:
+    Short setup around a high pivot, using level>=2 structure:
 
-    H0 = pivot high
-    L1 = first drop low after H0 (within N1 ticks)
-    H1 = lower high retest (within N2 ticks after L1)
-    confirm = first break below L1 - break_buffer (within N3 ticks after H1)
+    H0 = pivot high (L5+)
+    L1 = first level>=2 low after H0 (within N1 ticks)
+    H1 = level>=2 retest high after L1 (within N2 ticks), lower than H0
+    confirm = first level>=2 tick after H1 with price <= L1 - break_buffer (within N3 ticks)
     """
 
     n = len(eval_ticks)
@@ -212,31 +225,36 @@ def _detect_short(
         return None
 
     H0 = eval_ticks[pivot_idx].mid
+    min_struct_level = cfg.min_struct_level
 
-    # 1) First drop low L1
+    # 1) First drop low L1 (among level>=2 ticks)
     j_start = pivot_idx + 1
     j_end = min(n, pivot_idx + 1 + cfg.N1)
     if j_start >= j_end:
         return None
 
-    j_candidates = eval_ticks[j_start:j_end]
-    L1_rel = min(range(len(j_candidates)), key=lambda r: j_candidates[r].mid)
-    L1_idx = j_start + L1_rel
-    L1 = eval_ticks[L1_idx]
+    j_candidates = [et for et in eval_ticks[j_start:j_end] if et.level >= min_struct_level]
+    if not j_candidates:
+        return None
+
+    L1 = min(j_candidates, key=lambda et: et.mid)
+    L1_idx = L1.idx
 
     if H0 - L1.mid < cfg.drop_min:
         return None
 
-    # 2) Retest high H1 (lower high)
+    # 2) Retest high H1 (lower high, level>=2)
     k_start = L1_idx + 1
     k_end = min(n, L1_idx + 1 + cfg.N2)
     if k_start >= k_end:
         return None
 
-    k_candidates = eval_ticks[k_start:k_end]
-    H1_rel = max(range(len(k_candidates)), key=lambda r: k_candidates[r].mid)
-    H1_idx = k_start + H1_rel
-    H1 = eval_ticks[H1_idx]
+    k_candidates = [et for et in eval_ticks[k_start:k_end] if et.level >= min_struct_level]
+    if not k_candidates:
+        return None
+
+    H1 = max(k_candidates, key=lambda et: et.mid)
+    H1_idx = H1.idx
 
     # Real bounce
     if H1.mid - L1.mid < cfg.bounce_min:
@@ -246,15 +264,16 @@ def _detect_short(
     if H1.mid > H0 - cfg.small_buffer:
         return None
 
-    # 3) Confirmation: break of L1
+    # 3) Confirmation: break of L1 by a level>=2 tick
     m_start = H1_idx + 1
     m_end = min(n, H1_idx + 1 + cfg.N3)
     if m_start >= m_end:
         return None
 
-    confirm_idx = None
+    confirm_idx: Optional[int] = None
     for m in range(m_start, m_end):
-        if eval_ticks[m].mid <= L1.mid - cfg.break_buffer:
+        et = eval_ticks[m]
+        if et.level >= min_struct_level and et.mid <= L1.mid - cfg.break_buffer:
             confirm_idx = m
             break
 
@@ -279,12 +298,12 @@ def _detect_long(
     cfg: ConfirmConfig,
 ) -> Optional[Dict[str, Any]]:
     """
-    Long setup around a low pivot (mirrored):
+    Long setup around a low pivot (mirrored), using level>=2 structure:
 
-    L0 = pivot low
-    H1 = first push high after L0 (within N1 ticks)
-    L1 = higher low retest (within N2 ticks after H1)
-    confirm = first break above L1 + break_buffer (within N3 ticks after L1)
+    L0 = pivot low (L5+)
+    H1 = first level>=2 high after L0 (within N1 ticks)
+    L1 = level>=2 retest low after H1 (within N2 ticks), higher than L0
+    confirm = first level>=2 tick after L1 with price >= L1 + break_buffer (within N3 ticks)
     """
 
     n = len(eval_ticks)
@@ -292,31 +311,36 @@ def _detect_long(
         return None
 
     L0 = eval_ticks[pivot_idx].mid
+    min_struct_level = cfg.min_struct_level
 
-    # 1) First push high H1
+    # 1) First push high H1 (among level>=2 ticks)
     j_start = pivot_idx + 1
     j_end = min(n, pivot_idx + 1 + cfg.N1)
     if j_start >= j_end:
         return None
 
-    j_candidates = eval_ticks[j_start:j_end]
-    H1_rel = max(range(len(j_candidates)), key=lambda r: j_candidates[r].mid)
-    H1_idx = j_start + H1_rel
-    H1 = eval_ticks[H1_idx]
+    j_candidates = [et for et in eval_ticks[j_start:j_end] if et.level >= min_struct_level]
+    if not j_candidates:
+        return None
+
+    H1 = max(j_candidates, key=lambda et: et.mid)
+    H1_idx = H1.idx
 
     if H1.mid - L0 < cfg.drop_min:
         return None
 
-    # 2) Retest low L1 (higher low)
+    # 2) Retest low L1 (higher low, level>=2)
     k_start = H1_idx + 1
     k_end = min(n, H1_idx + 1 + cfg.N2)
     if k_start >= k_end:
         return None
 
-    k_candidates = eval_ticks[k_start:k_end]
-    L1_rel = min(range(len(k_candidates)), key=lambda r: k_candidates[r].mid)
-    L1_idx = k_start + L1_rel
-    L1 = eval_ticks[L1_idx]
+    k_candidates = [et for et in eval_ticks[k_start:k_end] if et.level >= min_struct_level]
+    if not k_candidates:
+        return None
+
+    L1 = min(k_candidates, key=lambda et: et.mid)
+    L1_idx = L1.idx
 
     # Real bounce
     if H1.mid - L1.mid < cfg.bounce_min:
@@ -326,15 +350,16 @@ def _detect_long(
     if L1.mid < L0 + cfg.small_buffer:
         return None
 
-    # 3) Confirmation: break above L1
+    # 3) Confirmation: break above L1 by a level>=2 tick
     m_start = L1_idx + 1
     m_end = min(n, L1_idx + 1 + cfg.N3)
     if m_start >= m_end:
         return None
 
-    confirm_idx = None
+    confirm_idx: Optional[int] = None
     for m in range(m_start, m_end):
-        if eval_ticks[m].mid >= L1.mid + cfg.break_buffer:
+        et = eval_ticks[m]
+        if et.level >= min_struct_level and et.mid >= L1.mid + cfg.break_buffer:
             confirm_idx = m
             break
 
@@ -354,7 +379,7 @@ def _detect_long(
 
 
 # ---------------------------------------------------------------------------
-# Step 3 – Trade outcome metrics
+# Step 3 – Trade outcome metrics (half-wave style)
 # ---------------------------------------------------------------------------
 
 def compute_trade_metrics(
@@ -364,32 +389,98 @@ def compute_trade_metrics(
     stop_price: float,
     cfg: ConfirmConfig,
 ) -> Optional[Dict[str, Any]]:
+    """
+    After confirmation, look ahead up to N_wave ticks:
+
+      - First pass: compute max favourable move (MFE_base) in that window.
+      - If MFE_base <= 0: price never moves in our favour; exit at earliest of
+        stop or the last tick in the window.
+      - Else:
+        * target_move = target_frac_of_wave * MFE_base
+        * simulate path:
+            - if stop hit first -> exit at stop
+            - else exit at first tick where favourable move >= target_move
+        * if neither hit by end of window -> exit at last tick in window.
+
+    MFE/MAE are computed over the actual trade path from confirm to exit.
+    """
+
     confirm = eval_ticks[confirm_idx]
     n = len(eval_ticks)
-
     direction = -1 if side == "short" else 1
 
-    target_ts = confirm.ts + timedelta(seconds=cfg.H_exit)
-
-    exit_idx: Optional[int] = None
-    for i in range(confirm_idx + 1, n):
-        if eval_ticks[i].ts >= target_ts:
-            exit_idx = i
-            break
-
-    # Not enough data for exit
-    if exit_idx is None:
+    start = confirm_idx + 1
+    end = min(n, confirm_idx + 1 + cfg.N_wave)
+    if start >= end:
         return None
 
     confirm_price = confirm.mid
-    exit_price = eval_ticks[exit_idx].mid
 
-    mfe = 0.0  # max favourable excursion (in price move units)
-    mae = 0.0  # max adverse excursion (negative values)
+    # -------- Pass 1: measure max favourable move over the whole window --------
+    max_fav = 0.0
+    for i in range(start, end):
+        px = eval_ticks[i].mid
+        move = direction * (px - confirm_price)
+        if move > max_fav:
+            max_fav = move
+
+    # If never moves in our favour: loser trade, exit at earliest stop or window end
+    if max_fav <= 0.0:
+        exit_idx: Optional[int] = None
+        stop_hit = False
+
+        mfe = 0.0
+        mae = 0.0
+
+        for i in range(start, end):
+            px = eval_ticks[i].mid
+            move = direction * (px - confirm_price)
+            if move > mfe:
+                mfe = move
+            if move < mae:
+                mae = move
+
+            if not stop_hit:
+                if side == "short" and px >= stop_price:
+                    stop_hit = True
+                    exit_idx = i
+                    exit_price = stop_price
+                    break
+                elif side == "long" and px <= stop_price:
+                    stop_hit = True
+                    exit_idx = i
+                    exit_price = stop_price
+                    break
+
+        if exit_idx is None:
+            exit_idx = end - 1
+            exit_price = eval_ticks[exit_idx].mid
+
+        raw_return = direction * (exit_price - confirm_price)
+        net_return = raw_return - cfg.cost_per_trade
+
+        return {
+            "confirm_time": confirm.ts,
+            "confirm_price": confirm_price,
+            "exit_time": eval_ticks[exit_idx].ts,
+            "exit_price": exit_price,
+            "raw_return": raw_return,
+            "net_return": net_return,
+            "MFE": mfe,
+            "MAE": mae,
+            "stop_hit": stop_hit,
+        }
+
+    # -------- Pass 2: trade path with target at target_frac_of_wave * max_fav ----
+    target_move = cfg.target_frac_of_wave * max_fav
+
+    mfe = 0.0
+    mae = 0.0
     stop_hit = False
+    exit_idx: Optional[int] = None
+    exit_price: float
 
-    # Scan path for MFE/MAE and stop hits
-    for i in range(confirm_idx + 1, exit_idx + 1):
+    for i in range(start, end):
         px = eval_ticks[i].mid
         move = direction * (px - confirm_price)
         if move > mfe:
@@ -397,20 +488,32 @@ def compute_trade_metrics(
         if move < mae:
             mae = move
 
+        # Check stop first
         if not stop_hit:
             if side == "short" and px >= stop_price:
                 stop_hit = True
+                exit_idx = i
+                exit_price = stop_price
+                break
             elif side == "long" and px <= stop_price:
                 stop_hit = True
+                exit_idx = i
+                exit_price = stop_price
+                break
+
+        # Then check if we reached the target fraction of the wave
+        if move >= target_move and exit_idx is None:
+            exit_idx = i
+            exit_price = px
+            break
+
+    if exit_idx is None:
+        # Neither stop nor target hit: exit at last tick in window
+        exit_idx = end - 1
+        exit_price = eval_ticks[exit_idx].mid
 
     raw_return = direction * (exit_price - confirm_price)
     net_return = raw_return - cfg.cost_per_trade
-
-    # If stop is hit, clamp to stop-based P&L
-    if stop_hit:
-        stop_move = direction * (stop_price - confirm_price)
-        raw_return = stop_move
-        net_return = stop_move - cfg.cost_per_trade
 
     return {
         "confirm_time": confirm.ts,
@@ -511,8 +614,8 @@ def parse_iso8601(s: str) -> datetime:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--symbol", default=None, help="Symbol (e.g. XAUUSD). Optional.")
-    parser.add_argument("--start", required=True, help="Start ISO-8601, e.g. 2025-01-01T00:00:00Z")
-    parser.add_argument("--end", required=True, help="End ISO-8601, e.g. 2025-01-01T06:00:00Z")
+    parser.add_argument("--start", required=True, help="Start ISO-8601, e.g. 2025-07-01T08:00:00Z")
+    parser.add_argument("--end", required=True, help="End ISO-8601, e.g. 2025-07-01T22:00:00Z")
     parser.add_argument("--out-dir", default="train/confirm_spots")
     args = parser.parse_args()
 
