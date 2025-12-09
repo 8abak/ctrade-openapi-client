@@ -179,7 +179,14 @@ def api_evals_window(
     tick_from: int = Query(..., ge=1),
     tick_to: int = Query(..., ge=1),
     min_level: int = Query(1, ge=1),
+    max_rows: int = Query(200_000, ge=1, le=1_000_000),
 ):
+    """
+    Return evals between tick_from and tick_to (inclusive),
+    filtered by level >= min_level.
+
+    max_rows is a safety cap to avoid returning too many rows.
+    """
     if tick_to < tick_from:
         tick_from, tick_to = tick_to, tick_from
 
@@ -201,16 +208,22 @@ def api_evals_window(
             WHERE tick_id BETWEEN %s AND %s
               AND level >= %s
             ORDER BY tick_id, level
+            LIMIT %s
             """,
-            (tick_from, tick_to, min_level),
+            (tick_from, tick_to, min_level, max_rows),
         )
         rows = cur.fetchall()
+
+    rows_json = _jsonable(rows)
+    truncated = len(rows_json) >= max_rows
 
     return {
         "tick_from": tick_from,
         "tick_to": tick_to,
         "min_level": min_level,
-        "evals": _jsonable(rows),
+        "max_rows": max_rows,
+        "truncated": truncated,
+        "evals": rows_json,
     }
     
     
