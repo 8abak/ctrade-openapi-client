@@ -180,15 +180,11 @@ def api_evals_window(
     tick_to: int = Query(..., ge=1),
     min_level: int = Query(1, ge=1),
 ):
-    """
-    Return all evals between tick_from and tick_to (inclusive),
-    filtered by level >= min_level.
-    """
     if tick_to < tick_from:
         tick_from, tick_to = tick_to, tick_from
 
     conn = get_conn()
-    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+    with dict_cur(conn) as cur:
         cur.execute(
             """
             SELECT
