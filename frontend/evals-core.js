@@ -1,16 +1,39 @@
 // frontend/evals-core.js
 // Evals visualiser for Segmeling.
 //
-// - Talks to /api/evals/window?tick_from=&tick_to=&min_level=
-// - Uses /api/sql?q=select max(id) from ticks for "Last N ticks" helper
-// - X axis: tick_id
-// - Y axis: mid price
-// - Dot size: level
-// - Dot color: base_sign
-// - Optional line showing eval sequence order by tick_id
+// Backend contract (main.py):
+//   GET /api/evals/window
+//     ?tick_from=<int>
+//     &tick_to=<int>
+//     &min_level=<int, default 1>
+//     &max_rows=<int, default 200000>
+//   Response:
+//     {
+//       tick_from, tick_to, min_level, max_rows,
+//       truncated: bool,
+//       evals: [
+//         {
+//           id, tick_id, mid, timestamp,
+//           base_sign, level, signed_importance,
+//           promotion_path, computed_at
+//         }, ...
+//       ]
+//     }
+//
+// Also uses /api/sql?q=SELECT max(id) AS max_id FROM ticks
 
 (function () {
-  const MAX_POINTS = 100_000; // safety cap for plotting
+  // ---- Tunables -----------------------------------------------------
+
+  // How many rows we allow backend to return in one window.
+  // Should be <= default max_rows in backend.
+  const MAX_FETCH_ROWS = 200_000;
+
+  // How many points we actually plot. If we get more,
+  // we sample evenly along the array index.
+  const MAX_POINTS = 40_000;
+
+  // -------------------------------------------------------------------
 
   let chart;
   let statusEl;
@@ -20,7 +43,7 @@
   let btnLoad;
   let btnLast;
 
-  // ----------------- Helpers -----------------
+  // ----------------- DOM helpers -------------------------------------
 
   function $(id) {
     return document.getElementById(id);
@@ -30,24 +53,27 @@
     if (statusEl) statusEl.textContent = msg || "";
   }
 
+  // ----------------- Visual helpers ----------------------------------
+
   function colorForSign(sign) {
     if (sign > 0) return "#4caf50"; // up
     if (sign < 0) return "#f44336"; // down
-    return "#9e9e9e"; // neutral
+    return "#9e9e9e"; // neutral / 0
   }
 
   function sizeForLevel(level) {
     const lvl = Number(level) || 1;
-    // Base 4px, +2 per level, clamped
+    // Base 4 px plus 2 per level, clamped
     return Math.max(4, Math.min(20, 4 + lvl * 2));
   }
 
   function initChart() {
     const dom = $("chart");
     if (!dom) {
-      console.error("chart div not found");
+      console.error("evals-core: #chart not found");
       return;
     }
+
     chart = echarts.init(dom, "dark");
 
     chart.setOption({
@@ -61,17 +87,14 @@
         formatter: function (p) {
           const d = p.data && p.data._meta;
           if (!d) return "";
-          const parts = [];
-          parts.push(
-            `<b>tick</b>: ${d.tick_id} | <b>mid</b>: ${d.mid.toFixed(2)}`
-          );
-          parts.push(
-            `<b>level</b>: ${d.level} | <b>sign</b>: ${d.base_sign} | <b>imp</b>: ${d.signed_importance}`
-          );
-          if (d.promotion_path) {
-            parts.push(`<b>path</b>: ${d.promotion_path}`);
-          }
-          return parts.join("<br/>");
+
+          // Requested format:
+          // id: ###   time: ###
+          // mid: #### imp: ###
+          return [
+            `id: ${d.id}   time: ${d.time}`,
+            `mid: ${d.mid.toFixed(2)}   imp: ${d.signed_importance}`,
+          ].join("<br/>");
         },
       },
       legend: {
@@ -84,9 +107,10 @@
         right: 20,
         bottom: 50,
       },
+      // X axis is now TIME, not tick_id
       xAxis: {
-        type: "value",
-        name: "tick_id",
+        type: "time",
+        name: "time",
         axisLabel: { color: "#aaa" },
         boundaryGap: ["5%", "5%"],
       },
@@ -112,8 +136,14 @@
     });
   }
 
-  // Build series from raw rows coming from /api/evals/window
+  // ----------------- Series builder ----------------------------------
+
   function buildSeries(rows) {
+    if (!chart) {
+      console.error("evals-core: chart not initialised");
+      return [];
+    }
+
     if (!rows || !rows.length) {
       chart.__evalDiag = {
         total: 0,
@@ -125,7 +155,7 @@
 
     const total = rows.length;
 
-    // Sampling for big windows
+    // Down-sample if too many rows
     let usedRows = rows;
     let sampledFrom = total;
     if (total > MAX_POINTS) {
@@ -138,32 +168,33 @@
     const byLevel = new Map();
     let used = 0;
 
-    usedRows.forEach((r) => {
+    for (const r of usedRows) {
       const tickId = Number(r.tick_id);
       const mid = Number(r.mid);
       const level = Number(r.level);
       const baseSign = Number(r.base_sign);
       const imp = Number(r.signed_importance) || 0;
       const promotionPath = r.promotion_path;
+      const ts = r.timestamp; // ISO string from backend
+      const id = r.id;
 
-      if (!Number.isFinite(tickId) || !Number.isFinite(mid)) {
-        return; // skip malformed rows
-      }
-      if (!Number.isFinite(level)) {
-        return; // skip if no level
-      }
+      if (!Number.isFinite(tickId) || !Number.isFinite(mid)) continue;
+      if (!Number.isFinite(level)) continue;
+      if (!ts) continue; // require timestamp for time axis
 
       if (!byLevel.has(level)) byLevel.set(level, []);
       byLevel.get(level).push({
+        id,
         tickId,
         mid,
         level,
         baseSign,
         imp,
         promotionPath,
+        ts,
       });
       used++;
-    });
+    }
 
     chart.__evalDiag = {
       total,
@@ -171,7 +202,7 @@
       sampledFrom,
     };
 
-    // Sort each level by tick_id
+    // Sort by tick_id within each level (ordering)
     for (const arr of byLevel.values()) {
       arr.sort((a, b) => a.tickId - b.tickId);
     }
@@ -179,17 +210,21 @@
     const series = [];
     const allPoints = [];
 
+    // Scatter per level
     Array.from(byLevel.keys())
       .sort((a, b) => a - b)
       .forEach((level) => {
         const arr = byLevel.get(level);
         const points = arr.map((r) => {
-          const point = {
-            value: [r.tickId, r.mid],
+          const dp = {
+            // X = timestamp (time axis), Y = mid price
+            value: [r.ts, r.mid],
             symbolSize: sizeForLevel(r.level),
             itemStyle: { color: colorForSign(r.baseSign) },
             _meta: {
+              id: r.id,
               tick_id: r.tickId,
+              time: r.ts,
               mid: r.mid,
               level: r.level,
               base_sign: r.baseSign,
@@ -197,8 +232,8 @@
               promotion_path: r.promotionPath,
             },
           };
-          allPoints.push(point);
-          return point;
+          allPoints.push(dp);
+          return dp;
         });
 
         series.push({
@@ -208,7 +243,7 @@
         });
       });
 
-    // Optional: one sequence line across all points
+    // Sequence line across all evals (still ordered by tick_id)
     if (allPoints.length) {
       const seq = allPoints
         .slice()
@@ -232,6 +267,8 @@
     return series;
   }
 
+  // ----------------- Backend helpers ---------------------------------
+
   async function fetchLastTicksWindow(defaultWindow) {
     // Use /api/sql to get MAX(id) from ticks
     const q = "SELECT max(id) AS max_id FROM ticks";
@@ -253,16 +290,19 @@
   }
 
   async function loadWindow(fromId, toId, minLevel) {
+    let start = Number(fromId);
+    let end = Number(toId);
     const minLvl = Number(minLevel) || 1;
-    if (!fromId || !toId) {
-      setStatus("tick_from / tick_to missing");
+
+    if (!Number.isFinite(start) || !Number.isFinite(end)) {
+      setStatus("tick_from / tick_to missing or invalid");
       return;
     }
 
-    if (toId < fromId) {
-      const tmp = fromId;
-      fromId = toId;
-      toId = tmp;
+    if (end < start) {
+      const tmp = start;
+      start = end;
+      end = tmp;
     }
 
     setStatus("Loading…");
@@ -270,42 +310,52 @@
 
     try {
       const url =
-        `/api/evals/window?tick_from=${fromId}` +
-        `&tick_to=${toId}` +
-        `&min_level=${minLvl}`;
+        `/api/evals/window?tick_from=${start}` +
+        `&tick_to=${end}` +
+        `&min_level=${minLvl}` +
+        `&max_rows=${MAX_FETCH_ROWS}`;
+
       const res = await fetch(url);
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}`);
       }
+
       const data = await res.json();
       const rows = data.evals || [];
 
       if (!chart) initChart();
       const series = buildSeries(rows);
       const diag = chart.__evalDiag || {};
+      const used = diag.used || 0;
+      const sampledFrom = diag.sampledFrom || rows.length;
+      const truncated = !!data.truncated;
 
-      setStatus(
+      let msg =
         `Loaded ${rows.length} evals [tick ${data.tick_from}..${data.tick_to}], ` +
-          `min_level=${data.min_level}; plotted=${diag.used || 0}` +
-          (diag.sampledFrom && diag.sampledFrom > MAX_POINTS
-            ? ` (sampled from ${diag.sampledFrom})`
-            : "")
-      );
+        `min_level=${data.min_level}; plotted=${used}`;
+
+      if (sampledFrom > used) {
+        msg += ` (sampled from ${sampledFrom})`;
+      }
+      if (truncated) {
+        msg += ` – WARNING: truncated at max_rows=${data.max_rows}, narrow tick window`;
+      }
+
+      setStatus(msg);
 
       chart.setOption({
-        xAxis: {
-          min: data.tick_from,
-          max: data.tick_to,
-        },
+        // xAxis min/max are left for ECharts to infer based on time values
         series: series,
       });
     } catch (err) {
-      console.error("load window failed", err);
+      console.error("evals-core: loadWindow failed", err);
       setStatus("Error: " + err.message);
     } finally {
       if (btnLoad) btnLoad.disabled = false;
     }
   }
+
+  // ----------------- Wiring DOM events --------------------------------
 
   function wireControls() {
     statusEl = $("status");
@@ -317,9 +367,9 @@
 
     if (btnLoad) {
       btnLoad.addEventListener("click", () => {
-        const fromId = Number(inputFrom.value);
-        const toId = Number(inputTo.value);
-        const minLevel = Number(inputMinLevel.value) || 1;
+        const fromId = inputFrom.value;
+        const toId = inputTo.value;
+        const minLevel = inputMinLevel.value;
         loadWindow(fromId, toId, minLevel);
       });
     }
@@ -332,10 +382,10 @@
           const win = await fetchLastTicksWindow(50_000);
           inputFrom.value = win.tick_from;
           inputTo.value = win.tick_to;
-          const minLevel = Number(inputMinLevel.value) || 1;
+          const minLevel = inputMinLevel.value || 1;
           await loadWindow(win.tick_from, win.tick_to, minLevel);
         } catch (err) {
-          console.error(err);
+          console.error("evals-core: last window failed", err);
           setStatus("Error: " + err.message);
         } finally {
           btnLast.disabled = false;
@@ -349,14 +399,16 @@
         const win = await fetchLastTicksWindow(50_000);
         inputFrom.value = win.tick_from;
         inputTo.value = win.tick_to;
-        const minLevel = Number(inputMinLevel.value) || 1;
+        const minLevel = inputMinLevel.value || 1;
         await loadWindow(win.tick_from, win.tick_to, minLevel);
       } catch (err) {
-        console.error("auto load failed", err);
+        console.error("evals-core: auto load failed", err);
         setStatus("Ready (no auto window)");
       }
     })();
   }
+
+  // ----------------- Init --------------------------------------------
 
   document.addEventListener("DOMContentLoaded", () => {
     initChart();
