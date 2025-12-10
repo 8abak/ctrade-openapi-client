@@ -167,14 +167,15 @@ def writeTick(timestamp, _symbolId, bid, ask):
     askFloat = ask / 100000.0
     mid = round((bidFloat + askFloat) / 2.0, 2)
     spread = round(askFloat - bidFloat, 2)
+    kal = kalman_filter.step(mid)
 
     try:
         ensure_conn()
         with conn.cursor() as c:
             c.execute(
                 """
-                INSERT INTO ticks (symbol, timestamp, bid, ask, mid, spread)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                INSERT INTO ticks (symbol, timestamp, bid, ask, mid, spread, kal)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     "XAUUSD",
@@ -183,6 +184,7 @@ def writeTick(timestamp, _symbolId, bid, ask):
                     askFloat,
                     mid,
                     spread,
+                    kal,
                 ),
             )
         conn.commit()
