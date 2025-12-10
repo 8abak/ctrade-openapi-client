@@ -15,7 +15,7 @@
   // ---------- CONFIG --------------------------------------------------------
 
   // Relative to /src/frontend/confirm.html -> /src/train/confirm_spots_tags/
-  const CSV_PATH_PREFIX = "../train/confirm_spots_tags/";
+  const CSV_PATH_PREFIX = "../src/train/confirm_spots_tags/";
 
   // How many ticks before/after pivot_tick_id to fetch.
   const WINDOW_BEFORE_TICKS = 2000;
