@@ -11,8 +11,8 @@
 
   const CSV_PATH_PREFIX = "../src/train/confirm_spots_tags/";
 
-  const WINDOW_BEFORE_TICKS = 2000;
-  const WINDOW_AFTER_TICKS  = 2000;
+  const WINDOW_BEFORE_TICKS = 500;
+  const WINDOW_AFTER_TICKS  = 4000;
 
   // Use /api/review/window (from_id, window)
   function tickApiUrl(symbol, fromId, toId) {
