@@ -55,6 +55,52 @@ lastValidBid = None
 lastValidAsk = None
 shutdown_event = Event()
 
+# --------------------------------------------
+# Simple 1D Kalman filter for mid -> kal
+# --------------------------------------------
+
+class ScalarKalmanFilter:
+    """
+    x_t = x_{t-1} + w_t      (process noise ~ N(0, q))
+    z_t = x_t     + v_t      (measurement noise ~ N(0, r))
+    """
+    def __init__(self, process_var=1e-4, meas_var=1e-2, init_var=1.0):
+        self.q = float(process_var)
+        self.r = float(meas_var)
+        self.init_var = float(init_var)
+        self.x = None  # state estimate
+        self.P = None  # variance
+
+    def step(self, z: float) -> float:
+        """
+        Advance filter with observation z, return updated state x_t.
+        If uninitialized, start at x0 = z.
+        """
+        z = float(z)
+        if self.x is None or self.P is None:
+            self.x = z
+            self.P = self.init_var
+
+        # Predict
+        x_prior = self.x
+        P_prior = self.P + self.q
+
+        # Update
+        K = P_prior / (P_prior + self.r)
+        x_post = x_prior + K * (z - x_prior)
+        P_post = (1.0 - K) * P_prior
+
+        self.x = x_post
+        self.P = P_post
+        return x_post
+
+kalman_filter = ScalarKalmanFilter(
+    process_var=1e-4,
+    meas_var=1e-2,
+    init_var=1.0,
+)
+
+
 # --------------------------------------------------
 # Token refresh logic
 # --------------------------------------------------
