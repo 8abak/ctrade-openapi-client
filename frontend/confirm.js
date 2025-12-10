@@ -3,33 +3,25 @@
 // Pure frontend "confirm lab" viewer.
 // - Loads confirm_spots CSV from ../train/confirm_spots_tags/
 // - Lets you choose a tag index (row)
-// - Fetches ticks around pivot via existing tick API
+// - Fetches ticks around pivot via existing review API
 // - Draws the window with pivot/L1/H1/confirm/exit markers
-//
-// You may need to adjust:
-//   - CSV_PATH_PREFIX
-//   - TICK_API_URL + query param names
-//   - tick field names in normalizeTick()
 
 (() => {
   // ---------- CONFIG --------------------------------------------------------
 
-  // Relative to /src/frontend/confirm.html -> /src/train/confirm_spots_tags/
-  const CSV_PATH_PREFIX = "../src/train/confirm_spots_tags/";
+  const CSV_PATH_PREFIX = "../train/confirm_spots_tags/";
 
-  // How many ticks before/after pivot_tick_id to fetch.
   const WINDOW_BEFORE_TICKS = 2000;
   const WINDOW_AFTER_TICKS  = 2000;
 
-  // Existing tick API endpoint.
-  // TODO: adjust path / query names to match your backend.
+  // Use /api/review/window (from_id, window)
   function tickApiUrl(symbol, fromId, toId) {
+    const windowSize = Math.max(1, toId - fromId + 1);
     const p = new URLSearchParams({
-      symbol: symbol,
       from_id: String(fromId),
-      to_id: String(toId),
+      window: String(windowSize),
     });
-    return `/api/ticks?${p.toString()}`;
+    return `/api/review/window?${p.toString()}`;
   }
 
   // ---------- DOM / ECharts setup ------------------------------------------
@@ -46,7 +38,7 @@
 
   // ---------- CSV loading & parsing ----------------------------------------
 
-  let csvRows = null;  // array of row-objects keyed by column name
+  let csvRows = null;
 
   async function loadCsvOnce(datasetName) {
     if (csvRows && csvRows._datasetName === datasetName) {
@@ -82,7 +74,6 @@
     return rows;
   }
 
-  // very small CSV line splitter supporting quoted commas
   function splitCsvLine(line) {
     const result = [];
     let current = "";
@@ -91,7 +82,6 @@
       const ch = line[i];
       if (ch === '"') {
         if (inQuotes && line[i + 1] === '"') {
-          // escaped quote
           current += '"';
           i++;
         } else {
@@ -129,7 +119,6 @@
   }
 
   function normalizeTick(raw) {
-    // Adjust these if your API uses different field names.
     const tick_id = raw.tick_id ?? raw.id;
     const tsRaw   = raw.ts ?? raw.timestamp ?? raw.time;
     const mid     = raw.mid ?? raw.price;
@@ -167,7 +156,6 @@
     const ticks = data.ticks;
     const series = [];
 
-    // price line
     series.push({
       name: "price",
       type: "line",
@@ -177,7 +165,6 @@
       lineStyle: { width: 1 },
     });
 
-    // eval tags scatter
     if (showTags) {
       const tagPoints = ticks
         .filter(t => t.eval_level >= 2)
@@ -195,7 +182,6 @@
       }
     }
 
-    // markers
     function marker(event, color) {
       if (!event || !event.tick) return null;
       return {
@@ -256,14 +242,8 @@
         top: 20,
         bottom: 30,
       },
-      xAxis: {
-        type: "time",
-        boundaryGap: false,
-      },
-      yAxis: {
-        type: "value",
-        scale: true,
-      },
+      xAxis: { type: "time", boundaryGap: false },
+      yAxis: { type: "value", scale: true },
       series,
     };
   }
@@ -350,6 +330,5 @@
   });
   showTagsInput.addEventListener("change", loadAndRender);
 
-  // Auto-initialize with defaults
   loadAndRender();
 })();
