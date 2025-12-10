@@ -167,7 +167,7 @@ def writeTick(timestamp, _symbolId, bid, ask):
     askFloat = ask / 100000.0
     mid = round((bidFloat + askFloat) / 2.0, 2)
     spread = round(askFloat - bidFloat, 2)
-    kal = kalman_filter.step(mid)
+    kal = round(kalman_filter.step(mid),2)
 
     try:
         ensure_conn()
