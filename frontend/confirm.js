@@ -1,10 +1,11 @@
 // frontend/confirm.js
 //
 // Pure frontend "confirm lab" viewer.
-// - Loads confirm_spots CSV from ../train/confirm_spots_tags/
+// - Loads confirm_spots CSV from ../src/train/confirm_spots_tags/
 // - Lets you choose a tag index (row)
 // - Fetches ticks around pivot via existing review API
 // - Draws the window with pivot/L1/H1/confirm/exit markers
+// - Now also shows Kalman-smoothed price (ticks.kal) as optional overlay.
 
 (() => {
   // ---------- CONFIG --------------------------------------------------------
@@ -30,6 +31,7 @@
   const datasetInput  = document.getElementById("datasetInput");
   const tagInput      = document.getElementById("tagInput");
   const showTagsInput = document.getElementById("showTagsInput");
+  const showKalInput  = document.getElementById("showKalInput");
   const loadBtn       = document.getElementById("loadBtn");
   const infoDiv       = document.getElementById("info");
 
@@ -122,6 +124,7 @@
     const tick_id = raw.tick_id ?? raw.id;
     const tsRaw   = raw.ts ?? raw.timestamp ?? raw.time;
     const mid     = raw.mid ?? raw.price;
+    const kal     = raw.kal ?? null;  // new: bring kalman value through
 
     if (tick_id == null || tsRaw == null || mid == null) {
       return null;
@@ -131,6 +134,7 @@
       tick_id: Number(tick_id),
       ts: new Date(tsRaw).toISOString(),
       mid: Number(mid),
+      kal: kal != null ? Number(kal) : null,
       eval_level: Number(evalLevel),
     };
   }
@@ -152,12 +156,13 @@
 
   // ---------- Chart option builder -----------------------------------------
 
-  function buildOption(data, showTags) {
+  function buildOption(data, showTags, showKal) {
     const ticks = data.ticks;
     const series = [];
 
+    // Price (mid)
     series.push({
-      name: "price",
+      name: "mid",
       type: "line",
       data: ticks.map(t => [t.ts, t.mid]),
       showSymbol: false,
@@ -165,6 +170,24 @@
       lineStyle: { width: 1 },
     });
 
+    // Kalman overlay (if requested and available)
+    if (showKal) {
+      const hasKal = ticks.some(t => t.kal != null);
+      if (hasKal) {
+        series.push({
+          name: "kal",
+          type: "line",
+          data: ticks.map(t =>
+            t.kal != null ? [t.ts, t.kal] : [t.ts, null]
+          ),
+          showSymbol: false,
+          smooth: false,
+          lineStyle: { width: 1 },
+        });
+      }
+    }
+
+    // Eval tags as scatter
     if (showTags) {
       const tagPoints = ticks
         .filter(t => t.eval_level >= 2)
@@ -182,6 +205,7 @@
       }
     }
 
+    // Markers for pivot / L1 / H1 / confirm / exit (on mid)
     function marker(event, color) {
       if (!event || !event.tick) return null;
       return {
@@ -230,10 +254,21 @@
         trigger: "axis",
         axisPointer: { type: "cross" },
         formatter: params => {
-          const p = params[0];
-          const ts = p.value[0];
-          const price = p.value[1];
-          return `${ts}<br/>price: ${price}`;
+          // params = [{seriesName, value:[ts, y]}, ...]
+          const time = params[0].value[0];
+          let lines = [time];
+
+          const midItem = params.find(p => p.seriesName === "mid");
+          if (midItem) {
+            lines.push(`mid: ${midItem.value[1]}`);
+          }
+
+          const kalItem = params.find(p => p.seriesName === "kal");
+          if (kalItem && kalItem.value[1] != null) {
+            lines.push(`kal: ${kalItem.value[1]}`);
+          }
+
+          return lines.join("<br/>");
         },
       },
       grid: {
@@ -251,10 +286,11 @@
   // ---------- Main load/render logic ---------------------------------------
 
   async function loadAndRender() {
-    const symbol  = symbolInput.value.trim();
-    const dataset = datasetInput.value.trim();
-    const tagIdx  = parseInt(tagInput.value, 10);
+    const symbol   = symbolInput.value.trim();
+    const dataset  = datasetInput.value.trim();
+    const tagIdx   = parseInt(tagInput.value, 10);
     const showTags = showTagsInput.checked;
+    const showKal  = showKalInput.checked;
 
     if (!symbol || !dataset || !tagIdx) return;
 
@@ -314,7 +350,7 @@
         exit:    exitTick,
       };
 
-      const option = buildOption(dataForChart, showTags);
+      const option = buildOption(dataForChart, showTags, showKal);
       chart.setOption(option, true);
     } catch (err) {
       console.error(err);
@@ -329,6 +365,7 @@
     }
   });
   showTagsInput.addEventListener("change", loadAndRender);
+  showKalInput.addEventListener("change", loadAndRender);
 
   loadAndRender();
 })();
