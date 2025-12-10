@@ -9,7 +9,7 @@
 (() => {
   // ---------- CONFIG --------------------------------------------------------
 
-  const CSV_PATH_PREFIX = "../train/confirm_spots_tags/";
+  const CSV_PATH_PREFIX = "../src/train/confirm_spots_tags/";
 
   const WINDOW_BEFORE_TICKS = 2000;
   const WINDOW_AFTER_TICKS  = 2000;
