@@ -15,9 +15,9 @@
 #   1) Fetch ordered L5+ pivots ("tags") for the symbol.
 #   2) For each pivot in [start_tag, start_tag + num_tags):
 #        - Find 3 previous L2+ evals and 3 next L4+ evals to define [start_ts, end_ts].
-#        - Load eval ticks only in [start_ts, end_ts].
-#        - Classify pivot as local high/low in that window.
-#        - Detect confirmation pattern (L2 structure, half-wave exit).
+#        - Load eval ticks only in [start_ts, end_ts], including Kalman value.
+#        - Classify pivot as local high/low in that window (using mid).
+#        - Detect confirmation pattern using Kalman L1/H1 and break-of-L1.
 #        - Append one row to CSV, with durations from pivot:
 #            dur_pivot_to_L1_sec, dur_pivot_to_H1_sec,
 #            dur_pivot_to_confirm_sec, dur_pivot_to_exit_sec.
@@ -58,18 +58,18 @@ class ConfirmConfig:
     # Target fraction of maximal favourable move after confirmation
     target_frac_of_wave: float = 0.5
 
-    # Price thresholds (all in price units)
-    drop_min: float = 0.5       # min H0->L1 (short) or L0->H1 (long)
-    bounce_min: float = 0.3     # min L1->H1 (short) or H1->L1 (long)
-    small_buffer: float = 0.1   # H1 lower than H0 (short), or L1 higher than L0 (long)
-    break_buffer: float = 0.0   # confirmation trigger at L1 (or slightly beyond)
+    # Price thresholds (all in price units), now applied to Kalman moves
+    drop_min: float = 0.5       # min H0->L1 (short) or L0->H1 (long) in Kalman
+    bounce_min: float = 0.3     # min L1->H1 (short) or H1->L1 (long) in Kalman
+    small_buffer: float = 0.1   # H1 lower than H0 (short), or L1 higher than L0 (long) in Kalman
+    break_buffer: float = 0.0   # confirmation trigger relative to L1 in Kalman
 
-    SL_buffer: float = 0.5      # stop distance beyond H0/L0
+    SL_buffer: float = 0.5      # stop distance beyond H0/L0 (still on mid)
 
     # Trading costs (spread + fees) in price units
     cost_per_trade: float = 0.1
 
-    # Minimum eval level to treat as "L2 structure".
+    # Kept for compatibility; no longer used inside the Kalman pattern.
     min_struct_level: int = 2
 
 
@@ -78,8 +78,9 @@ class EvalTick:
     idx: int           # index in in-memory list (segment-local)
     tick_id: int
     ts: datetime
-    mid: float
-    level: int
+    mid: float         # raw mid price
+    level: int         # eval level (0..8)
+    kal: float         # Kalman-smoothed mid for this tick
 
 
 # ---------------------------------------------------------------------------
@@ -208,13 +209,15 @@ def load_segment_eval_ticks(
 ) -> List[EvalTick]:
     """
     Load eval ticks for a symbol in [start_ts, end_ts], ordered by tick_id.
+    Includes Kalman mid from ticks.kal.
     """
 
     sql = """
         SELECT e.tick_id,
                e.timestamp,
                e.mid::double precision,
-               e.level
+               e.level,
+               t.kal::double precision
         FROM evals e
         JOIN ticks t ON e.tick_id = t.id
         WHERE t.symbol = %(symbol)s
@@ -227,7 +230,7 @@ def load_segment_eval_ticks(
     rows = cur.fetchall()
 
     eval_ticks: List[EvalTick] = []
-    for i, (tick_id, ts, mid, level) in enumerate(rows):
+    for i, (tick_id, ts, mid, level, kal) in enumerate(rows):
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
         eval_ticks.append(
@@ -237,6 +240,7 @@ def load_segment_eval_ticks(
                 ts=ts,
                 mid=float(mid),
                 level=int(level),
+                kal=float(kal),
             )
         )
 
@@ -244,7 +248,7 @@ def load_segment_eval_ticks(
 
 
 # ---------------------------------------------------------------------------
-# Pivot classification (local high/low inside the small segment)
+# Pivot classification (local high/low inside the small segment, on mid)
 # ---------------------------------------------------------------------------
 
 def classify_pivot_type(
@@ -289,7 +293,7 @@ def classify_pivot_type(
 
 
 # ---------------------------------------------------------------------------
-# Step 2 – Confirmation pattern detection (using level>=2 for L1/H1/confirm)
+# Step 2 – Confirmation pattern detection (Kalman L1/H1 and break-of-L1)
 # ---------------------------------------------------------------------------
 
 def detect_confirmation_for_pivot(
@@ -312,59 +316,56 @@ def _detect_short(
     cfg: ConfirmConfig,
 ) -> Optional[Dict[str, Any]]:
     """
-    Short setup around a high pivot, using level>=2 structure:
+    Short setup around a high pivot, using Kalman structure:
 
-    H0 = pivot high (L5+)
-    L1 = first level>=2 low after H0 (within N1 ticks)
-    H1 = level>=2 retest high after L1 (within N2 ticks), lower than H0
-    confirm = first level>=2 tick after H1 with price <= L1 - break_buffer (within N3 ticks)
+    H0 = pivot high (L5+), use Kalman value H0_kal.
+    L1 = first Kalman low after H0 within N1 ticks.
+    H1 = Kalman retest high after L1 within N2 ticks, lower than H0 in Kalman.
+    confirm = first tick after H1 where Kalman <= L1 - break_buffer within N3.
+
+    All pattern conditions are defined in Kalman space.
+    Stop is still placed using mid prices (H0_mid + SL_buffer).
     """
 
     n = len(eval_ticks)
     if pivot_idx >= n - 2:
         return None
 
-    H0 = eval_ticks[pivot_idx].mid
-    min_struct_level = cfg.min_struct_level
+    pivot = eval_ticks[pivot_idx]
+    H0_mid = pivot.mid
+    H0_kal = pivot.kal
 
-    # 1) First drop low L1 (among level>=2 ticks)
+    # 1) First Kalman low L1 after pivot, within N1 ticks
     j_start = pivot_idx + 1
     j_end = min(n, pivot_idx + 1 + cfg.N1)
     if j_start >= j_end:
         return None
 
-    j_candidates = [et for et in eval_ticks[j_start:j_end] if et.level >= min_struct_level]
-    if not j_candidates:
-        return None
-
-    L1 = min(j_candidates, key=lambda et: et.mid)
+    L1 = min(eval_ticks[j_start:j_end], key=lambda et: et.kal)
     L1_idx = L1.idx
 
-    if H0 - L1.mid < cfg.drop_min:
+    # Require a meaningful drop from pivot (Kalman)
+    if H0_kal - L1.kal < cfg.drop_min:
         return None
 
-    # 2) Retest high H1 (lower high, level>=2)
+    # 2) Retest high H1 (lower high in Kalman), within N2 ticks after L1
     k_start = L1_idx + 1
     k_end = min(n, L1_idx + 1 + cfg.N2)
     if k_start >= k_end:
         return None
 
-    k_candidates = [et for et in eval_ticks[k_start:k_end] if et.level >= min_struct_level]
-    if not k_candidates:
-        return None
-
-    H1 = max(k_candidates, key=lambda et: et.mid)
+    H1 = max(eval_ticks[k_start:k_end], key=lambda et: et.kal)
     H1_idx = H1.idx
 
-    # Real bounce
-    if H1.mid - L1.mid < cfg.bounce_min:
+    # Real bounce in Kalman
+    if H1.kal - L1.kal < cfg.bounce_min:
         return None
 
-    # Lower high than pivot
-    if H1.mid > H0 - cfg.small_buffer:
+    # Lower high than the original pivot in Kalman space
+    if H1.kal > H0_kal - cfg.small_buffer:
         return None
 
-    # 3) Confirmation: break of L1 by a level>=2 tick
+    # 3) Confirmation: Kalman breaks below L1 within N3 ticks after H1
     m_start = H1_idx + 1
     m_end = min(n, H1_idx + 1 + cfg.N3)
     if m_start >= m_end:
@@ -373,14 +374,15 @@ def _detect_short(
     confirm_idx: Optional[int] = None
     for m in range(m_start, m_end):
         et = eval_ticks[m]
-        if et.level >= min_struct_level and et.mid <= L1.mid - cfg.break_buffer:
+        if et.kal <= L1.kal - cfg.break_buffer:
             confirm_idx = m
             break
 
     if confirm_idx is None:
         return None
 
-    stop_price = H0 + cfg.SL_buffer
+    # Stop is still defined on mid prices
+    stop_price = H0_mid + cfg.SL_buffer
 
     return {
         "pivot_idx": pivot_idx,
@@ -398,59 +400,56 @@ def _detect_long(
     cfg: ConfirmConfig,
 ) -> Optional[Dict[str, Any]]:
     """
-    Long setup around a low pivot (mirrored), using level>=2 structure:
+    Long setup around a low pivot (mirror), using Kalman structure:
 
-    L0 = pivot low (L5+)
-    H1 = first level>=2 high after L0 (within N1 ticks)
-    L1 = level>=2 retest low after H1 (within N2 ticks), higher than L0
-    confirm = first level>=2 tick after L1 with price >= L1 + break_buffer (within N3 ticks)
+    L0 = pivot low (L5+), use Kalman value L0_kal.
+    H1 = first Kalman high after L0 within N1 ticks.
+    L1 = Kalman retest low after H1 within N2 ticks, higher than L0 in Kalman.
+    confirm = first tick after L1 where Kalman >= L1 + break_buffer within N3.
+
+    All pattern conditions are defined in Kalman space.
+    Stop is still placed using mid prices (L0_mid - SL_buffer).
     """
 
     n = len(eval_ticks)
     if pivot_idx >= n - 2:
         return None
 
-    L0 = eval_ticks[pivot_idx].mid
-    min_struct_level = cfg.min_struct_level
+    pivot = eval_ticks[pivot_idx]
+    L0_mid = pivot.mid
+    L0_kal = pivot.kal
 
-    # 1) First push high H1 (among level>=2 ticks)
+    # 1) First Kalman high H1 after pivot, within N1 ticks
     j_start = pivot_idx + 1
     j_end = min(n, pivot_idx + 1 + cfg.N1)
     if j_start >= j_end:
         return None
 
-    j_candidates = [et for et in eval_ticks[j_start:j_end] if et.level >= min_struct_level]
-    if not j_candidates:
-        return None
-
-    H1 = max(j_candidates, key=lambda et: et.mid)
+    H1 = max(eval_ticks[j_start:j_end], key=lambda et: et.kal)
     H1_idx = H1.idx
 
-    if H1.mid - L0 < cfg.drop_min:
+    # Require a meaningful push up from pivot (Kalman)
+    if H1.kal - L0_kal < cfg.drop_min:
         return None
 
-    # 2) Retest low L1 (higher low, level>=2)
+    # 2) Retest low L1 (higher low in Kalman), within N2 ticks after H1
     k_start = H1_idx + 1
     k_end = min(n, H1_idx + 1 + cfg.N2)
     if k_start >= k_end:
         return None
 
-    k_candidates = [et for et in eval_ticks[k_start:k_end] if et.level >= min_struct_level]
-    if not k_candidates:
-        return None
-
-    L1 = min(k_candidates, key=lambda et: et.mid)
+    L1 = min(eval_ticks[k_start:k_end], key=lambda et: et.kal)
     L1_idx = L1.idx
 
-    # Real bounce
-    if H1.mid - L1.mid < cfg.bounce_min:
+    # Real pullback in Kalman
+    if H1.kal - L1.kal < cfg.bounce_min:
         return None
 
-    # Higher low than pivot
-    if L1.mid < L0 + cfg.small_buffer:
+    # Higher low than pivot in Kalman space
+    if L1.kal < L0_kal + cfg.small_buffer:
         return None
 
-    # 3) Confirmation: break above L1 by a level>=2 tick
+    # 3) Confirmation: Kalman breaks above L1 within N3 ticks after L1
     m_start = L1_idx + 1
     m_end = min(n, L1_idx + 1 + cfg.N3)
     if m_start >= m_end:
@@ -459,14 +458,15 @@ def _detect_long(
     confirm_idx: Optional[int] = None
     for m in range(m_start, m_end):
         et = eval_ticks[m]
-        if et.level >= min_struct_level and et.mid >= L1.mid + cfg.break_buffer:
+        if et.kal >= L1.kal + cfg.break_buffer:
             confirm_idx = m
             break
 
     if confirm_idx is None:
         return None
 
-    stop_price = L0 - cfg.SL_buffer
+    # Stop is still defined on mid prices
+    stop_price = L0_mid - cfg.SL_buffer
 
     return {
         "pivot_idx": pivot_idx,
