@@ -4,7 +4,6 @@
 #
 # Usage example (from repo root):
 #
-#   # Process tags (L5+ pivots) 1..300
 #   python -m jobs.buildConfirmSpots \
 #       --symbol XAUUSD \
 #       --start-tag 1 \
@@ -14,14 +13,16 @@
 # Behaviour:
 #   1) Fetch ordered L5+ pivots ("tags") for the symbol.
 #   2) For each pivot in [start_tag, start_tag + num_tags):
-#        - Find 3 previous L2+ evals and 3 next L4+ evals to define [start_ts, end_ts].
-#        - Load eval ticks only in [start_ts, end_ts], including Kalman value.
-#        - Classify pivot as local high/low in that window (using mid).
-#        - Detect confirmation pattern using Kalman L1/H1 and break-of-L1.
-#        - Append one row to CSV, with durations from pivot:
-#            dur_pivot_to_L1_sec, dur_pivot_to_H1_sec,
-#            dur_pivot_to_confirm_sec, dur_pivot_to_exit_sec.
-#   3) Never hold more than one pivot-window in memory.
+#        - Find small time window around pivot using nearby L2+/L4+ evals.
+#        - Load eval ticks in that window, including Kalman value.
+#        - Classify pivot as local high/low (using mid).
+#        - Detect confirmation using Kalman pattern:
+#              high pivot  -> short via H0 -> L1 -> H1 -> break-of-L1
+#              low  pivot  -> long  via L0 -> H1 -> L1 -> break-of-L1
+#        - Simulate a trade after confirmation (on mid prices).
+#        - Write exactly one CSV row per pivot that gets a valid confirmation.
+#
+#   CSV schema and semantics are kept identical to the previous implementation.
 
 from __future__ import annotations
 
@@ -31,10 +32,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Dict, Any
-
 from collections import Counter
 
-# Adjust this import / function name if your DB helper is different.
 from backend import db as dbmod  # type: ignore
 
 
@@ -44,29 +43,30 @@ from backend import db as dbmod  # type: ignore
 
 @dataclass
 class ConfirmConfig:
-    # Local extremum window (in ticks) around pivot, inside the small segment.
+    # Local extremum window (in ticks) around pivot inside the segment.
     W_loc: int = 400
 
-    # Search horizons (ticks) for pattern stages INSIDE the small segment
+    # Search horizons (ticks) for pattern stages INSIDE the small segment.
     N1: int = 200   # first drop / first push after pivot
     N2: int = 200   # retest high/low after L1/H1
     N3: int = 400   # confirmation horizon after retest
 
-    # Wave scanning horizon after confirmation (ticks)
+    # Wave scanning horizon after confirmation (ticks).
     N_wave: int = 800
 
-    # Target fraction of maximal favourable move after confirmation
+    # Target fraction of maximal favourable move after confirmation.
     target_frac_of_wave: float = 0.5
 
-    # Price thresholds (all in price units), now applied to Kalman moves
+    # Price thresholds (in price units), applied to Kalman moves.
     drop_min: float = 0.5       # min H0->L1 (short) or L0->H1 (long) in Kalman
     bounce_min: float = 0.3     # min L1->H1 (short) or H1->L1 (long) in Kalman
-    small_buffer: float = 0.1   # H1 lower than H0 (short), or L1 higher than L0 (long) in Kalman
+    small_buffer: float = 0.1   # H1 lower than H0 / L1 higher than L0 in Kalman
     break_buffer: float = 0.0   # confirmation trigger relative to L1 in Kalman
 
-    SL_buffer: float = 0.5      # stop distance beyond H0/L0 (still on mid)
+    # Stop distance beyond H0/L0 (still on mid, not Kalman).
+    SL_buffer: float = 0.5
 
-    # Trading costs (spread + fees) in price units
+    # Trading costs (spread + fees) in price units.
     cost_per_trade: float = 0.1
 
     # Kept for compatibility; no longer used inside the Kalman pattern.
@@ -95,8 +95,8 @@ def get_l5_pivots(
 ) -> List[Dict[str, Any]]:
     """
     Fetch L5+ eval rows (pivots/tags) for a symbol, ordered by time,
-    and return only the pivots in [start_tag, start_tag + num_tags).
-    Tags are 1-based over all L5+ pivots for that symbol.
+    and return the slices [start_tag, start_tag + num_tags) as a list
+    of dicts with tag_index (global 1-based).
     """
 
     if start_tag < 1:
@@ -124,13 +124,12 @@ def get_l5_pivots(
     rows = cur.fetchall()
 
     pivots: List[Dict[str, Any]] = []
-    # tag_index is the global tag index (1-based) for this symbol
     for i, (tick_id, ts, mid, level) in enumerate(rows, start=start_tag):
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
         pivots.append(
             {
-                "tag_index": i,         # global L5+ tag index (1-based)
+                "tag_index": i,
                 "pivot_tick_id": int(tick_id),
                 "pivot_time": ts,
                 "pivot_price": float(mid),
@@ -150,9 +149,7 @@ def get_window_bounds_for_pivot(
     For a given pivot_time, find:
       - start_ts: time of the 3rd previous L2+ eval (level >= 2),
       - end_ts: time of the 3rd next   L4+ eval (level >= 4).
-
-    If there aren't enough points, we use what we have; if we have none on
-    one side, we return None (skip this pivot).
+    If there aren’t enough points on one side, return None.
     """
 
     cur = conn.cursor()
@@ -186,10 +183,8 @@ def get_window_bounds_for_pivot(
     next_rows = cur.fetchall()
 
     if not prev_rows or not next_rows:
-        # Not enough structure around this pivot; skip.
         return None
 
-    # earliest of the previous 3, latest of the next 3
     start_ts = min(ts for (ts,) in prev_rows)
     end_ts = max(ts for (ts,) in next_rows)
 
@@ -248,7 +243,7 @@ def load_segment_eval_ticks(
 
 
 # ---------------------------------------------------------------------------
-# Pivot classification (local high/low inside the small segment, on mid)
+# Pivot classification (local high/low on mid)
 # ---------------------------------------------------------------------------
 
 def classify_pivot_type(
@@ -258,7 +253,7 @@ def classify_pivot_type(
 ) -> Optional[str]:
     """
     Determine if pivot_idx is a local high or local low in +/- W_loc ticks.
-    Returns "high", "low", or None (if neither).
+    Returns "high", "low", or None.
     """
 
     n = len(eval_ticks)
@@ -273,27 +268,25 @@ def classify_pivot_type(
         return None
 
     mids = [et.mid for et in window]
-    mid_i = eval_ticks[pivot_idx].mid
+    pivot_mid = eval_ticks[pivot_idx].mid
     max_mid = max(mids)
     min_mid = min(mids)
 
-    is_high = abs(mid_i - max_mid) < 1e-12
-    is_low = abs(mid_i - min_mid) < 1e-12
-
-    if not (is_high or is_low):
-        return None
+    is_high = abs(pivot_mid - max_mid) < 1e-12
+    is_low = abs(pivot_mid - min_mid) < 1e-12
 
     if is_high and not is_low:
         return "high"
     if is_low and not is_high:
         return "low"
-
-    # Flat plateau: default to high for now
-    return "high"
+    if is_high and is_low:
+        # flat plateau: default to high
+        return "high"
+    return None
 
 
 # ---------------------------------------------------------------------------
-# Step 2 – Confirmation pattern detection (Kalman L1/H1 and break-of-L1)
+# Confirmation detection (Kalman L1/H1 + break-of-L1)
 # ---------------------------------------------------------------------------
 
 def detect_confirmation_for_pivot(
@@ -316,15 +309,15 @@ def _detect_short(
     cfg: ConfirmConfig,
 ) -> Optional[Dict[str, Any]]:
     """
-    Short setup around a high pivot, using Kalman structure:
+    High pivot → short:
 
-    H0 = pivot high (L5+), use Kalman value H0_kal.
-    L1 = first Kalman low after H0 within N1 ticks.
-    H1 = Kalman retest high after L1 within N2 ticks, lower than H0 in Kalman.
-    confirm = first tick after H1 where Kalman <= L1 - break_buffer within N3.
+      H0 (pivot, Kalman H0_kal)
+      L1 = first Kalman low after pivot within N1
+      H1 = Kalman lower high after L1 within N2
+      confirm = first Kalman break below L1 - break_buffer within N3
 
-    All pattern conditions are defined in Kalman space.
-    Stop is still placed using mid prices (H0_mid + SL_buffer).
+    All pattern conditions use Kalman values.
+    Stops are still placed using mid prices.
     """
 
     n = len(eval_ticks)
@@ -348,7 +341,7 @@ def _detect_short(
     if H0_kal - L1.kal < cfg.drop_min:
         return None
 
-    # 2) Retest high H1 (lower high in Kalman), within N2 ticks after L1
+    # 2) Retest high H1 (lower high), within N2 ticks after L1
     k_start = L1_idx + 1
     k_end = min(n, L1_idx + 1 + cfg.N2)
     if k_start >= k_end:
@@ -361,7 +354,7 @@ def _detect_short(
     if H1.kal - L1.kal < cfg.bounce_min:
         return None
 
-    # Lower high than the original pivot in Kalman space
+    # Lower high than H0 in Kalman space
     if H1.kal > H0_kal - cfg.small_buffer:
         return None
 
@@ -381,7 +374,6 @@ def _detect_short(
     if confirm_idx is None:
         return None
 
-    # Stop is still defined on mid prices
     stop_price = H0_mid + cfg.SL_buffer
 
     return {
@@ -400,15 +392,12 @@ def _detect_long(
     cfg: ConfirmConfig,
 ) -> Optional[Dict[str, Any]]:
     """
-    Long setup around a low pivot (mirror), using Kalman structure:
+    Low pivot → long (mirror of short):
 
-    L0 = pivot low (L5+), use Kalman value L0_kal.
-    H1 = first Kalman high after L0 within N1 ticks.
-    L1 = Kalman retest low after H1 within N2 ticks, higher than L0 in Kalman.
-    confirm = first tick after L1 where Kalman >= L1 + break_buffer within N3.
-
-    All pattern conditions are defined in Kalman space.
-    Stop is still placed using mid prices (L0_mid - SL_buffer).
+      L0 (pivot, Kalman L0_kal)
+      H1 = first Kalman high after pivot within N1
+      L1 = Kalman higher low after H1 within N2
+      confirm = first Kalman break above L1 + break_buffer within N3
     """
 
     n = len(eval_ticks)
@@ -432,7 +421,7 @@ def _detect_long(
     if H1.kal - L0_kal < cfg.drop_min:
         return None
 
-    # 2) Retest low L1 (higher low in Kalman), within N2 ticks after H1
+    # 2) Retest low L1 (higher low), within N2 ticks after H1
     k_start = H1_idx + 1
     k_end = min(n, H1_idx + 1 + cfg.N2)
     if k_start >= k_end:
@@ -465,7 +454,6 @@ def _detect_long(
     if confirm_idx is None:
         return None
 
-    # Stop is still defined on mid prices
     stop_price = L0_mid - cfg.SL_buffer
 
     return {
@@ -479,7 +467,7 @@ def _detect_long(
 
 
 # ---------------------------------------------------------------------------
-# Step 3 – Trade outcome metrics (half-wave style, segment-local)
+# Trade simulation (unchanged semantics, on mid prices)
 # ---------------------------------------------------------------------------
 
 def compute_trade_metrics(
@@ -490,19 +478,18 @@ def compute_trade_metrics(
     cfg: ConfirmConfig,
 ) -> Optional[Dict[str, Any]]:
     """
-    After confirmation, look ahead up to N_wave ticks INSIDE THIS SEGMENT:
+    After confirmation, look ahead up to N_wave ticks in this segment.
 
-      - Pass 1: compute max favourable move (MFE_base) in that segment window.
-      - If MFE_base <= 0: price never moves in our favour; exit at earliest of
-        stop or the last tick in the window.
-      - Else:
-        * target_move = target_frac_of_wave * MFE_base
-        * simulate path:
-            - if stop hit first -> exit at stop
-            - else exit at first tick where favourable move >= target_move
-        * if neither hit by end of window -> exit at last tick in window.
+    - Pass 1: measure max favourable move (MFE_base) from confirm to end/window.
+    - If MFE_base <= 0: exit at earliest of stop or end-of-window.
+    - Else:
+        target_move = target_frac_of_wave * MFE_base
+        walk forward:
+          * stop hit → exit at stop
+          * else first time favourable move >= target_move → exit there
+          * if neither by end-of-window → exit at last tick.
 
-    MFE/MAE are computed over the actual trade path from confirm to exit.
+    All prices here use mid (not Kalman).
     """
 
     confirm = eval_ticks[confirm_idx]
@@ -516,7 +503,7 @@ def compute_trade_metrics(
 
     confirm_price = confirm.mid
 
-    # -------- Pass 1: measure max favourable move over the whole window --------
+    # ----- Pass 1: max favourable move -----
     max_fav = 0.0
     for i in range(start, end):
         px = eval_ticks[i].mid
@@ -524,13 +511,13 @@ def compute_trade_metrics(
         if move > max_fav:
             max_fav = move
 
-    # If never moves in our favour: loser trade, exit at earliest stop or window end
+    # No favourable move at all → loser; exit at stop or end
     if max_fav <= 0.0:
-        exit_idx: Optional[int] = None
-        stop_hit = False
-
         mfe = 0.0
         mae = 0.0
+        stop_hit = False
+        exit_idx: Optional[int] = None
+        exit_price: float
 
         for i in range(start, end):
             px = eval_ticks[i].mid
@@ -546,7 +533,7 @@ def compute_trade_metrics(
                     exit_idx = i
                     exit_price = stop_price
                     break
-                elif side == "long" and px <= stop_price:
+                if side == "long" and px <= stop_price:
                     stop_hit = True
                     exit_idx = i
                     exit_price = stop_price
@@ -571,7 +558,7 @@ def compute_trade_metrics(
             "stop_hit": stop_hit,
         }
 
-    # -------- Pass 2: trade path with target at target_frac_of_wave * max_fav ----
+    # ----- Pass 2: target fraction of wave -----
     target_move = cfg.target_frac_of_wave * max_fav
 
     mfe = 0.0
@@ -595,20 +582,19 @@ def compute_trade_metrics(
                 exit_idx = i
                 exit_price = stop_price
                 break
-            elif side == "long" and px <= stop_price:
+            if side == "long" and px <= stop_price:
                 stop_hit = True
                 exit_idx = i
                 exit_price = stop_price
                 break
 
-        # Then check if we reached the target fraction of the wave
+        # Then check target
         if move >= target_move and exit_idx is None:
             exit_idx = i
             exit_price = px
             break
 
     if exit_idx is None:
-        # Neither stop nor target hit: exit at last tick in window
         exit_idx = end - 1
         exit_price = eval_ticks[exit_idx].mid
 
@@ -629,7 +615,7 @@ def compute_trade_metrics(
 
 
 # ---------------------------------------------------------------------------
-# Stats printing (streaming)
+# Stats printing
 # ---------------------------------------------------------------------------
 
 def print_stats_from_stream(net_values: List[float], side_counts: Counter) -> None:
@@ -706,25 +692,22 @@ def main() -> None:
     csv_path = out_dir / f"confirm_spots_{label}.csv"
 
     fieldnames = [
-        "tag_index",                 # global L5+ tag index (1-based)
-        "pivot_type",                # high/low
+        "tag_index",
+        "pivot_type",
         "pivot_tick_id",
-        "pivot_time",               # actual datetime of the pivot/tag
+        "pivot_time",
         "pivot_price",
         "pivot_eval_level",
         "side",
         "stop_price",
-        # prices of legs
         "L1_price",
         "H1_price",
         "confirm_price",
         "exit_price",
-        # durations from pivot (in seconds)
         "dur_pivot_to_L1_sec",
         "dur_pivot_to_H1_sec",
         "dur_pivot_to_confirm_sec",
         "dur_pivot_to_exit_sec",
-        # trade metrics
         "raw_return",
         "net_return",
         "MFE",
@@ -735,6 +718,8 @@ def main() -> None:
     net_values: List[float] = []
     side_counts: Counter = Counter()
 
+    print(f"Writing output to {csv_path}")
+
     with csv_path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -744,89 +729,99 @@ def main() -> None:
             pivot_time = pivot["pivot_time"]
             pivot_tick_id = pivot["pivot_tick_id"]
 
-            bounds = get_window_bounds_for_pivot(conn, args.symbol, pivot_time)
-            if bounds is None:
-                # Not enough surrounding structure; skip pivot
-                continue
+            try:
+                bounds = get_window_bounds_for_pivot(conn, args.symbol, pivot_time)
+                if bounds is None:
+                    print(f"Tag {tag_index}: skipped (no window bounds)")
+                    continue
 
-            start_ts = bounds["start_ts"]
-            end_ts = bounds["end_ts"]
+                start_ts = bounds["start_ts"]
+                end_ts = bounds["end_ts"]
 
-            eval_ticks = load_segment_eval_ticks(conn, args.symbol, start_ts, end_ts)
-            if not eval_ticks:
-                continue
+                eval_ticks = load_segment_eval_ticks(conn, args.symbol, start_ts, end_ts)
+                if not eval_ticks:
+                    print(f"Tag {tag_index}: skipped (no eval_ticks in window)")
+                    continue
 
-            # find pivot_idx in this segment
-            pivot_idx = None
-            for et in eval_ticks:
-                if et.tick_id == pivot_tick_id:
-                    pivot_idx = et.idx
-                    break
+                # locate pivot in this segment
+                pivot_idx = None
+                for et in eval_ticks:
+                    if et.tick_id == pivot_tick_id:
+                        pivot_idx = et.idx
+                        break
 
-            if pivot_idx is None:
-                # Pivot not in this segment? (shouldn't happen, but be safe)
-                continue
+                if pivot_idx is None:
+                    print(f"Tag {tag_index}: skipped (pivot tick_id not in segment)")
+                    continue
 
-            pivot_type = classify_pivot_type(eval_ticks, pivot_idx, cfg)
-            if pivot_type is None:
-                continue
+                pivot_type = classify_pivot_type(eval_ticks, pivot_idx, cfg)
+                if pivot_type is None:
+                    print(f"Tag {tag_index}: skipped (cannot classify pivot type)")
+                    continue
 
-            conf = detect_confirmation_for_pivot(eval_ticks, pivot_idx, pivot_type, cfg)
-            if conf is None:
-                continue
+                conf = detect_confirmation_for_pivot(eval_ticks, pivot_idx, pivot_type, cfg)
+                if conf is None:
+                    print(f"Tag {tag_index}: skipped (no confirmation pattern)")
+                    continue
 
-            trade = compute_trade_metrics(
-                eval_ticks,
-                conf["confirm_idx"],
-                conf["side"],
-                conf["stop_price"],
-                cfg,
-            )
-            if trade is None:
-                continue
+                trade = compute_trade_metrics(
+                    eval_ticks,
+                    conf["confirm_idx"],
+                    conf["side"],
+                    conf["stop_price"],
+                    cfg,
+                )
+                if trade is None:
+                    print(f"Tag {tag_index}: skipped (no trade metrics)")
+                    continue
 
-            et_pivot = eval_ticks[pivot_idx]
-            et_L1 = eval_ticks[conf["L1_idx"]]
-            et_H1 = eval_ticks[conf["H1_idx"]]
-            et_conf = eval_ticks[conf["confirm_idx"]]
+                et_pivot = eval_ticks[pivot_idx]
+                et_L1 = eval_ticks[conf["L1_idx"]]
+                et_H1 = eval_ticks[conf["H1_idx"]]
+                et_conf = eval_ticks[conf["confirm_idx"]]
 
-            # Durations from pivot
-            dur_pivot_to_L1 = (et_L1.ts - et_pivot.ts).total_seconds()
-            dur_pivot_to_H1 = (et_H1.ts - et_pivot.ts).total_seconds()
-            dur_pivot_to_confirm = (trade["confirm_time"] - et_pivot.ts).total_seconds()
-            dur_pivot_to_exit = (trade["exit_time"] - et_pivot.ts).total_seconds()
+                dur_pivot_to_L1 = (et_L1.ts - et_pivot.ts).total_seconds()
+                dur_pivot_to_H1 = (et_H1.ts - et_pivot.ts).total_seconds()
+                dur_pivot_to_confirm = (trade["confirm_time"] - et_pivot.ts).total_seconds()
+                dur_pivot_to_exit = (trade["exit_time"] - et_pivot.ts).total_seconds()
 
-            row: Dict[str, Any] = {
-                "tag_index": tag_index,
-                "pivot_type": pivot_type,
-                "pivot_tick_id": et_pivot.tick_id,
-                "pivot_time": et_pivot.ts.isoformat(),
-                "pivot_price": et_pivot.mid,
-                "pivot_eval_level": et_pivot.level,
-                "side": conf["side"],
-                "stop_price": conf["stop_price"],
-                "L1_price": et_L1.mid,
-                "H1_price": et_H1.mid,
-                "confirm_price": et_conf.mid,
-                "exit_price": trade["exit_price"],
-                "dur_pivot_to_L1_sec": dur_pivot_to_L1,
-                "dur_pivot_to_H1_sec": dur_pivot_to_H1,
-                "dur_pivot_to_confirm_sec": dur_pivot_to_confirm,
-                "dur_pivot_to_exit_sec": dur_pivot_to_exit,
-                "raw_return": trade["raw_return"],
-                "net_return": trade["net_return"],
-                "MFE": trade["MFE"],
-                "MAE": trade["MAE"],
-                "stop_hit": trade["stop_hit"],
-            }
+                row: Dict[str, Any] = {
+                    "tag_index": tag_index,
+                    "pivot_type": pivot_type,
+                    "pivot_tick_id": et_pivot.tick_id,
+                    "pivot_time": et_pivot.ts.isoformat(),
+                    "pivot_price": et_pivot.mid,
+                    "pivot_eval_level": et_pivot.level,
+                    "side": conf["side"],
+                    "stop_price": conf["stop_price"],
+                    "L1_price": et_L1.mid,
+                    "H1_price": et_H1.mid,
+                    "confirm_price": et_conf.mid,
+                    "exit_price": trade["exit_price"],
+                    "dur_pivot_to_L1_sec": dur_pivot_to_L1,
+                    "dur_pivot_to_H1_sec": dur_pivot_to_H1,
+                    "dur_pivot_to_confirm_sec": dur_pivot_to_confirm,
+                    "dur_pivot_to_exit_sec": dur_pivot_to_exit,
+                    "raw_return": trade["raw_return"],
+                    "net_return": trade["net_return"],
+                    "MFE": trade["MFE"],
+                    "MAE": trade["MAE"],
+                    "stop_hit": trade["stop_hit"],
+                }
 
-            writer.writerow(row)
+                writer.writerow(row)
+                f.flush()  # make sure rows hit disk promptly
 
-            net_values.append(float(trade["net_return"]))
-            side_counts[conf["side"]] += 1
+                net_values.append(float(trade["net_return"]))
+                side_counts[conf["side"]] += 1
 
-            # Optional: light progress logging
-            print(f"Processed tag {tag_index}, side={conf['side']}, net={trade['net_return']:.3f}")
+                print(f"Processed tag {tag_index}, side={conf['side']}, "
+                      f"net={trade['net_return']:.3f}")
+
+            except Exception as e:
+                import traceback
+                print(f"ERROR on tag {tag_index}: {e}")
+                traceback.print_exc()
 
     print_stats_from_stream(net_values, side_counts)
     print(f"Wrote {len(net_values)} confirmations to {csv_path}")
