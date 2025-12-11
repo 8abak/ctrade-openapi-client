@@ -47,9 +47,10 @@ class ConfirmConfig:
     W_loc: int = 400
 
     # Search horizons (ticks) for pattern stages INSIDE the small segment.
-    N1: int = 200   # first drop / first push after pivot
-    N2: int = 200   # retest high/low after L1/H1
-    N3: int = 400   # confirmation horizon after retest
+    # Tightened so L1 / H1 / confirm stay closer to the pivot.
+    N1: int = 120   # first drop / first push after pivot
+    N2: int = 120   # retest high/low after L1/H1
+    N3: int = 240   # confirmation horizon after retest
 
     # Wave scanning horizon after confirmation (ticks).
     N_wave: int = 800
@@ -81,6 +82,135 @@ class EvalTick:
     mid: float         # raw mid price
     level: int         # eval level (0..8)
     kal: float         # Kalman-smoothed mid for this tick
+
+
+# ---------------------------------------------------------------------------
+# Wave helpers (first-wave extremum on Kalman)
+# ---------------------------------------------------------------------------
+
+def find_first_wave_low(
+    eval_ticks: List[EvalTick],
+    start_idx: Optional[int],
+    horizon: int,
+    drop_min: float,
+    bounce_min: float,
+) -> Optional[int]:
+    """
+    First-wave LOW on Kalman:
+
+    Starting at start_idx, look forward up to `horizon` ticks.
+
+      1) Wait until price has DROPPED by at least `drop_min` from the
+         starting Kalman value.
+      2) Track the lowest Kalman value reached during this first drop.
+      3) As soon as price has BOUNCED UP by at least `bounce_min`
+         from that lowest low, return the index of that low.
+
+    If we never see both a drop >= drop_min and a subsequent bounce
+    >= bounce_min within the horizon, return None.
+    """
+    if start_idx is None:
+        return None
+
+    n = len(eval_ticks)
+    if start_idx < 0 or start_idx >= n:
+        return None
+
+    start_kal = eval_ticks[start_idx].kal
+    end_idx = min(n, start_idx + horizon + 1)
+
+    # Step 1: find first index where drop from start >= drop_min
+    drop_start_idx: Optional[int] = None
+    low_idx: Optional[int] = None
+    low_val: Optional[float] = None
+
+    for i in range(start_idx + 1, end_idx):
+        kal_i = eval_ticks[i].kal
+        if start_kal - kal_i >= drop_min:
+            drop_start_idx = i
+            low_idx = i
+            low_val = kal_i
+            break
+
+    if drop_start_idx is None or low_idx is None or low_val is None:
+        return None
+
+    # Step 2/3: extend the wave, updating the low and waiting for bounce
+    for j in range(drop_start_idx + 1, end_idx):
+        kal_j = eval_ticks[j].kal
+
+        # Extend extremum while we keep making new lows
+        if kal_j < low_val:
+            low_val = kal_j
+            low_idx = j
+
+        # Check bounce away from that extremum
+        if kal_j - low_val >= bounce_min:
+            return low_idx
+
+    return None
+
+
+def find_first_wave_high(
+    eval_ticks: List[EvalTick],
+    start_idx: Optional[int],
+    horizon: int,
+    drop_min: float,
+    bounce_min: float,
+) -> Optional[int]:
+    """
+    First-wave HIGH on Kalman (mirror of find_first_wave_low):
+
+    Starting at start_idx, look forward up to `horizon` ticks.
+
+      1) Wait until price has RISEN by at least `drop_min` from the
+         starting Kalman value.
+      2) Track the highest Kalman value reached during this first rise.
+      3) As soon as price has PULLED BACK by at least `bounce_min`
+         from that high, return the index of that high.
+
+    If the pattern does not complete inside the horizon, return None.
+    """
+    if start_idx is None:
+        return None
+
+    n = len(eval_ticks)
+    if start_idx < 0 or start_idx >= n:
+        return None
+
+    start_kal = eval_ticks[start_idx].kal
+    end_idx = min(n, start_idx + horizon + 1)
+
+    # Step 1: find first index where rise from start >= drop_min
+    rise_start_idx: Optional[int] = None
+    high_idx: Optional[int] = None
+    high_val: Optional[float] = None
+
+    for i in range(start_idx + 1, end_idx):
+        kal_i = eval_ticks[i].kal
+        if kal_i - start_kal >= drop_min:
+            rise_start_idx = i
+            high_idx = i
+            high_val = kal_i
+            break
+
+    if rise_start_idx is None or high_idx is None or high_val is None:
+        return None
+
+    # Step 2/3: extend the wave, updating the high and waiting for pullback
+    for j in range(rise_start_idx + 1, end_idx):
+        kal_j = eval_ticks[j].kal
+
+        # Extend extremum while we keep making new highs
+        if kal_j > high_val:
+            high_val = kal_j
+            high_idx = j
+
+        # Check pullback away from that extremum
+        if high_val - kal_j >= bounce_min:
+            return high_idx
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -312,8 +442,8 @@ def _detect_short(
     High pivot → short:
 
       H0 (pivot, Kalman H0_kal)
-      L1 = first Kalman low after pivot within N1
-      H1 = Kalman lower high after L1 within N2
+      L1 = first-wave Kalman low after pivot (drop then bounce)
+      H1 = first-wave Kalman lower high after L1 (bounce then pullback)
       confirm = first Kalman break below L1 - break_buffer within N3
 
     All pattern conditions use Kalman values.
@@ -328,27 +458,35 @@ def _detect_short(
     H0_mid = pivot.mid
     H0_kal = pivot.kal
 
-    # 1) First Kalman low L1 after pivot, within N1 ticks
-    j_start = pivot_idx + 1
-    j_end = min(n, pivot_idx + 1 + cfg.N1)
-    if j_start >= j_end:
+    # 1) First-wave Kalman low L1 after pivot, within N1 ticks
+    L1_idx = find_first_wave_low(
+        eval_ticks,
+        pivot_idx,
+        cfg.N1,
+        cfg.drop_min,
+        cfg.bounce_min,
+    )
+    if L1_idx is None:
         return None
 
-    L1 = min(eval_ticks[j_start:j_end], key=lambda et: et.kal)
-    L1_idx = L1.idx
+    L1 = eval_ticks[L1_idx]
 
     # Require a meaningful drop from pivot (Kalman)
     if H0_kal - L1.kal < cfg.drop_min:
         return None
 
-    # 2) Retest high H1 (lower high), within N2 ticks after L1
-    k_start = L1_idx + 1
-    k_end = min(n, L1_idx + 1 + cfg.N2)
-    if k_start >= k_end:
+    # 2) Retest high H1 (lower high), first-wave high after L1 within N2
+    H1_idx = find_first_wave_high(
+        eval_ticks,
+        L1_idx,
+        cfg.N2,
+        cfg.bounce_min,   # rise from L1
+        cfg.bounce_min,   # pullback from high
+    )
+    if H1_idx is None:
         return None
 
-    H1 = max(eval_ticks[k_start:k_end], key=lambda et: et.kal)
-    H1_idx = H1.idx
+    H1 = eval_ticks[H1_idx]
 
     # Real bounce in Kalman
     if H1.kal - L1.kal < cfg.bounce_min:
@@ -395,8 +533,8 @@ def _detect_long(
     Low pivot → long (mirror of short):
 
       L0 (pivot, Kalman L0_kal)
-      H1 = first Kalman high after pivot within N1
-      L1 = Kalman higher low after H1 within N2
+      H1 = first-wave Kalman high after pivot (push then pullback)
+      L1 = first-wave Kalman higher low after H1 (pullback then bounce)
       confirm = first Kalman break above L1 + break_buffer within N3
     """
 
@@ -408,27 +546,35 @@ def _detect_long(
     L0_mid = pivot.mid
     L0_kal = pivot.kal
 
-    # 1) First Kalman high H1 after pivot, within N1 ticks
-    j_start = pivot_idx + 1
-    j_end = min(n, pivot_idx + 1 + cfg.N1)
-    if j_start >= j_end:
+    # 1) First-wave Kalman high H1 after pivot, within N1 ticks
+    H1_idx = find_first_wave_high(
+        eval_ticks,
+        pivot_idx,
+        cfg.N1,
+        cfg.drop_min,
+        cfg.bounce_min,
+    )
+    if H1_idx is None:
         return None
 
-    H1 = max(eval_ticks[j_start:j_end], key=lambda et: et.kal)
-    H1_idx = H1.idx
+    H1 = eval_ticks[H1_idx]
 
     # Require a meaningful push up from pivot (Kalman)
     if H1.kal - L0_kal < cfg.drop_min:
         return None
 
-    # 2) Retest low L1 (higher low), within N2 ticks after H1
-    k_start = H1_idx + 1
-    k_end = min(n, H1_idx + 1 + cfg.N2)
-    if k_start >= k_end:
+    # 2) Retest low L1 (higher low), first-wave low after H1 within N2
+    L1_idx = find_first_wave_low(
+        eval_ticks,
+        H1_idx,
+        cfg.N2,
+        cfg.bounce_min,   # drop from H1
+        cfg.bounce_min,   # bounce from low
+    )
+    if L1_idx is None:
         return None
 
-    L1 = min(eval_ticks[k_start:k_end], key=lambda et: et.kal)
-    L1_idx = L1.idx
+    L1 = eval_ticks[L1_idx]
 
     # Real pullback in Kalman
     if H1.kal - L1.kal < cfg.bounce_min:
