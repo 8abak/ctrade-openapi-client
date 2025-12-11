@@ -47,7 +47,7 @@ class ConfirmConfig:
     W_loc: int = 400
 
     # Search horizons (ticks) for pattern stages INSIDE the small segment.
-    # Tightened so L1 / H1 / confirm stay closer to the pivot.
+    # Slightly tightened so L1/H1/confirm stay closer to the pivot.
     N1: int = 120   # first drop / first push after pivot
     N2: int = 120   # retest high/low after L1/H1
     N3: int = 240   # confirmation horizon after retest
@@ -59,7 +59,8 @@ class ConfirmConfig:
     target_frac_of_wave: float = 0.5
 
     # Price thresholds (in price units), applied to Kalman moves.
-    drop_min: float = 0.5       # min H0->L1 (short) or L0->H1 (long) in Kalman
+    drop_min: float = 0.5       # min H0->L1 (short) in Kalman
+    up_min: float = 0.3         # min L0->H1 (long) in Kalman
     bounce_min: float = 0.3     # min L1->H1 (short) or H1->L1 (long) in Kalman
     small_buffer: float = 0.1   # H1 lower than H0 / L1 higher than L0 in Kalman
     break_buffer: float = 0.0   # confirmation trigger relative to L1 in Kalman
@@ -95,10 +96,9 @@ def find_first_wave_low(
     drop_min: float,
     bounce_min: float,
 ) -> Optional[int]:
-    """
-    First-wave LOW on Kalman:
+    """First-wave LOW on Kalman.
 
-    Starting at start_idx, look forward up to `horizon` ticks.
+    Starting at start_idx, look forward up to `horizon` ticks:
 
       1) Wait until price has DROPPED by at least `drop_min` from the
          starting Kalman value.
@@ -158,10 +158,9 @@ def find_first_wave_high(
     drop_min: float,
     bounce_min: float,
 ) -> Optional[int]:
-    """
-    First-wave HIGH on Kalman (mirror of find_first_wave_low):
+    """First-wave HIGH on Kalman (mirror of find_first_wave_low).
 
-    Starting at start_idx, look forward up to `horizon` ticks.
+    Starting at start_idx, look forward up to `horizon` ticks:
 
       1) Wait until price has RISEN by at least `drop_min` from the
          starting Kalman value.
@@ -438,8 +437,7 @@ def _detect_short(
     pivot_idx: int,
     cfg: ConfirmConfig,
 ) -> Optional[Dict[str, Any]]:
-    """
-    High pivot → short:
+    """High pivot → short.
 
       H0 (pivot, Kalman H0_kal)
       L1 = first-wave Kalman low after pivot (drop then bounce)
@@ -449,7 +447,6 @@ def _detect_short(
     All pattern conditions use Kalman values.
     Stops are still placed using mid prices.
     """
-
     n = len(eval_ticks)
     if pivot_idx >= n - 2:
         return None
@@ -529,15 +526,13 @@ def _detect_long(
     pivot_idx: int,
     cfg: ConfirmConfig,
 ) -> Optional[Dict[str, Any]]:
-    """
-    Low pivot → long (mirror of short):
+    """Low pivot → long (mirror of short).
 
       L0 (pivot, Kalman L0_kal)
       H1 = first-wave Kalman high after pivot (push then pullback)
       L1 = first-wave Kalman higher low after H1 (pullback then bounce)
       confirm = first Kalman break above L1 + break_buffer within N3
     """
-
     n = len(eval_ticks)
     if pivot_idx >= n - 2:
         return None
@@ -551,7 +546,7 @@ def _detect_long(
         eval_ticks,
         pivot_idx,
         cfg.N1,
-        cfg.drop_min,
+        cfg.up_min,
         cfg.bounce_min,
     )
     if H1_idx is None:
@@ -560,7 +555,7 @@ def _detect_long(
     H1 = eval_ticks[H1_idx]
 
     # Require a meaningful push up from pivot (Kalman)
-    if H1.kal - L0_kal < cfg.drop_min:
+    if H1.kal - L0_kal < cfg.up_min:
         return None
 
     # 2) Retest low L1 (higher low), first-wave low after H1 within N2
