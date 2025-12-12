@@ -16,12 +16,12 @@ const ChartCore = (function () {
     lastTickId: null,
 
     liveTimer: null,
-    liveLimit: 2000, // NEW: default to last 2000 ticks for live
+    liveLimit: 2000, // default to last 2000 ticks for live
 
     windowChangeHandler: null, // callback(info)
     hasInit: false, // tracks whether we've set the base option (for zoom preservation)
 
-    // NEW: group-level visibility flags (used when building series)
+    // group-level visibility flags (used when building series)
     visibility: {
       bid: true,
       ask: true,
@@ -33,7 +33,7 @@ const ChartCore = (function () {
       zones: true,
     },
 
-    // NEW: eval overlay state (non-breaking additive)
+    // eval overlay state (non-breaking additive)
     evals: [], // raw eval rows currently attached to the window
     evalMinLevel: 1, // active minimum level
     evalVisibility: true, // master on/off for eval overlay
@@ -185,7 +185,8 @@ const ChartCore = (function () {
       const ts = xVals[i];
 
       // y uses mid, or p.mid if present
-      const y = p.mid != null ? Number(p.mid) : state.ticks[i].mid != null ? Number(state.ticks[i].mid) : null;
+      const y =
+        p.mid != null ? Number(p.mid) : state.ticks[i].mid != null ? Number(state.ticks[i].mid) : null;
       if (y == null) continue;
 
       const payload = {
@@ -208,7 +209,8 @@ const ChartCore = (function () {
       const i = idxByTickId.get(Number(p.tick_id));
       if (i == null) continue;
       const ts = xVals[i];
-      const y = p.mid != null ? Number(p.mid) : state.ticks[i].mid != null ? Number(state.ticks[i].mid) : null;
+      const y =
+        p.mid != null ? Number(p.mid) : state.ticks[i].mid != null ? Number(state.ticks[i].mid) : null;
       if (y == null) continue;
 
       const payload = {
@@ -228,7 +230,8 @@ const ChartCore = (function () {
       const i = idxByTickId.get(Number(p.tick_id));
       if (i == null) continue;
       const ts = xVals[i];
-      const y = p.mid != null ? Number(p.mid) : state.ticks[i].mid != null ? Number(state.ticks[i].mid) : null;
+      const y =
+        p.mid != null ? Number(p.mid) : state.ticks[i].mid != null ? Number(state.ticks[i].mid) : null;
       if (y == null) continue;
 
       const payload = {
@@ -325,7 +328,6 @@ const ChartCore = (function () {
 
     // HHLL groups
     for (const [cls, pts] of hhllByClass.entries()) {
-      // these are always overlay; controlled by zones visibility (zonesHhll) separately.
       series.push({
         id: `hhll_${cls}`,
         name: `HHLL ${cls}`,
@@ -340,7 +342,6 @@ const ChartCore = (function () {
     if (vis.zones) {
       const zoneAreas = [];
       for (const z of state.zonesHhll) {
-        // zones are based on tick_id ranges and y bounds (low/high)
         const iFrom = idxByTickId.get(Number(z.tick_from));
         const iTo = idxByTickId.get(Number(z.tick_to));
         if (iFrom == null || iTo == null) continue;
@@ -352,10 +353,7 @@ const ChartCore = (function () {
         const y2 = safeNum(z.high);
         if (y1 == null || y2 == null) continue;
 
-        zoneAreas.push([
-          { xAxis: x1, yAxis: y1 },
-          { xAxis: x2, yAxis: y2 },
-        ]);
+        zoneAreas.push([{ xAxis: x1, yAxis: y1 }, { xAxis: x2, yAxis: y2 }]);
       }
 
       series.push({
@@ -374,8 +372,8 @@ const ChartCore = (function () {
     }
 
     // --------------------------
-    // NEW: eval overlays (scatter)
-    // Align eval.tick_id to the tick index -> xVals[index], so dots sit on the same X grid.
+    // Evals overlays (scatter)
+    // Align eval.tick_id to the tick index -> xVals[index], so dots sit on same X grid.
     // --------------------------
     function colorForSign(sign) {
       if (sign > 0) return "#4caf50";
@@ -384,7 +382,6 @@ const ChartCore = (function () {
     }
     function sizeForLevel(level) {
       const lvl = Number(level) || 1;
-      // 4 + 2*level, clamped to stay readable
       return Math.max(4, Math.min(22, 4 + 2 * lvl));
     }
 
@@ -400,18 +397,15 @@ const ChartCore = (function () {
         if (!Number.isFinite(tickId) || !Number.isFinite(mid)) continue;
 
         const i = idxByTickId.get(tickId);
-        if (i == null) continue; // eval outside the current tick window
+        if (i == null) continue;
 
         if (!byLevel.has(level)) byLevel.set(level, []);
         byLevel.get(level).push({ i, mid, r });
       }
 
-      // One scatter series per level
       for (const level of Array.from(byLevel.keys()).sort((a, b) => a - b)) {
         const rows = byLevel.get(level);
-        const points = rows.map(({ i, mid, r }) => {
-          return [xVals[i], mid, r]; // payload in slot 2 for tooltip
-        });
+        const points = rows.map(({ i, mid, r }) => [xVals[i], mid, r]);
 
         series.push({
           id: `eval_L${level}`,
@@ -419,7 +413,6 @@ const ChartCore = (function () {
           type: "scatter",
           symbol: "circle",
           symbolSize: function (val) {
-            // val: [x, y, payload]
             const payload = Array.isArray(val) ? val[2] : null;
             return sizeForLevel(payload ? payload.level : level);
           },
@@ -457,7 +450,6 @@ const ChartCore = (function () {
     return function (params) {
       if (!params || !params.length) return "";
 
-      // ECharts passes an array of series points at the same axis trigger
       const axisValue = params[0].axisValue;
       const dt = (() => {
         const iso = toISO(axisValue);
@@ -477,18 +469,14 @@ const ChartCore = (function () {
       html += `* * *<br/>`;
 
       const extras = [];
+
       params.forEach((p) => {
         const seriesId = p.seriesId || p.seriesName;
         const data = p.data;
         const yVal = Array.isArray(data) ? data[1] : data;
         const yText = yVal == null ? "" : Number(yVal).toFixed(2);
 
-        if (
-          seriesId === "mid" ||
-          seriesId === "kal" ||
-          seriesId === "bid" ||
-          seriesId === "ask"
-        ) {
+        if (seriesId === "mid" || seriesId === "kal" || seriesId === "bid" || seriesId === "ask") {
           html += `${p.marker} ${p.seriesName}: ${yText}<br/>`;
         } else if (seriesId === "piv_hi" || seriesId === "piv_lo") {
           const payload = Array.isArray(data) ? data[2] : null;
@@ -500,16 +488,12 @@ const ChartCore = (function () {
         } else if (seriesId === "swings") {
           const payload = Array.isArray(data) ? data[2] : null;
           if (payload) {
-            extras.push(
-              `Swing – mid:${yText} ptype:${payload.ptype} swing:${payload.swing_index}`
-            );
+            extras.push(`Swing – mid:${yText} ptype:${payload.ptype} swing:${payload.swing_index}`);
           }
         } else if (String(seriesId).startsWith("hhll_")) {
           const payload = Array.isArray(data) ? data[2] : null;
           if (payload) {
-            extras.push(
-              `HHLL – mid:${yText} class:${payload.class_text} ptype:${payload.ptype}`
-            );
+            extras.push(`HHLL – mid:${yText} class:${payload.class_text} ptype:${payload.ptype}`);
           }
         } else if (String(seriesId).startsWith("eval_L")) {
           const payload = Array.isArray(data) ? data[2] : null;
@@ -541,22 +525,14 @@ const ChartCore = (function () {
 
     const n = state.ticks.length;
     if (!n) {
-      state.windowChangeHandler({
-        count: 0,
-        firstId: null,
-        lastId: null,
-      });
+      state.windowChangeHandler({ count: 0, firstId: null, lastId: null });
       return;
     }
 
     const firstId = state.ticks[0].id;
     const lastId = state.ticks[n - 1].id;
 
-    state.windowChangeHandler({
-      count: n,
-      firstId,
-      lastId,
-    });
+    state.windowChangeHandler({ count: n, firstId, lastId });
   }
 
   function render() {
@@ -564,9 +540,7 @@ const ChartCore = (function () {
 
     const { series, xVals } = buildSeries();
     const yAxisPatch = buildYAxisPatch(xVals);
-    const tooltip = {
-      formatter: buildTooltipFormatter(xVals, state.ticks),
-    };
+    const tooltip = { formatter: buildTooltipFormatter(xVals, state.ticks) };
 
     if (!state.hasInit) {
       chart.setOption(
@@ -591,7 +565,6 @@ const ChartCore = (function () {
       );
       state.hasInit = true;
     } else {
-      // preserve zoom
       const oldOpt = chart.getOption();
       const dz = oldOpt && oldOpt.dataZoom ? oldOpt.dataZoom[0] : null;
 
@@ -614,7 +587,6 @@ const ChartCore = (function () {
   }
 
   function handleDataZoom() {
-    // Keep Y bounds synced to visible X window
     recomputeYFromVisibleWindow(chart, state);
   }
 
@@ -633,7 +605,6 @@ const ChartCore = (function () {
     state.hhll = [];
     state.zonesHhll = [];
 
-    // track last tick id to avoid reloading if no new ticks
     if (state.ticks.length) {
       state.lastTickId = state.ticks[state.ticks.length - 1].id;
     } else {
@@ -648,7 +619,7 @@ const ChartCore = (function () {
     const limit = opts && opts.limit != null ? Number(opts.limit) : state.liveLimit;
     const intervalMs = opts && opts.intervalMs != null ? Number(opts.intervalMs) : 2000;
 
-    stopLive(); // ensure single timer
+    stopLive();
     state.mode = "live";
     state.liveLimit = limit;
 
@@ -656,7 +627,6 @@ const ChartCore = (function () {
 
     state.liveTimer = setInterval(async () => {
       try {
-        // cheap check: query last tick
         const res = await fetch(`/api/live_last_tick`);
         if (!res.ok) return;
         const d = await res.json();
@@ -679,13 +649,16 @@ const ChartCore = (function () {
     }
   }
 
+  // ✅ FIXED: review endpoint is /api/review/window (NOT /api/ticks/window)
   async function loadWindow(fromId, windowSize) {
     const from = Number(fromId);
     const win = Number(windowSize);
-    const url = `/api/ticks/window?from_id=${encodeURIComponent(from)}&window=${encodeURIComponent(win)}`;
+    const url =
+      `/api/review/window?from_id=${encodeURIComponent(from)}` +
+      `&window=${encodeURIComponent(win)}`;
 
     const res = await fetch(url);
-    if (!res.ok) throw new Error(`ticks/window failed: ${res.status}`);
+    if (!res.ok) throw new Error(`review/window failed: ${res.status}`);
     const data = await res.json();
 
     state.mode = "review";
@@ -715,14 +688,12 @@ const ChartCore = (function () {
     state.windowChangeHandler = typeof fn === "function" ? fn : null;
   }
 
-  // NEW: attach eval rows to the current window (non-breaking)
   function setEvals(rows, minLevel) {
     state.evals = Array.isArray(rows) ? rows : [];
     state.evalMinLevel = typeof minLevel === "number" ? minLevel : 1;
-    render(); // evals follow zoom/pan naturally
+    render();
   }
 
-  // NEW: master toggle for eval overlay
   function setEvalVisibility(visible) {
     state.evalVisibility = !!visible;
     render();
@@ -735,7 +706,6 @@ const ChartCore = (function () {
       const c = ensureChart(domId);
       if (!c) return;
 
-      // attach zoom handler once
       c.off && c.off("dataZoom");
       c.on("dataZoom", handleDataZoom);
     },
@@ -744,7 +714,7 @@ const ChartCore = (function () {
     stopLive,
     setVisibility,
     setWindowChangeHandler,
-    loadLiveOnce, // used by index-core for LIVE + STOP
+    loadLiveOnce,
     setEvals,
     setEvalVisibility,
   };
