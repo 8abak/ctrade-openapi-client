@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class TagConfig:
     # USER RULE: window is -500 to +2000 ticks around pivot
-    pre_ticks: int = 200
+    pre_ticks: int = 30
     post_ticks: int = 500
 
     # local extrema detection on Kalman (span=2 => 5-tick window)
