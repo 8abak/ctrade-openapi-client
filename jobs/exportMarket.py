@@ -149,7 +149,7 @@ def main() -> int:
 
     conn = psycopg2.connect(build_conn_dsn())
     try:
-        conn.autocommit = False
+        conn.autocommit = False  # REQUIRED for named cursor
         n = export_day(
             conn=conn,
             schema=args.schema,
@@ -167,8 +167,6 @@ def main() -> int:
 
     print(f"[ok] exported {n} rows to {out_csv}")
     print(f"[window] UTC {window.start_utc.isoformat()} -> {window.end_utc.isoformat()} (end-exclusive)")
-    if args.symbol:
-        print(f"[filter] {args.symbol_col} = {args.symbol}")
     return 0
 
 
