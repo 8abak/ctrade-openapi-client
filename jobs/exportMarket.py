@@ -1,28 +1,12 @@
-"""
-Export all ticks for a "Sydney market day" into a CSV in train/set/.
-
-Definition:
-  Market day for DATE (Sydney) = [DATE 08:00:00, (DATE+1) 07:00:00) Sydney time
-  (end is exclusive -> includes up to 06:59:59.999... next day)
-
-Usage:
-  python -m jobs.export_market_day_ticks --date 2025-12-12
-
-DB connection uses standard env vars:
-  PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD
-(or DATABASE_URL if you prefer; see build_conn_dsn()).
-"""
-
 from __future__ import annotations
 
 import argparse
 import csv
 import os
-import sys
 from dataclasses import dataclass
 from datetime import datetime, date, time, timedelta, timezone
 from zoneinfo import ZoneInfo
-from typing import List, Optional, Iterator, Any
+from typing import List, Optional
 
 import psycopg2
 
@@ -40,19 +24,20 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--date", required=True, help="Sydney market date, e.g. 2025-12-12 (YYYY-MM-DD)")
     p.add_argument("--table", default="ticks", help="Table name (default: ticks)")
-    p.add_argument("--ts-col", default="t", help="Timestamp column name (default: t)")
+    p.add_argument("--ts-col", default="timestamp", help="Timestamp column name (default: timestamp)")
     p.add_argument("--schema", default="public", help="Schema name (default: public)")
     p.add_argument("--chunk", type=int, default=20000, help="Rows per fetch (default: 20000)")
     p.add_argument("--outdir", default="train/set", help="Output directory (default: train/set)")
     p.add_argument("--order-by", default=None,
-                   help="Optional ORDER BY override, e.g. 't, id'. Default: '<ts-col>, id' if id exists else '<ts-col>'")
+                   help="Optional ORDER BY override, e.g. 'timestamp, id'. Default: '<ts-col>, id' if id exists else '<ts-col>'")
+
+    # optional symbol filter (matches your table)
+    p.add_argument("--symbol", default=None, help="Optional symbol filter, e.g. XAUUSD")
+    p.add_argument("--symbol-col", default="symbol", help="Symbol column name (default: symbol)")
     return p.parse_args()
 
 
 def build_conn_dsn() -> str:
-    """
-    Prefer DATABASE_URL if set, else build from PG* env vars.
-    """
     dburl = os.getenv("DATABASE_URL")
     if dburl:
         return dburl
@@ -60,9 +45,8 @@ def build_conn_dsn() -> str:
     host = os.getenv("PGHOST", "localhost")
     port = os.getenv("PGPORT", "5432")
     db = os.getenv("PGDATABASE", "trading")
-    user = os.getenv("PGUSER", "babak")
-    pwd = os.getenv("PGPASSWORD", "babak33044")
-    # psycopg2 accepts keyword DSN format
+    user = os.getenv("PGUSER", "postgres")
+    pwd = os.getenv("PGPASSWORD", "")
     return f"host={host} port={port} dbname={db} user={user} password={pwd}"
 
 
@@ -87,12 +71,10 @@ def get_table_columns(conn, schema: str, table: str) -> List[str]:
     """
     with conn.cursor() as cur:
         cur.execute(sql, (schema, table))
-        cols = [r[0] for r in cur.fetchall()]
-    return cols
+        return [r[0] for r in cur.fetchall()]
 
 
 def quote_ident(name: str) -> str:
-    # minimal safe quoting for identifiers (no schema/user input injection)
     return '"' + name.replace('"', '""') + '"'
 
 
@@ -105,16 +87,18 @@ def export_day(
     out_csv_path: str,
     chunk: int,
     order_by: Optional[str],
+    symbol: Optional[str],
+    symbol_col: str,
 ) -> int:
     cols = get_table_columns(conn, schema, table)
     if not cols:
         raise RuntimeError(f"No columns found for {schema}.{table} (table missing?)")
 
     if ts_col not in cols:
-        raise RuntimeError(
-            f"Timestamp column '{ts_col}' not found in {schema}.{table}. "
-            f"Available columns: {', '.join(cols)}"
-        )
+        raise RuntimeError(f"Timestamp column '{ts_col}' not found. Available: {', '.join(cols)}")
+
+    if symbol is not None and symbol_col not in cols:
+        raise RuntimeError(f"Symbol column '{symbol_col}' not found. Available: {', '.join(cols)}")
 
     has_id = "id" in cols
     if order_by is None:
@@ -123,20 +107,25 @@ def export_day(
         else:
             order_by = f"{quote_ident(ts_col)}"
 
-    # Build SELECT with fully-qualified table
     select_list = ", ".join(quote_ident(c) for c in cols)
     fq_table = f"{quote_ident(schema)}.{quote_ident(table)}"
-    where = f"{quote_ident(ts_col)} >= %s AND {quote_ident(ts_col)} < %s"
+
+    where_parts = [f"{quote_ident(ts_col)} >= %s", f"{quote_ident(ts_col)} < %s"]
+    params = [window.start_utc, window.end_utc]
+
+    if symbol is not None:
+        where_parts.append(f"{quote_ident(symbol_col)} = %s")
+        params.append(symbol)
+
+    where = " AND ".join(where_parts)
     sql = f"SELECT {select_list} FROM {fq_table} WHERE {where} ORDER BY {order_by}"
 
     os.makedirs(os.path.dirname(out_csv_path), exist_ok=True)
 
     rowcount = 0
-
-    # Server-side cursor streams rows without loading everything into RAM.
     with conn.cursor(name="export_ticks_cursor") as cur, open(out_csv_path, "w", newline="") as f:
         cur.itersize = max(1, chunk)
-        cur.execute(sql, (window.start_utc, window.end_utc))
+        cur.execute(sql, params)
 
         w = csv.writer(f)
         w.writerow(cols)
@@ -153,15 +142,12 @@ def export_day(
 
 def main() -> int:
     args = parse_args()
-
     syd_date = date.fromisoformat(args.date)
     window = compute_window(syd_date)
 
     out_csv = os.path.join(args.outdir, f"{args.date}.csv")
 
-    dsn = build_conn_dsn()
-    # readonly-ish session; you can also set statement_timeout etc if desired
-    conn = psycopg2.connect(dsn)
+    conn = psycopg2.connect(build_conn_dsn())
     try:
         conn.autocommit = True
         n = export_day(
@@ -173,12 +159,16 @@ def main() -> int:
             out_csv_path=out_csv,
             chunk=args.chunk,
             order_by=args.order_by,
+            symbol=args.symbol,
+            symbol_col=args.symbol_col,
         )
     finally:
         conn.close()
 
     print(f"[ok] exported {n} rows to {out_csv}")
     print(f"[window] UTC {window.start_utc.isoformat()} -> {window.end_utc.isoformat()} (end-exclusive)")
+    if args.symbol:
+        print(f"[filter] {args.symbol_col} = {args.symbol}")
     return 0
 
 
