@@ -45,8 +45,8 @@ def build_conn_dsn() -> str:
     host = os.getenv("PGHOST", "localhost")
     port = os.getenv("PGPORT", "5432")
     db = os.getenv("PGDATABASE", "trading")
-    user = os.getenv("PGUSER", "postgres")
-    pwd = os.getenv("PGPASSWORD", "")
+    user = os.getenv("PGUSER", "babak")
+    pwd = os.getenv("PGPASSWORD", "babak33044")
     return f"host={host} port={port} dbname={db} user={user} password={pwd}"
 
 
