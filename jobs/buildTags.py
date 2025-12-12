@@ -22,10 +22,16 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class TagConfig:
-    pre_ticks: int = 300       # ticks before pivot in window
-    post_ticks: int = 2000     # ticks after pivot in window
-    local_span: int = 2        # 2 each side → 5-tick window for local extrema
-    classify_N: int = 80       # number of ticks before/after for direction
+    # USER RULE: window is -500 to +2000 ticks around pivot
+    pre_ticks: int = 500
+    post_ticks: int = 2000
+
+    # local extrema detection on Kalman (span=2 => 5-tick window)
+    local_span: int = 2
+
+    # pivot direction classification (kept as-is)
+    classify_N: int = 80
+
     cost_per_trade: float = 0.1
 
 
@@ -43,9 +49,7 @@ class TagTick:
 # ---------------------------------------------------------------------------
 
 def is_local_min_kal(ticks: List[TagTick], i: int, span: int) -> bool:
-    """
-    True if ticks[i].kal is strictly less than all neighbours in [i-span .. i+span].
-    """
+    """True if ticks[i].kal is strictly less than all neighbours in [i-span .. i+span]."""
     if i - span < 0 or i + span >= len(ticks):
         return False
     k0 = ticks[i].kal
@@ -58,9 +62,7 @@ def is_local_min_kal(ticks: List[TagTick], i: int, span: int) -> bool:
 
 
 def is_local_max_kal(ticks: List[TagTick], i: int, span: int) -> bool:
-    """
-    True if ticks[i].kal is strictly greater than all neighbours in [i-span .. i+span].
-    """
+    """True if ticks[i].kal is strictly greater than all neighbours in [i-span .. i+span]."""
     if i - span < 0 or i + span >= len(ticks):
         return False
     k0 = ticks[i].kal
@@ -84,8 +86,8 @@ def get_l5_pivots(conn, symbol: str, start_tag: int, num_tags: int):
     """
     Fetch L5+ pivots from evals joined to ticks, and assign a global 1-based tag_index.
 
-    We define "L5+" as evals.level >= 5 for the given symbol.
-    Tag ordering is by evals.timestamp, id.
+    L5+ means evals.level >= 5 for the given symbol.
+    Ordering is by evals.timestamp, evals.id.
     """
     sql = """
         WITH l5 AS (
@@ -191,13 +193,11 @@ def load_tick_window(
     ticks: List[TagTick] = []
     idx = 0
 
-    for row in prev_rows:
-        tick_id, ts, mid, kal = row
+    for tick_id, ts, mid, kal in prev_rows:
         ticks.append(TagTick(idx=idx, tick_id=int(tick_id), ts=ts, mid=float(mid), kal=float(kal)))
         idx += 1
 
-    for row in next_rows:
-        tick_id, ts, mid, kal = row
+    for tick_id, ts, mid, kal in next_rows:
         ticks.append(TagTick(idx=idx, tick_id=int(tick_id), ts=ts, mid=float(mid), kal=float(kal)))
         idx += 1
 
@@ -208,7 +208,7 @@ def load_tick_window(
             break
 
     full_window = (
-        len(prev_rows) >= cfg.pre_ticks + 1 and  # includes pivot
+        len(prev_rows) >= cfg.pre_ticks + 1 and
         len(next_rows) >= cfg.post_ticks
     )
 
@@ -239,14 +239,11 @@ def classify_pivot_type(
     avg_before = sum(t.mid for t in before) / len(before)
     avg_after = sum(t.mid for t in after) / len(after)
 
-    if avg_after < avg_before:
-        return "high"
-    else:
-        return "low"
+    return "high" if avg_after < avg_before else "low"
 
 
 # ---------------------------------------------------------------------------
-# Wave detection
+# Wave detection: EXACT USER RULES (Kalman-based)
 # ---------------------------------------------------------------------------
 
 def detect_wave_points(
@@ -256,40 +253,47 @@ def detect_wave_points(
     cfg: TagConfig,
 ) -> Tuple[Optional[int], Optional[int], Optional[int]]:
     """
-    Return indices (L1_idx, H1_idx, conf_idx) or Nones, according to the spec.
+    USER RULE:
+      - From pivot, move forward to find first turning point on Kalman.
+        * If pivot_type == "high" (short): first turning point = first local MIN (L1)
+        * If pivot_type == "low"  (long):  first turning point = first local MAX (H1)
+      - Then find second turning point (opposite of first):
+        * high: second = first local MAX after L1 (H1)
+        * low:  second = first local MIN after H1 (L1)
+      - Confirm point: AFTER the second turning point, wait for Kalman to pass the first turning
+        level:
+        * high: after H1, first tick where kal <= kal(L1)
+        * low:  after L1, first tick where kal >= kal(H1)
+
+    Returns indices (L1_idx, H1_idx, conf_idx) or Nones.
     """
     if pivot_type not in ("high", "low"):
         return None, None, None
 
     span = cfg.local_span
-
     L1_idx: Optional[int] = None
     H1_idx: Optional[int] = None
     conf_idx: Optional[int] = None
 
     if pivot_type == "high":
-        pivot_kal = ticks[pivot_idx].kal
-
-        # L1: first local min after pivot with kal < pivot kal
+        # First turning point (opposite of pivot): first local MIN after pivot => L1
         for i in range(pivot_idx + 1, len(ticks)):
-            if is_local_min_kal(ticks, i, span) and ticks[i].kal < pivot_kal:
+            if is_local_min_kal(ticks, i, span):
                 L1_idx = i
                 break
-
         if L1_idx is None:
             return None, None, None
 
-        # H1: first local max after L1 with kal > L1 kal
-        L1_kal = ticks[L1_idx].kal
+        # Second turning point (same direction as pivot): first local MAX after L1 => H1
         for j in range(L1_idx + 1, len(ticks)):
-            if is_local_max_kal(ticks, j, span) and ticks[j].kal > L1_kal:
+            if is_local_max_kal(ticks, j, span):
                 H1_idx = j
                 break
-
         if H1_idx is None:
             return L1_idx, None, None
 
-        # Confirm: first tick after H1 where kal <= L1 kal
+        # Confirm: after H1, first tick where kal <= kal(L1)
+        L1_kal = ticks[L1_idx].kal
         for k in range(H1_idx + 1, len(ticks)):
             if ticks[k].kal <= L1_kal:
                 conf_idx = k
@@ -298,28 +302,24 @@ def detect_wave_points(
         return L1_idx, H1_idx, conf_idx
 
     else:  # pivot_type == "low"
-        pivot_kal = ticks[pivot_idx].kal
-
-        # H1: first local max after pivot with kal > pivot kal
+        # First turning point (opposite of pivot): first local MAX after pivot => H1
         for i in range(pivot_idx + 1, len(ticks)):
-            if is_local_max_kal(ticks, i, span) and ticks[i].kal > pivot_kal:
+            if is_local_max_kal(ticks, i, span):
                 H1_idx = i
                 break
-
         if H1_idx is None:
             return None, None, None
 
-        # L1: first local min after H1 with kal < H1 kal
-        H1_kal = ticks[H1_idx].kal
+        # Second turning point (same direction as pivot): first local MIN after H1 => L1
         for j in range(H1_idx + 1, len(ticks)):
-            if is_local_min_kal(ticks, j, span) and ticks[j].kal < H1_kal:
+            if is_local_min_kal(ticks, j, span):
                 L1_idx = j
                 break
-
         if L1_idx is None:
             return None, H1_idx, None
 
-        # Confirm: first tick after L1 where kal >= H1 kal
+        # Confirm: after L1, first tick where kal >= kal(H1)
+        H1_kal = ticks[H1_idx].kal
         for k in range(L1_idx + 1, len(ticks)):
             if ticks[k].kal >= H1_kal:
                 conf_idx = k
@@ -329,7 +329,7 @@ def detect_wave_points(
 
 
 # ---------------------------------------------------------------------------
-# Trade simulation
+# Trade simulation: EXACT USER RULES
 # ---------------------------------------------------------------------------
 
 def simulate_trade(
@@ -338,76 +338,93 @@ def simulate_trade(
     conf_idx: int,
     pivot_type: Optional[str],
     cfg: TagConfig,
-) -> Tuple[Optional[int], Optional[float], Optional[float], Optional[str]]:
+) -> Tuple[
+    Optional[int],   # close_idx
+    Optional[int],   # tp_idx
+    Optional[int],   # sl_idx
+    Optional[float], # take_price
+    Optional[float], # stop_price
+    Optional[float], # gnet
+    Optional[float], # net
+    Optional[str],   # side
+    Optional[bool],  # stop_hit
+]:
     """
-    Simulate a single SL/TP trade from conf_idx to end of window.
-
-    Returns:
-        close_idx, gnet, net, side
+    USER RULE:
+      - Enter at confirm point (conf_idx, entry_price = ticks[conf_idx].mid)
+      - distance = |entry - pivot|
+      - stop_loss distance = 1.1 * distance (10% extra) in adverse direction
+      - take_profit distance = 1.0 * distance in favorable direction
+      - walk forward until TP or SL hit; record tick id/time by index
     """
     if pivot_type not in ("high", "low"):
-        return None, None, None, ""
-
+        return None, None, None, None, None, None, None, "", None
     if conf_idx is None or conf_idx >= len(ticks) - 1:
-        return None, None, None, ""
+        return None, None, None, None, None, None, None, "", None
 
     pivot = ticks[pivot_idx]
     conf = ticks[conf_idx]
 
-    distance = abs(conf.mid - pivot.mid)
-    entry_price = conf.mid
+    entry = conf.mid
+    distance = abs(entry - pivot.mid)
+
     direction = -1 if pivot_type == "high" else +1
     side = "short" if direction == -1 else "long"
 
     if distance == 0:
-        # Degenerate case: no distance; treat as no-op trade
+        # Degenerate: no SL/TP levels; exit at last tick
         close_idx = len(ticks) - 1
         exit_mid = ticks[close_idx].mid
-        gnet = direction * (exit_mid - entry_price)
+        gnet = direction * (exit_mid - entry)
         net = gnet - cfg.cost_per_trade
-        return close_idx, gnet, net, side
+        return close_idx, None, None, None, None, gnet, net, side, False
 
     if pivot_type == "high":
-        stop = entry_price + 1.1 * distance      # above pivot by 0.1 * distance
-        take = entry_price - distance
+        stop_price = entry + 1.1 * distance
+        take_price = entry - 1.0 * distance
     else:
-        stop = entry_price - 1.1 * distance      # below pivot by 0.1 * distance
-        take = entry_price + distance
+        stop_price = entry - 1.1 * distance
+        take_price = entry + 1.0 * distance
 
     close_idx: Optional[int] = None
-    stop_hit = False
+    tp_idx: Optional[int] = None
+    sl_idx: Optional[int] = None
+    stop_hit = None
 
     for i in range(conf_idx + 1, len(ticks)):
         mid = ticks[i].mid
         if pivot_type == "high":
-            if mid >= stop:
+            if mid >= stop_price:
                 close_idx = i
+                sl_idx = i
                 stop_hit = True
                 break
-            elif mid <= take:
+            if mid <= take_price:
                 close_idx = i
+                tp_idx = i
                 stop_hit = False
                 break
-        else:  # low / long
-            if mid <= stop:
+        else:
+            if mid <= stop_price:
                 close_idx = i
+                sl_idx = i
                 stop_hit = True
                 break
-            elif mid >= take:
+            if mid >= take_price:
                 close_idx = i
+                tp_idx = i
                 stop_hit = False
                 break
 
     if close_idx is None:
-        # Neither SL nor TP hit → exit at last tick
         close_idx = len(ticks) - 1
         stop_hit = False
 
     exit_mid = ticks[close_idx].mid
-    gnet = direction * (exit_mid - entry_price)
+    gnet = direction * (exit_mid - entry)
     net = gnet - cfg.cost_per_trade
 
-    return close_idx, gnet, net, side
+    return close_idx, tp_idx, sl_idx, take_price, stop_price, gnet, net, side, stop_hit
 
 
 # ---------------------------------------------------------------------------
@@ -419,28 +436,35 @@ FIELDNAMES = [
     "tag",          # global tag_index from get_l5_pivots
     "id",           # tick id of pivot
 
-    "L1",           # tick id of L1 (or empty)
-    "H1",           # tick id of H1 (or empty)
-    "conf",         # tick id of confirm (or empty)
-    "close",        # tick id of close (or empty)
+    "L1",           # tick id of first turning point (kal local min/max depending on pivot_type)
+    "H1",           # tick id of second turning point
+    "conf",         # tick id of confirm (kal passes first turning level)
+    "tp",           # tick id where TP hit (if any)
+    "sl",           # tick id where SL hit (if any)
+    "close",        # tick id of exit (tp/sl/last)
 
-    "price_piv",    # mid at pivot
-    "price_L1",     # mid at L1
-    "price_H1",     # mid at H1
-    "price_conf",   # mid at confirm
-    "price_close",  # mid at close
+    "price_piv",
+    "price_L1",
+    "price_H1",
+    "price_conf",
+    "take_price",   # TP level price
+    "stop_price",   # SL level price
+    "price_close",
 
     "date",         # pivot date (YYYY-MM-DD)
     "time",         # pivot time (HH:MM:SS)
 
-    "t_L1",         # seconds from pivot to L1
-    "t_H1",         # seconds from pivot to H1
-    "t_conf",       # seconds from pivot to confirm
-    "t_close",      # seconds from pivot to close
+    "t_L1",
+    "t_H1",
+    "t_conf",
+    "t_tp",
+    "t_sl",
+    "t_close",
 
-    "net",          # net profit (direction * (exit-entry) - cost)
-    "gnet",         # gross profit (direction * (exit-entry))
-    "side",         # "short"/"long"/"" depending on pivot_type
+    "stop_hit",     # true/false
+    "net",
+    "gnet",
+    "side",
 ]
 
 
@@ -481,22 +505,34 @@ def write_tags_csv(
                 cfg=cfg,
             )
 
-            # If we can't find pivot in ticks, or don't have full window,
-            # still write a row but leave wave/trade fields blank.
-            L1_idx = H1_idx = conf_idx = close_idx = None
+            # Defaults: pivot-only
+            L1_idx = H1_idx = conf_idx = None
+            close_idx = tp_idx = sl_idx = None
             pivot_type: Optional[str] = None
+            take_price = stop_price = None
             net = gnet = None
             side = ""
+            stop_hit: Optional[bool] = None
 
             if pivot_idx is not None and full_window and ticks:
-                # Use tick timestamp at pivot if available; else fall back to evals timestamp
                 pivot_ts = ticks[pivot_idx].ts or pivot_time
 
                 pivot_type = classify_pivot_type(ticks, pivot_idx, cfg)
+
                 L1_idx, H1_idx, conf_idx = detect_wave_points(ticks, pivot_idx, pivot_type, cfg)
 
                 if conf_idx is not None and conf_idx < len(ticks) - 1 and pivot_type is not None:
-                    close_idx, gnet, net, side = simulate_trade(
+                    (
+                        close_idx,
+                        tp_idx,
+                        sl_idx,
+                        take_price,
+                        stop_price,
+                        gnet,
+                        net,
+                        side,
+                        stop_hit,
+                    ) = simulate_trade(
                         ticks=ticks,
                         pivot_idx=pivot_idx,
                         conf_idx=conf_idx,
@@ -506,7 +542,6 @@ def write_tags_csv(
             else:
                 pivot_ts = pivot_time
 
-            # Build CSV row
             pivot_date_str = pivot_ts.date().isoformat()
             pivot_time_str = pivot_ts.strftime("%H:%M:%S")
 
@@ -529,12 +564,16 @@ def write_tags_csv(
                 "L1": tick_id(L1_idx),
                 "H1": tick_id(H1_idx),
                 "conf": tick_id(conf_idx),
+                "tp": tick_id(tp_idx),
+                "sl": tick_id(sl_idx),
                 "close": tick_id(close_idx),
 
                 "price_piv": f"{pivot_mid:.6f}",
                 "price_L1": price(L1_idx),
                 "price_H1": price(H1_idx),
                 "price_conf": price(conf_idx),
+                "take_price": f"{take_price:.6f}" if take_price is not None else "",
+                "stop_price": f"{stop_price:.6f}" if stop_price is not None else "",
                 "price_close": price(close_idx),
 
                 "date": pivot_date_str,
@@ -543,8 +582,11 @@ def write_tags_csv(
                 "t_L1": td(L1_idx),
                 "t_H1": td(H1_idx),
                 "t_conf": td(conf_idx),
+                "t_tp": td(tp_idx),
+                "t_sl": td(sl_idx),
                 "t_close": td(close_idx),
 
+                "stop_hit": "true" if stop_hit else ("false" if stop_hit is not None else ""),
                 "net": f"{net:.6f}" if net is not None else "",
                 "gnet": f"{gnet:.6f}" if gnet is not None else "",
                 "side": side,
@@ -575,30 +617,12 @@ def write_tags_csv(
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Build tag windows around +5 pivots and simulate simple SL/TP trades.",
+        description="Build tag windows around +5 pivots and simulate SL/TP trades based on Kalman turning points.",
     )
-    p.add_argument(
-        "--symbol",
-        required=True,
-        help="Symbol to process (e.g. XAUUSD)",
-    )
-    p.add_argument(
-        "--start-tag",
-        type=int,
-        required=True,
-        help="1-based index of first L5+ pivot",
-    )
-    p.add_argument(
-        "--num-tags",
-        type=int,
-        required=True,
-        help="How many pivots to process",
-    )
-    p.add_argument(
-        "--out-dir",
-        default="train/tags",
-        help="Output directory (default: train/tags)",
-    )
+    p.add_argument("--symbol", required=True, help="Symbol to process (e.g. XAUUSD)")
+    p.add_argument("--start-tag", type=int, required=True, help="1-based index of first L5+ pivot")
+    p.add_argument("--num-tags", type=int, required=True, help="How many pivots to process")
+    p.add_argument("--out-dir", default="train/tags", help="Output directory (default: train/tags)")
     return p.parse_args()
 
 
