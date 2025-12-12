@@ -1,188 +1,87 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <title>XAUUSD Tag CSV Confirm</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-
-    <style>
-        body {
-            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-            margin: 0;
-            padding: 0;
-            background: #111;
-            color: #eee;
-        }
-
-        header {
-            padding: 12px 16px;
-            background: #222;
-            border-bottom: 1px solid #333;
-            display: flex;
-            flex-wrap: wrap;
-            align-items: center;
-            gap: 8px;
-        }
-
-        header h1 {
-            margin: 0;
-            font-size: 18px;
-            font-weight: 500;
-        }
-
-        header .file-info {
-            margin-left: auto;
-            font-size: 12px;
-            opacity: 0.75;
-        }
-
-        main {
-            padding: 12px 16px;
-        }
-
-        #status {
-            margin-bottom: 8px;
-            font-size: 13px;
-        }
-
-        #status.error {
-            color: #ff6b6b;
-        }
-
-        #status.ok {
-            color: #8bc34a;
-        }
-
-        #controls {
-            margin-bottom: 8px;
-            display: flex;
-            flex-wrap: wrap;
-            gap: 8px;
-            align-items: center;
-        }
-
-        button {
-            padding: 4px 10px;
-            font-size: 13px;
-            border-radius: 4px;
-            border: 1px solid #555;
-            background: #333;
-            color: #eee;
-            cursor: pointer;
-        }
-
-        button:hover {
-            background: #444;
-        }
-
-        button:disabled {
-            opacity: 0.5;
-            cursor: default;
-        }
-
-        #summary {
-            font-size: 12px;
-            opacity: 0.8;
-            margin-bottom: 6px;
-        }
-
-        .table-container {
-            border: 1px solid #333;
-            border-radius: 4px;
-            overflow: auto;
-            max-height: calc(100vh - 160px);
-            background: #000;
-        }
-
-        table {
-            border-collapse: collapse;
-            width: 100%;
-            font-size: 11px;
-        }
-
-        thead {
-            position: sticky;
-            top: 0;
-            background: #111;
-            z-index: 1;
-        }
-
-        th, td {
-            padding: 2px 6px;
-            border-bottom: 1px solid #222;
-            white-space: nowrap;
-        }
-
-        th {
-            font-weight: 500;
-            border-bottom: 1px solid #444;
-        }
-
-        tr:nth-child(even) td {
-            background: #080808;
-        }
-
-        tr:nth-child(odd) td {
-            background: #050505;
-        }
-
-        .col-index {
-            position: sticky;
-            left: 0;
-            background: #181818;
-            z-index: 2;
-            font-weight: 500;
-        }
-
-        .small-note {
-            font-size: 11px;
-            opacity: 0.7;
-            margin-top: 6px;
-        }
-
-        @media (max-width: 600px) {
-            header h1 {
-                flex-basis: 100%;
-            }
-            header .file-info {
-                margin-left: 0;
-            }
-        }
-    </style>
-
-    <script src="confirm.js" defer></script>
+  <meta charset="UTF-8">
+  <title>Confirm Lab</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- ECharts -->
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      margin: 0;
+      padding: 0;
+      background: #0b0c10;
+      color: #e5e5e5;
+    }
+    header {
+      padding: 10px 16px;
+      border-bottom: 1px solid #222;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    label {
+      font-size: 13px;
+    }
+    input, button {
+      background: #111;
+      border: 1px solid #333;
+      color: #e5e5e5;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 13px;
+    }
+    button {
+      cursor: pointer;
+    }
+    #chart-container {
+      width: 100%;
+      height: calc(100vh - 70px);
+    }
+    .badge {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 11px;
+      margin-right: 6px;
+    }
+    .badge-long { background: #005f3b; }
+    .badge-short { background: #7a001e; }
+    .meta-line { font-size: 12px; margin-top: 4px; }
+  </style>
 </head>
 <body>
-<header>
-    <h1>XAUUSD Tag CSV — Confirm</h1>
-    <div class="file-info">
-        Source: <code>../train/tags/tags_XAUUSD_tags_1_600.csv</code>
-    </div>
-</header>
+  <header>
+    <label>
+      Symbol:
+      <input id="symbolInput" value="XAUUSD" size="8">
+    </label>
+    <label>
+      Dataset:
+      <input id="datasetInput"
+             value="confirm_spots_XAUUSD_tags_1_300.csv"
+             size="40">
+    </label>
+    <label>
+      Tag index:
+      <input id="tagInput" type="number" value="1" min="1" style="width:70px;">
+    </label>
+    <label>
+      <input id="showTagsInput" type="checkbox" checked>
+      Show eval tags (L2+)
+    </label>
+    <label>
+      <input id="showKalInput" type="checkbox" checked>
+      Show Kalman
+    </label>
+    <button id="loadBtn">Load</button>
+    <div id="info" class="meta-line"></div>
+  </header>
 
-<main>
-    <div id="status">Loading CSV…</div>
+  <div id="chart-container"></div>
 
-    <div id="controls">
-        <button id="reloadBtn">Reload</button>
-        <label style="font-size: 12px;">
-            <input type="checkbox" id="limitRowsCheckbox" checked>
-            show only first 200 rows
-        </label>
-    </div>
-
-    <div id="summary"></div>
-
-    <div class="table-container">
-        <table id="csvTable">
-            <thead></thead>
-            <tbody></tbody>
-        </table>
-    </div>
-
-    <div class="small-note">
-        This page is only for debugging/confirmation of tag CSV output from <code>buildTags.py</code>.
-    </div>
-</main>
+  <script src="confirm.js"></script>
 </body>
 </html>
