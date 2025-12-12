@@ -1,7 +1,6 @@
 // frontend/chart-core.js
 // ChartCore: single ECharts instance responsible for rendering tick price series
-// and overlays (pivots / swings / zones). This module exposes a stable API used
-// by page controllers (index-core.js, tick-core.js, htick-core.js, review-core.js).
+// and eval overlays. Public API used by controllers (index-core.js etc).
 
 const ChartCore = (function () {
   let chart = null;
@@ -9,34 +8,26 @@ const ChartCore = (function () {
   const state = {
     mode: "review", // "review" | "live"
     ticks: [],
-    pivHilo: [],
-    pivSwings: [],
-    hhll: [],
-    zonesHhll: [],
     lastTickId: null,
 
     liveTimer: null,
-    liveLimit: 2000, // default to last 2000 ticks for live
+    liveLimit: 2000,
 
-    windowChangeHandler: null, // callback(info)
-    hasInit: false, // tracks whether we've set the base option (for zoom preservation)
+    windowChangeHandler: null,
+    hasInit: false,
 
-    // group-level visibility flags (used when building series)
+    // visibility flags
     visibility: {
+      mid: true,
       bid: true,
       ask: true,
-      mid: true,
       kal: true,
-      hipiv: true,
-      lopiv: true,
-      swings: true,
-      zones: true,
     },
 
-    // eval overlay state (non-breaking additive)
-    evals: [], // raw eval rows currently attached to the window
-    evalMinLevel: 1, // active minimum level
-    evalVisibility: true, // master on/off for eval overlay
+    // eval overlay state
+    evals: [],
+    evalMinLevel: 1,
+    evalVisibility: true,
   };
 
   // ---------- Helpers ----------
@@ -50,14 +41,12 @@ const ChartCore = (function () {
 
     chart = echarts.init(dom, null, { useDirtyRect: true });
     chart.on("dataZoom", function () {
-      // Recompute Y bounds for the new visible X window
       recomputeYFromVisibleWindow(chart, state);
     });
 
     state.hasInit = false;
 
     window.addEventListener("resize", () => chart && chart.resize());
-
     return chart;
   }
 
@@ -66,7 +55,7 @@ const ChartCore = (function () {
     try {
       const d = new Date(ts);
       return d.toISOString();
-    } catch (e) {
+    } catch {
       return String(ts);
     }
   }
@@ -77,7 +66,6 @@ const ChartCore = (function () {
   }
 
   function computeYBoundsFromTicks(ticks, xFromTs, xToTs) {
-    // Find points in [xFromTs, xToTs], collect numeric Y values from bid/ask/mid/kal (if present).
     const ys = [];
 
     for (const t of ticks) {
@@ -99,11 +87,7 @@ const ChartCore = (function () {
     const minY = Math.min(...ys);
     const maxY = Math.max(...ys);
 
-    // Give some padding
-    const paddedMin = Math.floor(minY);
-    const paddedMax = Math.ceil(maxY);
-
-    return { min: paddedMin, max: paddedMax };
+    return { min: Math.floor(minY), max: Math.ceil(maxY) };
   }
 
   function recomputeYFromVisibleWindow(chart, state) {
@@ -112,10 +96,8 @@ const ChartCore = (function () {
     const option = chart.getOption();
     const xAxis = option.xAxis && option.xAxis[0];
     const dataZoom = option.dataZoom && option.dataZoom[0];
-
     if (!xAxis || !dataZoom) return;
 
-    // We use category axis with timestamps stored in xAxis.data (xVals).
     const xVals = xAxis.data || [];
     const startPct = dataZoom.start != null ? dataZoom.start : 0;
     const endPct = dataZoom.end != null ? dataZoom.end : 100;
@@ -133,20 +115,14 @@ const ChartCore = (function () {
     if (!bounds) return;
 
     chart.setOption(
-      {
-        yAxis: [{ min: bounds.min, max: bounds.max }],
-      },
+      { yAxis: [{ min: bounds.min, max: bounds.max }] },
       { notMerge: false, lazyUpdate: true }
     );
   }
 
   function buildYAxisPatch(xVals) {
-    // Called during render; keep initial y-axis auto, but after a zoom operation we patch it.
-    // We compute bounds for the full window on initial render.
-    if (!state.ticks.length) return {};
-    const xFromTs = xVals[0];
-    const xToTs = xVals[xVals.length - 1];
-    const bounds = computeYBoundsFromTicks(state.ticks, xFromTs, xToTs);
+    if (!state.ticks.length || !xVals.length) return {};
+    const bounds = computeYBoundsFromTicks(state.ticks, xVals[0], xVals[xVals.length - 1]);
     if (!bounds) return {};
     return { yAxis: [{ min: bounds.min, max: bounds.max }] };
   }
@@ -155,226 +131,65 @@ const ChartCore = (function () {
     const xVals = state.ticks.map((t) => t.ts);
     const vis = state.visibility;
 
-    // include payload with id so tooltip can show it
-    const midData = state.ticks.map((t) =>
-      t.mid != null ? [t.ts, Number(t.mid), { id: t.id }] : [t.ts, null, { id: t.id }]
-    );
-    const kalData = state.ticks.map((t) =>
-      t.kal != null ? [t.ts, Number(t.kal), { id: t.id }] : [t.ts, null, { id: t.id }]
-    );
-    const bidData = state.ticks.map((t) =>
-      t.bid != null ? [t.ts, Number(t.bid), { id: t.id }] : [t.ts, null, { id: t.id }]
-    );
-    const askData = state.ticks.map((t) =>
-      t.ask != null ? [t.ts, Number(t.ask), { id: t.id }] : [t.ts, null, { id: t.id }]
-    );
+    const midData = state.ticks.map((t) => [t.ts, t.mid != null ? Number(t.mid) : null, { id: t.id }]);
+    const kalData = state.ticks.map((t) => [t.ts, t.kal != null ? Number(t.kal) : null, { id: t.id }]);
+    const bidData = state.ticks.map((t) => [t.ts, t.bid != null ? Number(t.bid) : null, { id: t.id }]);
+    const askData = state.ticks.map((t) => [t.ts, t.ask != null ? Number(t.ask) : null, { id: t.id }]);
 
-    // tickId -> index map for overlays
+    // tickId -> index map (for eval alignment)
     const idxByTickId = new Map();
     state.ticks.forEach((t, idx) => {
       if (t.id != null) idxByTickId.set(Number(t.id), idx);
     });
 
-    // piv_hilo
-    const pivHi = [];
-    const pivLo = [];
-
-    for (const p of state.pivHilo) {
-      const i = idxByTickId.get(Number(p.tick_id));
-      if (i == null) continue;
-      const ts = xVals[i];
-
-      // y uses mid, or p.mid if present
-      const y =
-        p.mid != null ? Number(p.mid) : state.ticks[i].mid != null ? Number(state.ticks[i].mid) : null;
-      if (y == null) continue;
-
-      const payload = {
-        id: p.id,
-        tick_id: p.tick_id,
-        mid: p.mid,
-        ptype: p.ptype,
-        win_left: p.win_left,
-        win_right: p.win_right,
-        computed_at: p.computed_at,
-      };
-
-      if (p.ptype === "hi") pivHi.push([ts, y, payload]);
-      if (p.ptype === "lo") pivLo.push([ts, y, payload]);
-    }
-
-    // piv_swings
-    const swings = [];
-    for (const p of state.pivSwings) {
-      const i = idxByTickId.get(Number(p.tick_id));
-      if (i == null) continue;
-      const ts = xVals[i];
-      const y =
-        p.mid != null ? Number(p.mid) : state.ticks[i].mid != null ? Number(state.ticks[i].mid) : null;
-      if (y == null) continue;
-
-      const payload = {
-        id: p.id,
-        tick_id: p.tick_id,
-        mid: p.mid,
-        ptype: p.ptype,
-        swing_index: p.swing_index,
-        computed_at: p.computed_at,
-      };
-      swings.push([ts, y, payload]);
-    }
-
-    // hhll
-    const hhllByClass = new Map();
-    for (const p of state.hhll) {
-      const i = idxByTickId.get(Number(p.tick_id));
-      if (i == null) continue;
-      const ts = xVals[i];
-      const y =
-        p.mid != null ? Number(p.mid) : state.ticks[i].mid != null ? Number(state.ticks[i].mid) : null;
-      if (y == null) continue;
-
-      const payload = {
-        id: p.id,
-        tick_id: p.tick_id,
-        mid: p.mid,
-        ptype: p.ptype,
-        class_text: p.class_text,
-        computed_at: p.computed_at,
-      };
-
-      const k = String(p.class_text || "");
-      if (!hhllByClass.has(k)) hhllByClass.set(k, []);
-      hhllByClass.get(k).push([ts, y, payload]);
-    }
-
-    // series list
     const series = [];
 
-    // Price series
-    series.push({
-      id: "mid",
-      name: "Mid",
-      type: "line",
-      data: midData,
-      showSymbol: false,
-      smooth: false,
-      show: vis.mid,
-    });
-
-    series.push({
-      id: "kal",
-      name: "Kal",
-      type: "line",
-      data: kalData,
-      showSymbol: false,
-      smooth: false,
-      show: vis.kal,
-    });
-
-    series.push({
-      id: "bid",
-      name: "Bid",
-      type: "line",
-      data: bidData,
-      showSymbol: false,
-      smooth: false,
-      show: vis.bid,
-    });
-
-    series.push({
-      id: "ask",
-      name: "Ask",
-      type: "line",
-      data: askData,
-      showSymbol: false,
-      smooth: false,
-      show: vis.ask,
-    });
-
-    // Pivots
-    if (vis.hipiv) {
+    // IMPORTANT: only push series if visible (ECharts ignores "show")
+    if (vis.mid) {
       series.push({
-        id: "piv_hi",
-        name: "PivHi",
-        type: "scatter",
-        data: pivHi,
-        symbolSize: 8,
-        show: true,
-      });
-    }
-    if (vis.lopiv) {
-      series.push({
-        id: "piv_lo",
-        name: "PivLo",
-        type: "scatter",
-        data: pivLo,
-        symbolSize: 8,
-        show: true,
-      });
-    }
-
-    // Swings
-    if (vis.swings) {
-      series.push({
-        id: "swings",
-        name: "Swings",
-        type: "scatter",
-        data: swings,
-        symbolSize: 6,
-        show: true,
-      });
-    }
-
-    // HHLL groups
-    for (const [cls, pts] of hhllByClass.entries()) {
-      series.push({
-        id: `hhll_${cls}`,
-        name: `HHLL ${cls}`,
-        type: "scatter",
-        data: pts,
-        symbolSize: 6,
-        show: true,
-      });
-    }
-
-    // Zones
-    if (vis.zones) {
-      const zoneAreas = [];
-      for (const z of state.zonesHhll) {
-        const iFrom = idxByTickId.get(Number(z.tick_from));
-        const iTo = idxByTickId.get(Number(z.tick_to));
-        if (iFrom == null || iTo == null) continue;
-
-        const x1 = xVals[iFrom];
-        const x2 = xVals[iTo];
-
-        const y1 = safeNum(z.low);
-        const y2 = safeNum(z.high);
-        if (y1 == null || y2 == null) continue;
-
-        zoneAreas.push([{ xAxis: x1, yAxis: y1 }, { xAxis: x2, yAxis: y2 }]);
-      }
-
-      series.push({
-        id: "zones_hhll",
-        name: "Zones",
+        id: "mid",
+        name: "Mid",
         type: "line",
-        data: [],
+        data: midData,
         showSymbol: false,
-        markArea: {
-          silent: true,
-          itemStyle: { opacity: 0.08 },
-          data: zoneAreas,
-        },
-        show: true,
+        smooth: false,
       });
     }
 
-    // --------------------------
-    // Evals overlays (scatter)
-    // Align eval.tick_id to the tick index -> xVals[index], so dots sit on same X grid.
-    // --------------------------
+    if (vis.kal) {
+      series.push({
+        id: "kal",
+        name: "Kal",
+        type: "line",
+        data: kalData,
+        showSymbol: false,
+        smooth: false,
+      });
+    }
+
+    if (vis.bid) {
+      series.push({
+        id: "bid",
+        name: "Bid",
+        type: "line",
+        data: bidData,
+        showSymbol: false,
+        smooth: false,
+      });
+    }
+
+    if (vis.ask) {
+      series.push({
+        id: "ask",
+        name: "Ask",
+        type: "line",
+        data: askData,
+        showSymbol: false,
+        smooth: false,
+      });
+    }
+
+    // ---- Evals overlays (scatter) ----
     function colorForSign(sign) {
       if (sign > 0) return "#4caf50";
       if (sign < 0) return "#f44336";
@@ -425,7 +240,6 @@ const ChartCore = (function () {
           },
           data: points,
           emphasis: { focus: "series" },
-          show: true,
           tooltip: { trigger: "item" },
         });
       }
@@ -435,7 +249,6 @@ const ChartCore = (function () {
   }
 
   function buildTooltipFormatter(xVals, ticks) {
-    // ts -> detailed info
     const infoByTs = new Map();
     ticks.forEach((t) => {
       infoByTs.set(t.ts, {
@@ -478,23 +291,6 @@ const ChartCore = (function () {
 
         if (seriesId === "mid" || seriesId === "kal" || seriesId === "bid" || seriesId === "ask") {
           html += `${p.marker} ${p.seriesName}: ${yText}<br/>`;
-        } else if (seriesId === "piv_hi" || seriesId === "piv_lo") {
-          const payload = Array.isArray(data) ? data[2] : null;
-          if (payload) {
-            extras.push(
-              `${seriesId === "piv_hi" ? "High" : "Low"} piv – mid:${yText} ptype:${payload.ptype} winL:${payload.win_left} winR:${payload.win_right}`
-            );
-          }
-        } else if (seriesId === "swings") {
-          const payload = Array.isArray(data) ? data[2] : null;
-          if (payload) {
-            extras.push(`Swing – mid:${yText} ptype:${payload.ptype} swing:${payload.swing_index}`);
-          }
-        } else if (String(seriesId).startsWith("hhll_")) {
-          const payload = Array.isArray(data) ? data[2] : null;
-          if (payload) {
-            extras.push(`HHLL – mid:${yText} class:${payload.class_text} ptype:${payload.ptype}`);
-          }
         } else if (String(seriesId).startsWith("eval_L")) {
           const payload = Array.isArray(data) ? data[2] : null;
           if (payload) {
@@ -502,18 +298,14 @@ const ChartCore = (function () {
             const sign = payload.base_sign != null ? payload.base_sign : "";
             const imp = payload.signed_importance != null ? payload.signed_importance : "";
             extras.push(`Eval – mid:${yText} level:${lvl} sign:${sign} imp:${imp}`);
-            if (payload.promotion_path) {
-              extras.push(`Path – ${payload.promotion_path}`);
-            }
+            if (payload.promotion_path) extras.push(`Path – ${payload.promotion_path}`);
           }
         }
       });
 
       if (extras.length) {
         html += `* * *<br/>`;
-        extras.forEach((e) => {
-          html += `${e}<br/>`;
-        });
+        extras.forEach((e) => (html += `${e}<br/>`));
       }
 
       return html;
@@ -529,10 +321,11 @@ const ChartCore = (function () {
       return;
     }
 
-    const firstId = state.ticks[0].id;
-    const lastId = state.ticks[n - 1].id;
-
-    state.windowChangeHandler({ count: n, firstId, lastId });
+    state.windowChangeHandler({
+      count: n,
+      firstId: state.ticks[0].id,
+      lastId: state.ticks[n - 1].id,
+    });
   }
 
   function render() {
@@ -600,16 +393,9 @@ const ChartCore = (function () {
 
     state.mode = "live";
     state.ticks = Array.isArray(data.ticks) ? data.ticks : [];
-    state.pivHilo = [];
-    state.pivSwings = [];
-    state.hhll = [];
-    state.zonesHhll = [];
 
-    if (state.ticks.length) {
-      state.lastTickId = state.ticks[state.ticks.length - 1].id;
-    } else {
-      state.lastTickId = null;
-    }
+    if (state.ticks.length) state.lastTickId = state.ticks[state.ticks.length - 1].id;
+    else state.lastTickId = null;
 
     render();
     return data;
@@ -649,7 +435,6 @@ const ChartCore = (function () {
     }
   }
 
-  // ✅ FIXED: review endpoint is /api/review/window (NOT /api/ticks/window)
   async function loadWindow(fromId, windowSize) {
     const from = Number(fromId);
     const win = Number(windowSize);
@@ -663,16 +448,9 @@ const ChartCore = (function () {
 
     state.mode = "review";
     state.ticks = Array.isArray(data.ticks) ? data.ticks : [];
-    state.pivHilo = Array.isArray(data.piv_hilo) ? data.piv_hilo : [];
-    state.pivSwings = Array.isArray(data.piv_swings) ? data.piv_swings : [];
-    state.hhll = Array.isArray(data.hhll) ? data.hhll : [];
-    state.zonesHhll = Array.isArray(data.zones_hhll) ? data.zones_hhll : [];
 
-    if (state.ticks.length) {
-      state.lastTickId = state.ticks[state.ticks.length - 1].id;
-    } else {
-      state.lastTickId = null;
-    }
+    if (state.ticks.length) state.lastTickId = state.ticks[state.ticks.length - 1].id;
+    else state.lastTickId = null;
 
     render();
     return data;
@@ -698,8 +476,6 @@ const ChartCore = (function () {
     state.evalVisibility = !!visible;
     render();
   }
-
-  // ---------- Public API ----------
 
   return {
     init(domId) {

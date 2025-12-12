@@ -1,6 +1,5 @@
 // frontend/index-core.js
-// Unified index controller: ticks (bid/ask/mid/kal) + overlays + eval dots.
-// Chart behavior stays in chart-core.js.
+// Unified index controller: ticks (mid/bid/ask/kal) + eval dots.
 
 (function () {
   const MAX_EVAL_ROWS = 200000;
@@ -133,19 +132,17 @@
       cb.addEventListener("change", () => {
         const group = cb.getAttribute("data-layer-group");
         const checked = !!cb.checked;
-
-        if (group === "pivots") {
-          ChartCore.setVisibility("hipiv", checked);
-          ChartCore.setVisibility("lopiv", checked);
-        } else if (group === "swings") {
-          ChartCore.setVisibility("swings", checked);
-        } else if (group === "zones") {
-          ChartCore.setVisibility("zones", checked);
-        } else {
-          // bid/ask/mid/kal
-          ChartCore.setVisibility(group, checked);
-        }
+        // now only mid/bid/ask/kal exist
+        ChartCore.setVisibility(group, checked);
       });
+    });
+  }
+
+  function applyInitialToggleStatesToChart() {
+    if (!layerCheckboxes) return;
+    layerCheckboxes.forEach((cb) => {
+      const group = cb.getAttribute("data-layer-group");
+      ChartCore.setVisibility(group, !!cb.checked);
     });
   }
 
@@ -175,7 +172,6 @@
 
       try {
         if (!Number.isFinite(fromId) || fromId <= 0) {
-          // No fromId: load last window once and then jump using its last id.
           const res = await fetch(`/api/live_window?limit=${windowSize}`);
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           const data = await res.json();
@@ -203,7 +199,6 @@
         ChartCore.stopLive();
         setRunButton(false);
       } else {
-        // live mode selected; do not auto-start
         setRunButton(false);
       }
     });
@@ -222,7 +217,6 @@
         return;
       }
 
-      // review mode: one-shot load window
       setRunButton(false);
       if (reviewJumpBtn) reviewJumpBtn.click();
     });
@@ -251,9 +245,14 @@
     wireToggles();
     wireEvalControls();
 
-    // sensible defaults
+    // defaults
     if (reviewWindowInput) reviewWindowInput.value = 2000;
     if (modeSelect) modeSelect.value = "live";
+
+    // ensure chart matches initial checkbox states immediately
+    applyInitialToggleStatesToChart();
+
+    // eval overlay toggle
     if (evalVisibleToggle) ChartCore.setEvalVisibility(!!evalVisibleToggle.checked);
 
     setRunButton(false);
