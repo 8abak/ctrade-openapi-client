@@ -10,7 +10,7 @@
 (() => {
   // ---------- CONFIG --------------------------------------------------------
 
-  const CSV_PATH_PREFIX = "../src/train/confirm_spots_tags/";
+  const CSV_PATH_PREFIX = "../src/train/tags/";
 
   const WINDOW_BEFORE_TICKS = 500;
   const WINDOW_AFTER_TICKS  = 1000;
