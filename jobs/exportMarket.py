@@ -149,7 +149,7 @@ def main() -> int:
 
     conn = psycopg2.connect(build_conn_dsn())
     try:
-        conn.autocommit = True
+        conn.autocommit = False
         n = export_day(
             conn=conn,
             schema=args.schema,
