@@ -1,272 +1,228 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>segmeling / datavis.au</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Segmeling – Live/Review</title>
+
   <style>
     :root {
-      color-scheme: dark;
-      --bg: #050912;
-      --bg-alt: #0b111f;
-      --fg: #e5e7eb;
-      --muted: #9ca3af;
-      --accent: #38bdf8;
-      --accent-soft: rgba(56,189,248,0.15);
-      --border: #1f2933;
-      --danger: #f97373;
-      --ok: #22c55e;
-      --control-bg: #020617;
+      --bg: #0b1220;
+      --panel: #121a2b;
+      --text: #e8eefc;
+      --muted: #9fb0d0;
+      --accent: #4aa3ff;
+      --danger: #ff4a6a;
+      --border: #22304a;
     }
-    * {
-      box-sizing: border-box;
-    }
-    body {
+
+    html, body {
+      height: 100%;
       margin: 0;
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
-        sans-serif;
       background: var(--bg);
-      color: var(--fg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
     }
-    .page {
-      min-height: 100vh;
-      display: flex;
-      flex-direction: column;
-    }
+
     .top-bar {
       display: flex;
-      flex-wrap: wrap;
       align-items: center;
-      gap: 0.75rem;
-      padding: 0.6rem 0.9rem;
+      gap: 1rem;
+      padding: 0.75rem 1rem;
       border-bottom: 1px solid var(--border);
-      background: radial-gradient(circle at top left, #111827, #020617);
+      background: var(--panel);
     }
+
     .brand {
-      font-weight: 600;
-      letter-spacing: 0.06em;
-      text-transform: uppercase;
-      font-size: 0.8rem;
-      color: var(--muted);
-      padding-right: 0.9rem;
-      border-right: 1px solid var(--border);
-      margin-right: 0.4rem;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+      color: var(--text);
+      user-select: none;
     }
+
     .top-group {
       display: flex;
       align-items: center;
+      gap: 0.75rem;
       flex-wrap: wrap;
-      gap: 0.5rem;
     }
-    .top-group label {
-      font-size: 0.8rem;
-      color: var(--muted);
-      display: flex;
-      align-items: center;
-      gap: 0.3rem;
-    }
-    select,
-    input[type="number"] {
-      background: var(--control-bg);
-      border-radius: 0.4rem;
-      border: 1px solid var(--border);
-      color: var(--fg);
-      padding: 0.15rem 0.4rem;
-      font-size: 0.8rem;
-    }
-    input[type="number"] {
-      width: 5rem;
-    }
-    button {
-      cursor: pointer;
-      border-radius: 999px;
-      border: 1px solid transparent;
-      padding: 0.25rem 0.8rem;
-      font-size: 0.8rem;
+
+    label {
       display: inline-flex;
       align-items: center;
-      gap: 0.25rem;
-      background: var(--control-bg);
-      color: var(--fg);
-      transition: background 0.12s, border-color 0.12s, transform 0.05s;
+      gap: 0.5rem;
+      color: var(--muted);
+      font-size: 0.9rem;
+      white-space: nowrap;
     }
-    button:active {
-      transform: scale(0.97);
+
+    select, input[type="number"] {
+      background: #0c1426;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.25rem 0.4rem;
+      outline: none;
     }
-    .btn-run {
-      border-color: var(--accent);
-      background: var(--accent-soft);
-      color: var(--accent);
+
+    .btn-run, .btn-stop {
+      border: 1px solid var(--border);
+      background: #0c1426;
+      color: var(--text);
+      border-radius: 8px;
+      padding: 0.35rem 0.7rem;
+      cursor: pointer;
       font-weight: 600;
     }
-    .btn-stop {
-      border-color: var(--danger);
-      background: rgba(239,68,68,0.15);
-      color: var(--danger);
-      font-weight: 600;
-    }
-    .btn-compact {
-      padding-inline: 0.6rem;
-      font-size: 0.78rem;
-    }
-    .toggles-row {
+
+    .btn-run { border-color: rgba(74,163,255,0.6); }
+    .btn-stop { border-color: rgba(255,74,106,0.6); }
+
+    .toggles {
       display: flex;
-      flex-wrap: wrap;
-      gap: 1rem;
-      padding: 0.4rem 0.9rem 0.2rem;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0.5rem 1rem;
       border-bottom: 1px solid var(--border);
-      background: linear-gradient(to right, #020617, #020617);
-    }
-    .toggle-group {
-      display: flex;
+      background: rgba(18,26,43,0.7);
       flex-wrap: wrap;
+    }
+
+    .toggle-item {
+      display: inline-flex;
       align-items: center;
       gap: 0.45rem;
-      font-size: 0.8rem;
-    }
-    .toggle-title {
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-      font-size: 0.75rem;
       color: var(--muted);
-      margin-right: 0.2rem;
+      font-size: 0.9rem;
     }
-    .toggle-group label {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.25rem;
-      cursor: pointer;
+
+    .status {
+      padding: 0.4rem 1rem;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+      background: rgba(18,26,43,0.5);
+      font-size: 0.9rem;
     }
-    .toggle-group input[type="checkbox"] {
-      width: 0.9rem;
-      height: 0.9rem;
-      accent-color: var(--accent);
-    }
-    .chart-container {
-      flex: 1 1 auto;
-      padding: 0.6rem 0.9rem 0.2rem;
-    }
+
     #segmeling-chart {
       width: 100%;
-      height: calc(100vh - 145px);
-      min-height: 320px;
-      border-radius: 0.75rem;
-      border: 1px solid var(--border);
-      background: #020617;
-      overflow: hidden;
-    }
-    .status-line {
-      font-size: 0.8rem;
-      color: var(--muted);
-      padding: 0.3rem 0.95rem 0.7rem;
-      border-top: 1px solid #020617;
-      background: #020617;
-    }
-    @media (max-width: 720px) {
-      #segmeling-chart {
-        height: calc(100vh - 180px);
-      }
-      .top-bar {
-        align-items: flex-start;
-      }
+      height: calc(100vh - 160px);
     }
   </style>
 </head>
+
 <body>
-  <div class="page">
-    <header class="top-bar">
-      <div class="brand">SEGEMLING / DATAVIS.AU</div>
+  <header class="top-bar">
+    <div class="brand">SEGEMLING / DATAVIS.AU</div>
 
-      <div class="top-group">
-        <label>
-          Mode
-          <select id="mode-select">
-            <option value="live">Live</option>
-            <option value="review">Review</option>
-          </select>
-        </label>
+    <div class="top-group">
+      <label>
+        Mode
+        <select id="mode-select">
+          <option value="live">Live</option>
+          <option value="review">Review</option>
+        </select>
+      </label>
 
-        <button id="btn-run-stop" class="btn-run">
-          <span class="label">Run</span>
-        </button>
-      </div>
-
-      <!-- NEW: Review jump controls -->
-      <div class="top-group" style="margin-left:auto; gap:0.5rem;">
-        <label>
-          From Id
-          <input
-            id="review-from-id"
-            type="number"
-            min="1"
-            step="1"
-            inputmode="numeric"
-          />
-        </label>
-        <label>
-          Window
-          <input
-            id="review-window"
-            type="number"
-            min="1"
-            step="1"
-            inputmode="numeric"
-          />
-        </label>
-        <button id="btn-review-jump" class="btn-compact">
-          Jump
-        </button>
-      </div>
-    </header>
-
-    <div class="toggles-row">
-      <div class="toggle-group">
-        <span class="toggle-title">Price</span>
-        <label>
-          <input type="checkbox" data-layer-group="bid" checked />
-          Bid
-        </label>
-        <label>
-          <input type="checkbox" data-layer-group="ask" checked />
-          Ask
-        </label>
-        <label>
-          <input type="checkbox" data-layer-group="mid" checked />
-          Mid
-        </label>
-        <label>
-          <input type="checkbox" data-layer-group="kal" checked />
-          Kal
-        </label>
-      </div>
-
-      <div class="toggle-group">
-        <span class="toggle-title">Overlays</span>
-        <label>
-          <input type="checkbox" data-layer-group="pivots" checked />
-          Pivots
-        </label>
-        <label>
-          <input type="checkbox" data-layer-group="swings" checked />
-          Swings / HHLL
-        </label>
-        <label>
-          <input type="checkbox" data-layer-group="zones" checked />
-          Zones
-        </label>
-      </div>
+      <button id="btn-run-stop" class="btn-run">
+        <span class="label">Run</span>
+      </button>
     </div>
 
-    <main class="chart-container">
-      <div id="segmeling-chart"></div>
-    </main>
+    <!-- Evals controls -->
+    <div class="top-group">
+      <label>
+        Evals min level
+        <select id="eval-min-level">
+          <option value="1">1+</option>
+          <option value="2" selected>2+</option>
+          <option value="3">3+</option>
+          <option value="4">4+</option>
+          <option value="5">5+</option>
+          <option value="6">6+</option>
+          <option value="7">7+</option>
+          <option value="8">8</option>
+        </select>
+      </label>
+      <label>
+        <input id="eval-visible-toggle" type="checkbox" checked />
+        Show evals
+      </label>
+    </div>
 
-    <footer id="status-line" class="status-line">
-      Initialising…
-    </footer>
+    <!-- NEW: Review jump controls -->
+    <div class="top-group" style="margin-left:auto; gap:0.5rem;">
+      <label>
+        From Id
+        <input
+          id="review-from-id"
+          type="number"
+          min="1"
+          step="1"
+          inputmode="numeric"
+          placeholder="(optional)"
+          style="width: 10rem;"
+        />
+      </label>
+
+      <label>
+        Window
+        <input
+          id="review-window"
+          type="number"
+          min="10"
+          step="10"
+          inputmode="numeric"
+          value="2000"
+          style="width: 6rem;"
+        />
+      </label>
+
+      <button id="btn-review-jump" class="btn-run">Jump</button>
+    </div>
+  </header>
+
+  <div class="toggles">
+    <span class="toggle-item">
+      <input type="checkbox" data-layer-group="mid" checked />
+      Mid
+    </span>
+
+    <span class="toggle-item">
+      <input type="checkbox" data-layer-group="bid" checked />
+      Bid
+    </span>
+
+    <span class="toggle-item">
+      <input type="checkbox" data-layer-group="ask" checked />
+      Ask
+    </span>
+
+    <span class="toggle-item">
+      <input type="checkbox" data-layer-group="kal" />
+      Kal
+    </span>
+
+    <span class="toggle-item">
+      <input type="checkbox" data-layer-group="pivots" />
+      Pivots
+    </span>
+
+    <span class="toggle-item">
+      <input type="checkbox" data-layer-group="swings" />
+      Swings
+    </span>
+
+    <span class="toggle-item">
+      <input type="checkbox" data-layer-group="zones" />
+      Zones
+    </span>
   </div>
 
-  <!-- ECharts + core scripts -->
+  <div id="status-line" class="status">Loading…</div>
+
+  <div id="segmeling-chart"></div>
+
   <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
   <script src="chart-core.js"></script>
   <script src="index-core.js"></script>

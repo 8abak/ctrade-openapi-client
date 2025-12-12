@@ -1,7 +1,9 @@
-// PATH: frontend/chart-core.js
-// ECharts core for datavis.au – live + review window
+// frontend/chart-core.js
+// ChartCore: single ECharts instance responsible for rendering tick price series
+// and overlays (pivots / swings / zones). This module exposes a stable API used
+// by page controllers (index-core.js, tick-core.js, htick-core.js, review-core.js).
 
-window.ChartCore = (function () {
+const ChartCore = (function () {
   let chart = null;
 
   const state = {
@@ -30,13 +32,16 @@ window.ChartCore = (function () {
       swings: true,
       zones: true,
     },
+
+    // NEW: eval overlay state (non-breaking additive)
+    evals: [], // raw eval rows currently attached to the window
+    evalMinLevel: 1, // active minimum level
+    evalVisibility: true, // master on/off for eval overlay
   };
 
   // ---------- Helpers ----------
 
   function ensureChart(domId) {
-    if (chart) return chart;
-
     const dom = document.getElementById(domId);
     if (!dom) {
       console.error("ChartCore: container not found:", domId);
@@ -44,9 +49,9 @@ window.ChartCore = (function () {
     }
 
     chart = echarts.init(dom, null, { useDirtyRect: true });
-    chart.on('dataZoom', function () {
-        // Recompute Y bounds for the new visible X window
-        recomputeYFromVisibleWindow(chart, state);
+    chart.on("dataZoom", function () {
+      // Recompute Y bounds for the new visible X window
+      recomputeYFromVisibleWindow(chart, state);
     });
 
     state.hasInit = false;
@@ -56,321 +61,94 @@ window.ChartCore = (function () {
     return chart;
   }
 
-  function formatDateTime(ts) {
-    if (!ts || typeof ts !== "string") return { date: "", time: "" };
-
-    const tParts = ts.split("T");
-    if (tParts.length < 2) return { date: ts, time: "" };
-
-    const date = tParts[0];
-    let rest = tParts[1];
-
-    const plusIdx = rest.indexOf("+");
-    const minusIdx = rest.indexOf("-");
-    let cut = rest.length;
-
-    if (plusIdx > -1) cut = plusIdx;
-    if (minusIdx > 0 && minusIdx < cut) cut = minusIdx;
-
-    rest = rest.slice(0, cut);
-
-    const dotIdx = rest.indexOf(".");
-    if (dotIdx > -1) rest = rest.slice(0, dotIdx);
-
-    return { date, time: rest };
-  }
-
-  // Recompute Y-axis bounds based only on ticks currently visible on the X-axis
-  function recomputeYFromVisibleWindow(chart, state) {
-      if (!chart || !state || !state.ticks || !state.ticks.length) {
-          return;
-      }
-
-      let minX;
-      let maxX;
-
-      try {
-          // Preferred: use the xAxis scale extent (data space)
-          const xComp = chart.getModel().getComponent('xAxis');
-          if (xComp && xComp.axis && xComp.axis.scale) {
-              const extent = xComp.axis.scale.getExtent();
-              if (extent && extent.length === 2) {
-                  minX = extent[0];
-                  maxX = extent[1];
-              }
-          }
-      } catch (e) {
-          // fall through to pixel-based method
-      }
-
-      if (!Number.isFinite(minX) || !Number.isFinite(maxX)) {
-          // Fallback: derive data extent from pixel coordinates
-          try {
-              // Left/right of the plotting area
-              const grid = chart.getModel().getComponent('grid');
-              let leftPx = 0;
-              let rightPx = chart.getWidth();
-
-              if (grid && grid.coordinateSystem && grid.coordinateSystem.getRect) {
-                  const rect = grid.coordinateSystem.getRect();
-                  leftPx = rect.x;
-                  rightPx = rect.x + rect.width;
-              }
-
-              const dataExtent = chart.convertFromPixel(
-                  { xAxisIndex: 0 },
-                  [leftPx, rightPx]
-              );
-
-              if (Array.isArray(dataExtent) && dataExtent.length === 2) {
-                  minX = dataExtent[0];
-                  maxX = dataExtent[1];
-              }
-          } catch (e) {
-              // If we can't get a sane x-range, bail out and don't touch Y-axis
-              return;
-          }
-      }
-
-      if (!Number.isFinite(minX) || !Number.isFinite(maxX)) {
-          return;
-      }
-
-      // IMPORTANT: adjust this predicate to whatever field you actually use on X
-      // (id, ts, index, etc.) – the goal is to keep it consistent with your series data.
-      const windowTicks = state.ticks.filter(t => {
-          const x = t.id ?? t.ts ?? t.x;
-          return x >= minX && x <= maxX;
-      });
-
-      if (!windowTicks.length) {
-          return;
-      }
-
-      // Collect all price-like values from the visible ticks
-      const ys = windowTicks
-          .map(t => [t.bid, t.ask, t.mid, t.kal])
-          .flat()
-          .filter(v => v != null && !Number.isNaN(v));
-
-      if (!ys.length) {
-          return;
-      }
-
-      const minY = Math.min(...ys);
-      const maxY = Math.max(...ys);
-
-      if (!Number.isFinite(minY) || !Number.isFinite(maxY)) {
-          return;
-      }
-
-      const paddedMin = Math.floor(minY);
-      const paddedMax = Math.ceil(maxY);
-
-      // Merge into existing option so zoom is not reset
-      chart.setOption(
-          {
-              yAxis: {
-                  min: paddedMin,
-                  max: paddedMax,
-              },
-          },
-          false // notMerge = false → merge with current option, keep zoom
-      );
-  }
-
-
-  function buildBaseOption() {
-    return {
-      backgroundColor: "#050912",
-      animation: true,
-      animationDuration: 200,
-      tooltip: {
-        trigger: "axis",
-        axisPointer: {
-          type: "cross",
-          label: {
-            backgroundColor: "#333",
-          },
-        },
-        formatter: null,
-      },
-      grid: {
-        left: 60,
-        right: 20,
-        top: 20,
-        bottom: 60,
-      },
-      xAxis: {
-        type: "category",
-        boundaryGap: false,
-        axisLine: { lineStyle: { color: "#555" } },
-        axisLabel: {
-          color: "#999",
-          formatter: function (value) {
-            const dt = formatDateTime(value);
-            return dt.time || value;
-          },
-        },
-        splitLine: {
-          show: true,
-          lineStyle: { color: "#111" },
-        },
-      },
-      yAxis: {
-        type: "value",
-        axisLine: { lineStyle: { color: "#555" } },
-        axisLabel: {
-          color: "#999",
-          formatter: function (val) {
-            return "$" + Math.round(val).toString();
-          },
-        },
-        splitLine: {
-          show: true,
-          lineStyle: { color: "#111" },
-        },
-      },
-      dataZoom: [
-        {
-          // horizontal zoom (mouse wheel, drag)
-          type: "inside",
-          xAxisIndex: 0,
-          filterMode: "none",
-        },
-        {
-          type: "slider",
-          xAxisIndex: 0,
-          height: 20,
-          bottom: 30,
-        },
-        {
-          // vertical zoom (kept; user can still adjust if desired)
-          type: "inside",
-          yAxisIndex: 0,
-          filterMode: "none",
-        },
-      ],
-      series: [],
-    };
-  }
-
-  // NEW: determine index range of visible data from dataZoom
-  function computeVisibleIndexRange(xVals) {
-    const n = xVals.length;
-    if (!n) return { from: 0, to: -1 };
-
-    let from = 0;
-    let to = n - 1;
-
-    if (!chart || !state.hasInit) {
-      return { from, to };
-    }
-
+  function toISO(ts) {
+    if (!ts) return "";
     try {
-      const opt = chart.getOption();
-      if (!opt || !opt.dataZoom || !opt.dataZoom.length) {
-        return { from, to };
-      }
-
-      const dz = opt.dataZoom[0]; // primary x-axis zoom (inside/slider share same window)
-
-      if (dz.startValue != null || dz.endValue != null) {
-        if (dz.startValue != null) from = dz.startValue;
-        if (dz.endValue != null) to = dz.endValue;
-      } else if (dz.start != null || dz.end != null) {
-        const s = dz.start != null ? dz.start : 0; // percent
-        const e = dz.end != null ? dz.end : 100;
-        const span = n - 1;
-        from = Math.round((s / 100) * span);
-        to = Math.round((e / 100) * span);
-      }
-    } catch (err) {
-      console.warn("ChartCore: computeVisibleIndexRange error", err);
+      const d = new Date(ts);
+      return d.toISOString();
+    } catch (e) {
+      return String(ts);
     }
-
-    from = Math.max(0, Math.min(from, n - 1));
-    to = Math.max(from, Math.min(to, n - 1));
-
-    return { from, to };
   }
 
-  // NEW: y-bounds based ONLY on visible ticks
-  function computeYBounds(fromIndex, toIndex) {
-    if (state.ticks.length === 0 || fromIndex > toIndex) {
-      return null;
-    }
-
-    const values = [];
-    for (let i = fromIndex; i <= toIndex && i < state.ticks.length; i++) {
-      const t = state.ticks[i];
-      if (!t) continue;
-      if (t.mid != null) values.push(Number(t.mid));
-      if (t.kal != null) values.push(Number(t.kal));
-      if (t.bid != null) values.push(Number(t.bid));
-      if (t.ask != null) values.push(Number(t.ask));
-    }
-
-    if (!values.length) return null;
-
-    let min = Math.min(...values);
-    let max = Math.max(...values);
-    if (!isFinite(min) || !isFinite(max)) return null;
-
-    // Integer bounds as required
-    min = Math.floor(min);
-    max = Math.ceil(max);
-
-    if (min === max) {
-      min -= 1;
-      max += 1;
-    }
-
-    return { min, max };
+  function safeNum(v) {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
   }
 
-  function computeYAxisStep(min, max) {
-    const range = Math.max(1, max - min);
+  function computeYBoundsFromTicks(ticks, xFromTs, xToTs) {
+    // Find points in [xFromTs, xToTs], collect numeric Y values from bid/ask/mid/kal (if present).
+    const ys = [];
 
-    // simple "nice" integer step selection
-    if (range <= 10) return 1;
-    if (range <= 20) return 2;
-    if (range <= 50) return 5;
-    if (range <= 100) return 10;
-    if (range <= 200) return 20;
-    if (range <= 500) return 50;
-    if (range <= 1000) return 100;
+    for (const t of ticks) {
+      if (t.ts < xFromTs || t.ts > xToTs) continue;
 
-    const pow = Math.floor(Math.log10(range)) - 1;
-    return Math.pow(10, pow);
+      const bid = safeNum(t.bid);
+      const ask = safeNum(t.ask);
+      const mid = safeNum(t.mid);
+      const kal = safeNum(t.kal);
+
+      if (bid != null) ys.push(bid);
+      if (ask != null) ys.push(ask);
+      if (mid != null) ys.push(mid);
+      if (kal != null) ys.push(kal);
+    }
+
+    if (!ys.length) return null;
+
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+
+    // Give some padding
+    const paddedMin = Math.floor(minY);
+    const paddedMax = Math.ceil(maxY);
+
+    return { min: paddedMin, max: paddedMax };
   }
 
-  // NEW: build a yAxis patch for current (or provided) xVals
+  function recomputeYFromVisibleWindow(chart, state) {
+    if (!chart || !state.ticks || !state.ticks.length) return;
+
+    const option = chart.getOption();
+    const xAxis = option.xAxis && option.xAxis[0];
+    const dataZoom = option.dataZoom && option.dataZoom[0];
+
+    if (!xAxis || !dataZoom) return;
+
+    // We use category axis with timestamps stored in xAxis.data (xVals).
+    const xVals = xAxis.data || [];
+    const startPct = dataZoom.start != null ? dataZoom.start : 0;
+    const endPct = dataZoom.end != null ? dataZoom.end : 100;
+
+    const n = xVals.length;
+    if (!n) return;
+
+    const i0 = Math.max(0, Math.floor((startPct / 100) * (n - 1)));
+    const i1 = Math.min(n - 1, Math.ceil((endPct / 100) * (n - 1)));
+
+    const xFromTs = xVals[i0];
+    const xToTs = xVals[i1];
+
+    const bounds = computeYBoundsFromTicks(state.ticks, xFromTs, xToTs);
+    if (!bounds) return;
+
+    chart.setOption(
+      {
+        yAxis: [{ min: bounds.min, max: bounds.max }],
+      },
+      { notMerge: false, lazyUpdate: true }
+    );
+  }
+
   function buildYAxisPatch(xVals) {
-    if (!xVals || !xVals.length) return null;
-
-    const { from, to } = computeVisibleIndexRange(xVals);
-    const bounds = computeYBounds(from, to);
-    if (!bounds) return null;
-
-    const step = computeYAxisStep(bounds.min, bounds.max);
-
-    return {
-      min: bounds.min,
-      max: bounds.max,
-      minInterval: 1,
-      interval: step,
-      axisLabel: {
-        color: "#999",
-        formatter: function (val) {
-          return "$" + Math.round(val).toString();
-        },
-      },
-      splitLine: {
-        show: true,
-        lineStyle: { color: "#111" },
-      },
-    };
+    // Called during render; keep initial y-axis auto, but after a zoom operation we patch it.
+    // We compute bounds for the full window on initial render.
+    if (!state.ticks.length) return {};
+    const xFromTs = xVals[0];
+    const xToTs = xVals[xVals.length - 1];
+    const bounds = computeYBoundsFromTicks(state.ticks, xFromTs, xToTs);
+    if (!bounds) return {};
+    return { yAxis: [{ min: bounds.min, max: bounds.max }] };
   }
 
   function buildSeries() {
@@ -400,167 +178,186 @@ window.ChartCore = (function () {
     // piv_hilo
     const pivHi = [];
     const pivLo = [];
-    state.pivHilo.forEach((p) => {
+
+    for (const p of state.pivHilo) {
       const i = idxByTickId.get(Number(p.tick_id));
-      if (i == null) return;
-      const y = p.mid != null ? Number(p.mid) : null;
-      if (y == null) return;
-      const point = [xVals[i], y, p];
-      if (Number(p.ptype) > 0) {
-        pivHi.push(point);
-      } else {
-        pivLo.push(point);
-      }
-    });
+      if (i == null) continue;
+      const ts = xVals[i];
+
+      // y uses mid, or p.mid if present
+      const y = p.mid != null ? Number(p.mid) : state.ticks[i].mid != null ? Number(state.ticks[i].mid) : null;
+      if (y == null) continue;
+
+      const payload = {
+        id: p.id,
+        tick_id: p.tick_id,
+        mid: p.mid,
+        ptype: p.ptype,
+        win_left: p.win_left,
+        win_right: p.win_right,
+        computed_at: p.computed_at,
+      };
+
+      if (p.ptype === "hi") pivHi.push([ts, y, payload]);
+      if (p.ptype === "lo") pivLo.push([ts, y, payload]);
+    }
 
     // piv_swings
     const swings = [];
-    state.pivSwings.forEach((p) => {
+    for (const p of state.pivSwings) {
       const i = idxByTickId.get(Number(p.tick_id));
-      if (i == null) return;
-      const y = p.mid != null ? Number(p.mid) : null;
-      if (y == null) return;
-      swings.push([xVals[i], y, p]);
-    });
+      if (i == null) continue;
+      const ts = xVals[i];
+      const y = p.mid != null ? Number(p.mid) : state.ticks[i].mid != null ? Number(state.ticks[i].mid) : null;
+      if (y == null) continue;
+
+      const payload = {
+        id: p.id,
+        tick_id: p.tick_id,
+        mid: p.mid,
+        ptype: p.ptype,
+        swing_index: p.swing_index,
+        computed_at: p.computed_at,
+      };
+      swings.push([ts, y, payload]);
+    }
 
     // hhll
-    const hhllMap = {};
-    state.hhll.forEach((p) => {
+    const hhllByClass = new Map();
+    for (const p of state.hhll) {
       const i = idxByTickId.get(Number(p.tick_id));
-      if (i == null) return;
-      const y = p.mid != null ? Number(p.mid) : null;
-      if (y == null) return;
-      const key = p.class_text || "HHLL";
-      if (!hhllMap[key]) hhllMap[key] = [];
-      hhllMap[key].push([xVals[i], y, p]);
-    });
+      if (i == null) continue;
+      const ts = xVals[i];
+      const y = p.mid != null ? Number(p.mid) : state.ticks[i].mid != null ? Number(state.ticks[i].mid) : null;
+      if (y == null) continue;
 
-    // zones_hhll
-    const zoneAreas = [];
-    state.zonesHhll.forEach((z) => {
-      const start = z.start_time || z.start_ts || null;
-      const end = z.end_time || z.end_ts || null;
-      if (!start || !end) return;
+      const payload = {
+        id: p.id,
+        tick_id: p.tick_id,
+        mid: p.mid,
+        ptype: p.ptype,
+        class_text: p.class_text,
+        computed_at: p.computed_at,
+      };
 
-      const top = z.top_price != null ? Number(z.top_price) : null;
-      const bot = z.bot_price != null ? Number(z.bot_price) : null;
-      if (top == null || bot == null) return;
+      const k = String(p.class_text || "");
+      if (!hhllByClass.has(k)) hhllByClass.set(k, []);
+      hhllByClass.get(k).push([ts, y, payload]);
+    }
 
-      const yTop = Math.max(top, bot);
-      const yBot = Math.min(top, bot);
-
-      zoneAreas.push([
-        { xAxis: start, yAxis: yBot, value: z },
-        { xAxis: end, yAxis: yTop },
-      ]);
-    });
-
+    // series list
     const series = [];
 
-    // main price lines (PRICE group)
-    if (vis.bid && bidData.some((d) => d[1] != null)) {
-      series.push({
-        id: "bid",
-        name: "Bid",
-        type: "line",
-        showSymbol: false,
-        data: bidData,
-        lineStyle: { width: 1.0 },
-        smooth: true,
-        show: true,
-      });
-    }
+    // Price series
+    series.push({
+      id: "mid",
+      name: "Mid",
+      type: "line",
+      data: midData,
+      showSymbol: false,
+      smooth: false,
+      show: vis.mid,
+    });
 
-    if (vis.ask && askData.some((d) => d[1] != null)) {
-      series.push({
-        id: "ask",
-        name: "Ask",
-        type: "line",
-        showSymbol: false,
-        data: askData,
-        lineStyle: { width: 1.0 },
-        smooth: true,
-        show: true,
-      });
-    }
+    series.push({
+      id: "kal",
+      name: "Kal",
+      type: "line",
+      data: kalData,
+      showSymbol: false,
+      smooth: false,
+      show: vis.kal,
+    });
 
-    if (vis.mid) {
-      series.push({
-        id: "mid",
-        name: "Mid",
-        type: "line",
-        showSymbol: false,
-        data: midData,
-        lineStyle: { width: 1.2 },
-        smooth: true,
-        show: true,
-      });
-    }
+    series.push({
+      id: "bid",
+      name: "Bid",
+      type: "line",
+      data: bidData,
+      showSymbol: false,
+      smooth: false,
+      show: vis.bid,
+    });
 
-    if (vis.kal) {
-      series.push({
-        id: "kal",
-        name: "Kal",
-        type: "line",
-        showSymbol: false,
-        data: kalData,
-        lineStyle: { width: 1.2 },
-        smooth: true,
-        show: true,
-      });
-    }
+    series.push({
+      id: "ask",
+      name: "Ask",
+      type: "line",
+      data: askData,
+      showSymbol: false,
+      smooth: false,
+      show: vis.ask,
+    });
 
-    // Hi / Lo pivots
+    // Pivots
     if (vis.hipiv) {
       series.push({
         id: "piv_hi",
-        name: "Hi Piv",
+        name: "PivHi",
         type: "scatter",
-        symbolSize: 6,
         data: pivHi,
-        emphasis: { focus: "series" },
+        symbolSize: 8,
         show: true,
       });
     }
     if (vis.lopiv) {
       series.push({
         id: "piv_lo",
-        name: "Lo Piv",
+        name: "PivLo",
         type: "scatter",
-        symbolSize: 6,
         data: pivLo,
-        emphasis: { focus: "series" },
+        symbolSize: 8,
         show: true,
       });
     }
 
-    // Swings & HHLL – one overlay group
+    // Swings
     if (vis.swings) {
       series.push({
         id: "swings",
         name: "Swings",
         type: "scatter",
-        symbolSize: 7,
         data: swings,
-        emphasis: { focus: "series" },
+        symbolSize: 6,
         show: true,
       });
+    }
 
-      Object.keys(hhllMap).forEach((cls) => {
-        series.push({
-          id: "hhll_" + cls,
-          name: "HHLL " + cls,
-          type: "scatter",
-          symbolSize: 7,
-          data: hhllMap[cls],
-          emphasis: { focus: "series" },
-          show: true,
-        });
+    // HHLL groups
+    for (const [cls, pts] of hhllByClass.entries()) {
+      // these are always overlay; controlled by zones visibility (zonesHhll) separately.
+      series.push({
+        id: `hhll_${cls}`,
+        name: `HHLL ${cls}`,
+        type: "scatter",
+        data: pts,
+        symbolSize: 6,
+        show: true,
       });
     }
 
     // Zones
     if (vis.zones) {
+      const zoneAreas = [];
+      for (const z of state.zonesHhll) {
+        // zones are based on tick_id ranges and y bounds (low/high)
+        const iFrom = idxByTickId.get(Number(z.tick_from));
+        const iTo = idxByTickId.get(Number(z.tick_to));
+        if (iFrom == null || iTo == null) continue;
+
+        const x1 = xVals[iFrom];
+        const x2 = xVals[iTo];
+
+        const y1 = safeNum(z.low);
+        const y2 = safeNum(z.high);
+        if (y1 == null || y2 == null) continue;
+
+        zoneAreas.push([
+          { xAxis: x1, yAxis: y1 },
+          { xAxis: x2, yAxis: y2 },
+        ]);
+      }
+
       series.push({
         id: "zones_hhll",
         name: "Zones",
@@ -574,6 +371,71 @@ window.ChartCore = (function () {
         },
         show: true,
       });
+    }
+
+    // --------------------------
+    // NEW: eval overlays (scatter)
+    // Align eval.tick_id to the tick index -> xVals[index], so dots sit on the same X grid.
+    // --------------------------
+    function colorForSign(sign) {
+      if (sign > 0) return "#4caf50";
+      if (sign < 0) return "#f44336";
+      return "#9e9e9e";
+    }
+    function sizeForLevel(level) {
+      const lvl = Number(level) || 1;
+      // 4 + 2*level, clamped to stay readable
+      return Math.max(4, Math.min(22, 4 + 2 * lvl));
+    }
+
+    if (state.evalVisibility && Array.isArray(state.evals) && state.evals.length) {
+      const byLevel = new Map();
+
+      for (const r of state.evals) {
+        const level = Number(r.level);
+        if (!Number.isFinite(level) || level < state.evalMinLevel) continue;
+
+        const tickId = Number(r.tick_id);
+        const mid = Number(r.mid);
+        if (!Number.isFinite(tickId) || !Number.isFinite(mid)) continue;
+
+        const i = idxByTickId.get(tickId);
+        if (i == null) continue; // eval outside the current tick window
+
+        if (!byLevel.has(level)) byLevel.set(level, []);
+        byLevel.get(level).push({ i, mid, r });
+      }
+
+      // One scatter series per level
+      for (const level of Array.from(byLevel.keys()).sort((a, b) => a - b)) {
+        const rows = byLevel.get(level);
+        const points = rows.map(({ i, mid, r }) => {
+          return [xVals[i], mid, r]; // payload in slot 2 for tooltip
+        });
+
+        series.push({
+          id: `eval_L${level}`,
+          name: `Eval L${level}`,
+          type: "scatter",
+          symbol: "circle",
+          symbolSize: function (val) {
+            // val: [x, y, payload]
+            const payload = Array.isArray(val) ? val[2] : null;
+            return sizeForLevel(payload ? payload.level : level);
+          },
+          itemStyle: {
+            color: function (p) {
+              const payload = p && p.data ? p.data[2] : null;
+              const s = payload ? Number(payload.base_sign) : 0;
+              return colorForSign(s);
+            },
+          },
+          data: points,
+          emphasis: { focus: "series" },
+          show: true,
+          tooltip: { trigger: "item" },
+        });
+      }
     }
 
     return { xVals, series };
@@ -595,24 +457,26 @@ window.ChartCore = (function () {
     return function (params) {
       if (!params || !params.length) return "";
 
-      const first = params[0];
-      const ts =
-        first.axisValue ||
-        (Array.isArray(first.data) ? first.data[0] : null);
+      // ECharts passes an array of series points at the same axis trigger
+      const axisValue = params[0].axisValue;
+      const dt = (() => {
+        const iso = toISO(axisValue);
+        if (!iso) return { date: "", time: "" };
+        const [d, t] = iso.split("T");
+        return { date: d || "", time: (t || "").replace("Z", "") };
+      })();
 
-      const dt = formatDateTime(ts);
-      const info = infoByTs.get(ts) || {};
+      const info = infoByTs.get(axisValue) || {};
       const idText = info.id != null ? info.id : "";
 
       let html = "";
-
+      html += `<b>${axisValue}</b><br/>`;
       html += `Id: ${idText}<br/>`;
       if (dt.date) html += `${dt.date}<br/>`;
       if (dt.time) html += `${dt.time}<br/>`;
       html += `* * *<br/>`;
 
       const extras = [];
-
       params.forEach((p) => {
         const seriesId = p.seriesId || p.seriesName;
         const data = p.data;
@@ -646,6 +510,17 @@ window.ChartCore = (function () {
             extras.push(
               `HHLL – mid:${yText} class:${payload.class_text} ptype:${payload.ptype}`
             );
+          }
+        } else if (String(seriesId).startsWith("eval_L")) {
+          const payload = Array.isArray(data) ? data[2] : null;
+          if (payload) {
+            const lvl = payload.level != null ? payload.level : "";
+            const sign = payload.base_sign != null ? payload.base_sign : "";
+            const imp = payload.signed_importance != null ? payload.signed_importance : "";
+            extras.push(`Eval – mid:${yText} level:${lvl} sign:${sign} imp:${imp}`);
+            if (payload.promotion_path) {
+              extras.push(`Path – ${payload.promotion_path}`);
+            }
           }
         }
       });
@@ -694,117 +569,107 @@ window.ChartCore = (function () {
     };
 
     if (!state.hasInit) {
-      const option = buildBaseOption();
-      option.xAxis.data = xVals;
-
-      if (yAxisPatch) {
-        option.yAxis.min = yAxisPatch.min;
-        option.yAxis.max = yAxisPatch.max;
-        option.yAxis.minInterval = yAxisPatch.minInterval;
-        option.yAxis.interval = yAxisPatch.interval;
-        option.yAxis.axisLabel = yAxisPatch.axisLabel;
-        option.yAxis.splitLine = yAxisPatch.splitLine;
-      }
-
-      option.series = series;
-      option.tooltip = Object.assign(option.tooltip || {}, tooltip);
-
-      chart.setOption(option, true);
-      state.hasInit = true;
-    } else {
       chart.setOption(
         {
-          xAxis: { data: xVals },
-          yAxis: yAxisPatch || {},
+          animation: false,
+          grid: { left: 45, right: 25, top: 20, bottom: 40 },
+          tooltip: { trigger: "axis", axisPointer: { type: "cross" }, ...tooltip },
+          xAxis: {
+            type: "category",
+            data: xVals,
+            axisLabel: { formatter: (v) => String(v).slice(11, 19) },
+          },
+          yAxis: { type: "value", scale: true },
+          dataZoom: [
+            { type: "inside", xAxisIndex: 0, filterMode: "none" },
+            { type: "slider", xAxisIndex: 0, filterMode: "none" },
+          ],
           series,
-          tooltip,
+          ...yAxisPatch,
         },
-        false // preserve dataZoom / view window
+        { notMerge: true, lazyUpdate: true }
       );
+      state.hasInit = true;
+    } else {
+      // preserve zoom
+      const oldOpt = chart.getOption();
+      const dz = oldOpt && oldOpt.dataZoom ? oldOpt.dataZoom[0] : null;
+
+      chart.setOption(
+        {
+          tooltip: { trigger: "axis", axisPointer: { type: "cross" }, ...tooltip },
+          xAxis: [{ data: xVals }],
+          series,
+          ...yAxisPatch,
+        },
+        { notMerge: false, lazyUpdate: true }
+      );
+
+      if (dz && dz.start != null && dz.end != null) {
+        chart.dispatchAction({ type: "dataZoom", start: dz.start, end: dz.end });
+      }
     }
 
     notifyWindowChange();
   }
 
-  function renderLive(ticks) {
-    if (!chart) return;
+  function handleDataZoom() {
+    // Keep Y bounds synced to visible X window
+    recomputeYFromVisibleWindow(chart, state);
+  }
+
+  async function loadLiveOnce(limit) {
+    const lim = limit != null ? Number(limit) : state.liveLimit;
+    const url = `/api/live_window?limit=${encodeURIComponent(lim)}`;
+
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`live_window failed: ${res.status}`);
+    const data = await res.json();
 
     state.mode = "live";
-    state.ticks = ticks || [];
-    if (state.ticks.length) {
-      state.lastTickId = state.ticks[state.ticks.length - 1].id;
-    }
-
-    // In live mode unified index currently has no pivots/zones overlays
+    state.ticks = Array.isArray(data.ticks) ? data.ticks : [];
     state.pivHilo = [];
     state.pivSwings = [];
     state.hhll = [];
     state.zonesHhll = [];
 
-    render();
-  }
-
-  // ---------- Public API ----------
-
-  async function loadWindow(fromId, windowSize) {
-    const res = await fetch(
-      `/api/review/window?from_id=${fromId}&window=${windowSize}`
-    );
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-    const data = await res.json();
-
-    state.mode = "review";
-    state.ticks = data.ticks || [];
-    state.pivHilo = data.piv_hilo || [];
-    state.pivSwings = data.piv_swings || [];
-    state.hhll = data.hhll || [];
-    state.zonesHhll = data.zones_hhll || [];
-    state.lastTickId = state.ticks.length
-      ? state.ticks[state.ticks.length - 1].id
-      : null;
-
-    render();
-  }
-
-  async function pollLiveOnce() {
-    const url = `/api/live_window?limit=${state.liveLimit}`;
-    const res = await fetch(url);
-    if (!res.ok) {
-      console.error("Live poll error", res.status);
-      return;
+    // track last tick id to avoid reloading if no new ticks
+    if (state.ticks.length) {
+      state.lastTickId = state.ticks[state.ticks.length - 1].id;
+    } else {
+      state.lastTickId = null;
     }
 
-    const data = await res.json();
-    renderLive(data.ticks || []);
+    render();
+    return data;
   }
 
-  async function loadLiveOnce(opts) {
-    const limit = (opts && opts.limit) || state.liveLimit || 2000;
-    const url = `/api/live_window?limit=${limit}`;
-    const res = await fetch(url);
-    if (!res.ok) {
-      console.error("Live one-shot error", res.status);
-      return;
-    }
+  async function startLive(opts) {
+    const limit = opts && opts.limit != null ? Number(opts.limit) : state.liveLimit;
+    const intervalMs = opts && opts.intervalMs != null ? Number(opts.intervalMs) : 2000;
 
-    const data = await res.json();
+    stopLive(); // ensure single timer
+    state.mode = "live";
     state.liveLimit = limit;
-    renderLive(data.ticks || []);
-  }
 
-  function startLive(opts) {
-    const intervalMs = (opts && opts.intervalMs) || 2000;
-    state.liveLimit = (opts && opts.limit) || state.liveLimit || 2000;
+    await loadLiveOnce(limit);
 
-    if (state.liveTimer) {
-      clearInterval(state.liveTimer);
-      state.liveTimer = null;
-    }
+    state.liveTimer = setInterval(async () => {
+      try {
+        // cheap check: query last tick
+        const res = await fetch(`/api/live_last_tick`);
+        if (!res.ok) return;
+        const d = await res.json();
+        const lastId = d && d.id != null ? Number(d.id) : null;
+        if (!lastId) return;
 
-    // initial fetch
-    pollLiveOnce();
-    state.liveTimer = setInterval(pollLiveOnce, intervalMs);
+        if (state.lastTickId == null || lastId > Number(state.lastTickId)) {
+          await loadLiveOnce(limit);
+        }
+      } catch (e) {
+        console.warn("ChartCore live poll failed:", e);
+      }
+    }, intervalMs);
   }
 
   function stopLive() {
@@ -812,33 +677,58 @@ window.ChartCore = (function () {
       clearInterval(state.liveTimer);
       state.liveTimer = null;
     }
-    state.mode = "review";
   }
 
-  // NEW: group-based visibility controller using state.visibility + re-render
-  function setVisibility(group, visible) {
-    if (!(group in state.visibility)) {
-      console.warn("ChartCore: unknown visibility group", group);
+  async function loadWindow(fromId, windowSize) {
+    const from = Number(fromId);
+    const win = Number(windowSize);
+    const url = `/api/ticks/window?from_id=${encodeURIComponent(from)}&window=${encodeURIComponent(win)}`;
+
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`ticks/window failed: ${res.status}`);
+    const data = await res.json();
+
+    state.mode = "review";
+    state.ticks = Array.isArray(data.ticks) ? data.ticks : [];
+    state.pivHilo = Array.isArray(data.piv_hilo) ? data.piv_hilo : [];
+    state.pivSwings = Array.isArray(data.piv_swings) ? data.piv_swings : [];
+    state.hhll = Array.isArray(data.hhll) ? data.hhll : [];
+    state.zonesHhll = Array.isArray(data.zones_hhll) ? data.zones_hhll : [];
+
+    if (state.ticks.length) {
+      state.lastTickId = state.ticks[state.ticks.length - 1].id;
+    } else {
+      state.lastTickId = null;
     }
+
+    render();
+    return data;
+  }
+
+  function setVisibility(group, visible) {
+    if (!(group in state.visibility)) return;
     state.visibility[group] = !!visible;
-    render(); // preserves zoom (setOption(..., false))
+    render();
   }
 
   function setWindowChangeHandler(fn) {
     state.windowChangeHandler = typeof fn === "function" ? fn : null;
-    notifyWindowChange();
   }
 
-  // NEW: recompute y-axis when user zooms/pans along x
-  function handleDataZoom() {
-    if (!chart || !state.ticks.length) return;
-
-    const xVals = state.ticks.map((t) => t.ts);
-    const yAxisPatch = buildYAxisPatch(xVals);
-    if (!yAxisPatch) return;
-
-    chart.setOption({ yAxis: yAxisPatch }, false);
+  // NEW: attach eval rows to the current window (non-breaking)
+  function setEvals(rows, minLevel) {
+    state.evals = Array.isArray(rows) ? rows : [];
+    state.evalMinLevel = typeof minLevel === "number" ? minLevel : 1;
+    render(); // evals follow zoom/pan naturally
   }
+
+  // NEW: master toggle for eval overlay
+  function setEvalVisibility(visible) {
+    state.evalVisibility = !!visible;
+    render();
+  }
+
+  // ---------- Public API ----------
 
   return {
     init(domId) {
@@ -855,5 +745,7 @@ window.ChartCore = (function () {
     setVisibility,
     setWindowChangeHandler,
     loadLiveOnce, // used by index-core for LIVE + STOP
+    setEvals,
+    setEvalVisibility,
   };
 })();
