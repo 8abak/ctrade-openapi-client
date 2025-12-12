@@ -349,10 +349,29 @@
       const confirmTime = new Date(pivotTime.getTime() + durConf * 1000);
       const exitTime    = new Date(pivotTime.getTime() + durExit * 1000);
 
+      if (!Number.isFinite(pivotTickId) || pivotTickId <= 0) {
+        infoDiv.textContent = `Invalid pivot_tick_id: ${pivotTickId}`;
+        return;
+      }
+
       const fromId = Math.max(1, pivotTickId - WINDOW_BEFORE_TICKS);
       const toId   = pivotTickId + WINDOW_AFTER_TICKS;
 
-      const ticks = await loadTicks(symbol, fromId, toId);
+      // sanity guard: avoid ridiculous windows
+      if (toId - fromId <= 1) {
+        infoDiv.textContent = `Invalid tick window: from ${fromId} to ${toId}`;
+        return;
+      }
+
+      let ticks;
+      try {
+        ticks = await loadTicks(symbol, fromId, toId);
+      } catch (e) {
+        infoDiv.textContent =
+          `Failed to load ticks (pivot_tick_id=${pivotTickId}, window=${toId - fromId + 1})`;
+        return;
+      }
+
       if (!ticks.length) {
         infoDiv.textContent = "No ticks in this window.";
         return;
