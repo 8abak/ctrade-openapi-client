@@ -1,11 +1,12 @@
 // frontend/confirm.js
 //
 // Pure frontend "confirm lab" viewer.
-// - Loads confirm_spots CSV from ../src/train/confirm_spots_tags/
+// - Loads tags CSV from ../src/train/tags/
 // - Lets you choose a tag index (row)
 // - Fetches ticks around pivot via existing review API
 // - Draws the window with pivot/L1/H1/confirm/exit markers
-// - Now also shows Kalman-smoothed price (ticks.kal) as optional overlay.
+// - Shows Kalman-smoothed price (ticks.kal) as optional overlay.
+// - NEW: lists available *.csv files in the tags folder and lets you pick.
 
 (() => {
   // ---------- CONFIG --------------------------------------------------------
@@ -28,6 +29,7 @@
   // ---------- DOM / ECharts setup ------------------------------------------
 
   const symbolInput   = document.getElementById("symbolInput");
+  const datasetSelect = document.getElementById("datasetSelect");
   const datasetInput  = document.getElementById("datasetInput");
   const tagInput      = document.getElementById("tagInput");
   const showTagsInput = document.getElementById("showTagsInput");
@@ -40,6 +42,51 @@
 
   // ---------- CSV loading & parsing ----------------------------------------
 
+  async function listCsvFiles() {
+    // Requires directory listing to be enabled for /src/train/tags/
+    const resp = await fetch(CSV_PATH_PREFIX, { cache: "no-store" });
+    if (!resp.ok) return [];
+
+    const html = await resp.text();
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    return Array.from(doc.querySelectorAll("a"))
+      .map(a => a.getAttribute("href"))
+      .filter(h => h && h.endsWith(".csv"))
+      .map(h => h.split("/").pop());
+  }
+
+  async function populateDatasetSelect() {
+    if (!datasetSelect) return;
+
+    datasetSelect.innerHTML = `<option value="">(loading...)</option>`;
+    const files = await listCsvFiles();
+
+    if (!files.length) {
+      datasetSelect.innerHTML = `<option value="">(no csv found)</option>`;
+      return;
+    }
+
+    files.sort((a, b) => a.localeCompare(b));
+    datasetSelect.innerHTML = "";
+
+    for (const f of files) {
+      const opt = document.createElement("option");
+      opt.value = f;
+      opt.textContent = f;
+      datasetSelect.appendChild(opt);
+    }
+
+    // Try to match whatever is typed in datasetInput
+    const typed = datasetInput.value.trim();
+    if (typed && files.includes(typed)) {
+      datasetSelect.value = typed;
+    } else {
+      // Default: choose last lexicographically (often “largest/most recent” by naming)
+      datasetSelect.value = files[files.length - 1];
+      datasetInput.value = datasetSelect.value;
+    }
+  }
+
   let csvRows = null;
 
   async function loadCsvOnce(datasetName) {
@@ -47,7 +94,7 @@
       return csvRows;
     }
     const url = CSV_PATH_PREFIX + datasetName;
-    const resp = await fetch(url);
+    const resp = await fetch(url, { cache: "no-store" });
     if (!resp.ok) {
       throw new Error(`Failed to load CSV: ${resp.status} ${resp.statusText}`);
     }
@@ -104,7 +151,7 @@
 
   async function loadTicks(symbol, fromId, toId) {
     const url = tickApiUrl(symbol, fromId, toId);
-    const resp = await fetch(url);
+    const resp = await fetch(url, { cache: "no-store" });
     if (!resp.ok) {
       throw new Error(`Failed to load ticks: ${resp.status} ${resp.statusText}`);
     }
@@ -124,7 +171,7 @@
     const tick_id = raw.tick_id ?? raw.id;
     const tsRaw   = raw.ts ?? raw.timestamp ?? raw.time;
     const mid     = raw.mid ?? raw.price;
-    const kal     = raw.kal ?? null;  // new: bring kalman value through
+    const kal     = raw.kal ?? null;
 
     if (tick_id == null || tsRaw == null || mid == null) {
       return null;
@@ -177,9 +224,7 @@
         series.push({
           name: "kal",
           type: "line",
-          data: ticks.map(t =>
-            t.kal != null ? [t.ts, t.kal] : [t.ts, null]
-          ),
+          data: ticks.map(t => (t.kal != null ? [t.ts, t.kal] : [t.ts, null])),
           showSymbol: false,
           smooth: false,
           lineStyle: { width: 1 },
@@ -191,10 +236,7 @@
     if (showTags) {
       const tagPoints = ticks
         .filter(t => t.eval_level >= 2)
-        .map(t => ({
-          value: [t.ts, t.mid],
-          eval_level: t.eval_level,
-        }));
+        .map(t => ({ value: [t.ts, t.mid], eval_level: t.eval_level }));
       if (tagPoints.length > 0) {
         series.push({
           name: "L2+ tags",
@@ -254,29 +296,19 @@
         trigger: "axis",
         axisPointer: { type: "cross" },
         formatter: params => {
-          // params = [{seriesName, value:[ts, y]}, ...]
           const time = params[0].value[0];
-          let lines = [time];
+          const lines = [time];
 
           const midItem = params.find(p => p.seriesName === "mid");
-          if (midItem) {
-            lines.push(`mid: ${midItem.value[1]}`);
-          }
+          if (midItem) lines.push(`mid: ${midItem.value[1]}`);
 
           const kalItem = params.find(p => p.seriesName === "kal");
-          if (kalItem && kalItem.value[1] != null) {
-            lines.push(`kal: ${kalItem.value[1]}`);
-          }
+          if (kalItem && kalItem.value[1] != null) lines.push(`kal: ${kalItem.value[1]}`);
 
           return lines.join("<br/>");
         },
       },
-      grid: {
-        left: 40,
-        right: 20,
-        top: 20,
-        bottom: 30,
-      },
+      grid: { left: 40, right: 20, top: 20, bottom: 30 },
       xAxis: { type: "time", boundaryGap: false },
       yAxis: { type: "value", scale: true },
       series,
@@ -303,6 +335,7 @@
       }
       const row = rows[tagIdx - 1];
 
+      // New tags CSV schema (buildTags.py output)
       const pivotTickId = Number(row["pivot_tick_id"]);
       const pivotTime   = new Date(row["pivot_time"]);
 
@@ -333,7 +366,7 @@
 
       const dataForChart = {
         symbol,
-        tag_index: Number(row["tag_index"]),
+        tag_index: Number(row["tag_index"] || tagIdx),
         pivot_type: row["pivot_type"],
         side: row["side"],
         stop_price: Number(row["stop_price"]),
@@ -358,14 +391,39 @@
     }
   }
 
+  // ---------- Wiring --------------------------------------------------------
+
   loadBtn.addEventListener("click", loadAndRender);
-  tagInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
+
+  if (datasetSelect) {
+    datasetSelect.addEventListener("change", () => {
+      if (!datasetSelect.value) return;
+      datasetInput.value = datasetSelect.value;
+      csvRows = null; // ensure the new file actually reloads
       loadAndRender();
-    }
+    });
+  }
+
+  datasetInput.addEventListener("change", () => {
+    // If user types a dataset name manually, we should reload from that file.
+    csvRows = null;
   });
+
+  tagInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") loadAndRender();
+  });
+
   showTagsInput.addEventListener("change", loadAndRender);
   showKalInput.addEventListener("change", loadAndRender);
 
-  loadAndRender();
+  // Boot: populate list, then render once
+  (async () => {
+    try {
+      await populateDatasetSelect();
+    } catch (e) {
+      // ignore; manual datasetInput still works
+      console.warn("populateDatasetSelect failed:", e);
+    }
+    loadAndRender();
+  })();
 })();

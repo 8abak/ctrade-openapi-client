@@ -25,7 +25,7 @@
     label {
       font-size: 13px;
     }
-    input, button {
+    input, button, select {
       background: #111;
       border: 1px solid #333;
       color: #e5e5e5;
@@ -58,12 +58,21 @@
       Symbol:
       <input id="symbolInput" value="XAUUSD" size="8">
     </label>
+
+    <label>
+      Dataset (list):
+      <select id="datasetSelect" style="min-width: 320px;">
+        <option value="">(loading...)</option>
+      </select>
+    </label>
+
     <label>
       Dataset:
       <input id="datasetInput"
-             value="confirm_spots_XAUUSD_tags_1_300.csv"
+             value="tags_XAUUSD_tags_1_600.csv"
              size="40">
     </label>
+
     <label>
       Tag index:
       <input id="tagInput" type="number" value="1" min="1" style="width:70px;">
