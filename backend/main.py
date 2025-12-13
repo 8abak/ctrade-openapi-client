@@ -1,552 +1,711 @@
-# PATH: jobs/breakLine.py
-from __future__ import annotations
+# PATH: backend/main.py
+# FastAPI backend (clean version)
+# - Keeps only what sql.html, review.html, and live.html need.
+# - SQL console: /api/sql/* and legacy /sqlvw/*.
+# - Review window: /api/review/window
+# - Live window:   /api/live_window
 
 import os
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+import json
+from datetime import datetime, date
+from decimal import Decimal
+from typing import Any, Dict, List, Optional
+
+from fastapi import FastAPI, Body, Query, HTTPException, Header
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 import psycopg2.extras
 
-from backend.db import get_conn, dict_cur
+from backend.db import (
+    get_conn,
+    dict_cur,
+    detect_ts_col,
+    detect_mid_expr,
+    detect_bid_ask,
+)
 
-LOG_PATH = os.path.join("logs", "breakLine.log")
-BATCH_SIZE = 10_000
+VERSION = "2025.11.24.clean-v1"
+
+app = FastAPI(title="cTrade backend (clean)")
+
+# --------------------------- Static & CORS ----------------------------
+
+FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend")
+if os.path.isdir(FRONTEND_DIR):
+    app.mount("/frontend", StaticFiles(directory=FRONTEND_DIR), name="frontend")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ----------------------------- Utilities ------------------------------
+
+def _jsonable(o):
+    if isinstance(o, Decimal):
+        return float(o)
+    if isinstance(o, (datetime, date)):
+        return o.isoformat()
+    if isinstance(o, dict):
+        return {k: _jsonable(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [_jsonable(v) for v in o]
+    return o
 
 
-def _now_utc_str() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+def _ts_mid_cols(conn):
+    """Detect timestamp column, mid expression, and bid/ask presence."""
+    return detect_ts_col(conn), detect_mid_expr(conn), detect_bid_ask(conn)
 
 
-def _to_ms(ts: datetime) -> int:
-    # Postgres timestamptz -> aware datetime. timestamp() returns float seconds.
-    return int(ts.timestamp() * 1000)
+def _table_exists(conn, name: str) -> bool:
+    """Check if a table exists in public schema."""
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema = 'public'
+              AND table_name   = %s
+            """,
+            (name,),
+        )
+        return cur.fetchone() is not None
 
 
-def _interp(p1: float, p2: float, x1: int, x2: int, xi: int) -> float:
-    if x2 == x1:
-        return p2
-    return p1 + (p2 - p1) * ((xi - x1) / (x2 - x1))
+def _ticks_has_kal(conn) -> bool:
+    """Return True if ticks table has a 'kal' column."""
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name   = 'ticks'
+              AND column_name  = 'kal'
+            """
+        )
+        return cur.fetchone() is not None
 
 
-def _append_log(line: str) -> None:
-    os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
-    with open(LOG_PATH, "a", encoding="utf-8") as f:
-        f.write(line.rstrip() + "\n")
+# --------------------------- Basic / Status ---------------------------
+
+@app.get("/")
+def root():
+    return {"ok": True, "version": VERSION}
 
 
-def break_line(segm_id: int, segLine_id: Optional[int] = None) -> Dict[str, Any]:
+@app.get("/version")
+def get_version():
+    return {"version": VERSION}
+
+
+# -------------------------- SQL Console APIs --------------------------
+# These are what sql.html / sql-core.js rely on.
+
+# Legacy endpoints kept for compatibility with older tooling
+@app.get("/sqlvw/tables")
+def sqlvw_tables():
+    conn = get_conn()
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            SELECT tablename
+            FROM pg_tables
+            WHERE schemaname='public'
+              AND tablename NOT LIKE 'pg_%'
+            ORDER BY tablename
+            """
+        )
+        return [r["tablename"] for r in cur.fetchall()]
+
+
+@app.get("/sqlvw/query")
+def sqlvw_query(query: str = Query(...)):
+    conn = get_conn()
+    with dict_cur(conn) as cur:
+        cur.execute(query)
+        if cur.description:
+            return _jsonable(cur.fetchall())
+        return {"ok": True, "rowcount": cur.rowcount}
+
+
+# Newer API used primarily by sql-core.js
+@app.get("/api/sql/tables")
+def api_sql_tables():
     """
-    One step:
-      - if no seglines for segm_id: init (create base line + assign all ticks)
-      - else: split one active segline (specified or worst max_abs_dist)
-    Returns dict summary; backend returns it as JSON.
+    List visible tables in public schema, excluding ones explicitly hidden
+    in meta.hidden_tables (if that table exists).
     """
-    if not isinstance(segm_id, int) or segm_id <= 0:
-        return {"error": "segm_id must be a positive int"}
+    conn = get_conn()
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            SELECT t.table_name
+            FROM information_schema.tables t
+            LEFT JOIN meta.hidden_tables h
+              ON h.table_schema = t.table_schema
+             AND h.table_name   = t.table_name
+            WHERE t.table_schema = 'public'
+              AND t.table_type   = 'BASE TABLE'
+              AND (h.table_name IS NULL)
+            ORDER BY t.table_name
+            """
+        )
+        return [r["table_name"] for r in cur.fetchall()]
+
+
+@app.get("/api/sql")
+def api_sql_get(q: str = ""):
+    """
+    Simple read-only SELECT endpoint via query string (?q=...).
+    """
+    q = (q or "").strip()
+    if not q:
+        return {"rows": []}
+    if not q.lower().startswith("select"):
+        raise HTTPException(status_code=400, detail="Only SELECT is allowed here.")
+    conn = get_conn()
+    with dict_cur(conn) as cur:
+        cur.execute(q)
+        return {"rows": _jsonable(cur.fetchall())}
+
+
+@app.get("/api/evals/window")
+def api_evals_window(
+    tick_from: int = Query(..., ge=1),
+    tick_to: int = Query(..., ge=1),
+    min_level: int = Query(1, ge=1),
+    max_rows: int = Query(200_000, ge=1, le=1_000_000),
+):
+    """
+    Return evals between tick_from and tick_to (inclusive),
+    filtered by level >= min_level.
+
+    max_rows is a safety cap to avoid returning too many rows.
+    """
+    if tick_to < tick_from:
+        tick_from, tick_to = tick_to, tick_from
 
     conn = get_conn()
-    # get_conn() sets autocommit True; we want atomic steps:
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            SELECT
+                id,
+                tick_id,
+                mid,
+                timestamp,
+                base_sign,
+                level,
+                signed_importance,
+                promotion_path,
+                computed_at
+            FROM evals
+            WHERE tick_id BETWEEN %s AND %s
+              AND level >= %s
+            ORDER BY tick_id, level
+            LIMIT %s
+            """,
+            (tick_from, tick_to, min_level, max_rows),
+        )
+        rows = cur.fetchall()
+
+    rows_json = _jsonable(rows)
+    truncated = len(rows_json) >= max_rows
+
+    return {
+        "tick_from": tick_from,
+        "tick_to": tick_to,
+        "min_level": min_level,
+        "max_rows": max_rows,
+        "truncated": truncated,
+        "evals": rows_json,
+    }
+    
+    
+@app.post("/api/sql")
+def api_sql_post(sql: str = Body("", embed=True)):
+    """
+    Read-only SELECT endpoint via POST body { "sql": "SELECT ..." }.
+    """
+    stmt = (sql or "").strip()
+    if not stmt:
+        return {"rows": []}
+    if not stmt.lower().startswith("select"):
+        raise HTTPException(status_code=400, detail="Only SELECT is allowed here.")
+    conn = get_conn()
+    with dict_cur(conn) as cur:
+        cur.execute(stmt)
+        return {"rows": _jsonable(cur.fetchall())}
+
+
+@app.post("/api/sql/exec")
+def api_sql_exec(
+    sql: str = Body("", embed=True),
+    unsafe: Optional[bool] = Query(False),
+    x_allow_write: Optional[str] = Header(None),
+):
+    """
+    DDL/DML executor used by the "Execute" button in sql.html.
+
+    Guard rails:
+      - require unsafe=true query param
+      - require header X-Allow-Write: yes
+    Accepts multiple semicolon-separated statements and wraps them in a single
+    transaction. Returns per-statement results/rowcounts.
+    """
+    stmt = (sql or "").strip()
+    if not stmt:
+        return {"ok": True, "results": []}
+
+    if not unsafe or (x_allow_write or "").lower() != "yes":
+        raise HTTPException(
+            status_code=403,
+            detail="Write access disabled. Use unsafe=true and X-Allow-Write: yes",
+        )
+
+    import sqlparse
+
+    conn = get_conn()
     conn.autocommit = False
-
+    results: List[Dict[str, Any]] = []
     try:
-        with dict_cur(conn) as cur:
-            cur.execute("SELECT COUNT(*)::int AS n FROM public.seglines WHERE segm_id=%s", (segm_id,))
-            n = int(cur.fetchone()["n"])
-
-        if n == 0:
-            result = _init_mode(conn, segm_id)
-        else:
-            result = _split_mode(conn, segm_id, segLine_id)
-
-        conn.commit()
-        return result
+        with conn, dict_cur(conn) as cur:
+            for part in [p.strip() for p in sqlparse.split(stmt) if p.strip()]:
+                cur.execute(part)
+                if cur.description:
+                    rows = cur.fetchall()
+                    results.append(
+                        {"type": "resultset", "rows": _jsonable(rows)}
+                    )
+                else:
+                    results.append(
+                        {"type": "rowcount", "rowcount": cur.rowcount}
+                    )
+        return {"ok": True, "results": results}
     except Exception as e:
         conn.rollback()
-        return {"error": f"{type(e).__name__}: {e}", "segm_id": segm_id}
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+        raise HTTPException(
+            status_code=400,
+            detail=f"{type(e).__name__}: {e}",
+        )
 
 
-# ---------------------------- INIT MODE ----------------------------
+# ----------------------------- Review API -----------------------------
+# Used by review.html / review-core.js (no live stream, just windows).
 
-def _get_first_last_tick(conn, segm_id: int) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+@app.get("/api/review/window")
+def api_review_window(
+    from_id: int = Query(..., description="Starting tick id (inclusive)"),
+    window: int = Query(5000, ge=100, le=50000),
+):
     """
-    Returns dicts:
-      {tick_id, ts, price}
-    price uses COALESCE(kal, mid).
+    Historical review window over ticks.
+
+    Returns JSON:
+      {
+        "ticks":      [...],
+        "segs":       [...],  # kalseg (old, if exists)
+        "zones":      [...],  # zones  (old, if exists)
+
+        "piv_hilo":   [...],  # local highs/lows (if piv_hilo exists)
+        "piv_swings": [...],  # swing pivots      (if piv_swings exists)
+        "hhll":       [...],  # HH/HL/LH/LL       (if hhll_piv exists)
+        "zones_hhll": [...]   # HH/LL zones       (if zones_hhll exists)
+      }
     """
-    with dict_cur(conn) as cur:
-        cur.execute(
-            """
-            SELECT t.id AS tick_id, t.timestamp AS ts,
-                   COALESCE(t.kal, t.mid) AS price
-            FROM public.segticks st
-            JOIN public.ticks t ON t.id = st.tick_id
-            WHERE st.segm_id=%s
-            ORDER BY t.timestamp ASC, t.id ASC
-            LIMIT 1
-            """,
-            (segm_id,),
-        )
-        first = cur.fetchone()
+    to_id = from_id + window - 1
 
-        cur.execute(
-            """
-            SELECT t.id AS tick_id, t.timestamp AS ts,
-                   COALESCE(t.kal, t.mid) AS price
-            FROM public.segticks st
-            JOIN public.ticks t ON t.id = st.tick_id
-            WHERE st.segm_id=%s
-            ORDER BY t.timestamp DESC, t.id DESC
-            LIMIT 1
-            """,
-            (segm_id,),
-        )
-        last = cur.fetchone()
+    conn = get_conn()
+    ts_col, mid_expr, (has_bid, has_ask) = _ts_mid_cols(conn)
+    has_kal = _ticks_has_kal(conn)
 
-    if not first or first["price"] is None:
-        raise RuntimeError("no ticks (or no kal/mid) for segm_id")
-    if not last or last["price"] is None:
-        raise RuntimeError("no ticks (or no kal/mid) for segm_id")
-
-    return first, last
-
-
-def _init_mode(conn, segm_id: int) -> Dict[str, Any]:
-    first, last = _get_first_last_tick(conn, segm_id)
-
-    # insert base segline
-    with dict_cur(conn) as cur:
-        cur.execute(
-            """
-            INSERT INTO public.seglines (
-                segm_id,
-                parent_id,
-                depth,
-                iteration,
-                start_tick_id,
-                end_tick_id,
-                start_ts,
-                end_ts,
-                start_price,
-                end_price,
-                is_active
-            )
-            VALUES (%s, NULL, 0, 0, %s, %s, %s, %s, %s, %s, true)
-            RETURNING id
-            """,
-            (
-                segm_id,
-                int(first["tick_id"]),
-                int(last["tick_id"]),
-                first["ts"],
-                last["ts"],
-                float(first["price"]),
-                float(last["price"]),
-            ),
-        )
-        line_id = int(cur.fetchone()["id"])
-
-    # assign all ticks to this line, compute dist
-    _assign_all_ticks(conn, segm_id, line_id, first, last)
-
-    # update stats
-    num_ticks, max_abs = _update_line_stats(conn, line_id)
-    num_active, global_max = _update_global_stats(conn, segm_id)
-
-    _append_log(
-        f"[{_now_utc_str()}] segm_id={segm_id} action=init line={line_id} "
-        f"ticks={num_ticks} max_abs_dist={max_abs} global_max_abs_dist={global_max}"
-    )
-
-    return {
-        "segm_id": segm_id,
-        "action": "init",
-        "segLine_id": line_id,
-        "num_lines_active": num_active,
-        "global_max_abs_dist": global_max,
-    }
-
-
-def _assign_all_ticks(conn, segm_id: int, line_id: int, first: Dict[str, Any], last: Dict[str, Any]) -> None:
-    x1 = _to_ms(first["ts"])
-    x2 = _to_ms(last["ts"])
-    p1 = float(first["price"])
-    p2 = float(last["price"])
-
-    offset = 0
-    while True:
-        with dict_cur(conn) as cur:
-            cur.execute(
-                """
-                SELECT st.id AS segtick_row_id,
-                       t.timestamp AS ts,
-                       COALESCE(t.kal, t.mid) AS price
-                FROM public.segticks st
-                JOIN public.ticks t ON t.id = st.tick_id
-                WHERE st.segm_id=%s
-                ORDER BY t.timestamp ASC, t.id ASC
-                LIMIT %s OFFSET %s
-                """,
-                (segm_id, BATCH_SIZE, offset),
-            )
-            rows = cur.fetchall()
-
-        if not rows:
-            break
-
-        updates: List[Tuple[int, int, float]] = []
-        for r in rows:
-            if r["price"] is None:
-                continue
-            xi = _to_ms(r["ts"])
-            phat = _interp(p1, p2, x1, x2, xi)
-            dist = float(r["price"]) - phat
-            updates.append((int(r["segtick_row_id"]), line_id, float(dist)))
-
-        _bulk_update_segticks(conn, updates)
-        offset += BATCH_SIZE
-
-
-# ---------------------------- SPLIT MODE ----------------------------
-
-def _split_mode(conn, segm_id: int, segLine_id: Optional[int]) -> Dict[str, Any]:
-    line = _pick_line_to_split(conn, segm_id, segLine_id)
-    if not line:
-        return {"error": "no active segLines to split", "segm_id": segm_id}
-
-    pivot = _pick_pivot_tick(conn, segm_id, int(line["id"]))
-    if not pivot:
-        return {"error": "no pivot tick found for line", "segm_id": segm_id, "segLine_id": int(line["id"])}
-
-    # create left/right children lines
-    left_id, right_id = _create_children(conn, segm_id, line, pivot)
-
-    # deactivate old line
-    with dict_cur(conn) as cur:
-        cur.execute(
-            "UPDATE public.seglines SET is_active=false, updated_at=now() WHERE id=%s",
-            (int(line["id"]),),
-        )
-
-    # reassign ticks that belonged to old line
-    left_n, right_n = _reassign_ticks_split(conn, segm_id, int(line["id"]), pivot, left_id, right_id)
-
-    # update stats for new lines and global stats
-    _update_line_stats(conn, left_id)
-    _update_line_stats(conn, right_id)
-    num_active, global_max = _update_global_stats(conn, segm_id)
-
-    pivot_abs = float(abs(float(pivot["dist"]))) if pivot["dist"] is not None else None
-
-    _append_log(
-        f"[{_now_utc_str()}] segm_id={segm_id} action=split split_line={int(line['id'])} "
-        f"pivot_tick={int(pivot['tick_id'])} pivot_abs_dist={pivot_abs} "
-        f"new_left={left_id} new_right={right_id} "
-        f"left_ticks={left_n} right_ticks={right_n} global_max_abs_dist={global_max}"
-    )
-
-    return {
-        "segm_id": segm_id,
-        "action": "split",
-        "segLine_id": int(line["id"]),
-        "pivot_tick_id": int(pivot["tick_id"]),
-        "pivot_abs_dist": pivot_abs,
-        "new_left_id": left_id,
-        "new_right_id": right_id,
-        "num_lines_active": num_active,
-        "global_max_abs_dist": global_max,
-    }
-
-
-def _pick_line_to_split(conn, segm_id: int, segLine_id: Optional[int]) -> Optional[Dict[str, Any]]:
-    with dict_cur(conn) as cur:
-        if segLine_id is not None:
-            cur.execute("SELECT * FROM public.seglines WHERE id=%s", (int(segLine_id),))
-            r = cur.fetchone()
-            if not r:
-                raise RuntimeError("segLine_id not found")
-            if int(r["segm_id"]) != int(segm_id):
-                raise RuntimeError("segLine_id does not belong to segm_id")
-            if not bool(r["is_active"]):
-                raise RuntimeError("segLine_id is not active")
-            return r
-
-        cur.execute(
-            """
-            SELECT *
-            FROM public.seglines
-            WHERE segm_id=%s AND is_active=true
-            ORDER BY max_abs_dist DESC NULLS LAST, id DESC
-            LIMIT 1
-            """,
-            (segm_id,),
-        )
-        return cur.fetchone()
-
-
-def _pick_pivot_tick(conn, segm_id: int, line_id: int) -> Optional[Dict[str, Any]]:
-    with dict_cur(conn) as cur:
-        cur.execute(
-            """
-            SELECT st.tick_id AS tick_id,
-                   t.timestamp AS ts,
-                   COALESCE(t.kal, t.mid) AS price,
-                   st.dist AS dist
-            FROM public.segticks st
-            JOIN public.ticks t ON t.id = st.tick_id
-            WHERE st.segm_id=%s AND st.segline_id=%s
-            ORDER BY ABS(st.dist) DESC NULLS LAST, t.timestamp ASC, t.id ASC
-            LIMIT 1
-            """,
-            (segm_id, line_id),
-        )
-        return cur.fetchone()
-
-
-def _get_tick(conn, tick_id: int) -> Dict[str, Any]:
-    with dict_cur(conn) as cur:
-        cur.execute(
-            """
-            SELECT id AS tick_id, timestamp AS ts, COALESCE(kal, mid) AS price
-            FROM public.ticks
-            WHERE id=%s
-            """,
-            (int(tick_id),),
-        )
-        r = cur.fetchone()
-    if not r or r["price"] is None:
-        raise RuntimeError(f"tick not found (or no kal/mid): {tick_id}")
-    return r
-
-
-def _create_children(conn, segm_id: int, line: Dict[str, Any], pivot: Dict[str, Any]) -> Tuple[int, int]:
-    parent_id = int(line["id"])
-    depth = int(line["depth"]) + 1
+    bid_sel = ", bid" if has_bid else ""
+    ask_sel = ", ask" if has_ask else ""
+    kal_sel = ", kal" if has_kal else ""
 
     with dict_cur(conn) as cur:
-        cur.execute("SELECT COALESCE(MAX(iteration), 0)::int AS it FROM public.seglines WHERE segm_id=%s", (segm_id,))
-        it_next = int(cur.fetchone()["it"]) + 1
-
-    start_tick_id = int(line["start_tick_id"])
-    end_tick_id = int(line["end_tick_id"])
-    pivot_tick_id = int(pivot["tick_id"])
-
-    left_start = _get_tick(conn, start_tick_id)
-    left_end = _get_tick(conn, pivot_tick_id)
-    right_start = left_end
-    right_end = _get_tick(conn, end_tick_id)
-
-    with dict_cur(conn) as cur:
+        # ------------------------------------------------
+        # Ticks
+        # ------------------------------------------------
         cur.execute(
-            """
-            INSERT INTO public.seglines (
-                segm_id, parent_id, depth, iteration,
-                start_tick_id, end_tick_id,
-                start_ts, end_ts,
-                start_price, end_price,
-                is_active
-            )
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,true)
-            RETURNING id
+            f"""
+            SELECT id,
+                   {ts_col}   AS ts,
+                   {mid_expr} AS mid
+                   {kal_sel}{bid_sel}{ask_sel}
+            FROM ticks
+            WHERE id BETWEEN %s AND %s
+            ORDER BY id ASC
             """,
-            (
-                segm_id, parent_id, depth, it_next,
-                int(left_start["tick_id"]), int(left_end["tick_id"]),
-                left_start["ts"], left_end["ts"],
-                float(left_start["price"]), float(left_end["price"]),
-            ),
+            (from_id, to_id),
         )
-        left_id = int(cur.fetchone()["id"])
+        ticks = cur.fetchall()
 
-        cur.execute(
-            """
-            INSERT INTO public.seglines (
-                segm_id, parent_id, depth, iteration,
-                start_tick_id, end_tick_id,
-                start_ts, end_ts,
-                start_price, end_price,
-                is_active
-            )
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,true)
-            RETURNING id
-            """,
-            (
-                segm_id, parent_id, depth, it_next,
-                int(right_start["tick_id"]), int(right_end["tick_id"]),
-                right_start["ts"], right_end["ts"],
-                float(right_start["price"]), float(right_end["price"]),
-            ),
-        )
-        right_id = int(cur.fetchone()["id"])
+        if not ticks:
+            # Nothing in this range – return empty but valid payload
+            return {
+                "ticks":      [],
+                "segs":       [],
+                "zones":      [],
+                "piv_hilo":   [],
+                "piv_swings": [],
+                "hhll":       [],
+                "zones_hhll": [],
+            }
 
-    return left_id, right_id
+        # normalize ticks (floats + kal + spread + ts ISO)
+        for r in ticks:
+            if isinstance(r.get("mid"), Decimal):
+                r["mid"] = float(r["mid"])
 
-
-def _get_line_endpoints(conn, line_id: int) -> Dict[str, Any]:
-    with dict_cur(conn) as cur:
-        cur.execute(
-            """
-            SELECT id, start_ts, end_ts, start_price, end_price
-            FROM public.seglines
-            WHERE id=%s
-            """,
-            (int(line_id),),
-        )
-        r = cur.fetchone()
-    if not r:
-        raise RuntimeError(f"line not found: {line_id}")
-    return r
-
-
-def _dist_for_line(line: Dict[str, Any], ts: datetime, price: float) -> float:
-    x1 = _to_ms(line["start_ts"])
-    x2 = _to_ms(line["end_ts"])
-    xi = _to_ms(ts)
-    phat = _interp(float(line["start_price"]), float(line["end_price"]), x1, x2, xi)
-    return price - phat
-
-
-def _reassign_ticks_split(
-    conn,
-    segm_id: int,
-    old_line_id: int,
-    pivot: Dict[str, Any],
-    left_id: int,
-    right_id: int,
-) -> Tuple[int, int]:
-    pivot_ts = pivot["ts"]
-    pivot_tick_id = int(pivot["tick_id"])
-
-    left_line = _get_line_endpoints(conn, left_id)
-    right_line = _get_line_endpoints(conn, right_id)
-
-    left_n = 0
-    right_n = 0
-
-    offset = 0
-    while True:
-        with dict_cur(conn) as cur:
-            cur.execute(
-                """
-                SELECT st.id AS segtick_row_id,
-                       st.tick_id AS tick_id,
-                       t.timestamp AS ts,
-                       COALESCE(t.kal, t.mid) AS price
-                FROM public.segticks st
-                JOIN public.ticks t ON t.id = st.tick_id
-                WHERE st.segm_id=%s AND st.segline_id=%s
-                ORDER BY t.timestamp ASC, t.id ASC
-                LIMIT %s OFFSET %s
-                """,
-                (segm_id, old_line_id, BATCH_SIZE, offset),
-            )
-            rows = cur.fetchall()
-
-        if not rows:
-            break
-
-        updates: List[Tuple[int, int, float]] = []
-        for r in rows:
-            if r["price"] is None:
-                continue
-
-            # left if (ts < pivot_ts) or (ts == pivot_ts and tick_id <= pivot_tick_id)
-            is_left = (r["ts"] < pivot_ts) or (r["ts"] == pivot_ts and int(r["tick_id"]) <= pivot_tick_id)
-
-            if is_left:
-                dist = _dist_for_line(left_line, r["ts"], float(r["price"]))
-                updates.append((int(r["segtick_row_id"]), left_id, float(dist)))
-                left_n += 1
+            if has_kal:
+                if isinstance(r.get("kal"), Decimal):
+                    r["kal"] = float(r["kal"])
             else:
-                dist = _dist_for_line(right_line, r["ts"], float(r["price"]))
-                updates.append((int(r["segtick_row_id"]), right_id, float(dist)))
-                right_n += 1
+                # mirror mid so frontend always has a kal value
+                r["kal"] = r.get("mid")
 
-        _bulk_update_segticks(conn, updates)
-        offset += BATCH_SIZE
+            if has_bid and isinstance(r.get("bid"), Decimal):
+                r["bid"] = float(r["bid"])
+            if has_ask and isinstance(r.get("ask"), Decimal):
+                r["ask"] = float(r["ask"])
 
-    return left_n, right_n
+            r["spread"] = (
+                (r.get("ask") - r.get("bid"))
+                if (
+                    has_bid
+                    and has_ask
+                    and r.get("ask") is not None
+                    and r.get("bid") is not None
+                )
+                else None
+            )
+
+            ts = r.get("ts")
+            if isinstance(ts, (datetime, date)):
+                r["ts"] = ts.isoformat()
+
+        # For other tables we can safely use the tick id range
+        window_start = int(ticks[0]["id"])
+        window_end = int(ticks[-1]["id"])
+
+        # ------------------------------------------------
+        # Old kalseg segments (if present)
+        # ------------------------------------------------
+        if _table_exists(conn, "kalseg"):
+            cur.execute(
+                """
+                SELECT id, start_id, end_id, direction
+                FROM kalseg
+                WHERE end_id   >= %s
+                  AND start_id <= %s
+                ORDER BY start_id
+                """,
+                (window_start, window_end),
+            )
+            segs = cur.fetchall()
+        else:
+            segs = []
+
+        # ------------------------------------------------
+        # Old zones (if present)
+        # ------------------------------------------------
+        if _table_exists(conn, "zones"):
+            cur.execute(
+                """
+                SELECT id, start_id, end_id, direction, zone_type
+                FROM zones
+                WHERE end_id   >= %s
+                  AND start_id <= %s
+                ORDER BY start_id
+                """,
+                (window_start, window_end),
+            )
+            zones = cur.fetchall()
+        else:
+            zones = []
+
+        # ------------------------------------------------
+        # NEW: piv_hilo (raw local highs/lows) – only if table exists
+        # ------------------------------------------------
+        if _table_exists(conn, "piv_hilo"):
+            cur.execute(
+                """
+                SELECT id,
+                       tick_id,
+                       ts,
+                       mid,
+                       ptype,
+                       win_left,
+                       win_right
+                FROM piv_hilo
+                WHERE tick_id BETWEEN %s AND %s
+                ORDER BY tick_id
+                """,
+                (window_start, window_end),
+            )
+            piv_hilo = cur.fetchall()
+        else:
+            piv_hilo = []
+
+        # ------------------------------------------------
+        # NEW: piv_swings – swing pivots (uses ptype, not stype)
+        # ------------------------------------------------
+        if _table_exists(conn, "piv_swings"):
+            cur.execute(
+                """
+                SELECT id,
+                       pivot_id,
+                       tick_id,
+                       ts,
+                       mid,
+                       ptype,
+                       swing_index
+                FROM piv_swings
+                WHERE tick_id BETWEEN %s AND %s
+                ORDER BY tick_id
+                """,
+                (window_start, window_end),
+            )
+            piv_swings = cur.fetchall()
+        else:
+            piv_swings = []
+
+        # ------------------------------------------------
+        # NEW: hhll_piv → hhll (HH/HL/LH/LL)
+        # ------------------------------------------------
+        if _table_exists(conn, "hhll_piv"):
+            cur.execute(
+                """
+                SELECT id,
+                       swing_id,
+                       tick_id,
+                       ts,
+                       mid,
+                       ptype,
+                       class,
+                       class_text
+                FROM hhll_piv
+                WHERE tick_id BETWEEN %s AND %s
+                ORDER BY tick_id
+                """,
+                (window_start, window_end),
+            )
+            hhll = cur.fetchall()
+        else:
+            hhll = []
+
+        # ------------------------------------------------
+        # NEW: zones_hhll – time/price rectangles built on hhll
+        #      (filter using start_tick_id / end_tick_id)
+        # ------------------------------------------------
+        if _table_exists(conn, "zones_hhll"):
+            cur.execute(
+                """
+                SELECT id,
+                       start_tick_id,
+                       end_tick_id,
+                       start_time,
+                       end_time,
+                       top_price,
+                       bot_price,
+                       state,
+                       break_dir
+                FROM zones_hhll
+                WHERE end_tick_id   >= %s
+                  AND start_tick_id <= %s
+                ORDER BY start_tick_id
+                """,
+                (window_start, window_end),
+            )
+            zones_hhll = cur.fetchall()
+        else:
+            zones_hhll = []
+
+    return {
+        "ticks":      _jsonable(ticks),
+        "segs":       _jsonable(segs),
+        "zones":      _jsonable(zones),
+        "piv_hilo":   _jsonable(piv_hilo),
+        "piv_swings": _jsonable(piv_swings),
+        "hhll":       _jsonable(hhll),
+        "zones_hhll": _jsonable(zones_hhll),
+    }
 
 
-# ---------------------------- BULK + STATS ----------------------------
 
-def _bulk_update_segticks(conn, rows: List[Tuple[int, int, float]]) -> None:
+
+
+
+# ------------------------------ Live API ------------------------------
+# Used for the live chart (window-based, but we can layer streaming/polling on top).
+# live-core.js will talk to /api/live_window.
+
+@app.get("/api/live_window")
+def api_live_window(
+    limit: int = Query(5000, ge=500, le=20000),
+    before_id: Optional[int] = Query(
+        None,
+        description="If set, window ends at/before this tick id.",
+    ),
+    after_id: Optional[int] = Query(
+        None,
+        description="If set, window starts at/after this tick id.",
+    ),
+):
     """
-    rows: [(segticks.id, segline_id, dist), ...]
+    Unified window API for live view.
+
+    Modes:
+      - default (no before_id/after_id): last N ticks
+      - before_id=X: window of N ticks ending at/before X
+      - after_id=Y:  window of N ticks starting at/after Y
+
+    Response:
+      {
+        "ticks":    [{id, ts, mid, kal?, bid?, ask?, spread?}, ...],
+        "segments": [{id, start_id, end_id, direction}, ...],
+        "zones":    [{id, start_id, end_id, direction, zone_type}, ...]
+      }
     """
-    if not rows:
-        return
+    if before_id is not None and after_id is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="Use only one of before_id or after_id",
+        )
+
+    conn = get_conn()
+    ts_col, mid_expr, (has_bid, has_ask) = _ts_mid_cols(conn)
+    has_kal = _ticks_has_kal(conn)
+
+    bid_sel = ", bid" if has_bid else ""
+    ask_sel = ", ask" if has_ask else ""
+    kal_sel = ", kal" if has_kal else ""
+
     with dict_cur(conn) as cur:
-        psycopg2.extras.execute_values(
-            cur,
-            """
-            UPDATE public.segticks AS st
-            SET segline_id = v.segline_id,
-                dist = v.dist
-            FROM (VALUES %s) AS v(segtick_id, segline_id, dist)
-            WHERE st.id = v.segtick_id
-            """,
-            rows,
-            template="(%s,%s,%s)",
-            page_size=10_000,
+        if before_id is not None:
+            # window ending at/before before_id
+            cur.execute(
+                f"""
+                SELECT id,
+                       {ts_col}   AS ts,
+                       {mid_expr} AS mid
+                       {kal_sel}{bid_sel}{ask_sel}
+                FROM ticks
+                WHERE id <= %s
+                ORDER BY id DESC
+                LIMIT %s
+                """,
+                (before_id, limit),
+            )
+            tick_rows = list(reversed(cur.fetchall()))
+        elif after_id is not None:
+            # window starting at/after after_id
+            cur.execute(
+                f"""
+                SELECT id,
+                       {ts_col}   AS ts,
+                       {mid_expr} AS mid
+                       {kal_sel}{bid_sel}{ask_sel}
+                FROM ticks
+                WHERE id >= %s
+                ORDER BY id ASC
+                LIMIT %s
+                """,
+                (after_id, limit),
+            )
+            tick_rows = cur.fetchall()
+        else:
+            # default: last N ticks
+            cur.execute(
+                f"""
+                SELECT id,
+                       {ts_col}   AS ts,
+                       {mid_expr} AS mid
+                       {kal_sel}{bid_sel}{ask_sel}
+                FROM ticks
+                ORDER BY id DESC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            tick_rows = list(reversed(cur.fetchall()))
+
+    if not tick_rows:
+        return {"ticks": [], "segments": [], "zones": []}
+
+    # normalize tick rows
+    for r in tick_rows:
+        if isinstance(r.get("mid"), Decimal):
+            r["mid"] = float(r["mid"])
+        if has_kal:
+            if isinstance(r.get("kal"), Decimal):
+                r["kal"] = float(r["kal"])
+        else:
+            # If no kal column, mirror mid so frontend still has a value.
+            r["kal"] = r.get("mid")
+
+        if has_bid and isinstance(r.get("bid"), Decimal):
+            r["bid"] = float(r["bid"])
+        if has_ask and isinstance(r.get("ask"), Decimal):
+            r["ask"] = float(r["ask"])
+
+        r["spread"] = (
+            (r.get("ask") - r.get("bid"))
+            if (
+                has_bid
+                and has_ask
+                and r.get("ask") is not None
+                and r.get("bid") is not None
+            )
+            else None
         )
+        if isinstance(r.get("ts"), (datetime, date)):
+            r["ts"] = r["ts"].isoformat()
 
+    window_start = int(tick_rows[0]["id"])
+    window_end = int(tick_rows[-1]["id"])
 
-def _update_line_stats(conn, line_id: int) -> Tuple[int, Optional[float]]:
-    with dict_cur(conn) as cur:
-        cur.execute(
-            """
-            SELECT COUNT(*)::int AS n,
-                   MAX(ABS(dist)) AS mx
-            FROM public.segticks
-            WHERE segline_id=%s
-            """,
-            (int(line_id),),
-        )
-        r = cur.fetchone()
-        n = int(r["n"])
-        mx = float(r["mx"]) if r["mx"] is not None else None
+    segments: List[Dict[str, Any]] = []
+    zones: List[Dict[str, Any]] = []
 
-        cur.execute(
-            "SELECT start_ts, end_ts FROM public.seglines WHERE id=%s",
-            (int(line_id),),
-        )
-        lr = cur.fetchone()
-        dur_ms = None
-        if lr:
-            dur_ms = _to_ms(lr["end_ts"]) - _to_ms(lr["start_ts"])
+    # kalseg segments
+    if _table_exists(conn, "kalseg"):
+        with dict_cur(conn) as cur:
+            cur.execute(
+                """
+                SELECT id, start_id, end_id, direction
+                FROM kalseg
+                WHERE end_id   >= %s
+                  AND start_id <= %s
+                ORDER BY start_id ASC
+                """,
+                (window_start, window_end),
+            )
+            segments = [dict(r) for r in cur.fetchall()]
 
-        cur.execute(
-            """
-            UPDATE public.seglines
-            SET num_ticks=%s,
-                duration_ms=%s,
-                max_abs_dist=%s,
-                updated_at=now()
-            WHERE id=%s
-            """,
-            (n, dur_ms, mx, int(line_id)),
-        )
+    # zones
+    if _table_exists(conn, "zones"):
+        with dict_cur(conn) as cur:
+            cur.execute(
+                """
+                SELECT id, start_id, end_id, direction, zone_type
+                FROM zones
+                WHERE end_id   >= %s
+                  AND start_id <= %s
+                ORDER BY start_id ASC
+                """,
+                (window_start, window_end),
+            )
+            zones = [dict(r) for r in cur.fetchall()]
 
-    return n, mx
-
-
-def _update_global_stats(conn, segm_id: int) -> Tuple[int, Optional[float]]:
-    with dict_cur(conn) as cur:
-        cur.execute(
-            """
-            SELECT COUNT(*) FILTER (WHERE is_active=true)::int AS n,
-                   MAX(max_abs_dist) FILTER (WHERE is_active=true) AS mx
-            FROM public.seglines
-            WHERE segm_id=%s
-            """,
-            (int(segm_id),),
-        )
-        r = cur.fetchone()
-        n = int(r["n"])
-        mx = float(r["mx"]) if r["mx"] is not None else None
-    return n, mx
+    return {
+        "ticks": _jsonable(tick_rows),
+        "segments": _jsonable(segments),
+        "zones": _jsonable(zones),
+    }
