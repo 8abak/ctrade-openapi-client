@@ -1,6 +1,6 @@
 // frontend/chart-core.js
 // ChartCore: single ECharts instance responsible for rendering tick price series
-// and eval overlays. Public API used by controllers (index-core.js etc).
+// and overlays (evals + segLines). Public API used by controllers.
 
 const ChartCore = (function () {
   let chart = null;
@@ -28,6 +28,11 @@ const ChartCore = (function () {
     evals: [],
     evalMinLevel: 1,
     evalVisibility: true,
+
+    // segLines overlay state
+    segLines: [],              // active lines for current segm
+    segLinesVisibility: true,  // show/hide overlay
+    selectedSegLineId: null,   // line selected in table (optional)
   };
 
   // ---------- Helpers ----------
@@ -40,6 +45,9 @@ const ChartCore = (function () {
     }
 
     chart = echarts.init(dom, null, { useDirtyRect: true });
+
+    // Avoid duplicate handlers (init() also wires it)
+    chart.off && chart.off("dataZoom");
     chart.on("dataZoom", function () {
       recomputeYFromVisibleWindow(chart, state);
     });
@@ -127,6 +135,24 @@ const ChartCore = (function () {
     return { yAxis: [{ min: bounds.min, max: bounds.max }] };
   }
 
+  function _slopePerSec(line) {
+    const durMs = line && line.duration_ms != null ? Number(line.duration_ms) : null;
+    if (!durMs || durMs <= 0) return null;
+    return (Number(line.end_price) - Number(line.start_price)) / (durMs / 1000.0);
+  }
+
+  function _findLineCoveringTs(ts) {
+    if (!state.segLinesVisibility) return null;
+    if (!ts || !state.segLines || !state.segLines.length) return null;
+
+    // ISO strings compare lexicographically if same format; we return iso from backend
+    // We accept a simple containment match:
+    for (const ln of state.segLines) {
+      if (ln && ln.start_ts <= ts && ts <= ln.end_ts) return ln;
+    }
+    return null;
+  }
+
   function buildSeries() {
     const xVals = state.ticks.map((t) => t.ts);
     const vis = state.visibility;
@@ -187,6 +213,58 @@ const ChartCore = (function () {
         showSymbol: false,
         smooth: false,
       });
+    }
+
+    // ---- segLines overlay (line) ----
+    // We keep it as two series: selected + others, so selection can be highlighted.
+    if (state.segLinesVisibility && Array.isArray(state.segLines) && state.segLines.length) {
+      const selId = state.selectedSegLineId != null ? Number(state.selectedSegLineId) : null;
+
+      const segDataOther = [];
+      const segDataSel = [];
+
+      for (const ln of state.segLines) {
+        if (!ln) continue;
+        const a = [ln.start_ts, Number(ln.start_price), ln];
+        const b = [ln.end_ts, Number(ln.end_price), ln];
+        const target = (selId != null && Number(ln.id) === selId) ? segDataSel : segDataOther;
+
+        target.push(a);
+        target.push(b);
+        target.push([null, null, null]); // segment break
+      }
+
+      if (segDataOther.length) {
+        series.push({
+          id: "seglines_other",
+          name: "segLines",
+          type: "line",
+          data: segDataOther,
+          showSymbol: false,
+          smooth: false,
+          connectNulls: false,
+          lineStyle: { width: 2 },
+          emphasis: { focus: "series" },
+          tooltip: { trigger: "item" },
+          silent: true, // we use axis tooltip, not per-item hover
+        });
+      }
+
+      if (segDataSel.length) {
+        series.push({
+          id: "seglines_selected",
+          name: "segLines (selected)",
+          type: "line",
+          data: segDataSel,
+          showSymbol: false,
+          smooth: false,
+          connectNulls: false,
+          lineStyle: { width: 4 },
+          emphasis: { focus: "series" },
+          tooltip: { trigger: "item" },
+          silent: true,
+        });
+      }
     }
 
     // ---- Evals overlays (scatter) ----
@@ -267,8 +345,10 @@ const ChartCore = (function () {
       const dt = (() => {
         const iso = toISO(axisValue);
         if (!iso) return { date: "", time: "" };
-        const [d, t] = iso.split("T");
-        return { date: d || "", time: (t || "").replace("Z", "") };
+        const parts = iso.split("T");
+        const d = parts[0] || "";
+        const t = (parts[1] || "").replace("Z", "");
+        return { date: d, time: t };
       })();
 
       const info = infoByTs.get(axisValue) || {};
@@ -283,6 +363,7 @@ const ChartCore = (function () {
 
       const extras = [];
 
+      // show prices and eval details
       params.forEach((p) => {
         const seriesId = p.seriesId || p.seriesName;
         const data = p.data;
@@ -302,6 +383,15 @@ const ChartCore = (function () {
           }
         }
       });
+
+      // segLine info at this time (simple containment)
+      const ln = _findLineCoveringTs(axisValue);
+      if (ln) {
+        const slope = _slopePerSec(ln);
+        const slopeTxt = slope != null ? slope.toFixed(6) + "/s" : "";
+        const maxd = ln.max_abs_dist != null ? Number(ln.max_abs_dist).toFixed(4) : "";
+        extras.push(`segLine id:${ln.id} depth:${ln.depth} it:${ln.iteration} slope:${slopeTxt} max|dist|:${maxd}`);
+      }
 
       if (extras.length) {
         html += `* * *<br/>`;
@@ -456,6 +546,15 @@ const ChartCore = (function () {
     return data;
   }
 
+  // NEW: inject ticks directly (used by segLines review page)
+  function setTicks(ticks) {
+    state.mode = "review";
+    state.ticks = Array.isArray(ticks) ? ticks : [];
+    if (state.ticks.length) state.lastTickId = state.ticks[state.ticks.length - 1].id;
+    else state.lastTickId = null;
+    render();
+  }
+
   function setVisibility(group, visible) {
     if (!(group in state.visibility)) return;
     state.visibility[group] = !!visible;
@@ -477,6 +576,18 @@ const ChartCore = (function () {
     render();
   }
 
+  // NEW: segLines overlay setters
+  function setSegLines(lines, selectedId) {
+    state.segLines = Array.isArray(lines) ? lines : [];
+    state.selectedSegLineId = selectedId != null ? Number(selectedId) : null;
+    render();
+  }
+
+  function setSegLinesVisibility(visible) {
+    state.segLinesVisibility = !!visible;
+    render();
+  }
+
   return {
     init(domId) {
       const c = ensureChart(domId);
@@ -493,5 +604,10 @@ const ChartCore = (function () {
     loadLiveOnce,
     setEvals,
     setEvalVisibility,
+
+    // new API
+    setTicks,
+    setSegLines,
+    setSegLinesVisibility,
   };
 })();
