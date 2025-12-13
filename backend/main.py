@@ -709,3 +709,284 @@ def api_live_window(
         "segments": _jsonable(segments),
         "zones": _jsonable(zones),
     }
+
+
+# -------------------------- Review segLines API -------------------------
+# (append-only block; does not modify existing routes)
+
+def _review_segm_meta(conn, segm_id: int) -> Dict[str, Any]:
+    with dict_cur(conn) as cur:
+        cur.execute(
+            "SELECT (start_ts::date)::text AS date FROM public.segms WHERE id=%s",
+            (int(segm_id),),
+        )
+        srow = cur.fetchone()
+        if not srow:
+            return {"error": "segm not found", "segm_id": int(segm_id)}
+
+        cur.execute(
+            """
+            SELECT COUNT(*)::int AS num_ticks,
+                   MIN(tick_id) AS tick_from,
+                   MAX(tick_id) AS tick_to
+            FROM public.segticks
+            WHERE segm_id=%s
+            """,
+            (int(segm_id),),
+        )
+        tr = cur.fetchone() or {}
+
+        cur.execute(
+            """
+            SELECT COUNT(*) FILTER (WHERE is_active=true)::int AS num_lines_active,
+                   MAX(max_abs_dist) FILTER (WHERE is_active=true) AS global_max_abs_dist
+            FROM public.seglines
+            WHERE segm_id=%s
+            """,
+            (int(segm_id),),
+        )
+        lr = cur.fetchone() or {}
+
+    return {
+        "segm_id": int(segm_id),
+        "date": srow["date"],
+        "num_ticks": int(tr["num_ticks"]) if tr.get("num_ticks") is not None else 0,
+        "tick_from": int(tr["tick_from"]) if tr.get("tick_from") is not None else None,
+        "tick_to": int(tr["tick_to"]) if tr.get("tick_to") is not None else None,
+        "num_lines_active": int(lr["num_lines_active"]) if lr.get("num_lines_active") is not None else 0,
+        "global_max_abs_dist": float(lr["global_max_abs_dist"]) if lr.get("global_max_abs_dist") is not None else None,
+    }
+
+
+@app.get("/api/review/default_segm")
+def api_review_default_segm():
+    """
+    Prefer latest segm with no seglines. Fallback to latest segm.
+    date is derived from segms.start_ts::date (segms has no 'date' column).
+    """
+    conn = get_conn()
+    try:
+        with dict_cur(conn) as cur:
+            cur.execute(
+                """
+                SELECT s.id AS segm_id,
+                       (s.start_ts::date)::text AS date
+                FROM public.segms s
+                LEFT JOIN public.seglines l ON l.segm_id = s.id
+                GROUP BY s.id
+                HAVING COUNT(l.id) = 0
+                ORDER BY s.id DESC
+                LIMIT 1
+                """
+            )
+            r = cur.fetchone()
+            if r:
+                return {"segm_id": int(r["segm_id"]), "date": r["date"], "has_segLines": False}
+
+            cur.execute(
+                """
+                SELECT s.id AS segm_id,
+                       (s.start_ts::date)::text AS date,
+                       (COUNT(l.id) > 0) AS has_seglines
+                FROM public.segms s
+                LEFT JOIN public.seglines l ON l.segm_id = s.id
+                GROUP BY s.id
+                ORDER BY s.id DESC
+                LIMIT 1
+                """
+            )
+            r = cur.fetchone()
+            if not r:
+                return {"error": "no segms found"}
+            return {"segm_id": int(r["segm_id"]), "date": r["date"], "has_segLines": bool(r["has_seglines"])}
+    finally:
+        conn.close()
+
+
+@app.get("/api/review/segms")
+def api_review_segms(limit: int = Query(200, ge=1, le=2000)):
+    conn = get_conn()
+    try:
+        with dict_cur(conn) as cur:
+            cur.execute(
+                """
+                WITH tick_counts AS (
+                  SELECT segm_id, COUNT(*)::int AS num_ticks
+                  FROM public.segticks
+                  GROUP BY segm_id
+                ),
+                line_stats AS (
+                  SELECT segm_id,
+                         COUNT(*) FILTER (WHERE is_active=true)::int AS num_lines_active,
+                         MAX(max_abs_dist) FILTER (WHERE is_active=true) AS global_max_abs_dist
+                  FROM public.seglines
+                  GROUP BY segm_id
+                )
+                SELECT s.id AS segm_id,
+                       (s.start_ts::date)::text AS date,
+                       COALESCE(tc.num_ticks, 0) AS num_ticks,
+                       COALESCE(ls.num_lines_active, 0) AS num_lines_active,
+                       ls.global_max_abs_dist
+                FROM public.segms s
+                LEFT JOIN tick_counts tc ON tc.segm_id = s.id
+                LEFT JOIN line_stats ls ON ls.segm_id = s.id
+                ORDER BY s.id DESC
+                LIMIT %s
+                """,
+                (int(limit),),
+            )
+            rows = cur.fetchall()
+
+        out = []
+        for r in rows:
+            out.append(
+                {
+                    "segm_id": int(r["segm_id"]),
+                    "date": r["date"],
+                    "num_ticks": int(r["num_ticks"]),
+                    "num_lines_active": int(r["num_lines_active"]),
+                    "global_max_abs_dist": float(r["global_max_abs_dist"]) if r["global_max_abs_dist"] is not None else None,
+                }
+            )
+        return out
+    finally:
+        conn.close()
+
+
+@app.get("/api/review/segm/{segm_id}/meta")
+def api_review_segm_meta(segm_id: int):
+    conn = get_conn()
+    try:
+        return _review_segm_meta(conn, int(segm_id))
+    finally:
+        conn.close()
+
+
+@app.get("/api/review/segm/{segm_id}/ticks_sample")
+def api_review_ticks_sample(
+    segm_id: int,
+    target_points: int = Query(5000, ge=100, le=50000),
+):
+    segm_id = int(segm_id)
+    target = max(100, min(int(target_points), 50000))
+
+    conn = get_conn()
+    try:
+        with dict_cur(conn) as cur:
+            cur.execute(
+                "SELECT COUNT(*)::int AS n FROM public.segticks WHERE segm_id=%s",
+                (segm_id,),
+            )
+            n = int(cur.fetchone()["n"])
+            if n <= 0:
+                return {"segm_id": segm_id, "stride": 1, "points": []}
+
+            stride = (n + target - 1) // target
+            if stride < 1:
+                stride = 1
+
+            # NOTE: assumes ticks has timestamp, ask, bid, mid, kal columns (as in your existing stack)
+            cur.execute(
+                """
+                WITH ordered AS (
+                  SELECT t.id AS id,
+                         t.timestamp AS ts,
+                         t.ask, t.bid, t.mid, t.kal,
+                         ROW_NUMBER() OVER (ORDER BY t.timestamp ASC, t.id ASC) AS rn
+                  FROM public.segticks st
+                  JOIN public.ticks t ON t.id = st.tick_id
+                  WHERE st.segm_id=%s
+                )
+                SELECT id, ts, ask, bid, mid, kal
+                FROM ordered
+                WHERE ((rn - 1) %% %s) = 0
+                ORDER BY ts ASC, id ASC
+                """,
+                (segm_id, int(stride)),
+            )
+            rows = cur.fetchall()
+
+        pts = []
+        for r in rows:
+            pts.append(
+                {
+                    "id": int(r["id"]),
+                    "ts": r["ts"].isoformat(),
+                    "ask": float(r["ask"]) if r["ask"] is not None else None,
+                    "bid": float(r["bid"]) if r["bid"] is not None else None,
+                    "mid": float(r["mid"]) if r["mid"] is not None else None,
+                    "kal": float(r["kal"]) if r["kal"] is not None else None,
+                }
+            )
+
+        return {"segm_id": segm_id, "stride": int(stride), "points": pts}
+    finally:
+        conn.close()
+
+
+@app.get("/api/review/segm/{segm_id}/lines")
+def api_review_lines(segm_id: int):
+    conn = get_conn()
+    try:
+        with dict_cur(conn) as cur:
+            cur.execute(
+                """
+                SELECT id, parent_id, depth, iteration,
+                       start_ts, end_ts, start_price, end_price,
+                       num_ticks, duration_ms, max_abs_dist
+                FROM public.seglines
+                WHERE segm_id=%s AND is_active=true
+                ORDER BY max_abs_dist DESC NULLS LAST, id ASC
+                """,
+                (int(segm_id),),
+            )
+            rows = cur.fetchall()
+
+        out = []
+        for r in rows:
+            out.append(
+                {
+                    "id": int(r["id"]),
+                    "parent_id": int(r["parent_id"]) if r["parent_id"] is not None else None,
+                    "depth": int(r["depth"]),
+                    "iteration": int(r["iteration"]),
+                    "start_ts": r["start_ts"].isoformat(),
+                    "end_ts": r["end_ts"].isoformat(),
+                    "start_price": float(r["start_price"]),
+                    "end_price": float(r["end_price"]),
+                    "num_ticks": int(r["num_ticks"]) if r["num_ticks"] is not None else None,
+                    "duration_ms": int(r["duration_ms"]) if r["duration_ms"] is not None else None,
+                    "max_abs_dist": float(r["max_abs_dist"]) if r["max_abs_dist"] is not None else None,
+                }
+            )
+
+        return {"segm_id": int(segm_id), "lines": out}
+    finally:
+        conn.close()
+
+
+@app.post("/api/review/breakLine")
+def api_review_breakline(payload: Dict[str, Any] = Body(...)):
+    segm_id = payload.get("segm_id", None)
+    segLine_id = payload.get("segLine_id", None)
+
+    if segm_id is None:
+        raise HTTPException(status_code=400, detail="segm_id required")
+
+    segm_id = int(segm_id)
+    segLine_id = int(segLine_id) if segLine_id is not None else None
+
+    # Import locally to avoid changing top-of-file imports
+    from jobs.breakLine import break_line
+
+    result = break_line(segm_id=segm_id, segLine_id=segLine_id)
+    if isinstance(result, dict) and "error" in result:
+        return {"result": result, "meta": {"segm_id": segm_id}}
+
+    conn = get_conn()
+    try:
+        meta = _review_segm_meta(conn, segm_id)
+    finally:
+        conn.close()
+
+    return {"result": result, "meta": meta}
