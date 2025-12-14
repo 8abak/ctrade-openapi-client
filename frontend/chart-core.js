@@ -98,6 +98,24 @@ const ChartCore = (function () {
     return { min: Math.floor(minY), max: Math.ceil(maxY) };
   }
 
+  function buildSegLineMarkers(lines) {
+    return lines.map(ln => ({
+      name: `L${ln.id}`,
+      xAxis: ln.start_ts,
+      label: {
+        show: true,
+        formatter: `L${ln.id}`,
+        color: "#ff9800"
+      },
+      lineStyle: {
+        color: "#ff9800",
+        width: 1,
+        type: "dashed"
+      }
+    }));
+  }
+
+
   function recomputeYFromVisibleWindow(chart, state) {
     if (!chart || !state.ticks || !state.ticks.length) return;
 
@@ -441,6 +459,10 @@ const ChartCore = (function () {
             { type: "inside", xAxisIndex: 0, filterMode: "none" },
             { type: "slider", xAxisIndex: 0, filterMode: "none" },
           ],
+          markLines: {
+            silent: true,
+            data: buildSegLineMarkers(state.segLines)
+          },
           series,
           ...yAxisPatch,
         },
