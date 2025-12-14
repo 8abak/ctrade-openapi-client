@@ -990,3 +990,54 @@ def api_review_breakline(payload: Dict[str, Any] = Body(...)):
         conn.close()
 
     return {"result": result, "meta": meta}
+
+
+# ------------------------------ Journal API ------------------------------
+# Adds a tiny append-only text journal under /src/journal/YYYY-MM-DD.txt
+# nginx serves /src, so it becomes reachable at:
+#   https://datavis.au/src/journal/YYYY-MM-DD.txt
+
+@app.post("/api/journal/write")
+def api_journal_write(payload: Dict[str, Any] = Body(...)):
+    # local import so we don't disturb your existing import section
+    from backend import journal as j
+
+    event = payload.get("event", "event")
+    segm_id = payload.get("segm_id", None)
+    segline_id = payload.get("segline_id", None)
+    details = payload.get("details", None)
+    extra = payload.get("extra", None)
+
+    line = j.format_event(
+        event=str(event),
+        segm_id=int(segm_id) if segm_id is not None else None,
+        segline_id=int(segline_id) if segline_id is not None else None,
+        details=str(details) if details is not None else None,
+        extra=extra if isinstance(extra, dict) else None,
+    )
+    return j.append_line(line)
+
+
+@app.get("/api/journal/today")
+def api_journal_today(tail: int = Query(50, ge=1, le=500)):
+    """
+    Convenience endpoint (optional) – returns the last N lines of today's journal
+    so frontend can show it without reading /src directly.
+    """
+    from backend import journal as j
+    from datetime import datetime, timezone
+
+    fname = datetime.now(timezone.utc).strftime("%Y-%m-%d") + ".txt"
+    full_path = os.path.join(j.JOURNAL_DIR, fname)
+
+    if not os.path.exists(full_path):
+        return {"ok": True, "filename": fname, "url_path": f"/src/journal/{fname}", "lines": []}
+
+    with open(full_path, "r", encoding="utf-8") as f:
+        lines = [ln.rstrip("\n") for ln in f.readlines()]
+
+    # tail last N lines
+    if tail and len(lines) > tail:
+        lines = lines[-tail:]
+
+    return {"ok": True, "filename": fname, "url_path": f"/src/journal/{fname}", "lines": lines}
