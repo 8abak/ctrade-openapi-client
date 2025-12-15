@@ -1,67 +1,60 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <title>SegLines Review</title>
+  <meta charset="UTF-8" />
+  <title>Segmeling – Review</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
+  <!-- ECharts -->
   <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
-  <script src="chart-core.js"></script>
-  <script src="review-core.js"></script>
 
   <style>
-    body {
+    html, body {
       margin: 0;
-      font-family: Arial, Helvetica, sans-serif;
-      background: #0f1115;
-      color: #ddd;
+      padding: 0;
+      height: 100%;
+      background: #0b1020;
+      color: #dbe2ff;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
     }
 
-    .topbar {
+    #topbar {
       display: flex;
+      gap: 10px;
       align-items: center;
-      gap: 12px;
-      padding: 8px 12px;
-      background: #151821;
-      border-bottom: 1px solid #222;
-      flex-wrap: wrap;
+      padding: 10px 14px;
+      border-bottom: 1px solid #1b2340;
+      background: #0e1530;
     }
 
     select, button {
-      background: #1e2230;
-      color: #ddd;
-      border: 1px solid #333;
-      padding: 4px 8px;
+      background: #141c3d;
+      color: #dbe2ff;
+      border: 1px solid #2a3570;
+      border-radius: 6px;
+      padding: 6px 10px;
+      font-size: 14px;
     }
 
-    button {
-      cursor: pointer;
+    button.toggle.active {
+      background: #2a3fff;
     }
 
     button.primary {
-      background: #2a6df4;
-      border-color: #2a6df4;
-      color: #fff;
-    }
-
-    .toggle {
-      border-radius: 14px;
-      padding: 4px 10px;
-    }
-
-    .toggle.on {
-      background: #2a6df4;
-      border-color: #2a6df4;
-      color: #fff;
-    }
-
-    .toggle.off {
-      background: #1e2230;
-      color: #aaa;
+      background: #1f3cff;
+      border-color: #1f3cff;
     }
 
     #chart {
       width: 100%;
-      height: 520px;
+      height: calc(100% - 160px);
+    }
+
+    #tableWrap {
+      height: 160px;
+      overflow: auto;
+      border-top: 1px solid #1b2340;
+      background: #0e1530;
     }
 
     table {
@@ -71,85 +64,56 @@
     }
 
     th, td {
-      padding: 4px 6px;
-      border-bottom: 1px solid #222;
+      padding: 6px 8px;
+      border-bottom: 1px solid #1b2340;
       text-align: right;
+      white-space: nowrap;
     }
 
     th {
-      background: #151821;
       position: sticky;
       top: 0;
-      z-index: 2;
+      background: #101840;
     }
 
-    tr.selected {
-      background: #2a6df422;
-    }
-
-    tr:hover {
-      background: #2a6df411;
-      cursor: pointer;
-    }
-
-    .footer {
-      padding: 6px 10px;
-      background: #151821;
-      border-top: 1px solid #222;
-      font-size: 12px;
+    td:first-child, th:first-child {
+      text-align: left;
     }
   </style>
 </head>
-
 <body>
 
-<div class="topbar">
+<div id="topbar">
   <label>Segm:</label>
   <select id="segmSelect"></select>
 
-  <button class="toggle on"  data-series="mid">Mid</button>
-  <button class="toggle on"  data-series="kal">Kal</button>
-  <button class="toggle off" data-series="bid">Bid</button>
-  <button class="toggle off" data-series="ask">Ask</button>
-  <button class="toggle on"  id="toggleSegLines">SegLines</button>
-
-  <label>Eval ≥</label>
-  <select id="evalLevel">
-    <option value="0">none</option>
-    <option value="1">1</option>
-    <option value="2">2</option>
-    <option value="3">3</option>
-    <option value="4" selected>4</option>
-    <option value="5">5</option>
-  </select>
+  <button id="toggleMid" class="toggle active">Mid</button>
+  <button id="toggleKal" class="toggle active">Kal</button>
+  <button id="toggleSegLines" class="toggle active">SegLines</button>
 
   <button id="breakBtn" class="primary">Break</button>
 </div>
 
 <div id="chart"></div>
 
-<div style="max-height:260px; overflow:auto;">
+<div id="tableWrap">
   <table id="linesTable">
     <thead>
       <tr>
-        <th>id</th>
-        <th>depth</th>
-        <th>iter</th>
-        <th>start</th>
-        <th>end</th>
-        <th>dur ms</th>
-        <th>slope</th>
-        <th>#ticks</th>
-        <th>max|dist|</th>
+        <th>ID</th>
+        <th>Depth</th>
+        <th>Iter</th>
+        <th>Start</th>
+        <th>End</th>
+        <th>#Ticks</th>
+        <th>Slope</th>
+        <th>Max |dist|</th>
       </tr>
     </thead>
     <tbody></tbody>
   </table>
 </div>
 
-<div class="footer" id="footerMeta">
-  loading…
-</div>
-
+<script src="review-core.js"></script>
 </body>
 </html>
