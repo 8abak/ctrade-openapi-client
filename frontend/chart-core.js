@@ -525,10 +525,14 @@ const ChartCore = (function () {
 
     state.liveTimer = setInterval(async () => {
       try {
-        const res = await fetch(`/api/live_last_tick`);
+        // Use an existing endpoint instead of /api/live_last_tick (which is 404)
+        const res = await fetch(`/api/live_window?limit=1`);
         if (!res.ok) return;
+
         const d = await res.json();
-        const lastId = d && d.id != null ? Number(d.id) : null;
+        const ticks = Array.isArray(d.ticks) ? d.ticks : [];
+        const last = ticks.length ? ticks[ticks.length - 1] : null;
+        const lastId = last && last.id != null ? Number(last.id) : null;
         if (!lastId) return;
 
         if (state.lastTickId == null || lastId > Number(state.lastTickId)) {
@@ -538,6 +542,7 @@ const ChartCore = (function () {
         console.warn("ChartCore live poll failed:", e);
       }
     }, intervalMs);
+
   }
 
   function stopLive() {
