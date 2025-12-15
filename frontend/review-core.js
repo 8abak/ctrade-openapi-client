@@ -15,7 +15,7 @@ const Review = (() => {
   }
 
   async function loadSegms() {
-    const segms = await fetchJSON('/api/segms');
+    const segms = await fetchJSON('/api/review/segms');
     const sel = document.getElementById('segmSelect');
     sel.innerHTML = '';
 
