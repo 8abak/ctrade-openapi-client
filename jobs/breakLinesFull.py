@@ -1,64 +1,62 @@
 # PATH: backend/jobs/breakLinesFull.py
 
 """
-Break segLines repeatedly until max_abs_dist < THRESHOLD.
-Run manually on server.
+Break segLines repeatedly until global_max_abs_dist < threshold.
+
+This uses jobs/breakLine.py as the single source of truth.
+It will:
+- create the initial root segline if none exist yet (init mode)
+- otherwise split the worst active line (highest max_abs_dist)
+- after each step, distances + max_abs_dist are updated by break_line()
 
 Usage:
-  python backend/jobs/breakLinesFull.py --segm 118 --threshold 3.0
+  python -m backend.jobs.breakLinesFull --segm 117 --threshold 3.0
+or:
+  python backend/jobs/breakLinesFull.py --segm 117 --threshold 3.0
 """
 
 import argparse
-from backend.db import get_conn, dict_cur
-from backend.jobs.breakLine import break_single_line  # reuse logic
+from typing import Optional
 
-THRESHOLD = 3.0
+from backend.jobs.breakLine import break_line
 
 
-def run(segm_id: int, threshold: float):
-    conn = get_conn()
-
+def run(segm_id: int, threshold: float, max_steps: Optional[int] = None) -> None:
+    step = 0
     while True:
-        with dict_cur(conn) as cur:
-            cur.execute(
-                """
-                SELECT id, max_abs_dist
-                FROM seglines
-                WHERE segm_id = %s
-                  AND is_active = true
-                ORDER BY max_abs_dist DESC
-                LIMIT 1
-                """,
-                (segm_id,),
-            )
-            row = cur.fetchone()
+        step += 1
+        out = break_line(segm_id=segm_id, segLine_id=None)  # None => init or split-worst
 
-        if not row:
-            print("No active lines left.")
-            break
+        if "error" in out:
+            raise SystemExit(f"[breakLinesFull] ERROR: {out}")
 
-        line_id = row["id"]
-        max_dist = row["max_abs_dist"]
+        action = out.get("action")
+        global_max = out.get("global_max_abs_dist")
 
-        print(f"Top line {line_id}, max |dist| = {max_dist:.4f}")
-
-        if max_dist is None or max_dist < threshold:
-            print("✓ All lines below threshold. Done.")
-            break
-
-        print(f"→ Breaking line {line_id}")
-        break_single_line(
-            segm_id=segm_id,
-            segLine_id=line_id,
-            conn=conn,
-            journal=True,
+        print(
+            f"[breakLinesFull] step={step} segm_id={segm_id} action={action} "
+            f"num_active={out.get('num_lines_active')} global_max_abs_dist={global_max}"
         )
+
+        # stop conditions
+        if global_max is None:
+            print("[breakLinesFull] ✓ global_max_abs_dist is None (no dists?). Done.")
+            break
+
+        if float(global_max) < float(threshold):
+            print(f"[breakLinesFull] ✓ Done. global_max_abs_dist={global_max} < threshold={threshold}")
+            break
+
+        if max_steps is not None and step >= int(max_steps):
+            print(f"[breakLinesFull] Stop: reached max_steps={max_steps}")
+            break
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--segm", type=int, required=True)
-    ap.add_argument("--threshold", type=float, default=THRESHOLD)
+    ap.add_argument("--segm", type=int, required=True, help="segms.id to process")
+    ap.add_argument("--threshold", type=float, default=3.0, help="stop when global max abs dist < threshold")
+    ap.add_argument("--max-steps", type=int, default=None, help="optional safety limit")
     args = ap.parse_args()
 
-    run(args.segm, args.threshold)
+    run(segm_id=args.segm, threshold=args.threshold, max_steps=args.max_steps)
