@@ -1,119 +1,134 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Segmeling – Review</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-
-  <!-- ECharts -->
-  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
-
   <style>
-    html, body {
-      margin: 0;
-      padding: 0;
-      height: 100%;
-      background: #0b1020;
-      color: #dbe2ff;
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+    :root{
+      --bg:#071022;
+      --panel:#0b1730;
+      --panel2:#0a1430;
+      --text:#d6e1ff;
+      --muted:#9ab1ff;
+      --btn:#1b3bff;
+      --btn2:#1730c9;
+      --line:#1a2b55;
+    }
+    html,body{height:100%; margin:0; background:var(--bg); color:var(--text); font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif;}
+    .topbar{
+      position:sticky; top:0; z-index:10;
+      display:flex; align-items:center; gap:10px;
+      padding:10px 12px;
+      background:linear-gradient(180deg, rgba(8,18,45,.98), rgba(8,18,45,.90));
+      border-bottom:1px solid var(--line);
+    }
+    .topbar label{color:var(--muted); font-weight:600;}
+    select{
+      background:var(--panel); color:var(--text);
+      border:1px solid var(--line);
+      padding:6px 8px; border-radius:8px; outline:none;
+      min-width:220px;
+    }
+    .btn{
+      border:1px solid var(--line);
+      background:var(--panel);
+      color:var(--text);
+      padding:6px 10px;
+      border-radius:10px;
+      cursor:pointer;
+      user-select:none;
+      font-weight:700;
+    }
+    .btn:hover{filter:brightness(1.08);}
+    .btn.primary{
+      background:var(--btn);
+      border-color:rgba(255,255,255,.12);
+    }
+    .btn.primary:hover{background:var(--btn2);}
+    .btn.toggle.on{
+      background:#14306b;
+      border-color:#2a4aa0;
+      box-shadow:0 0 0 2px rgba(42,74,160,.25) inset;
+    }
+    .spacer{flex:1;}
+    .meta{
+      font-size:12px; color:var(--muted);
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+      max-width:40vw;
     }
 
-    #topbar {
-      display: flex;
-      gap: 10px;
-      align-items: center;
-      padding: 10px 14px;
-      border-bottom: 1px solid #1b2340;
-      background: #0e1530;
-    }
+    #chartWrap{height:72vh; padding:10px 12px;}
+    #chart{height:100%; width:100%; border:1px solid var(--line); border-radius:12px; background:rgba(9,18,40,.55);}
 
-    select, button {
-      background: #141c3d;
-      color: #dbe2ff;
-      border: 1px solid #2a3570;
-      border-radius: 6px;
-      padding: 6px 10px;
-      font-size: 14px;
+    #tableWrap{
+      height:26vh;
+      border-top:1px solid var(--line);
+      background:rgba(7,16,34,.85);
+      overflow:auto;
     }
-
-    button.toggle.active {
-      background: #2a3fff;
+    table{width:100%; border-collapse:collapse; font-size:13px;}
+    thead th{
+      position:sticky; top:0;
+      background:rgba(9,18,40,.95);
+      border-bottom:1px solid var(--line);
+      padding:8px 10px;
+      text-align:left;
+      color:var(--muted);
     }
-
-    button.primary {
-      background: #1f3cff;
-      border-color: #1f3cff;
+    tbody td{
+      border-bottom:1px solid rgba(26,43,85,.45);
+      padding:8px 10px;
     }
-
-    #chart {
-      width: 100%;
-      height: calc(100% - 160px);
-    }
-
-    #tableWrap {
-      height: 160px;
-      overflow: auto;
-      border-top: 1px solid #1b2340;
-      background: #0e1530;
-    }
-
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 12px;
-    }
-
-    th, td {
-      padding: 6px 8px;
-      border-bottom: 1px solid #1b2340;
-      text-align: right;
-      white-space: nowrap;
-    }
-
-    th {
-      position: sticky;
-      top: 0;
-      background: #101840;
-    }
-
-    td:first-child, th:first-child {
-      text-align: left;
-    }
+    tbody tr:hover{background:rgba(20,48,107,.18);}
+    .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;}
   </style>
+
+  <!-- ECharts (same lib you already use elsewhere) -->
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
 </head>
+
 <body>
+  <div class="topbar">
+    <label for="segmSelect">Segm:</label>
+    <select id="segmSelect"></select>
 
-<div id="topbar">
-  <label>Segm:</label>
-  <select id="segmSelect"></select>
+    <button id="toggleMid" class="btn toggle on" type="button">Mid</button>
+    <button id="toggleKal" class="btn toggle on" type="button">Kal</button>
+    <button id="toggleBid" class="btn toggle" type="button">Bid</button>
+    <button id="toggleAsk" class="btn toggle" type="button">Ask</button>
+    <button id="toggleSegLines" class="btn toggle on" type="button">SegLines</button>
 
-  <button id="toggleMid" class="toggle active">Mid</button>
-  <button id="toggleKal" class="toggle active">Kal</button>
-  <button id="toggleSegLines" class="toggle active">SegLines</button>
+    <button id="btnBreak" class="btn primary" type="button">Break</button>
 
-  <button id="breakBtn" class="primary">Break</button>
-</div>
+    <div class="spacer"></div>
+    <div id="meta" class="meta">–</div>
+  </div>
 
-<div id="chart"></div>
+  <div id="chartWrap">
+    <div id="chart"></div>
+  </div>
 
-<div id="tableWrap">
-  <table id="linesTable">
-    <thead>
-      <tr>
-        <th>ID</th>
-        <th>Depth</th>
-        <th>Iter</th>
-        <th>Start</th>
-        <th>End</th>
-        <th>#Ticks</th>
-        <th>Slope</th>
-        <th>Max |dist|</th>
-      </tr>
-    </thead>
-    <tbody></tbody>
-  </table>
-</div>
+  <div id="tableWrap">
+    <table>
+      <thead>
+        <tr>
+          <th class="mono">ID</th>
+          <th>Depth</th>
+          <th>Iter</th>
+          <th class="mono">Start</th>
+          <th class="mono">End</th>
+          <th>#Ticks</th>
+          <th class="mono">Slope</th>
+          <th class="mono">Max|dist|</th>
+        </tr>
+      </thead>
+      <tbody id="linesBody"></tbody>
+    </table>
+  </div>
 
-<script src="review-core.js"></script>
+  <script src="/review-core.js"></script>
 </body>
 </html>
