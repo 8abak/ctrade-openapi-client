@@ -1,4 +1,4 @@
-# PATH: backend/jobs/breakLinesFull.py
+# PATH: jobs/breakLinesFull.py
 
 """
 Break segLines repeatedly until global_max_abs_dist < threshold.
@@ -9,38 +9,45 @@ It will:
 - otherwise split the worst active line (highest max_abs_dist)
 - after each step, distances + max_abs_dist are updated by break_line()
 
-Usage:
-  python -m backend.jobs.breakLinesFull --segm 117 --threshold 3.0
-or:
-  python backend/jobs/breakLinesFull.py --segm 117 --threshold 3.0
+Run:
+  python -m jobs.breakLinesFull --segm 117 --threshold 3.0
 """
 
 import argparse
 from typing import Optional
 
-from backend.jobs.breakLine import break_line
+from jobs.breakLine import break_line
 
 
 def run(segm_id: int, threshold: float, max_steps: Optional[int] = None) -> None:
     step = 0
+
     while True:
         step += 1
-        out = break_line(segm_id=segm_id, segLine_id=None)  # None => init or split-worst
+
+        # segLine_id=None => break_line will:
+        # - initialize (create first segline + dist) if none exist
+        # - otherwise split the worst active line
+        out = break_line(segm_id=segm_id, segLine_id=None)
+
+        if not isinstance(out, dict):
+            raise SystemExit(f"[breakLinesFull] ERROR: unexpected return type: {type(out)}")
 
         if "error" in out:
             raise SystemExit(f"[breakLinesFull] ERROR: {out}")
 
         action = out.get("action")
         global_max = out.get("global_max_abs_dist")
+        num_active = out.get("num_lines_active")
 
         print(
             f"[breakLinesFull] step={step} segm_id={segm_id} action={action} "
-            f"num_active={out.get('num_lines_active')} global_max_abs_dist={global_max}"
+            f"active={num_active} global_max_abs_dist={global_max}"
         )
 
         # stop conditions
         if global_max is None:
-            print("[breakLinesFull] ✓ global_max_abs_dist is None (no dists?). Done.")
+            print("[breakLinesFull] ✓ Done (global_max_abs_dist is None).")
             break
 
         if float(global_max) < float(threshold):
