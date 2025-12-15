@@ -525,8 +525,8 @@ const ChartCore = (function () {
 
     state.liveTimer = setInterval(async () => {
       try {
-        // Use an existing endpoint instead of /api/live_last_tick (which is 404)
-        const res = await fetch(`/api/live_window?limit=1`);
+        // Backend requires limit >= 500
+        const res = await fetch(`/api/live_window?limit=500`);
         if (!res.ok) return;
 
         const d = await res.json();
@@ -535,13 +535,47 @@ const ChartCore = (function () {
         const lastId = last && last.id != null ? Number(last.id) : null;
         if (!lastId) return;
 
-        if (state.lastTickId == null || lastId > Number(state.lastTickId)) {
+        // No new ticks
+        if (state.lastTickId != null && lastId <= Number(state.lastTickId)) return;
+
+        // If this is the first time, just load the full live window
+        if (state.lastTickId == null) {
           await loadLiveOnce(limit);
+          return;
+        }
+
+        // Fetch only the missing ticks (handles bursts: 10 ticks in 2 seconds, etc.)
+        const fromId = Number(state.lastTickId) + 1;
+        const deltaUrl =
+          `/api/window?tick_from=${encodeURIComponent(fromId)}` +
+          `&tick_to=${encodeURIComponent(lastId)}` +
+          `&min_level=${encodeURIComponent(state.evalMinLevel || 2)}` +
+          `&max_rows=200000`;
+
+        const r2 = await fetch(deltaUrl);
+        if (!r2.ok) {
+          // If delta endpoint isn't available/compatible, fallback to full reload
+          await loadLiveOnce(limit);
+          return;
+        }
+
+        const d2 = await r2.json();
+        const newTicks = Array.isArray(d2.ticks) ? d2.ticks : [];
+
+        if (newTicks.length) {
+          // Append + keep last N ticks (your liveLimit)
+          state.ticks = state.ticks.concat(newTicks);
+          if (state.ticks.length > state.liveLimit) {
+            state.ticks = state.ticks.slice(state.ticks.length - state.liveLimit);
+          }
+          state.lastTickId = state.ticks[state.ticks.length - 1].id;
+          render();
         }
       } catch (e) {
         console.warn("ChartCore live poll failed:", e);
       }
     }, intervalMs);
+
 
   }
 
