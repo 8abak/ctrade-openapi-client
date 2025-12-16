@@ -101,19 +101,23 @@
 
   async function loadTicks() {
     if (!state.segmId) return;
-    const data = await fetchJSON(`/api/review/ticks_sample?segm_id=${state.segmId}`);
 
-    // tolerate shapes:
-    // - { ticks:[...] }
-    // - [...] (array)
-    // - { rows:[...] }
-    const ticks = Array.isArray(data) ? data : (data.ticks ?? data.rows ?? []);
+    // Backend route is path-param, not query-param.
+    // Also, this endpoint is a downsampler (you can lower/raise target_points as needed).
+    const data = await fetchJSON(`/api/review/segm/${state.segmId}/ticks_sample?target_points=50000`);
+
+    // Shape:
+    //   { segm_id, stride, points:[{id, ts, ask, bid, mid, kal}, ...] }
+    // Tolerate older shapes too.
+    const ticks = Array.isArray(data) ? data : (data.points ?? data.ticks ?? data.rows ?? []);
     state.ticks = ticks;
   }
 
   async function loadLines() {
     if (!state.segmId) return;
-    const data = await fetchJSON(`/api/review/lines?segm_id=${state.segmId}`);
+
+    // Backend route is path-param, not query-param.
+    const data = await fetchJSON(`/api/review/segm/${state.segmId}/lines`);
     const lines = Array.isArray(data) ? data : (data.lines ?? data.rows ?? []);
     state.lines = lines;
   }
@@ -209,29 +213,18 @@
     const allSeries = tickSeries.concat(lineSeries);
 
     chart.setOption({
-      backgroundColor: "transparent",
       animation: false,
-      tooltip: {
-        trigger: "axis",
-        axisPointer: { type: "cross" },
-      },
-      legend: {
-        top: 8,
-        textStyle: { color: "#9ab1ff" },
-      },
-      grid: { left: 60, right: 25, top: 45, bottom: 40 },
+      grid: { left: 50, right: 20, top: 25, bottom: 60 },
+      tooltip: { trigger: "axis", axisPointer: { type: "cross" } },
       xAxis: {
         type: "time",
-        axisLine: { lineStyle: { color: "#1a2b55" } },
-        axisLabel: { color: "#9ab1ff" },
-        splitLine: { show: true, lineStyle: { color: "rgba(26,43,85,.35)" } },
+        axisLabel: { hideOverlap: true },
+        splitLine: { show: true, lineStyle: { color: "rgba(26,43,85,35)" } },
       },
       yAxis: {
         type: "value",
         scale: true,
-        axisLine: { lineStyle: { color: "#1a2b55" } },
-        axisLabel: { color: "#9ab1ff" },
-        splitLine: { show: true, lineStyle: { color: "rgba(26,43,85,.35)" } },
+        splitLine: { show: true, lineStyle: { color: "rgba(26,43,85,35)" } },
       },
       dataZoom: [
         { type: "inside", xAxisIndex: 0, filterMode: "none" },
@@ -246,7 +239,7 @@
     body.innerHTML = "";
 
     // Sort by start time so it looks like the day flow
-    const rows = [...state.lines].sort((a,b) => {
+    const rows = [...state.lines].sort((a, b) => {
       const ta = tsToMs(a.start_ts ?? a.startTs ?? a.start_time) ?? 0;
       const tb = tsToMs(b.start_ts ?? b.startTs ?? b.start_time) ?? 0;
       return ta - tb;
@@ -355,29 +348,34 @@
     tLines.addEventListener("click", () => { state.showSegLines = !state.showSegLines; setToggle(tLines, state.showSegLines); renderChart(); });
 
     $("btnBreak").addEventListener("click", doBreak);
+  }
 
-    // set initial toggle visuals
-    setToggle(tMid, state.showMid);
-    setToggle(tKal, state.showKal);
-    setToggle(tBid, state.showBid);
-    setToggle(tAsk, state.showAsk);
-    setToggle(tLines, state.showSegLines);
-
-    window.addEventListener("resize", () => chart && chart.resize());
+  function initChart() {
+    // expects echarts global already loaded
+    chart = echarts.init($("chart"));
   }
 
   async function init() {
-    chart = echarts.init($("chart"));
-
+    initChart();
     await loadSegmList();
+
+    // init toggle styles
+    setToggle($("toggleMid"), state.showMid);
+    setToggle($("toggleKal"), state.showKal);
+    setToggle($("toggleBid"), state.showBid);
+    setToggle($("toggleAsk"), state.showAsk);
+    setToggle($("toggleSegLines"), state.showSegLines);
+
     bindUI();
     await reloadAll();
   }
 
-  window.addEventListener("DOMContentLoaded", () => {
+  document.addEventListener("DOMContentLoaded", () => {
     init().catch((e) => {
       console.error(e);
-      alert(String(e.message ?? e));
+      const el = $("meta");
+      if (el) el.textContent = "Init failed: " + (e.message ?? String(e));
+      alert("Init failed: " + (e.message ?? String(e)));
     });
   });
 })();
