@@ -4,24 +4,20 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import psycopg2.extras
 
 from backend.db import get_conn, dict_cur
 
-LOG_PATH = os.path.join("logs", "breakLine.log")
-BATCH_SIZE = 10_000
+# Optional journal (works in your repo: backend/jobs/journal.py)
+try:
+    from backend.jobs.journal import write_journal  # type: ignore
+except Exception:  # pragma: no cover
+    write_journal = None  # type: ignore
 
-# IMPORTANT:
-# Your chart expectation is "tick walk" shape, not "timestamp weighted" shape.
-# So we segment in tick-index space by default.
-# Also: choose which price series you want to fit.
-#   PRICE_MODE=mid  (default)
-#   PRICE_MODE=kal
-PRICE_MODE = os.environ.get("PRICE_MODE", "mid").strip().lower()
-if PRICE_MODE not in ("mid", "kal"):
-    PRICE_MODE = "mid"
+LOG_PATH = os.path.join("logs", "breakLine.log")
+BATCH_SIZE = 25_000
 
 
 def _now_utc() -> str:
@@ -34,56 +30,80 @@ def _append_log(line: str) -> None:
         f.write(line.rstrip() + "\n")
 
 
+def _journal(msg: str) -> None:
+    # journal file requested by you (backend/jobs/journal.py)
+    if write_journal is not None:
+        try:
+            write_journal(msg)
+            return
+        except Exception:
+            pass
+    # fallback to local log
+    _append_log(f"[{_now_utc()}] JOURNAL {msg}")
+
+
 def _line_interp(p1: float, p2: float, x1: int, x2: int, xi: int) -> float:
-    # Linear interpolation in tick-index space.
     if x2 == x1:
         return p2
     return p1 + (p2 - p1) * ((xi - x1) / (x2 - x1))
 
 
-def _price_sql_expr() -> str:
-    # Keep it explicit. If kal is NULL, we do NOT silently fall back to mid when PRICE_MODE=kal.
-    if PRICE_MODE == "kal":
-        return "t.kal"
-    return "t.mid"
-
-
-@dataclass
-class Tick:
+@dataclass(frozen=True)
+class TickRow:
     segtick_row_id: int
     tick_id: int
     ts: datetime
     price: float
 
 
-def break_line(segm_id: int, segLine_id: Optional[int] = None) -> Dict[str, Any]:
+def break_line(
+    segm_id: int,
+    segLine_id: Optional[int] = None,
+    *,
+    price_source: str = "mid",  # "mid" | "kal"
+) -> Dict[str, Any]:
     """
-    Runs one step of break-line for segm_id.
-    - init if no seglines exist yet
-    - else split one active line (specified or worst by max_abs_dist)
-    Distances are computed in tick-id space (not timestamp space).
+    One step of line breaking:
+      - if segm has 0 seglines => init root line
+      - else split one active line (provided segLine_id or worst by max_abs_dist)
+
+    New approach:
+      - dist is computed on tick-order index (0..N-1), NOT timestamp ms
+      - no OFFSET queries anywhere (server-side cursor streaming)
+      - price_source defaults to "mid" so it matches what you see in review when Mid is on
     """
     if not isinstance(segm_id, int) or segm_id <= 0:
         return {"error": "segm_id must be a positive int"}
+
+    price_source = (price_source or "mid").strip().lower()
+    if price_source not in ("mid", "kal"):
+        price_source = "mid"
+
+    _journal(f"breakLine started segm_id={segm_id} segLine_id={segLine_id} price_source={price_source}")
 
     conn = get_conn()
     conn.autocommit = False
 
     try:
         with dict_cur(conn) as cur:
-            cur.execute("SELECT COUNT(*) AS n FROM public.seglines WHERE segm_id = %s", (segm_id,))
+            cur.execute("SELECT COUNT(*) AS n FROM public.seglines WHERE segm_id=%s", (segm_id,))
             n_lines = int(cur.fetchone()["n"])
 
         if n_lines == 0:
-            out = _init_mode(conn, segm_id)
+            out = _init_mode(conn, segm_id, price_source=price_source)
         else:
-            out = _split_mode(conn, segm_id, segLine_id)
+            out = _split_mode(conn, segm_id, segLine_id, price_source=price_source)
 
         conn.commit()
+        _journal(f"breakLine finished segm_id={segm_id} ok=true action={out.get('action')}")
         return out
+
     except Exception as e:
         conn.rollback()
+        _append_log(f"[{_now_utc()}] ERROR segm_id={segm_id} segLine_id={segLine_id} err={e}")
+        _journal(f"breakLine finished segm_id={segm_id} ok=false err={str(e)}")
         return {"error": str(e), "segm_id": segm_id}
+
     finally:
         try:
             conn.close()
@@ -91,392 +111,116 @@ def break_line(segm_id: int, segLine_id: Optional[int] = None) -> Dict[str, Any]
             pass
 
 
-def _get_first_last_tick(conn, segm_id: int) -> Tuple[Tick, Tick]:
-    price_expr = _price_sql_expr()
+# ----------------------------
+# Core helpers
+# ----------------------------
+
+def _price_sql(price_source: str) -> str:
+    # Important: default MID so breaking matches the Mid chart.
+    # If kal is null for some rows, we fall back to mid to avoid losing ticks.
+    if price_source == "kal":
+        return "COALESCE(t.kal, t.mid)"
+    return "t.mid"
+
+
+def _count_ticks(conn, segm_id: int, *, old_line_id: Optional[int] = None) -> int:
+    with dict_cur(conn) as cur:
+        if old_line_id is None:
+            cur.execute("SELECT COUNT(*) AS n FROM public.segticks WHERE segm_id=%s", (segm_id,))
+        else:
+            cur.execute(
+                "SELECT COUNT(*) AS n FROM public.segticks WHERE segm_id=%s AND segline_id=%s",
+                (segm_id, old_line_id),
+            )
+        return int(cur.fetchone()["n"])
+
+
+def _get_first_last_tick(conn, segm_id: int, *, old_line_id: Optional[int], price_source: str) -> Tuple[TickRow, TickRow]:
+    price_expr = _price_sql(price_source)
+
+    where = "st.segm_id=%s"
+    params: List[Any] = [segm_id]
+    if old_line_id is not None:
+        where += " AND st.segline_id=%s"
+        params.append(int(old_line_id))
 
     with dict_cur(conn) as cur:
         cur.execute(
             f"""
-            SELECT st.id AS segtick_row_id, t.id AS tick_id, t.timestamp AS ts,
-                   {price_expr} AS price
+            SELECT st.id AS segtick_row_id, t.id AS tick_id, t.timestamp AS ts, {price_expr} AS price
             FROM public.segticks st
             JOIN public.ticks t ON t.id = st.tick_id
-            WHERE st.segm_id = %s
+            WHERE {where}
             ORDER BY t.id ASC
             LIMIT 1
             """,
-            (segm_id,),
+            tuple(params),
         )
         r1 = cur.fetchone()
         if not r1 or r1["price"] is None:
-            raise RuntimeError(f"no ticks (or no {PRICE_MODE}) for segm_id")
+            raise RuntimeError("no ticks/prices for this selection")
 
         cur.execute(
             f"""
-            SELECT st.id AS segtick_row_id, t.id AS tick_id, t.timestamp AS ts,
-                   {price_expr} AS price
+            SELECT st.id AS segtick_row_id, t.id AS tick_id, t.timestamp AS ts, {price_expr} AS price
             FROM public.segticks st
             JOIN public.ticks t ON t.id = st.tick_id
-            WHERE st.segm_id = %s
+            WHERE {where}
             ORDER BY t.id DESC
             LIMIT 1
             """,
-            (segm_id,),
+            tuple(params),
         )
         r2 = cur.fetchone()
         if not r2 or r2["price"] is None:
-            raise RuntimeError(f"no ticks (or no {PRICE_MODE}) for segm_id")
+            raise RuntimeError("no ticks/prices for this selection")
 
     return (
-        Tick(int(r1["segtick_row_id"]), int(r1["tick_id"]), r1["ts"], float(r1["price"])),
-        Tick(int(r2["segtick_row_id"]), int(r2["tick_id"]), r2["ts"], float(r2["price"])),
+        TickRow(int(r1["segtick_row_id"]), int(r1["tick_id"]), r1["ts"], float(r1["price"])),
+        TickRow(int(r2["segtick_row_id"]), int(r2["tick_id"]), r2["ts"], float(r2["price"])),
     )
 
 
-def _init_mode(conn, segm_id: int) -> Dict[str, Any]:
-    first_t, last_t = _get_first_last_tick(conn, segm_id)
-
-    with dict_cur(conn) as cur:
-        cur.execute(
-            """
-            INSERT INTO public.seglines (
-              segm_id, parent_id, depth, iteration,
-              start_tick_id, end_tick_id,
-              start_ts, end_ts,
-              start_price, end_price,
-              is_active
-            )
-            VALUES (%s, NULL, 0, 0, %s, %s, %s, %s, %s, %s, true)
-            RETURNING id
-            """,
-            (
-                segm_id,
-                first_t.tick_id,
-                last_t.tick_id,
-                first_t.ts,
-                last_t.ts,
-                first_t.price,
-                last_t.price,
-            ),
-        )
-        line_id = int(cur.fetchone()["id"])
-
-    _reassign_all_ticks_to_line(conn, segm_id, line_id, first_t, last_t)
-
-    _update_line_stats(conn, line_id)
-    num_active, global_max = _update_global_stats(conn, segm_id)
-
-    _append_log(
-        f"[{_now_utc()}] segm_id={segm_id} action=init line={line_id} "
-        f"price_mode={PRICE_MODE} global_max_abs_dist={global_max}"
-    )
-
-    return {
-        "segm_id": segm_id,
-        "action": "init",
-        "price_mode": PRICE_MODE,
-        "segLine_id": line_id,
-        "num_lines_active": num_active,
-        "global_max_abs_dist": global_max,
-    }
-
-
-def _reassign_all_ticks_to_line(conn, segm_id: int, line_id: int, first_t: Tick, last_t: Tick) -> None:
-    x1 = first_t.tick_id
-    x2 = last_t.tick_id
-    p1 = first_t.price
-    p2 = last_t.price
-
-    price_expr = _price_sql_expr()
-    offset = 0
-
-    while True:
-        with dict_cur(conn) as cur:
-            cur.execute(
-                f"""
-                SELECT st.id AS segtick_row_id, t.id AS tick_id, t.timestamp AS ts,
-                       {price_expr} AS price
-                FROM public.segticks st
-                JOIN public.ticks t ON t.id = st.tick_id
-                WHERE st.segm_id = %s
-                ORDER BY t.id ASC
-                LIMIT %s OFFSET %s
-                """,
-                (segm_id, BATCH_SIZE, offset),
-            )
-            rows = cur.fetchall()
-
-        if not rows:
-            break
-
-        updates: List[Tuple[int, int, float]] = []
-        for r in rows:
-            if r["price"] is None:
-                continue
-            xi = int(r["tick_id"])
-            phat = _line_interp(p1, p2, x1, x2, xi)
-            dist = float(r["price"]) - phat
-            updates.append((int(r["segtick_row_id"]), line_id, float(dist)))
-
-        _bulk_update_segticks(conn, updates)
-        offset += BATCH_SIZE
-
-
-def _split_mode(conn, segm_id: int, segLine_id: Optional[int]) -> Dict[str, Any]:
-    line = _pick_line_to_split(conn, segm_id, segLine_id)
-    if line is None:
-        return {"error": "no active segLines to split", "segm_id": segm_id}
-
-    pivot = _pick_pivot_tick(conn, segm_id, int(line["id"]))
-    if pivot is None:
-        return {"error": "no pivot tick found for segLine", "segm_id": segm_id, "segLine_id": int(line["id"])}
-
-    new_left_id, new_right_id = _create_children_lines(conn, segm_id, line, pivot)
-
-    with dict_cur(conn) as cur:
-        cur.execute(
-            "UPDATE public.seglines SET is_active=false, updated_at=now() WHERE id=%s",
-            (int(line["id"]),),
-        )
-
-    left_ticks, right_ticks = _reassign_ticks_for_split(
-        conn,
-        segm_id=segm_id,
-        old_line_id=int(line["id"]),
-        pivot_tick_id=int(pivot["tick_id"]),
-        left_id=new_left_id,
-        right_id=new_right_id,
-    )
-
-    _update_line_stats(conn, new_left_id)
-    _update_line_stats(conn, new_right_id)
-    num_active, global_max = _update_global_stats(conn, segm_id)
-
-    pivot_abs = float(abs(float(pivot["dist"]))) if pivot["dist"] is not None else None
-
-    _append_log(
-        f"[{_now_utc()}] segm_id={segm_id} action=split split_line={int(line['id'])} "
-        f"price_mode={PRICE_MODE} pivot_tick={int(pivot['tick_id'])} pivot_abs_dist={pivot_abs} "
-        f"new_left={new_left_id} new_right={new_right_id} "
-        f"left_ticks={left_ticks} right_ticks={right_ticks} global_max_abs_dist={global_max}"
-    )
-
-    return {
-        "segm_id": segm_id,
-        "action": "split",
-        "price_mode": PRICE_MODE,
-        "segLine_id": int(line["id"]),
-        "pivot_tick_id": int(pivot["tick_id"]),
-        "pivot_abs_dist": pivot_abs,
-        "new_left_id": new_left_id,
-        "new_right_id": new_right_id,
-        "num_lines_active": num_active,
-        "global_max_abs_dist": global_max,
-    }
-
-
-def _pick_line_to_split(conn, segm_id: int, segLine_id: Optional[int]) -> Optional[Dict[str, Any]]:
-    with dict_cur(conn) as cur:
-        if segLine_id is not None:
-            cur.execute("SELECT * FROM public.seglines WHERE id=%s", (int(segLine_id),))
-            r = cur.fetchone()
-            if not r:
-                return None
-            if int(r["segm_id"]) != int(segm_id):
-                raise RuntimeError("segLine_id does not belong to segm_id")
-            if not bool(r["is_active"]):
-                raise RuntimeError("segLine_id is not active")
-            return r
-
-        cur.execute(
-            """
-            SELECT *
-            FROM public.seglines
-            WHERE segm_id=%s AND is_active=true
-            ORDER BY max_abs_dist DESC NULLS LAST, id DESC
-            LIMIT 1
-            """,
-            (segm_id,),
-        )
-        return cur.fetchone()
-
-
-def _pick_pivot_tick(conn, segm_id: int, line_id: int) -> Optional[Dict[str, Any]]:
-    # Choose the tick on this line with maximum |dist|.
-    # Breaks will now align with the tick-walk perception, because dist was computed in tick space.
-    with dict_cur(conn) as cur:
-        cur.execute(
-            """
-            SELECT st.tick_id AS tick_id, t.timestamp AS ts,
-                   st.dist AS dist
-            FROM public.segticks st
-            JOIN public.ticks t ON t.id = st.tick_id
-            WHERE st.segm_id=%s AND st.segline_id=%s
-            ORDER BY ABS(st.dist) DESC NULLS LAST, st.tick_id ASC
-            LIMIT 1
-            """,
-            (segm_id, line_id),
-        )
-        return cur.fetchone()
-
-
-def _create_children_lines(conn, segm_id: int, line: Dict[str, Any], pivot: Dict[str, Any]) -> Tuple[int, int]:
-    with dict_cur(conn) as cur:
-        cur.execute("SELECT COALESCE(MAX(iteration), 0) AS it FROM public.seglines WHERE segm_id=%s", (segm_id,))
-        it_next = int(cur.fetchone()["it"]) + 1
-
-    start_tick_id = int(line["start_tick_id"])
-    end_tick_id = int(line["end_tick_id"])
-    pivot_tick_id = int(pivot["tick_id"])
-
-    left_start = _get_tick_by_id(conn, start_tick_id)
-    left_end = _get_tick_by_id(conn, pivot_tick_id)
-    right_start = left_end
-    right_end = _get_tick_by_id(conn, end_tick_id)
-
-    depth = int(line["depth"]) + 1
-    parent_id = int(line["id"])
-
-    with dict_cur(conn) as cur:
-        cur.execute(
-            """
-            INSERT INTO public.seglines (
-              segm_id, parent_id, depth, iteration,
-              start_tick_id, end_tick_id, start_ts, end_ts, start_price, end_price,
-              is_active
-            )
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,true)
-            RETURNING id
-            """,
-            (
-                segm_id, parent_id, depth, it_next,
-                left_start["tick_id"], left_end["tick_id"],
-                left_start["ts"], left_end["ts"],
-                float(left_start["price"]), float(left_end["price"]),
-            ),
-        )
-        left_id = int(cur.fetchone()["id"])
-
-        cur.execute(
-            """
-            INSERT INTO public.seglines (
-              segm_id, parent_id, depth, iteration,
-              start_tick_id, end_tick_id, start_ts, end_ts, start_price, end_price,
-              is_active
-            )
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,true)
-            RETURNING id
-            """,
-            (
-                segm_id, parent_id, depth, it_next,
-                right_start["tick_id"], right_end["tick_id"],
-                right_start["ts"], right_end["ts"],
-                float(right_start["price"]), float(right_end["price"]),
-            ),
-        )
-        right_id = int(cur.fetchone()["id"])
-
-    return left_id, right_id
-
-
-def _get_tick_by_id(conn, tick_id: int) -> Dict[str, Any]:
-    price_expr = _price_sql_expr()
-    with dict_cur(conn) as cur:
-        cur.execute(
-            f"""
-            SELECT t.id AS tick_id, t.timestamp AS ts, {price_expr} AS price
-            FROM public.ticks t
-            WHERE t.id=%s
-            """,
-            (tick_id,),
-        )
-        r = cur.fetchone()
-        if not r or r["price"] is None:
-            raise RuntimeError(f"tick not found (or no {PRICE_MODE}): {tick_id}")
-        return r
-
-
-def _reassign_ticks_for_split(
+def _iter_ticks_stream(
     conn,
+    *,
     segm_id: int,
-    old_line_id: int,
-    pivot_tick_id: int,
-    left_id: int,
-    right_id: int,
-) -> Tuple[int, int]:
-    left_line = _get_line_endpoints(conn, left_id)
-    right_line = _get_line_endpoints(conn, right_id)
+    old_line_id: Optional[int],
+    price_source: str,
+) -> Iterable[Tuple[int, int, datetime, float]]:
+    """
+    Stream ticks in tick-id order without OFFSET.
+    Returns tuples: (segtick_row_id, tick_id, ts, price)
+    """
+    price_expr = _price_sql(price_source)
 
-    left_count = 0
-    right_count = 0
+    where = "st.segm_id=%s"
+    params: List[Any] = [segm_id]
+    if old_line_id is not None:
+        where += " AND st.segline_id=%s"
+        params.append(int(old_line_id))
 
-    price_expr = _price_sql_expr()
-    offset = 0
+    # Named cursor => server-side streaming (must be inside transaction)
+    cur = conn.cursor(name=f"breakline_stream_{segm_id}_{old_line_id or 0}")
+    cur.itersize = BATCH_SIZE
+    cur.execute(
+        f"""
+        SELECT st.id AS segtick_row_id, t.id AS tick_id, t.timestamp AS ts, {price_expr} AS price
+        FROM public.segticks st
+        JOIN public.ticks t ON t.id = st.tick_id
+        WHERE {where}
+        ORDER BY t.id ASC
+        """,
+        tuple(params),
+    )
+    for r in cur:
+        # r is a tuple because named cursor returns tuples
+        segtick_row_id, tick_id, ts, price = r
+        if price is None:
+            continue
+        yield int(segtick_row_id), int(tick_id), ts, float(price)
 
-    while True:
-        with dict_cur(conn) as cur:
-            cur.execute(
-                f"""
-                SELECT st.id AS segtick_row_id, st.tick_id AS tick_id,
-                       t.timestamp AS ts, {price_expr} AS price
-                FROM public.segticks st
-                JOIN public.ticks t ON t.id = st.tick_id
-                WHERE st.segm_id=%s AND st.segline_id=%s
-                ORDER BY st.tick_id ASC
-                LIMIT %s OFFSET %s
-                """,
-                (segm_id, old_line_id, BATCH_SIZE, offset),
-            )
-            rows = cur.fetchall()
-
-        if not rows:
-            break
-
-        updates: List[Tuple[int, int, float]] = []
-        for r in rows:
-            if r["price"] is None:
-                continue
-
-            tid = int(r["tick_id"])
-            is_left = tid <= pivot_tick_id
-
-            if is_left:
-                dist = _dist_for_line(left_line, tid, float(r["price"]))
-                updates.append((int(r["segtick_row_id"]), left_id, float(dist)))
-                left_count += 1
-            else:
-                dist = _dist_for_line(right_line, tid, float(r["price"]))
-                updates.append((int(r["segtick_row_id"]), right_id, float(dist)))
-                right_count += 1
-
-        _bulk_update_segticks(conn, updates)
-        offset += BATCH_SIZE
-
-    return left_count, right_count
-
-
-def _get_line_endpoints(conn, line_id: int) -> Dict[str, Any]:
-    with dict_cur(conn) as cur:
-        cur.execute(
-            """
-            SELECT id, start_tick_id, end_tick_id, start_ts, end_ts, start_price, end_price
-            FROM public.seglines
-            WHERE id=%s
-            """,
-            (line_id,),
-        )
-        r = cur.fetchone()
-        if not r:
-            raise RuntimeError(f"line not found: {line_id}")
-        return r
-
-
-def _dist_for_line(line: Dict[str, Any], tick_id: int, price: float) -> float:
-    x1 = int(line["start_tick_id"])
-    x2 = int(line["end_tick_id"])
-    xi = int(tick_id)
-    phat = _line_interp(float(line["start_price"]), float(line["end_price"]), x1, x2, xi)
-    return price - phat
+    cur.close()
 
 
 def _bulk_update_segticks(conn, rows: List[Tuple[int, int, float]]) -> None:
@@ -516,7 +260,6 @@ def _update_line_stats(conn, line_id: int) -> Tuple[int, Optional[float]]:
         lr = cur.fetchone()
         dur_ms = None
         if lr:
-            # keep duration for UI; timestamps are still stored
             dur_ms = int(lr["end_ts"].timestamp() * 1000) - int(lr["start_ts"].timestamp() * 1000)
 
         cur.execute(
@@ -527,6 +270,7 @@ def _update_line_stats(conn, line_id: int) -> Tuple[int, Optional[float]]:
             """,
             (n, dur_ms, mx, line_id),
         )
+
     return n, mx
 
 
@@ -534,8 +278,7 @@ def _update_global_stats(conn, segm_id: int) -> Tuple[int, Optional[float]]:
     with dict_cur(conn) as cur:
         cur.execute(
             """
-            SELECT COUNT(*) AS n,
-                   MAX(max_abs_dist) AS mx
+            SELECT COUNT(*) AS n, MAX(max_abs_dist) AS mx
             FROM public.seglines
             WHERE segm_id=%s AND is_active=true
             """,
@@ -545,3 +288,342 @@ def _update_global_stats(conn, segm_id: int) -> Tuple[int, Optional[float]]:
         n = int(r["n"])
         mx = float(r["mx"]) if r["mx"] is not None else None
     return n, mx
+
+
+# ----------------------------
+# INIT
+# ----------------------------
+
+def _init_mode(conn, segm_id: int, *, price_source: str) -> Dict[str, Any]:
+    first_t, last_t = _get_first_last_tick(conn, segm_id, old_line_id=None, price_source=price_source)
+    n = _count_ticks(conn, segm_id, old_line_id=None)
+    if n <= 1:
+        raise RuntimeError("segm has <= 1 tick, cannot init line")
+
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            INSERT INTO public.seglines (
+              segm_id, parent_id, depth, iteration,
+              start_tick_id, end_tick_id,
+              start_ts, end_ts,
+              start_price, end_price,
+              is_active
+            )
+            VALUES (%s, NULL, 0, 0, %s, %s, %s, %s, %s, %s, true)
+            RETURNING id
+            """,
+            (
+                segm_id,
+                first_t.tick_id,
+                last_t.tick_id,
+                first_t.ts,
+                last_t.ts,
+                first_t.price,
+                last_t.price,
+            ),
+        )
+        line_id = int(cur.fetchone()["id"])
+
+    _assign_stream_distances(
+        conn,
+        segm_id=segm_id,
+        old_line_id=None,
+        new_line_id=line_id,
+        n_ticks=n,
+        start_price=first_t.price,
+        end_price=last_t.price,
+        pivot_tick_id=None,
+        left_side=True,  # ignored for init
+        price_source=price_source,
+    )
+
+    num_ticks, _ = _update_line_stats(conn, line_id)
+    num_active, global_max = _update_global_stats(conn, segm_id)
+
+    _append_log(
+        f"[{_now_utc()}] segm_id={segm_id} action=init line={line_id} ticks={num_ticks} global_max_abs_dist={global_max}"
+    )
+
+    return {
+        "segm_id": segm_id,
+        "action": "init",
+        "segLine_id": line_id,
+        "num_lines_active": num_active,
+        "global_max_abs_dist": global_max,
+    }
+
+
+# ----------------------------
+# SPLIT
+# ----------------------------
+
+def _pick_line_to_split(conn, segm_id: int, segLine_id: Optional[int]) -> Optional[Dict[str, Any]]:
+    with dict_cur(conn) as cur:
+        if segLine_id is not None:
+            cur.execute("SELECT * FROM public.seglines WHERE id=%s", (int(segLine_id),))
+            r = cur.fetchone()
+            if not r:
+                return None
+            if int(r["segm_id"]) != int(segm_id):
+                raise RuntimeError("segLine_id does not belong to segm_id")
+            if not bool(r["is_active"]):
+                raise RuntimeError("segLine_id is not active")
+            return r
+
+        cur.execute(
+            """
+            SELECT *
+            FROM public.seglines
+            WHERE segm_id=%s AND is_active=true
+            ORDER BY max_abs_dist DESC NULLS LAST, id DESC
+            LIMIT 1
+            """,
+            (segm_id,),
+        )
+        return cur.fetchone()
+
+
+def _pick_pivot_tick(conn, segm_id: int, line_id: int) -> Optional[Dict[str, Any]]:
+    # Pivot = tick with maximum ABS(dist) inside this line.
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            SELECT st.tick_id AS tick_id, t.timestamp AS ts, st.dist AS dist
+            FROM public.segticks st
+            JOIN public.ticks t ON t.id = st.tick_id
+            WHERE st.segm_id=%s AND st.segline_id=%s
+            ORDER BY ABS(st.dist) DESC NULLS LAST, t.id ASC
+            LIMIT 1
+            """,
+            (segm_id, line_id),
+        )
+        return cur.fetchone()
+
+
+def _get_tick_price(conn, tick_id: int, *, price_source: str) -> Tuple[datetime, float]:
+    price_expr = _price_sql(price_source)
+    with dict_cur(conn) as cur:
+        cur.execute(
+            f"SELECT t.timestamp AS ts, {price_expr} AS price FROM public.ticks t WHERE t.id=%s",
+            (tick_id,),
+        )
+        r = cur.fetchone()
+        if not r or r["price"] is None:
+            raise RuntimeError(f"tick not found (or price null): {tick_id}")
+        return r["ts"], float(r["price"])
+
+
+def _create_children_lines(conn, segm_id: int, line: Dict[str, Any], pivot_tick_id: int, *, price_source: str) -> Tuple[int, int]:
+    with dict_cur(conn) as cur:
+        cur.execute("SELECT COALESCE(MAX(iteration), 0) AS it FROM public.seglines WHERE segm_id=%s", (segm_id,))
+        it_next = int(cur.fetchone()["it"]) + 1
+
+    parent_id = int(line["id"])
+    depth = int(line["depth"]) + 1
+
+    start_tick_id = int(line["start_tick_id"])
+    end_tick_id = int(line["end_tick_id"])
+
+    left_start_ts, left_start_price = _get_tick_price(conn, start_tick_id, price_source=price_source)
+    pivot_ts, pivot_price = _get_tick_price(conn, pivot_tick_id, price_source=price_source)
+    right_end_ts, right_end_price = _get_tick_price(conn, end_tick_id, price_source=price_source)
+
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            INSERT INTO public.seglines (
+              segm_id, parent_id, depth, iteration,
+              start_tick_id, end_tick_id, start_ts, end_ts, start_price, end_price,
+              is_active
+            )
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,true)
+            RETURNING id
+            """,
+            (
+                segm_id, parent_id, depth, it_next,
+                start_tick_id, pivot_tick_id,
+                left_start_ts, pivot_ts,
+                left_start_price, pivot_price,
+            ),
+        )
+        left_id = int(cur.fetchone()["id"])
+
+        cur.execute(
+            """
+            INSERT INTO public.seglines (
+              segm_id, parent_id, depth, iteration,
+              start_tick_id, end_tick_id, start_ts, end_ts, start_price, end_price,
+              is_active
+            )
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,true)
+            RETURNING id
+            """,
+            (
+                segm_id, parent_id, depth, it_next,
+                pivot_tick_id, end_tick_id,
+                pivot_ts, right_end_ts,
+                pivot_price, right_end_price,
+            ),
+        )
+        right_id = int(cur.fetchone()["id"])
+
+    return left_id, right_id
+
+
+def _get_line_endpoints(conn, line_id: int) -> Dict[str, Any]:
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            SELECT id, start_tick_id, end_tick_id, start_price, end_price
+            FROM public.seglines
+            WHERE id=%s
+            """,
+            (line_id,),
+        )
+        r = cur.fetchone()
+        if not r:
+            raise RuntimeError(f"line not found: {line_id}")
+        return r
+
+
+def _assign_stream_distances(
+    conn,
+    *,
+    segm_id: int,
+    old_line_id: Optional[int],   # None for init
+    new_line_id: int,             # line id to assign for the streamed rows
+    n_ticks: int,                 # number of ticks in THIS stream
+    start_price: float,
+    end_price: float,
+    pivot_tick_id: Optional[int], # used only when old_line_id is not None (split)
+    left_side: bool,              # used only in split
+    price_source: str,
+) -> int:
+    """
+    Stream ticks for either:
+      - init (old_line_id=None): assign all segm ticks to new_line_id
+      - split (old_line_id=old): stream that line's ticks, and assign left or right side
+
+    Distances computed on tick-index in the stream (0..n_ticks-1).
+    """
+    if n_ticks <= 0:
+        return 0
+    x1 = 0
+    x2 = n_ticks - 1
+
+    updates: List[Tuple[int, int, float]] = []
+    updated = 0
+
+    i = -1
+    for segtick_row_id, tick_id, _ts, price in _iter_ticks_stream(
+        conn,
+        segm_id=segm_id,
+        old_line_id=old_line_id,
+        price_source=price_source,
+    ):
+        i += 1
+
+        # split routing:
+        if old_line_id is not None and pivot_tick_id is not None:
+            if left_side and tick_id > pivot_tick_id:
+                continue
+            if (not left_side) and tick_id <= pivot_tick_id:
+                continue
+
+        phat = _line_interp(start_price, end_price, x1, x2, i)
+        dist = price - phat
+        updates.append((segtick_row_id, new_line_id, float(dist)))
+        updated += 1
+
+        if len(updates) >= BATCH_SIZE:
+            _bulk_update_segticks(conn, updates)
+            updates.clear()
+
+    if updates:
+        _bulk_update_segticks(conn, updates)
+
+    return updated
+
+
+def _split_mode(conn, segm_id: int, segLine_id: Optional[int], *, price_source: str) -> Dict[str, Any]:
+    line = _pick_line_to_split(conn, segm_id, segLine_id)
+    if line is None:
+        return {"error": "no active segLines to split", "segm_id": segm_id}
+
+    old_line_id = int(line["id"])
+
+    pivot = _pick_pivot_tick(conn, segm_id, old_line_id)
+    if pivot is None or pivot["tick_id"] is None:
+        return {"error": "no pivot tick found for segLine", "segm_id": segm_id, "segLine_id": old_line_id}
+
+    pivot_tick_id = int(pivot["tick_id"])
+
+    # Create children lines
+    left_id, right_id = _create_children_lines(conn, segm_id, line, pivot_tick_id, price_source=price_source)
+
+    # Deactivate old
+    with dict_cur(conn) as cur:
+        cur.execute("UPDATE public.seglines SET is_active=false, updated_at=now() WHERE id=%s", (old_line_id,))
+
+    # Count ticks in old line once (for tick-index interpolation)
+    n_old = _count_ticks(conn, segm_id, old_line_id=old_line_id)
+    if n_old <= 1:
+        raise RuntimeError("old line has <= 1 tick, cannot split")
+
+    # Load endpoints for new lines (prices already stored)
+    left_line = _get_line_endpoints(conn, left_id)
+    right_line = _get_line_endpoints(conn, right_id)
+
+    # Assign distances for left side (<= pivot)
+    left_updated = _assign_stream_distances(
+        conn,
+        segm_id=segm_id,
+        old_line_id=old_line_id,
+        new_line_id=left_id,
+        n_ticks=n_old,
+        start_price=float(left_line["start_price"]),
+        end_price=float(left_line["end_price"]),
+        pivot_tick_id=pivot_tick_id,
+        left_side=True,
+        price_source=price_source,
+    )
+
+    # Assign distances for right side (> pivot)
+    right_updated = _assign_stream_distances(
+        conn,
+        segm_id=segm_id,
+        old_line_id=old_line_id,
+        new_line_id=right_id,
+        n_ticks=n_old,
+        start_price=float(right_line["start_price"]),
+        end_price=float(right_line["end_price"]),
+        pivot_tick_id=pivot_tick_id,
+        left_side=False,
+        price_source=price_source,
+    )
+
+    _update_line_stats(conn, left_id)
+    _update_line_stats(conn, right_id)
+    num_active, global_max = _update_global_stats(conn, segm_id)
+
+    pivot_abs = float(abs(float(pivot["dist"]))) if pivot.get("dist") is not None else None
+
+    _append_log(
+        f"[{_now_utc()}] segm_id={segm_id} action=split split_line={old_line_id} "
+        f"pivot_tick={pivot_tick_id} pivot_abs_dist={pivot_abs} "
+        f"new_left={left_id} new_right={right_id} left_ticks={left_updated} right_ticks={right_updated} "
+        f"global_max_abs_dist={global_max}"
+    )
+
+    return {
+        "segm_id": segm_id,
+        "action": "split",
+        "segLine_id": old_line_id,
+        "pivot_tick_id": pivot_tick_id,
+        "pivot_abs_dist": pivot_abs,
+        "new_left_id": left_id,
+        "new_right_id": right_id,
+        "num_lines_active": num_active,
+        "global_max_abs_dist": global_max,
+    }
