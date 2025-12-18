@@ -17,7 +17,7 @@ from math import copysign
 
 CHUNK_SIZE = 10_000
 
-DSN = "dbname=trading user=postgres password=postgres host=localhost"
+DSN = "dbname=trading user=babak password=babak33044 host=localhost"
 
 def linear_y(x, x1, y1, x2, y2):
     if x2 == x1:
