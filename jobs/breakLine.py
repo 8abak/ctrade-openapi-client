@@ -404,8 +404,60 @@ def _pick_line_to_split(conn, segm_id: int, segLine_id: Optional[int]) -> Option
         return cur.fetchone()
 
 
-def _pick_pivot_tick(conn, segm_id: int, line_id: int) -> Optional[Dict[str, Any]]:
-    # Pivot = tick with maximum ABS(dist) inside this line.
+def _pick_pivot_tick(conn, segm_id: int, line_id: int, *, price_source: str) -> Optional[Dict[str, Any]]:
+    """
+    Pick pivot as a STRUCTURAL extremum:
+      - gather top candidates by ABS(dist)
+      - choose first that is a local extremum consistent with dist sign:
+          dist>0 => local max
+          dist<0 => local min
+      - fallback to raw max abs(dist) if none pass
+    """
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            SELECT st.tick_id AS tick_id, st.dist AS dist
+            FROM public.segticks st
+            WHERE st.segm_id=%s AND st.segline_id=%s
+            ORDER BY ABS(st.dist) DESC NULLS LAST
+            LIMIT %s
+            """,
+            (segm_id, line_id, PIVOT_CANDIDATES),
+        )
+        cands = cur.fetchall()
+
+    best = None
+    for c in cands:
+        if c["tick_id"] is None or c["dist"] is None:
+            continue
+        tid = int(c["tick_id"])
+        d = float(c["dist"])
+
+        is_max, is_min = _is_local_extremum(
+            conn, segm_id, line_id, tid, price_source=price_source, window=PIVOT_WINDOW
+        )
+
+        if d > 0 and not is_max:
+            continue
+        if d < 0 and not is_min:
+            continue
+
+        # accept
+        with dict_cur(conn) as cur:
+            cur.execute(
+                """
+                SELECT t.id AS tick_id, t.timestamp AS ts, st.dist AS dist
+                FROM public.segticks st
+                JOIN public.ticks t ON t.id = st.tick_id
+                WHERE st.segm_id=%s AND st.segline_id=%s AND st.tick_id=%s
+                """,
+                (segm_id, line_id, tid),
+            )
+            best = cur.fetchone()
+        if best:
+            return best
+
+    # fallback: original behavior
     with dict_cur(conn) as cur:
         cur.execute(
             """
@@ -419,6 +471,7 @@ def _pick_pivot_tick(conn, segm_id: int, line_id: int) -> Optional[Dict[str, Any
             (segm_id, line_id),
         )
         return cur.fetchone()
+
 
 
 def _get_tick_price(conn, tick_id: int, *, price_source: str) -> Tuple[datetime, float]:
@@ -563,6 +616,52 @@ def _assign_stream_distances(
         _bulk_update_segticks(conn, updates)
 
     return updated
+
+PIVOT_WINDOW = 25
+PIVOT_CANDIDATES = 150
+
+def _get_price_at_tick(conn, tick_id: int, *, price_source: str) -> float:
+    _ts, p = _get_tick_price(conn, tick_id, price_source=price_source)
+    return float(p)
+
+def _is_local_extremum(conn, segm_id: int, line_id: int, tick_id: int, *, price_source: str, window: int) -> Tuple[bool, bool]:
+    """
+    Returns (is_local_max, is_local_min) within a +/- window neighborhood, within the SAME segline.
+    Uses tick_id ordering.
+    """
+    price_expr = _price_sql(price_source)
+
+    with dict_cur(conn) as cur:
+        cur.execute(
+            f"""
+            SELECT t.id AS tick_id, {price_expr} AS price
+            FROM public.segticks st
+            JOIN public.ticks t ON t.id = st.tick_id
+            WHERE st.segm_id=%s AND st.segline_id=%s
+              AND t.id BETWEEN %s AND %s
+            ORDER BY t.id ASC
+            """,
+            (segm_id, line_id, tick_id - window, tick_id + window),
+        )
+        rows = cur.fetchall()
+
+    if not rows or len(rows) < 5:
+        return (False, False)
+
+    center_price = None
+    prices = []
+    for r in rows:
+        if r["price"] is None:
+            continue
+        p = float(r["price"])
+        prices.append(p)
+        if int(r["tick_id"]) == int(tick_id):
+            center_price = p
+
+    if center_price is None or len(prices) < 5:
+        return (False, False)
+
+    return (center_price == max(prices), center_price == min(prices))
 
 
 def _split_mode(conn, segm_id: int, segLine_id: Optional[int], *, price_source: str) -> Dict[str, Any]:
