@@ -75,10 +75,10 @@ def main() -> None:
         # ------------------------------------------------------------
         with dict_cur(conn) as cur:
             cur.execute(f"""
-                SELECT id, {price_expr} AS price
-                FROM ticks
-                WHERE id IN (%s, %s)
-                ORDER BY id
+                SELECT t.id, {price_expr} AS price
+                FROM ticks t
+                WHERE t.id IN (%s, %s)
+                ORDER BY t.id
             """, (start_tid, end_tid))
             r = cur.fetchall()
 
