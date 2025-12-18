@@ -34,7 +34,7 @@ def main() -> None:
 
     try:
         # ------------------------------------------------------------
-        # 1. Load segm (authoritative source)
+        # 1. Load segm
         # ------------------------------------------------------------
         with dict_cur(conn) as cur:
             cur.execute(
@@ -65,7 +65,7 @@ def main() -> None:
         EndTs = segm["end_ts"]
 
         # ------------------------------------------------------------
-        # 2. FORCE cleanup if requested
+        # 2. FORCE cleanup
         # ------------------------------------------------------------
         if args.force:
             with dict_cur(conn) as cur:
@@ -134,7 +134,7 @@ def main() -> None:
         print(f"[buildSegticks] root segLine created id={RootLineId}")
 
         # ------------------------------------------------------------
-        # 5. Tick count (for interpolation)
+        # 5. Tick count
         # ------------------------------------------------------------
         with dict_cur(conn) as cur:
             cur.execute(
@@ -144,7 +144,7 @@ def main() -> None:
             N = int(cur.fetchone()["n"])
 
         if N <= 1:
-            print("[buildSegticks] segm too small, skipping")
+            print("[buildSegticks] segm too small")
             return
 
         # ------------------------------------------------------------
@@ -181,6 +181,7 @@ def main() -> None:
                     SessionId,
                     tick_id,
                     segm_id,
+                    i,              # seg_pos (FIX)
                     RootLineId,
                     dist,
                 )
@@ -192,7 +193,7 @@ def main() -> None:
                         cur,
                         """
                         INSERT INTO public.segticks
-                            (symbol, session_id, tick_id, segm_id, segline_id, dist)
+                            (symbol, session_id, tick_id, segm_id, seg_pos, segline_id, dist)
                         VALUES %s
                         """,
                         inserts,
@@ -207,14 +208,13 @@ def main() -> None:
                     cur,
                     """
                     INSERT INTO public.segticks
-                        (symbol, session_id, tick_id, segm_id, segline_id, dist)
+                        (symbol, session_id, tick_id, segm_id, seg_pos, segline_id, dist)
                     VALUES %s
                     """,
                     inserts,
                     page_size=10_000,
                 )
             conn.commit()
-            inserts.clear()
 
         cur_stream.close()
 
