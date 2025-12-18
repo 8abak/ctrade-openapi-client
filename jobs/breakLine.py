@@ -67,10 +67,10 @@ def break_line(
       - if segm has 0 seglines => init root line
       - else split one active line (provided segLine_id or worst by max_abs_dist)
 
-    New approach:
-      - dist is computed on tick-order index (0..N-1), NOT timestamp ms
-      - no OFFSET queries anywhere (server-side cursor streaming)
-      - price_source defaults to "mid" so it matches what you see in review when Mid is on
+    Dist is computed in tick-order index space (tick_id order).
+    IMPORTANT: when splitting, we must use the correct x-span for each child:
+      left:  0 .. pivot_index
+      right: pivot_index .. (n_old-1)
     """
     if not isinstance(segm_id, int) or segm_id <= 0:
         return {"error": "segm_id must be a positive int"}
@@ -214,7 +214,6 @@ def _iter_ticks_stream(
         tuple(params),
     )
     for r in cur:
-        # r is a tuple because named cursor returns tuples
         segtick_row_id, tick_id, ts, price = r
         if price is None:
             continue
@@ -290,6 +289,25 @@ def _update_global_stats(conn, segm_id: int) -> Tuple[int, Optional[float]]:
     return n, mx
 
 
+def _get_pivot_index_in_line(conn, segm_id: int, old_line_id: int, pivot_tick_id: int) -> int:
+    """
+    Returns 0-based index of pivot_tick_id within (segm_id, old_line_id) ticks ordered by tick_id.
+    This is required so the child line interpolation uses the correct x-span.
+    """
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            SELECT COUNT(*) AS n_before_or_equal
+            FROM public.segticks st
+            WHERE st.segm_id=%s AND st.segline_id=%s AND st.tick_id <= %s
+            """,
+            (segm_id, old_line_id, pivot_tick_id),
+        )
+        n_be = int(cur.fetchone()["n_before_or_equal"])
+    # if pivot exists in this line, count>=1; index is count-1
+    return max(0, n_be - 1)
+
+
 # ----------------------------
 # INIT
 # ----------------------------
@@ -325,12 +343,14 @@ def _init_mode(conn, segm_id: int, *, price_source: str) -> Dict[str, Any]:
         )
         line_id = int(cur.fetchone()["id"])
 
+    # For init, x-span is 0..(n-1)
     _assign_stream_distances(
         conn,
         segm_id=segm_id,
         old_line_id=None,
         new_line_id=line_id,
-        n_ticks=n,
+        x1=0,
+        x2=n - 1,
         start_price=first_t.price,
         end_price=last_t.price,
         pivot_tick_id=None,
@@ -493,7 +513,8 @@ def _assign_stream_distances(
     segm_id: int,
     old_line_id: Optional[int],   # None for init
     new_line_id: int,             # line id to assign for the streamed rows
-    n_ticks: int,                 # number of ticks in THIS stream
+    x1: int,                      # interpolation x-start in parent index-space
+    x2: int,                      # interpolation x-end in parent index-space
     start_price: float,
     end_price: float,
     pivot_tick_id: Optional[int], # used only when old_line_id is not None (split)
@@ -501,17 +522,15 @@ def _assign_stream_distances(
     price_source: str,
 ) -> int:
     """
-    Stream ticks for either:
-      - init (old_line_id=None): assign all segm ticks to new_line_id
-      - split (old_line_id=old): stream that line's ticks, and assign left or right side
+    Stream ticks and assign segline_id + dist.
 
-    Distances computed on tick-index in the stream (0..n_ticks-1).
+    Key point:
+      - For init: x1=0, x2=(n-1)
+      - For split-left:  x1=0, x2=pivot_index
+      - For split-right: x1=pivot_index, x2=(n_old-1)
+
+    We keep xi=i where i is the 0-based index in the parent stream.
     """
-    if n_ticks <= 0:
-        return 0
-    x1 = 0
-    x2 = n_ticks - 1
-
     updates: List[Tuple[int, int, float]] = []
     updated = 0
 
@@ -559,6 +578,26 @@ def _split_mode(conn, segm_id: int, segLine_id: Optional[int], *, price_source: 
 
     pivot_tick_id = int(pivot["tick_id"])
 
+    # Count ticks in old line once
+    n_old = _count_ticks(conn, segm_id, old_line_id=old_line_id)
+    if n_old <= 2:
+        raise RuntimeError("old line has <= 2 ticks, cannot split")
+
+    # Determine pivot index within this old line (0-based)
+    pivot_index = _get_pivot_index_in_line(conn, segm_id, old_line_id, pivot_tick_id)
+
+    # Guard: if pivot is too close to ends, splitting makes no sense
+    if pivot_index <= 0 or pivot_index >= (n_old - 1):
+        return {
+            "segm_id": segm_id,
+            "action": "noop",
+            "reason": "pivot_at_endpoint",
+            "segLine_id": old_line_id,
+            "pivot_tick_id": pivot_tick_id,
+            "pivot_index": pivot_index,
+            "n_old": n_old,
+        }
+
     # Create children lines
     left_id, right_id = _create_children_lines(conn, segm_id, line, pivot_tick_id, price_source=price_source)
 
@@ -566,22 +605,18 @@ def _split_mode(conn, segm_id: int, segLine_id: Optional[int], *, price_source: 
     with dict_cur(conn) as cur:
         cur.execute("UPDATE public.seglines SET is_active=false, updated_at=now() WHERE id=%s", (old_line_id,))
 
-    # Count ticks in old line once (for tick-index interpolation)
-    n_old = _count_ticks(conn, segm_id, old_line_id=old_line_id)
-    if n_old <= 1:
-        raise RuntimeError("old line has <= 1 tick, cannot split")
-
     # Load endpoints for new lines (prices already stored)
     left_line = _get_line_endpoints(conn, left_id)
     right_line = _get_line_endpoints(conn, right_id)
 
-    # Assign distances for left side (<= pivot)
+    # Assign distances for left side (<= pivot): interpolate on x=0..pivot_index
     left_updated = _assign_stream_distances(
         conn,
         segm_id=segm_id,
         old_line_id=old_line_id,
         new_line_id=left_id,
-        n_ticks=n_old,
+        x1=0,
+        x2=pivot_index,
         start_price=float(left_line["start_price"]),
         end_price=float(left_line["end_price"]),
         pivot_tick_id=pivot_tick_id,
@@ -589,13 +624,14 @@ def _split_mode(conn, segm_id: int, segLine_id: Optional[int], *, price_source: 
         price_source=price_source,
     )
 
-    # Assign distances for right side (> pivot)
+    # Assign distances for right side (> pivot): interpolate on x=pivot_index..(n_old-1)
     right_updated = _assign_stream_distances(
         conn,
         segm_id=segm_id,
         old_line_id=old_line_id,
         new_line_id=right_id,
-        n_ticks=n_old,
+        x1=pivot_index,
+        x2=n_old - 1,
         start_price=float(right_line["start_price"]),
         end_price=float(right_line["end_price"]),
         pivot_tick_id=pivot_tick_id,
@@ -611,7 +647,7 @@ def _split_mode(conn, segm_id: int, segLine_id: Optional[int], *, price_source: 
 
     _append_log(
         f"[{_now_utc()}] segm_id={segm_id} action=split split_line={old_line_id} "
-        f"pivot_tick={pivot_tick_id} pivot_abs_dist={pivot_abs} "
+        f"pivot_tick={pivot_tick_id} pivot_index={pivot_index} n_old={n_old} pivot_abs_dist={pivot_abs} "
         f"new_left={left_id} new_right={right_id} left_ticks={left_updated} right_ticks={right_updated} "
         f"global_max_abs_dist={global_max}"
     )
@@ -621,6 +657,7 @@ def _split_mode(conn, segm_id: int, segLine_id: Optional[int], *, price_source: 
         "action": "split",
         "segLine_id": old_line_id,
         "pivot_tick_id": pivot_tick_id,
+        "pivot_index": pivot_index,
         "pivot_abs_dist": pivot_abs,
         "new_left_id": left_id,
         "new_right_id": right_id,
