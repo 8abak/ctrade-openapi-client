@@ -149,10 +149,17 @@ def main() -> None:
                 with dict_cur(conn) as cur:
                     psycopg2.extras.execute_values(cur, """
                         INSERT INTO segticks (
-                            symbol, tick_id, segm_id, session_id,
-                            seg_pos, seg_slope, seg_price_change,
-                            seg_duration_seconds, run_id,
-                            segline_id, dist
+                            symbol,
+                            tick_id,
+                            segm_id,
+                            session_id,
+                            seg_pos,
+                            seg_slope,
+                            seg_price_change,
+                            seg_duration_seconds,
+                            run_id,
+                            segline_id,
+                            dist
                         )
                         VALUES %s
                     """, rows, page_size=10_000)
