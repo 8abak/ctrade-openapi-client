@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime
 from typing import List, Tuple
 
 import psycopg2
@@ -15,7 +14,6 @@ STREAM_ITERSIZE = 50_000
 
 
 def line_interp(p1: float, p2: float, i: int, n: int) -> float:
-    """Linear interpolation on index space [0..n-1]."""
     if n <= 1:
         return p1
     return p1 + (p2 - p1) * (i / (n - 1))
@@ -35,15 +33,16 @@ def main() -> None:
     conn.autocommit = False
 
     try:
+        # ------------------------------------------------------------
+        # 1. Load segm (authoritative source)
+        # ------------------------------------------------------------
         with dict_cur(conn) as cur:
-            # ------------------------------------------------------------
-            # 1. Load segm (authoritative source)
-            # ------------------------------------------------------------
             cur.execute(
                 """
                 SELECT
                     id,
                     symbol,
+                    session_id,
                     start_tick_id,
                     end_tick_id,
                     start_ts,
@@ -54,14 +53,16 @@ def main() -> None:
                 (segm_id,),
             )
             segm = cur.fetchone()
-            if not segm:
-                raise RuntimeError(f"segm {segm_id} not found")
 
-            Symbol = segm["symbol"]
-            StartTickId = int(segm["start_tick_id"])
-            EndTickId = int(segm["end_tick_id"])
-            StartTs = segm["start_ts"]
-            EndTs = segm["end_ts"]
+        if not segm:
+            raise RuntimeError(f"segm {segm_id} not found")
+
+        Symbol = segm["symbol"]
+        SessionId = segm["session_id"]
+        StartTickId = int(segm["start_tick_id"])
+        EndTickId = int(segm["end_tick_id"])
+        StartTs = segm["start_ts"]
+        EndTs = segm["end_ts"]
 
         # ------------------------------------------------------------
         # 2. FORCE cleanup if requested
@@ -73,7 +74,7 @@ def main() -> None:
             conn.commit()
 
         # ------------------------------------------------------------
-        # 3. Get endpoint prices
+        # 3. Endpoint prices
         # ------------------------------------------------------------
         price_expr = "t.mid" if price_source == "mid" else "COALESCE(t.kal, t.mid)"
 
@@ -90,7 +91,7 @@ def main() -> None:
             rows = cur.fetchall()
 
         if len(rows) != 2 or rows[0]["price"] is None or rows[1]["price"] is None:
-            raise RuntimeError("cannot get endpoint prices")
+            raise RuntimeError("cannot load segm endpoint prices")
 
         P1 = float(rows[0]["price"])
         P2 = float(rows[1]["price"])
@@ -133,7 +134,7 @@ def main() -> None:
         print(f"[buildSegticks] root segLine created id={RootLineId}")
 
         # ------------------------------------------------------------
-        # 5. Count ticks (needed for interpolation denominator)
+        # 5. Tick count (for interpolation)
         # ------------------------------------------------------------
         with dict_cur(conn) as cur:
             cur.execute(
@@ -147,15 +148,13 @@ def main() -> None:
             return
 
         # ------------------------------------------------------------
-        # 6. Stream ticks + insert segticks in chunks
+        # 6. Stream ticks + insert segticks
         # ------------------------------------------------------------
-        cur_stream = conn.cursor(
-            name=f"segticks_stream_{segm_id}"
-        )
+        cur_stream = conn.cursor(name=f"segticks_stream_{segm_id}")
         cur_stream.itersize = STREAM_ITERSIZE
         cur_stream.execute(
             f"""
-            SELECT t.id, t.timestamp, {price_expr} AS price
+            SELECT t.id, {price_expr} AS price
             FROM public.ticks t
             WHERE t.id BETWEEN %s AND %s
             ORDER BY t.id
@@ -167,7 +166,7 @@ def main() -> None:
         i = -1
         max_abs_dist = 0.0
 
-        for tick_id, ts, price in cur_stream:
+        for tick_id, price in cur_stream:
             if price is None:
                 continue
 
@@ -179,6 +178,7 @@ def main() -> None:
             inserts.append(
                 (
                     Symbol,
+                    SessionId,
                     tick_id,
                     segm_id,
                     RootLineId,
@@ -192,7 +192,7 @@ def main() -> None:
                         cur,
                         """
                         INSERT INTO public.segticks
-                            (symbol, tick_id, segm_id, segline_id, dist)
+                            (symbol, session_id, tick_id, segm_id, segline_id, dist)
                         VALUES %s
                         """,
                         inserts,
@@ -207,7 +207,7 @@ def main() -> None:
                     cur,
                     """
                     INSERT INTO public.segticks
-                        (symbol, tick_id, segm_id, segline_id, dist)
+                        (symbol, session_id, tick_id, segm_id, segline_id, dist)
                     VALUES %s
                     """,
                     inserts,
