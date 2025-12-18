@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from typing import List, Tuple
+from datetime import datetime
 
 import psycopg2
 import psycopg2.extras
@@ -13,10 +14,10 @@ BATCH_SIZE = 20_000
 STREAM_ITERSIZE = 50_000
 
 
-def line_interp(p1: float, p2: float, i: int, n: int) -> float:
-    if n <= 1:
+def interp(p1: float, p2: float, t: float, T: float) -> float:
+    if T <= 0:
         return p1
-    return p1 + (p2 - p1) * (i / (n - 1))
+    return p1 + (p2 - p1) * (t / T)
 
 
 def main() -> None:
@@ -27,230 +28,178 @@ def main() -> None:
     args = ap.parse_args()
 
     segm_id = args.segm_id
-    price_source = args.price_source
+    price_expr = "t.mid" if args.price_source == "mid" else "COALESCE(t.kal, t.mid)"
 
     conn = get_conn()
     conn.autocommit = False
 
     try:
         # ------------------------------------------------------------
-        # 1. Load segm
+        # Load segm
         # ------------------------------------------------------------
         with dict_cur(conn) as cur:
-            cur.execute(
-                """
+            cur.execute("""
                 SELECT
-                    id,
-                    symbol,
-                    session_id,
-                    start_tick_id,
-                    end_tick_id,
-                    start_ts,
-                    end_ts
-                FROM public.segms
-                WHERE id = %s
-                """,
-                (segm_id,),
-            )
+                    id, symbol, session_id,
+                    start_tick_id, end_tick_id,
+                    start_ts, end_ts
+                FROM segms
+                WHERE id=%s
+            """, (segm_id,))
             segm = cur.fetchone()
 
         if not segm:
-            raise RuntimeError(f"segm {segm_id} not found")
+            raise RuntimeError("segm not found")
 
-        Symbol = segm["symbol"]
-        SessionId = segm["session_id"]
-        StartTickId = int(segm["start_tick_id"])
-        EndTickId = int(segm["end_tick_id"])
-        StartTs = segm["start_ts"]
-        EndTs = segm["end_ts"]
+        symbol = segm["symbol"]
+        session_id = segm["session_id"]
+        start_tid = segm["start_tick_id"]
+        end_tid = segm["end_tick_id"]
+        start_ts = segm["start_ts"]
+        end_ts = segm["end_ts"]
+
+        duration_sec = (end_ts - start_ts).total_seconds()
+        run_id = f"root-segline:{segm_id}"
 
         # ------------------------------------------------------------
-        # 2. FORCE cleanup
+        # FORCE cleanup
         # ------------------------------------------------------------
         if args.force:
             with dict_cur(conn) as cur:
-                cur.execute("DELETE FROM public.segticks WHERE segm_id = %s", (segm_id,))
-                cur.execute("DELETE FROM public.seglines WHERE segm_id = %s", (segm_id,))
+                cur.execute("DELETE FROM segticks WHERE segm_id=%s", (segm_id,))
+                cur.execute("DELETE FROM seglines WHERE segm_id=%s", (segm_id,))
             conn.commit()
 
         # ------------------------------------------------------------
-        # 3. Endpoint prices
+        # Endpoint prices
         # ------------------------------------------------------------
-        price_expr = "t.mid" if price_source == "mid" else "COALESCE(t.kal, t.mid)"
-
         with dict_cur(conn) as cur:
-            cur.execute(
-                f"""
+            cur.execute(f"""
                 SELECT id, {price_expr} AS price
-                FROM public.ticks t
+                FROM ticks
                 WHERE id IN (%s, %s)
                 ORDER BY id
-                """,
-                (StartTickId, EndTickId),
-            )
-            rows = cur.fetchall()
+            """, (start_tid, end_tid))
+            r = cur.fetchall()
 
-        if len(rows) != 2 or rows[0]["price"] is None or rows[1]["price"] is None:
-            raise RuntimeError("cannot load segm endpoint prices")
-
-        P1 = float(rows[0]["price"])
-        P2 = float(rows[1]["price"])
+        p1, p2 = float(r[0]["price"]), float(r[1]["price"])
+        slope = (p2 - p1) / duration_sec if duration_sec > 0 else 0.0
+        price_change = p2 - p1
 
         # ------------------------------------------------------------
-        # 4. Create ROOT segLine
+        # Create root segLine
         # ------------------------------------------------------------
         with dict_cur(conn) as cur:
-            cur.execute(
-                """
-                INSERT INTO public.seglines (
-                    segm_id,
-                    parent_id,
-                    depth,
-                    iteration,
-                    start_tick_id,
-                    end_tick_id,
-                    start_ts,
-                    end_ts,
-                    start_price,
-                    end_price,
+            cur.execute("""
+                INSERT INTO seglines (
+                    segm_id, parent_id, depth, iteration,
+                    start_tick_id, end_tick_id,
+                    start_ts, end_ts,
+                    start_price, end_price,
                     is_active
                 )
-                VALUES (%s, NULL, 0, 0, %s, %s, %s, %s, %s, %s, true)
+                VALUES (%s,NULL,0,0,%s,%s,%s,%s,%s,%s,true)
                 RETURNING id
-                """,
-                (
-                    segm_id,
-                    StartTickId,
-                    EndTickId,
-                    StartTs,
-                    EndTs,
-                    P1,
-                    P2,
-                ),
-            )
-            RootLineId = int(cur.fetchone()["id"])
+            """, (segm_id, start_tid, end_tid, start_ts, end_ts, p1, p2))
+            segline_id = cur.fetchone()["id"]
 
         conn.commit()
-        print(f"[buildSegticks] root segLine created id={RootLineId}")
+        print(f"[buildSegticks] root segLine created id={segline_id}")
 
         # ------------------------------------------------------------
-        # 5. Tick count
+        # Stream ticks and insert segticks
         # ------------------------------------------------------------
-        with dict_cur(conn) as cur:
-            cur.execute(
-                "SELECT COUNT(*) AS n FROM public.ticks WHERE id BETWEEN %s AND %s",
-                (StartTickId, EndTickId),
-            )
-            N = int(cur.fetchone()["n"])
-
-        if N <= 1:
-            print("[buildSegticks] segm too small")
-            return
-
-        # ------------------------------------------------------------
-        # 6. Stream ticks + insert segticks
-        # ------------------------------------------------------------
-        cur_stream = conn.cursor(name=f"segticks_stream_{segm_id}")
+        cur_stream = conn.cursor(name="segticks_stream")
         cur_stream.itersize = STREAM_ITERSIZE
-        cur_stream.execute(
-            f"""
-            SELECT t.id, {price_expr} AS price
-            FROM public.ticks t
+        cur_stream.execute(f"""
+            SELECT t.id, t.timestamp, {price_expr}
+            FROM ticks t
             WHERE t.id BETWEEN %s AND %s
             ORDER BY t.id
-            """,
-            (StartTickId, EndTickId),
-        )
+        """, (start_tid, end_tid))
 
-        inserts: List[Tuple] = []
-        i = -1
+        rows: List[Tuple] = []
         max_abs_dist = 0.0
 
-        for tick_id, price in cur_stream:
+        for tick_id, ts, price in cur_stream:
             if price is None:
                 continue
 
-            i += 1
-            phat = line_interp(P1, P2, i, N)
-            dist = float(price - phat)
+            t_rel = (ts - start_ts).total_seconds()
+            seg_pos = min(1.0, max(0.0, t_rel / duration_sec if duration_sec > 0 else 0.0))
+            projected = interp(p1, p2, t_rel, duration_sec)
+            dist = float(price - projected)
             max_abs_dist = max(max_abs_dist, abs(dist))
 
-            inserts.append(
-                (
-                    Symbol,
-                    SessionId,
-                    tick_id,
-                    segm_id,
-                    i,              # seg_pos (FIX)
-                    RootLineId,
-                    dist,
-                )
-            )
+            rows.append((
+                symbol,
+                tick_id,
+                segm_id,
+                session_id,
+                seg_pos,
+                slope,
+                price_change,
+                duration_sec,
+                run_id,
+                segline_id,
+                dist,
+            ))
 
-            if len(inserts) >= BATCH_SIZE:
+            if len(rows) >= BATCH_SIZE:
                 with dict_cur(conn) as cur:
-                    psycopg2.extras.execute_values(
-                        cur,
-                        """
-                        INSERT INTO public.segticks
-                            (symbol, session_id, tick_id, segm_id, seg_pos, segline_id, dist)
+                    psycopg2.extras.execute_values(cur, """
+                        INSERT INTO segticks (
+                            symbol, tick_id, segm_id, session_id,
+                            seg_pos, seg_slope, seg_price_change,
+                            seg_duration_seconds, run_id,
+                            segline_id, dist
+                        )
                         VALUES %s
-                        """,
-                        inserts,
-                        page_size=10_000,
-                    )
+                    """, rows, page_size=10_000)
                 conn.commit()
-                inserts.clear()
+                rows.clear()
 
-        if inserts:
+        if rows:
             with dict_cur(conn) as cur:
-                psycopg2.extras.execute_values(
-                    cur,
-                    """
-                    INSERT INTO public.segticks
-                        (symbol, session_id, tick_id, segm_id, seg_pos, segline_id, dist)
+                psycopg2.extras.execute_values(cur, """
+                    INSERT INTO segticks (
+                        symbol, tick_id, segm_id, session_id,
+                        seg_pos, seg_slope, seg_price_change,
+                        seg_duration_seconds, run_id,
+                        segline_id, dist
+                    )
                     VALUES %s
-                    """,
-                    inserts,
-                    page_size=10_000,
-                )
+                """, rows, page_size=10_000)
             conn.commit()
 
         cur_stream.close()
 
         # ------------------------------------------------------------
-        # 7. Update segLine stats
+        # Update segLine stats
         # ------------------------------------------------------------
         with dict_cur(conn) as cur:
-            cur.execute(
-                """
-                UPDATE public.seglines
+            cur.execute("""
+                UPDATE seglines
                 SET
-                    num_ticks = %s,
+                    num_ticks = (
+                        SELECT COUNT(*) FROM segticks WHERE segline_id=%s
+                    ),
                     duration_ms = %s,
                     max_abs_dist = %s,
                     updated_at = now()
-                WHERE id = %s
-                """,
-                (
-                    N,
-                    int((EndTs - StartTs).total_seconds() * 1000),
-                    max_abs_dist,
-                    RootLineId,
-                ),
-            )
-        conn.commit()
+                WHERE id=%s
+            """, (
+                segline_id,
+                int(duration_sec * 1000),
+                max_abs_dist,
+                segline_id,
+            ))
 
-        print(
-            f"[buildSegticks] DONE segm={segm_id} "
-            f"ticks={N} max_abs_dist={max_abs_dist:.6f}"
-        )
+        conn.commit()
+        print(f"[buildSegticks] DONE segm={segm_id} max_abs_dist={max_abs_dist}")
 
     finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+        conn.close()
 
 
 if __name__ == "__main__":
