@@ -14,6 +14,7 @@
       --btn:#1b3bff;
       --btn2:#1730c9;
       --line:#1a2b55;
+      --input:#08142b;
     }
     html,body{height:100%; margin:0; background:var(--bg); color:var(--text); font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif;}
     .topbar{
@@ -39,6 +40,7 @@
       cursor:pointer;
       user-select:none;
       font-weight:700;
+      white-space:nowrap;
     }
     .btn:hover{filter:brightness(1.08);}
     .btn.primary{
@@ -57,7 +59,38 @@
       white-space:nowrap;
       overflow:hidden;
       text-overflow:ellipsis;
-      max-width:40vw;
+      max-width:42vw;
+    }
+
+    .field{
+      display:flex; align-items:center; gap:8px;
+      padding:0 8px;
+      border:1px solid var(--line);
+      background:rgba(9,18,40,.35);
+      border-radius:10px;
+      height:34px;
+    }
+    .field label{
+      color:var(--muted);
+      font-weight:700;
+      font-size:12px;
+    }
+    .field input{
+      width:140px;
+      background:var(--input);
+      color:var(--text);
+      border:1px solid rgba(26,43,85,.65);
+      border-radius:8px;
+      padding:6px 8px;
+      outline:none;
+      font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;
+      font-size:12px;
+    }
+    .hint{
+      color:rgba(154,177,255,.85);
+      font-size:12px;
+      margin-left:2px;
+      white-space:nowrap;
     }
 
     #chartWrap{height:72vh; padding:10px 12px;}
@@ -86,7 +119,6 @@
     .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;}
   </style>
 
-  <!-- ECharts (same lib you already use elsewhere) -->
   <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
 </head>
 
@@ -100,6 +132,12 @@
     <button id="toggleBid" class="btn toggle" type="button">Bid</button>
     <button id="toggleAsk" class="btn toggle" type="button">Ask</button>
     <button id="toggleSegLines" class="btn toggle on" type="button">SegLines</button>
+
+    <div class="field" title="Optional: force the next break at a specific tick id. A vertical preview line will be shown.">
+      <label for="forceTickId">Force</label>
+      <input id="forceTickId" type="text" inputmode="numeric" placeholder="tick id" />
+      <span id="forceHint" class="hint"></span>
+    </div>
 
     <button id="btnBreak" class="btn primary" type="button">Break</button>
 

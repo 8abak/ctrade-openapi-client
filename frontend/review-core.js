@@ -1,4 +1,3 @@
-// frontend/review-core.js
 // Review page for segLines + ticks overlay (uses backend endpoints under /api/review/*)
 
 (() => {
@@ -14,6 +13,17 @@
     ticks: [],
     lines: [],
     meta: null,
+
+    // tick-id -> timestamp (ms) map from sampled ticks
+    TickIdToMs: new Map(),
+
+    // force preview
+    forceTickId: null,
+    forceTickMs: null,
+    forceHint: "",
+
+    // next-break preview (from backend-enriched line fields)
+    nextBreak: null, // { segline_id, tick_id, ts_ms, max_abs_dist }
   };
 
   let chart = null;
@@ -35,7 +45,6 @@
 
   function fmtTime(ts) {
     if (!ts) return "";
-    // backend returns ISO string; show HH:MM:SS
     try {
       const d = new Date(ts);
       if (Number.isNaN(d.getTime())) return String(ts);
@@ -48,7 +57,6 @@
   function tsToMs(ts) {
     if (ts == null) return null;
     if (typeof ts === "number") {
-      // if already ms or seconds, assume ms if large
       return ts > 1e12 ? ts : ts * 1000;
     }
     const d = new Date(ts);
@@ -56,20 +64,93 @@
     return Number.isNaN(ms) ? null : ms;
   }
 
+  function rebuildTickIdIndex() {
+    state.TickIdToMs = new Map();
+    for (const t of state.ticks) {
+      const tickId = t.tick_id ?? t.tickId ?? t.id;
+      const ms = tsToMs(t.timestamp ?? t.ts ?? t.time ?? t.t);
+      if (tickId == null || ms == null) continue;
+      state.TickIdToMs.set(Number(tickId), ms);
+    }
+  }
+
+  function computeNextBreakFromLines() {
+    // We expect backend to provide on each segline:
+    //   - worst_tick_id (or worstTickId)
+    //   - worst_ts (or worstTs)
+    // If not present, we still show nothing (no guessing on frontend).
+    let best = null;
+    for (const L of state.lines) {
+      const maxd = L.max_abs_dist ?? L.maxAbsDist;
+      if (maxd == null) continue;
+      const tickId = L.worst_tick_id ?? L.worstTickId;
+      const ts = L.worst_ts ?? L.worstTs;
+      const ms = tsToMs(ts);
+      if (tickId == null || ms == null) continue;
+
+      const cand = {
+        segline_id: L.id,
+        tick_id: Number(tickId),
+        ts_ms: ms,
+        max_abs_dist: Number(maxd),
+      };
+
+      if (!best || cand.max_abs_dist > best.max_abs_dist) best = cand;
+    }
+    state.nextBreak = best;
+  }
+
+  function normalizeForceTickInput(raw) {
+    if (!raw) return null;
+    const s = String(raw).trim();
+    if (!s) return null;
+    if (!/^\d+$/.test(s)) return null;
+    return Number(s);
+  }
+
+  function updateForceTickFromUI() {
+    const input = $("forceTickId");
+    const hint = $("forceHint");
+    const tickId = normalizeForceTickInput(input.value);
+
+    state.forceTickId = tickId;
+    state.forceTickMs = null;
+    state.forceHint = "";
+
+    if (!tickId) {
+      hint.textContent = "";
+      renderChart();
+      return;
+    }
+
+    // best-effort: find exact tick_id in sampled ticks
+    const ms = state.TickIdToMs.get(tickId);
+    if (ms != null) {
+      state.forceTickMs = ms;
+      state.forceHint = "preview";
+      hint.textContent = "preview";
+      renderChart();
+      return;
+    }
+
+    // if not found in sample, show guidance
+    state.forceHint = "not in sample";
+    hint.textContent = "not in sample (increase sample / zoom)";
+    renderChart();
+  }
+
   async function loadSegmList() {
-    // IMPORTANT: correct endpoint is /api/review/segms
     const segms = await fetchJSON("/api/review/segms");
 
     const sel = $("segmSelect");
     sel.innerHTML = "";
 
-    // API returns objects like:
-    // { segm_id, date, num_ticks, num_lines_active, global_max_abs_dist }
     for (const s of segms) {
       const segmId = s.segm_id ?? s.id ?? s.segmId;
       const date = s.date ?? (s.start_ts ? String(s.start_ts).slice(0, 10) : "");
       const opt = document.createElement("option");
       opt.value = String(segmId);
+
       const nLines = s.num_lines_active ?? 0;
       const worst = s.global_max_abs_dist;
       const worstTxt = (worst == null) ? "–" : Number(worst).toFixed(3);
@@ -77,13 +158,12 @@
       sel.appendChild(opt);
     }
 
-    // pick default segm
     try {
       const def = await fetchJSON("/api/review/default_segm");
       const defId = def.segm_id ?? def.segmId ?? def.id;
       if (defId != null) sel.value = String(defId);
     } catch {
-      // ignore, keep first
+      // ignore
     }
 
     state.segmId = parseInt(sel.value, 10);
@@ -91,7 +171,6 @@
 
   async function loadMeta() {
     if (!state.segmId) return;
-    // optional endpoint
     try {
       state.meta = await fetchJSON(`/api/review/segm/${state.segmId}/meta`);
     } catch {
@@ -102,28 +181,25 @@
   async function loadTicks() {
     if (!state.segmId) return;
 
-    // Backend route is path-param, not query-param.
-    // Also, this endpoint is a downsampler (you can lower/raise target_points as needed).
     const data = await fetchJSON(`/api/review/segm/${state.segmId}/ticks_sample?target_points=50000`);
-
-    // Shape:
-    //   { segm_id, stride, points:[{id, ts, ask, bid, mid, kal}, ...] }
-    // Tolerate older shapes too.
     const ticks = Array.isArray(data) ? data : (data.points ?? data.ticks ?? data.rows ?? []);
     state.ticks = ticks;
+
+    rebuildTickIdIndex();
+    updateForceTickFromUI(); // keep preview if user typed already
   }
 
   async function loadLines() {
     if (!state.segmId) return;
 
-    // Backend route is path-param, not query-param.
     const data = await fetchJSON(`/api/review/segm/${state.segmId}/lines`);
     const lines = Array.isArray(data) ? data : (data.lines ?? data.rows ?? []);
     state.lines = lines;
+
+    computeNextBreakFromLines();
   }
 
   function buildSeriesFromTicks() {
-    // ticks contain timestamp + bid/ask/mid/kal fields
     const pts = (field) => {
       const out = [];
       for (const t of state.ticks) {
@@ -199,10 +275,48 @@
         data: [[x1, Number(y1)], [x2, Number(y2)]],
         lineStyle: { width: 3, opacity: 0.95 },
         z: 10,
-        silent: true,
+        silent: false, // allow tooltip/click
       });
     }
     return out;
+  }
+
+  function buildMarkLines() {
+    // We attach markLines to the first available tick series (or an empty helper series).
+    const marks = [];
+
+    // Next break candidate (backend-provided)
+    if (state.nextBreak?.ts_ms != null) {
+      marks.push({
+        xAxis: state.nextBreak.ts_ms,
+        lineStyle: { type: "dashed", width: 2, opacity: 0.9 },
+        label: {
+          show: true,
+          formatter: `NEXT: line#${state.nextBreak.segline_id} tick#${state.nextBreak.tick_id} |dist|=${state.nextBreak.max_abs_dist.toFixed(3)}`,
+          position: "insideEndTop",
+        },
+      });
+    }
+
+    // Force preview
+    if (state.forceTickMs != null && state.forceTickId != null) {
+      marks.push({
+        xAxis: state.forceTickMs,
+        lineStyle: { type: "solid", width: 2, opacity: 0.95 },
+        label: {
+          show: true,
+          formatter: `FORCE tick#${state.forceTickId}`,
+          position: "insideEndBottom",
+        },
+      });
+    }
+
+    if (!marks.length) return null;
+
+    return {
+      symbol: "none",
+      data: marks,
+    };
   }
 
   function renderChart() {
@@ -212,10 +326,66 @@
     const lineSeries = buildSeriesFromLines();
     const allSeries = tickSeries.concat(lineSeries);
 
+    // Apply markLine to the first tick series if possible; otherwise create a helper series
+    const markLine = buildMarkLines();
+    if (markLine) {
+      if (allSeries.length) {
+        allSeries[0] = { ...allSeries[0], markLine };
+      } else {
+        allSeries.push({
+          name: "Marks",
+          type: "line",
+          data: [],
+          markLine,
+          silent: true,
+        });
+      }
+    }
+
     chart.setOption({
       animation: false,
       grid: { left: 50, right: 20, top: 25, bottom: 60 },
-      tooltip: { trigger: "axis", axisPointer: { type: "cross" } },
+
+      tooltip: {
+        trigger: "axis",
+        axisPointer: { type: "cross" },
+        formatter: (params) => {
+          // params is array for axis-trigger
+          if (!Array.isArray(params) || !params.length) return "";
+
+          // Find axis time
+          const axisValue = params[0].axisValue;
+          const d = new Date(axisValue);
+          const timeTxt = Number.isNaN(d.getTime()) ? String(axisValue) : d.toISOString().replace("T", " ").slice(0, 19);
+
+          const lines = [];
+          lines.push(`<div class="mono">${timeTxt}</div>`);
+
+          for (const p of params) {
+            const name = p.seriesName ?? "";
+            const val = (Array.isArray(p.data) ? p.data[1] : p.value);
+            if (val == null) continue;
+
+            if (name.startsWith("segLine#")) {
+              // show segLine id prominently
+              const id = name.slice("segLine#".length);
+              lines.push(`<div><b>${name}</b> (id=${id}) : <span class="mono">${Number(val).toFixed(3)}</span></div>`);
+            } else {
+              lines.push(`<div>${name}: <span class="mono">${Number(val).toFixed(3)}</span></div>`);
+            }
+          }
+
+          if (state.nextBreak) {
+            lines.push(`<div style="margin-top:6px;color:rgba(154,177,255,.9)">NEXT break: line#${state.nextBreak.segline_id} tick#${state.nextBreak.tick_id}</div>`);
+          }
+          if (state.forceTickId) {
+            lines.push(`<div style="color:rgba(154,177,255,.9)">FORCE tick: ${state.forceTickId} (${state.forceHint || "preview"})</div>`);
+          }
+
+          return lines.join("");
+        },
+      },
+
       xAxis: {
         type: "time",
         axisLabel: { hideOverlap: true },
@@ -238,7 +408,6 @@
     const body = $("linesBody");
     body.innerHTML = "";
 
-    // Sort by start time so it looks like the day flow
     const rows = [...state.lines].sort((a, b) => {
       const ta = tsToMs(a.start_ts ?? a.startTs ?? a.start_time) ?? 0;
       const tb = tsToMs(b.start_ts ?? b.startTs ?? b.start_time) ?? 0;
@@ -247,6 +416,7 @@
 
     for (const L of rows) {
       const tr = document.createElement("tr");
+      tr.style.cursor = "pointer";
 
       const id = L.id ?? "";
       const depth = L.depth ?? "";
@@ -267,6 +437,19 @@
         <td class="mono">${slope}</td>
         <td class="mono">${maxd}</td>
       `;
+
+      // Click row: if backend provided worst_tick_id, auto-fill force box
+      tr.addEventListener("click", () => {
+        const wtid = L.worst_tick_id ?? L.worstTickId;
+        if (wtid != null) {
+          $("forceTickId").value = String(wtid);
+          updateForceTickFromUI();
+        } else {
+          // fallback: no-op
+          $("forceHint").textContent = "no worst_tick_id in backend response";
+        }
+      });
+
       body.appendChild(tr);
     }
   }
@@ -275,7 +458,6 @@
     const el = $("meta");
     if (!el) return;
 
-    // If meta endpoint exists, show it; otherwise show quick derived
     const active = state.lines.length;
     let worst = null;
     for (const L of state.lines) {
@@ -285,12 +467,18 @@
     }
     const worstTxt = (worst == null) ? "–" : worst.toFixed(4);
 
-    if (state.meta) {
-      // keep short, but show something useful
-      const date = state.meta.date ?? state.meta.start_date ?? "";
-      el.textContent = `segm_id:${state.segmId} ${date} • active lines:${active} • worst:${worstTxt}`;
+    let nextTxt = "";
+    if (state.nextBreak) {
+      nextTxt = ` • next: line#${state.nextBreak.segline_id} tick#${state.nextBreak.tick_id}`;
     } else {
-      el.textContent = `segm_id:${state.segmId} • active lines:${active} • worst:${worstTxt}`;
+      nextTxt = ` • next: –`;
+    }
+
+    if (state.meta) {
+      const date = state.meta.date ?? state.meta.start_date ?? "";
+      el.textContent = `segm_id:${state.segmId} ${date} • active lines:${active} • worst:${worstTxt}${nextTxt}`;
+    } else {
+      el.textContent = `segm_id:${state.segmId} • active lines:${active} • worst:${worstTxt}${nextTxt}`;
     }
   }
 
@@ -307,14 +495,22 @@
     btn.disabled = true;
     const old = btn.textContent;
     btn.textContent = "Breaking…";
+
+    const forceTickId = state.forceTickId; // may be null
+
     try {
-      // backend expects payload for breakLine job
-      // keep it minimal: segm_id only
+      // IMPORTANT:
+      // Backend should accept optional force_tick_id.
+      // If absent/null -> break at default max|dist| tick.
       await fetchJSON("/api/review/breakLine", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ segm_id: state.segmId }),
+        body: JSON.stringify({
+          segm_id: state.segmId,
+          force_tick_id: forceTickId,
+        }),
       });
+
       await loadLines();
       renderChart();
       renderLinesTable();
@@ -348,18 +544,39 @@
     tLines.addEventListener("click", () => { state.showSegLines = !state.showSegLines; setToggle(tLines, state.showSegLines); renderChart(); });
 
     $("btnBreak").addEventListener("click", doBreak);
+
+    const forceInput = $("forceTickId");
+    forceInput.addEventListener("input", () => updateForceTickFromUI());
+    forceInput.addEventListener("change", () => updateForceTickFromUI());
   }
 
   function initChart() {
-    // expects echarts global already loaded
     chart = echarts.init($("chart"));
+
+    // Optional: clicking a segLine on chart can auto-fill force tick id (if backend provided it)
+    chart.on("click", (params) => {
+      const name = params?.seriesName ?? "";
+      if (!name.startsWith("segLine#")) return;
+
+      const idStr = name.slice("segLine#".length);
+      const id = Number(idStr);
+      const L = state.lines.find(x => Number(x.id) === id);
+      if (!L) return;
+
+      const wtid = L.worst_tick_id ?? L.worstTickId;
+      if (wtid != null) {
+        $("forceTickId").value = String(wtid);
+        updateForceTickFromUI();
+      } else {
+        $("forceHint").textContent = "no worst_tick_id in backend response";
+      }
+    });
   }
 
   async function init() {
     initChart();
     await loadSegmList();
 
-    // init toggle styles
     setToggle($("toggleMid"), state.showMid);
     setToggle($("toggleKal"), state.showKal);
     setToggle($("toggleBid"), state.showBid);
