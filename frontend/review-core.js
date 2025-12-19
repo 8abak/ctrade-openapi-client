@@ -293,6 +293,7 @@ const allSeries = tickSeries.concat(lineSeries);
 
   function renderLinesTable() {
     const body = $("linesBody");
+    if (!body) return;
     body.innerHTML = "";
 
     // Sort by start time so it looks like the day flow
@@ -352,7 +353,8 @@ const allSeries = tickSeries.concat(lineSeries);
   }
 
   async function reloadAll() {
-    $("meta").textContent = "Loading…";
+    const metaEl = $("meta");
+    if (metaEl) metaEl.textContent = "Loading…";
     await Promise.all([loadMeta(), loadTicks(), loadLines()]);
     renderChart();
     renderLinesTable();
