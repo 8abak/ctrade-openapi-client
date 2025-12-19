@@ -146,7 +146,12 @@ async function loadLines() {
         const x = tsToMs(t.timestamp ?? t.ts ?? t.time ?? t.t);
         const y = t[field];
         if (x == null || y == null) continue;
-        out.push([x, Number(y)]);
+        const tickId = t.id ?? t.tick_id ?? t.tickId;
+        if (tickId != null) {
+          out.push({ value: [x, Number(y)], tickId });
+        } else {
+          out.push([x, Number(y)]);
+        }
       }
       return out;
     };
@@ -355,7 +360,7 @@ const allSeries = tickSeries.concat(lineSeries);
   async function reloadAll() {
     const metaEl = $("meta");
     if (metaEl) metaEl.textContent = "Loading…";
-    await Promise.all([loadMeta(), loadTicks(), loadLines()]);
+    await Promise.all([loadMeta(), loadTicks(), loadLines(), loadNextBreak()]);
     renderChart();
     renderLinesTable();
     renderMeta();
