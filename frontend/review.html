@@ -2,171 +2,72 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Segmeling – Review</title>
   <style>
-    :root{
-      --bg:#071022;
-      --panel:#0b1730;
-      --panel2:#0a1430;
-      --text:#d6e1ff;
-      --muted:#9ab1ff;
-      --btn:#1b3bff;
-      --btn2:#1730c9;
-      --line:#1a2b55;
-      --input:#08142b;
-    }
-    html,body{height:100%; margin:0; background:var(--bg); color:var(--text); font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif;}
-    .topbar{
-      position:sticky; top:0; z-index:10;
+    body { margin: 0; background:#060a12; color:#d7e0ff; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+    .TopBar {
       display:flex; align-items:center; gap:10px;
-      padding:10px 12px;
-      background:linear-gradient(180deg, rgba(8,18,45,.98), rgba(8,18,45,.90));
-      border-bottom:1px solid var(--line);
+      padding:10px 12px; background:#0b1220; border-bottom:1px solid rgba(255,255,255,0.08);
+      position: sticky; top:0; z-index: 10;
     }
-    .topbar label{color:var(--muted); font-weight:600;}
-    select{
-      background:var(--panel); color:var(--text);
-      border:1px solid var(--line);
+    .TopBar .Group { display:flex; align-items:center; gap:8px; }
+    select, input {
+      background:#0f1a2e; color:#d7e0ff; border:1px solid rgba(255,255,255,0.12);
       padding:6px 8px; border-radius:8px; outline:none;
-      min-width:220px;
     }
-    .btn{
-      border:1px solid var(--line);
-      background:var(--panel);
-      color:var(--text);
-      padding:6px 10px;
-      border-radius:10px;
-      cursor:pointer;
-      user-select:none;
-      font-weight:700;
-      white-space:nowrap;
+    .Btn {
+      background:#0f1a2e; color:#d7e0ff; border:1px solid rgba(255,255,255,0.12);
+      padding:6px 10px; border-radius:10px; cursor:pointer; user-select:none;
     }
-    .btn:hover{filter:brightness(1.08);}
-    .btn.primary{
-      background:var(--btn);
-      border-color:rgba(255,255,255,.12);
-    }
-    .btn.primary:hover{background:var(--btn2);}
-    .btn.toggle.on{
-      background:#14306b;
-      border-color:#2a4aa0;
-      box-shadow:0 0 0 2px rgba(42,74,160,.25) inset;
-    }
-    .spacer{flex:1;}
-    .meta{
-      font-size:12px; color:var(--muted);
-      white-space:nowrap;
-      overflow:hidden;
-      text-overflow:ellipsis;
-      max-width:42vw;
-    }
-
-    .field{
-      display:flex; align-items:center; gap:8px;
-      padding:0 8px;
-      border:1px solid var(--line);
-      background:rgba(9,18,40,.35);
-      border-radius:10px;
-      height:34px;
-    }
-    .field label{
-      color:var(--muted);
-      font-weight:700;
-      font-size:12px;
-    }
-    .field input{
-      width:140px;
-      background:var(--input);
-      color:var(--text);
-      border:1px solid rgba(26,43,85,.65);
-      border-radius:8px;
-      padding:6px 8px;
-      outline:none;
-      font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;
-      font-size:12px;
-    }
-    .hint{
-      color:rgba(154,177,255,.85);
-      font-size:12px;
-      margin-left:2px;
-      white-space:nowrap;
-    }
-
-    #chartWrap{height:72vh; padding:10px 12px;}
-    #chart{height:100%; width:100%; border:1px solid var(--line); border-radius:12px; background:rgba(9,18,40,.55);}
-
-    #tableWrap{
-      height:26vh;
-      border-top:1px solid var(--line);
-      background:rgba(7,16,34,.85);
-      overflow:auto;
-    }
-    table{width:100%; border-collapse:collapse; font-size:13px;}
-    thead th{
-      position:sticky; top:0;
-      background:rgba(9,18,40,.95);
-      border-bottom:1px solid var(--line);
-      padding:8px 10px;
-      text-align:left;
-      color:var(--muted);
-    }
-    tbody td{
-      border-bottom:1px solid rgba(26,43,85,.45);
-      padding:8px 10px;
-    }
-    tbody tr:hover{background:rgba(20,48,107,.18);}
-    .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;}
+    .Btn.on { background:#1a2d55; border-color: rgba(255,255,255,0.22); }
+    .PrimaryBtn { background:#2a5cff; border:1px solid rgba(255,255,255,0.18); color:white; padding:6px 12px; border-radius:10px; cursor:pointer; }
+    .Hint { color: rgba(215,224,255,0.75); font-size: 12px; }
+    .ChartWrap { padding: 10px 12px 12px; }
+    #Chart { width: 100%; height: calc(100vh - 64px); border-radius: 14px; overflow:hidden; }
+    .ForceBox { display:flex; align-items:center; gap:6px; }
+    .ForceLabel { font-size:12px; color: rgba(215,224,255,0.75); }
+    .ForceInput { width: 160px; }
   </style>
 
   <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+  <script src="/src/frontend/review-core.js?v=1"></script>
 </head>
 
 <body>
-  <div class="topbar">
-    <label for="segmSelect">Segm:</label>
-    <select id="segmSelect"></select>
-
-    <button id="toggleMid" class="btn toggle on" type="button">Mid</button>
-    <button id="toggleKal" class="btn toggle on" type="button">Kal</button>
-    <button id="toggleBid" class="btn toggle" type="button">Bid</button>
-    <button id="toggleAsk" class="btn toggle" type="button">Ask</button>
-    <button id="toggleSegLines" class="btn toggle on" type="button">SegLines</button>
-
-    <div class="field" title="Optional: force the next break at a specific tick id. A vertical preview line will be shown.">
-      <label for="forceTickId">Force</label>
-      <input id="forceTickId" type="text" inputmode="numeric" placeholder="tick id" />
-      <span id="forceHint" class="hint"></span>
+  <div class="TopBar">
+    <div class="Group">
+      <div class="Hint">Segm:</div>
+      <select id="SegmSelect"></select>
     </div>
 
-    <button id="btnBreak" class="btn primary" type="button">Break</button>
+    <div class="Group">
+      <button id="BtnMid" class="Btn on">Mid</button>
+      <button id="BtnKal" class="Btn">Kal</button>
+      <button id="BtnBid" class="Btn">Bid</button>
+      <button id="BtnAsk" class="Btn">Ask</button>
+      <button id="BtnSegLines" class="Btn on">SegLines</button>
+    </div>
 
-    <div class="spacer"></div>
-    <div id="meta" class="meta">–</div>
+    <div class="Hint" id="NextBreakHint">next: —</div>
+
+    <div class="ForceBox">
+      <div class="ForceLabel">Force</div>
+      <input id="ForceTickId" class="ForceInput" placeholder="tick id (optional)" />
+    </div>
+
+    <button id="BtnBreak" class="PrimaryBtn">Break</button>
+
+    <div style="flex:1"></div>
+    <div class="Hint" id="MetaRight"></div>
   </div>
 
-  <div id="chartWrap">
-    <div id="chart"></div>
+  <div class="ChartWrap">
+    <div id="Chart"></div>
   </div>
 
-  <div id="tableWrap">
-    <table>
-      <thead>
-        <tr>
-          <th class="mono">ID</th>
-          <th>Depth</th>
-          <th>Iter</th>
-          <th class="mono">Start</th>
-          <th class="mono">End</th>
-          <th>#Ticks</th>
-          <th class="mono">Slope</th>
-          <th class="mono">Max|dist|</th>
-        </tr>
-      </thead>
-      <tbody id="linesBody"></tbody>
-    </table>
-  </div>
-
-  <script src="/review-core.js"></script>
+  <script>
+    window.ReviewInit && window.ReviewInit();
+  </script>
 </body>
 </html>
