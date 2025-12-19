@@ -28,6 +28,24 @@
     .ForceBox { display:flex; align-items:center; gap:6px; }
     .ForceLabel { font-size:12px; color: rgba(215,224,255,0.75); }
     .ForceInput { width: 160px; }
+    .LinesWrap { padding: 0 12px 16px; }
+    .LinesTable {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+      background: #0b1220;
+      border-radius: 12px;
+      overflow: hidden;
+    }
+    .LinesTable th, .LinesTable td {
+      padding: 6px 8px;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      text-align: left;
+      white-space: nowrap;
+    }
+    .LinesTable th { color: rgba(215,224,255,0.8); font-weight: 600; }
+    .LinesTable tbody tr:hover { background: rgba(255,255,255,0.03); }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
   </style>
 
   <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
@@ -64,6 +82,24 @@
 
   <div class="ChartWrap">
     <div id="chart"></div>
+  </div>
+
+  <div class="LinesWrap">
+    <table class="LinesTable" id="linesTable">
+      <thead>
+        <tr>
+          <th>id</th>
+          <th>depth</th>
+          <th>iter</th>
+          <th>start</th>
+          <th>end</th>
+          <th>ticks</th>
+          <th>slope</th>
+          <th>max_abs_dist</th>
+        </tr>
+      </thead>
+      <tbody id="linesBody"></tbody>
+    </table>
   </div>
 
   <script>
