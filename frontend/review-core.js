@@ -389,6 +389,8 @@ const allSeries = tickSeries.concat(lineSeries);
       renderChart();
       renderLinesTable();
       renderMeta();
+      const forceInput = $("ForceTickId");
+      if (forceInput) forceInput.value = "";
     } catch (e) {
       console.error(e);
       alert(String(e.message ?? e));

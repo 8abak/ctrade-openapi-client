@@ -656,6 +656,58 @@ def _assign_stream_distances(
 
     return updated
 
+
+def _assign_split_distances(
+    conn,
+    *,
+    segm_id: int,
+    old_line_id: int,
+    left_id: int,
+    right_id: int,
+    pivot_tick_id: int,
+    pivot_index: int,
+    n_old: int,
+    left_start_price: float,
+    left_end_price: float,
+    right_start_price: float,
+    right_end_price: float,
+    price_source: str,
+) -> Tuple[int, int]:
+    """
+    Assign distances for both child lines in one pass.
+    This avoids re-streaming after segline_id updates which would
+    corrupt parent index space for the right side.
+    """
+    updates: List[Tuple[int, int, float]] = []
+    left_updated = 0
+    right_updated = 0
+
+    i = -1
+    for segtick_row_id, tick_id, _ts, price in _iter_ticks_stream(
+        conn,
+        segm_id=segm_id,
+        old_line_id=old_line_id,
+        price_source=price_source,
+    ):
+        i += 1
+        if tick_id <= pivot_tick_id:
+            phat = _line_interp(left_start_price, left_end_price, 0, pivot_index, i)
+            updates.append((segtick_row_id, left_id, float(price - phat)))
+            left_updated += 1
+        else:
+            phat = _line_interp(right_start_price, right_end_price, pivot_index, n_old - 1, i)
+            updates.append((segtick_row_id, right_id, float(price - phat)))
+            right_updated += 1
+
+        if len(updates) >= BATCH_SIZE:
+            _bulk_update_segticks(conn, updates)
+            updates.clear()
+
+    if updates:
+        _bulk_update_segticks(conn, updates)
+
+    return left_updated, right_updated
+
 PIVOT_WINDOW = 25
 PIVOT_CANDIDATES = 150
 
@@ -765,33 +817,19 @@ def _split_mode(
     left_line = _get_line_endpoints(conn, left_id)
     right_line = _get_line_endpoints(conn, right_id)
 
-    # Assign distances for left side (<= pivot): interpolate on x=0..pivot_index
-    left_updated = _assign_stream_distances(
+    left_updated, right_updated = _assign_split_distances(
         conn,
         segm_id=segm_id,
         old_line_id=old_line_id,
-        new_line_id=left_id,
-        x1=0,
-        x2=pivot_index,
-        start_price=float(left_line["start_price"]),
-        end_price=float(left_line["end_price"]),
+        left_id=left_id,
+        right_id=right_id,
         pivot_tick_id=pivot_tick_id,
-        left_side=True,
-        price_source=price_source,
-    )
-
-    # Assign distances for right side (> pivot): interpolate on x=pivot_index..(n_old-1)
-    right_updated = _assign_stream_distances(
-        conn,
-        segm_id=segm_id,
-        old_line_id=old_line_id,
-        new_line_id=right_id,
-        x1=pivot_index,
-        x2=n_old - 1,
-        start_price=float(right_line["start_price"]),
-        end_price=float(right_line["end_price"]),
-        pivot_tick_id=pivot_tick_id,
-        left_side=False,
+        pivot_index=pivot_index,
+        n_old=n_old,
+        left_start_price=float(left_line["start_price"]),
+        left_end_price=float(left_line["end_price"]),
+        right_start_price=float(right_line["start_price"]),
+        right_end_price=float(right_line["end_price"]),
         price_source=price_source,
     )
 
