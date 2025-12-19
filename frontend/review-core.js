@@ -296,6 +296,22 @@ const allSeries = tickSeries.concat(lineSeries);
     }, { notMerge: true });
   }
 
+  function findNearestTickId(tsMs) {
+    if (!state.ticks.length || tsMs == null) return null;
+    let bestId = null;
+    let bestDist = null;
+    for (const t of state.ticks) {
+      const tMs = tsToMs(t.timestamp ?? t.ts ?? t.time ?? t.t);
+      if (tMs == null) continue;
+      const d = Math.abs(tMs - tsMs);
+      if (bestDist == null || d < bestDist) {
+        bestDist = d;
+        bestId = t.id ?? t.tick_id ?? t.tickId;
+      }
+    }
+    return bestId;
+  }
+
   function renderLinesTable() {
     const body = $("linesBody");
     if (!body) return;
@@ -425,6 +441,16 @@ const allSeries = tickSeries.concat(lineSeries);
   function initChart() {
     // expects echarts global already loaded
     chart = echarts.init($("chart"));
+    chart.on("click", (params) => {
+      if (!params || !params.seriesName) return;
+      if (!String(params.seriesName).startsWith("segLine#")) return;
+      const val = params.value;
+      const tsMs = Array.isArray(val) ? val[0] : null;
+      const tickId = findNearestTickId(tsMs);
+      if (tickId == null) return;
+      const input = $("ForceTickId");
+      if (input) input.value = String(tickId);
+    });
   }
 
   async function init() {
