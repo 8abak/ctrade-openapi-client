@@ -31,22 +31,22 @@
   </style>
 
   <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
-  <script src="/src/frontend/review-core.js?v=1"></script>
+  <script src="review-core.js?v=1"></script>
 </head>
 
 <body>
   <div class="TopBar">
     <div class="Group">
       <div class="Hint">Segm:</div>
-      <select id="SegmSelect"></select>
+      <select id="segmSelect"></select>
     </div>
 
     <div class="Group">
-      <button id="BtnMid" class="Btn on">Mid</button>
-      <button id="BtnKal" class="Btn">Kal</button>
-      <button id="BtnBid" class="Btn">Bid</button>
-      <button id="BtnAsk" class="Btn">Ask</button>
-      <button id="BtnSegLines" class="Btn on">SegLines</button>
+      <button id="toggleMid" class="Btn on">Mid</button>
+      <button id="toggleKal" class="Btn">Kal</button>
+      <button id="toggleBid" class="Btn">Bid</button>
+      <button id="toggleAsk" class="Btn">Ask</button>
+      <button id="toggleSegLines" class="Btn on">SegLines</button>
     </div>
 
     <div class="Hint" id="NextBreakHint">next: —</div>
@@ -56,14 +56,14 @@
       <input id="ForceTickId" class="ForceInput" placeholder="tick id (optional)" />
     </div>
 
-    <button id="BtnBreak" class="PrimaryBtn">Break</button>
+    <button id="btnBreak" class="PrimaryBtn">Break</button>
 
     <div style="flex:1"></div>
-    <div class="Hint" id="MetaRight"></div>
+    <div class="Hint" id="meta"></div>
   </div>
 
   <div class="ChartWrap">
-    <div id="Chart"></div>
+    <div id="chart"></div>
   </div>
 
   <script>
