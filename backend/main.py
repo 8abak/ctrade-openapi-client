@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 import psycopg2.extras
+from psycopg2.extras import RealDictCursor
 
 from backend.db import (
     get_conn,
@@ -1022,35 +1023,32 @@ def api_journal_write(payload: Dict[str, Any] = Body(...)):
 @app.get("/api/review/segm/{segm_id}/next_break")
 def api_review_next_break(segm_id: int):
     """
-    Return the worst (max ABS(dist)) segtick for this segm, including tick_id and timestamp in ms.
-
-    Used by review.html to draw a vertical 'next break' preview line.
+    Returns the worst (max ABS(dist)) segtick for this segm, with its tick_id and timestamp (ms).
+    Used by review.html to draw a vertical "next break" preview line.
     """
     conn = get_conn()
     try:
-        with dict_cur(conn) as cur:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
                 SELECT
-                    st.id                         AS segtick_id,
-                    st.tick_id                    AS tick_id,
-                    st.segline_id                 AS segline_id,
-                    st.dist                       AS dist,
+                    st.id         AS segtick_id,
+                    st.tick_id    AS tick_id,
+                    st.segline_id AS segline_id,
+                    st.dist       AS dist,
+                    ABS(st.dist)  AS abs_dist,
                     (EXTRACT(EPOCH FROM t.timestamp) * 1000)::bigint AS ts_ms
                 FROM public.segticks st
-                JOIN public.ticks t
-                  ON t.id = st.tick_id AND t.symbol = st.symbol
-                WHERE st.segm_id = %(segm_id)s
+                JOIN public.ticks t ON t.id = st.tick_id
+                WHERE st.segm_id = %s
                   AND st.dist IS NOT NULL
                 ORDER BY ABS(st.dist) DESC
                 LIMIT 1
                 """,
-                {"segm_id": segm_id},
+                (segm_id,),
             )
             row = cur.fetchone()
-            if not row:
-                return {}
-            return row
+            return row or {}
     finally:
         conn.close()
 
