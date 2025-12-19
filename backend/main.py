@@ -970,17 +970,19 @@ def api_review_lines(segm_id: int):
 def api_review_breakline(payload: Dict[str, Any] = Body(...)):
     segm_id = payload.get("segm_id", None)
     segLine_id = payload.get("segLine_id", None)
+    tick_id = payload.get("tick_id", None)
 
     if segm_id is None:
         raise HTTPException(status_code=400, detail="segm_id required")
 
     segm_id = int(segm_id)
     segLine_id = int(segLine_id) if segLine_id is not None else None
+    pivot_tick_id = int(tick_id) if tick_id is not None else None
 
     # Import locally to avoid changing top-of-file imports
     from jobs.breakLine import break_line
 
-    result = break_line(segm_id=segm_id, segLine_id=segLine_id)
+    result = break_line(segm_id=segm_id, segLine_id=segLine_id, pivot_tick_id=pivot_tick_id)
     if isinstance(result, dict) and "error" in result:
         return {"result": result, "meta": {"segm_id": segm_id}}
 

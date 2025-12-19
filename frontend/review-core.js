@@ -372,12 +372,17 @@ const allSeries = tickSeries.concat(lineSeries);
     const old = btn.textContent;
     btn.textContent = "Breaking…";
     try {
+      const forceVal = $("ForceTickId") ? $("ForceTickId").value.trim() : "";
+      const forceTickId = forceVal ? parseInt(forceVal, 10) : null;
+      const payload = { segm_id: state.segmId };
+      if (Number.isFinite(forceTickId) && forceTickId > 0) {
+        payload.tick_id = forceTickId;
+      }
       // backend expects payload for breakLine job
-      // keep it minimal: segm_id only
       await fetchJSON("/api/review/breakLine", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ segm_id: state.segmId }),
+        body: JSON.stringify(payload),
       });
       await loadLines();
     await loadNextBreak();

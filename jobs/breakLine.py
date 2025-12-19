@@ -60,6 +60,7 @@ def break_line(
     segm_id: int,
     segLine_id: Optional[int] = None,
     *,
+    pivot_tick_id: Optional[int] = None,
     price_source: str = "mid",  # "mid" | "kal"
 ) -> Dict[str, Any]:
     """
@@ -92,7 +93,13 @@ def break_line(
         if n_lines == 0:
             out = _init_mode(conn, segm_id, price_source=price_source)
         else:
-            out = _split_mode(conn, segm_id, segLine_id, price_source=price_source)
+            out = _split_mode(
+                conn,
+                segm_id,
+                segLine_id,
+                pivot_tick_id=pivot_tick_id,
+                price_source=price_source,
+            )
 
         conn.commit()
         _journal(f"breakLine finished segm_id={segm_id} ok=true action={out.get('action')}")
@@ -473,6 +480,38 @@ def _pick_pivot_tick(conn, segm_id: int, line_id: int, *, price_source: str) -> 
         return cur.fetchone()
 
 
+def _pick_line_by_tick(conn, segm_id: int, tick_id: int) -> Optional[int]:
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            SELECT st.segline_id AS segline_id
+            FROM public.segticks st
+            JOIN public.seglines l ON l.id = st.segline_id
+            WHERE st.segm_id=%s
+              AND st.tick_id=%s
+              AND l.is_active=true
+            LIMIT 1
+            """,
+            (segm_id, tick_id),
+        )
+        r = cur.fetchone()
+        return int(r["segline_id"]) if r and r.get("segline_id") is not None else None
+
+
+def _get_pivot_row(conn, segm_id: int, line_id: int, tick_id: int) -> Optional[Dict[str, Any]]:
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            SELECT st.tick_id AS tick_id, t.timestamp AS ts, st.dist AS dist
+            FROM public.segticks st
+            JOIN public.ticks t ON t.id = st.tick_id
+            WHERE st.segm_id=%s AND st.segline_id=%s AND st.tick_id=%s
+            """,
+            (segm_id, line_id, tick_id),
+        )
+        return cur.fetchone()
+
+
 
 def _get_tick_price(conn, tick_id: int, *, price_source: str) -> Tuple[datetime, float]:
     price_expr = _price_sql(price_source)
@@ -664,14 +703,32 @@ def _is_local_extremum(conn, segm_id: int, line_id: int, tick_id: int, *, price_
     return (center_price == max(prices), center_price == min(prices))
 
 
-def _split_mode(conn, segm_id: int, segLine_id: Optional[int], *, price_source: str) -> Dict[str, Any]:
+def _split_mode(
+    conn,
+    segm_id: int,
+    segLine_id: Optional[int],
+    *,
+    pivot_tick_id: Optional[int],
+    price_source: str,
+) -> Dict[str, Any]:
+    if pivot_tick_id is not None:
+        pivot_tick_id = int(pivot_tick_id)
+
+    if segLine_id is None and pivot_tick_id is not None:
+        segLine_id = _pick_line_by_tick(conn, segm_id, pivot_tick_id)
+        if segLine_id is None:
+            return {"error": "pivot tick not found in active segline", "segm_id": segm_id}
+
     line = _pick_line_to_split(conn, segm_id, segLine_id)
     if line is None:
         return {"error": "no active segLines to split", "segm_id": segm_id}
 
     old_line_id = int(line["id"])
 
-    pivot = _pick_pivot_tick(conn, segm_id, old_line_id)
+    if pivot_tick_id is not None:
+        pivot = _get_pivot_row(conn, segm_id, old_line_id, pivot_tick_id)
+    else:
+        pivot = _pick_pivot_tick(conn, segm_id, old_line_id, price_source=price_source)
     if pivot is None or pivot["tick_id"] is None:
         return {"error": "no pivot tick found for segLine", "segm_id": segm_id, "segLine_id": old_line_id}
 
