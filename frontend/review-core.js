@@ -119,7 +119,7 @@
   
 async function loadNextBreak() {
   state.nextBreak = null;
-  const segmId = state.currentSegmId;
+  const segmId = state.segmId;
   if (!segmId) return;
   try {
     const nb = await fetchJSON(`/api/review/segm/${segmId}/next_break`);
