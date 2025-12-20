@@ -277,6 +277,11 @@
     el.textContent = `${segm}${label}${lineInfo}${tickInfo}`;
   }
 
+  function showError(msg) {
+    const el = $("meta");
+    if (el) el.textContent = String(msg || "Error");
+  }
+
   async function loadWindow() {
     const segmId = state.segmId;
     const lineId = parseInt($("lineSelect").value, 10);
@@ -325,15 +330,26 @@
     $("segmSelect").addEventListener("change", async () => {
       state.segmId = parseInt($("segmSelect").value, 10);
       await loadLinesForSegm();
-      await loadWindow();
+      try {
+        await loadWindow();
+      } catch (e) {
+        console.error(e);
+        showError(e.message ?? String(e));
+      }
     });
 
     $("lineSelect").addEventListener("change", () => {
-      loadWindow().catch((e) => alert(String(e.message ?? e)));
+      loadWindow().catch((e) => {
+        console.error(e);
+        showError(e.message ?? String(e));
+      });
     });
 
     $("btnLoad").addEventListener("click", () => {
-      loadWindow().catch((e) => alert(String(e.message ?? e)));
+      loadWindow().catch((e) => {
+        console.error(e);
+        showError(e.message ?? String(e));
+      });
     });
 
     $("btnPrev").addEventListener("click", () => moveLine(-1));
@@ -367,8 +383,15 @@
 
     await loadSegmList();
     await loadLinesForSegm();
+    const lineCount = $("lineCount");
+    if (lineCount && !lineCount.value) lineCount.value = "1";
     bindUI();
-    await loadWindow();
+    try {
+      await loadWindow();
+    } catch (e) {
+      console.error(e);
+      showError(e.message ?? String(e));
+    }
   }
 
   document.addEventListener("DOMContentLoaded", () => {
@@ -376,7 +399,6 @@
       console.error(e);
       const el = $("meta");
       if (el) el.textContent = "Init failed: " + (e.message ?? String(e));
-      alert("Init failed: " + (e.message ?? String(e)));
     });
   });
 })();

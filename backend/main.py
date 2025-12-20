@@ -1101,7 +1101,7 @@ def api_regime_lines(segm_id: int):
 def api_regime_window(payload: Dict[str, Any] = Body(...)):
     segm_id = payload.get("segm_id", None)
     start_segline_id = payload.get("start_segline_id", None)
-    line_count = payload.get("line_count", 3)
+    line_count = payload.get("line_count", 1)
 
     if segm_id is None or start_segline_id is None:
         raise HTTPException(status_code=400, detail="segm_id and start_segline_id required")
