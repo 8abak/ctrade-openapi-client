@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Segmeling - Regime</title>
+  <style>
+    body { margin: 0; background:#060a12; color:#d7e0ff; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+    .TopBar {
+      display:flex; align-items:center; gap:10px; flex-wrap: wrap;
+      padding:10px 12px; background:#0b1220; border-bottom:1px solid rgba(255,255,255,0.08);
+      position: sticky; top:0; z-index: 10;
+    }
+    .TopBar .Group { display:flex; align-items:center; gap:8px; }
+    select, input {
+      background:#0f1a2e; color:#d7e0ff; border:1px solid rgba(255,255,255,0.12);
+      padding:6px 8px; border-radius:8px; outline:none;
+    }
+    input[type="number"] { width: 90px; }
+    .Btn {
+      background:#0f1a2e; color:#d7e0ff; border:1px solid rgba(255,255,255,0.12);
+      padding:6px 10px; border-radius:10px; cursor:pointer; user-select:none;
+    }
+    .Btn.on { background:#1a2d55; border-color: rgba(255,255,255,0.22); }
+    .PrimaryBtn { background:#2a5cff; border:1px solid rgba(255,255,255,0.18); color:white; padding:6px 12px; border-radius:10px; cursor:pointer; }
+    .Hint { color: rgba(215,224,255,0.75); font-size: 12px; }
+    .ChartWrap { padding: 10px 12px 12px; }
+    #chart { width: 100%; height: calc(100vh - 96px); border-radius: 14px; overflow:hidden; }
+  </style>
+
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+  <script src="regime-core.js?v=1"></script>
+</head>
+
+<body>
+  <div class="TopBar">
+    <div class="Group">
+      <div class="Hint">Segm:</div>
+      <select id="segmSelect"></select>
+    </div>
+
+    <div class="Group">
+      <div class="Hint">Start Line:</div>
+      <select id="lineSelect"></select>
+    </div>
+
+    <div class="Group">
+      <div class="Hint">LineCount:</div>
+      <input id="lineCount" type="number" min="1" max="50" value="3" />
+    </div>
+
+    <div class="Group">
+      <button id="btnPrev" class="Btn">Prev</button>
+      <button id="btnNext" class="Btn">Next</button>
+      <button id="btnLoad" class="PrimaryBtn">Load</button>
+    </div>
+
+    <div class="Group">
+      <button id="toggleMid" class="Btn on">Mid</button>
+      <button id="toggleKal" class="Btn on">Kal</button>
+      <button id="toggleBid" class="Btn">Bid</button>
+      <button id="toggleAsk" class="Btn">Ask</button>
+      <button id="toggleSegLines" class="Btn on">SegLines</button>
+    </div>
+
+    <div style="flex:1"></div>
+    <div class="Hint" id="meta"></div>
+  </div>
+
+  <div class="ChartWrap">
+    <div id="chart"></div>
+  </div>
+
+  <script>
+    window.RegimeInit && window.RegimeInit();
+  </script>
+</body>
+</html>
