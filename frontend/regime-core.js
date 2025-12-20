@@ -124,43 +124,25 @@
     if (!state.showSegLines || !state.rangeLines.length) return [];
 
     const selId = selectedId != null ? Number(selectedId) : null;
-    const other = [];
-    const primary = [];
-
-    for (const ln of state.rangeLines) {
-      const a = [Number(ln.start_tick_id), Number(ln.start_price)];
-      const b = [Number(ln.end_tick_id), Number(ln.end_price)];
-      const target = (selId != null && Number(ln.id) === selId) ? primary : other;
-      target.push(a);
-      target.push(b);
-      target.push([null, null]);
-    }
 
     const series = [];
-    if (other.length) {
+    for (const ln of state.rangeLines) {
+      const isPrimary = selId != null && Number(ln.id) === selId;
+      const a = [Number(ln.start_tick_id), Number(ln.start_price)];
+      const b = [Number(ln.end_tick_id), Number(ln.end_price)];
+      if (!Number.isFinite(a[0]) || !Number.isFinite(b[0])) continue;
+
       series.push({
-        id: "seglines_other",
-        name: "SegLines",
+        id: `segline_${ln.id}`,
+        name: isPrimary ? "SegLine (primary)" : "SegLine",
         type: "line",
-        data: other,
+        data: [a, b],
         showSymbol: false,
-        connectNulls: false,
-        lineStyle: { width: 2, opacity: 0.7 },
+        lineStyle: isPrimary
+          ? { width: 4, opacity: 0.95, color: "#ffd54a" }
+          : { width: 2, opacity: 0.65 },
         silent: true,
-        z: 5,
-      });
-    }
-    if (primary.length) {
-      series.push({
-        id: "seglines_primary",
-        name: "SegLine (primary)",
-        type: "line",
-        data: primary,
-        showSymbol: false,
-        connectNulls: false,
-        lineStyle: { width: 4, opacity: 0.95, color: "#ffd54a" },
-        silent: true,
-        z: 6,
+        z: isPrimary ? 6 : 5,
       });
     }
     return series;
@@ -216,6 +198,15 @@
     const segLineSeries = buildSegLineSeries(selId);
     const allSeries = series.concat(segLineSeries);
 
+    let minX = null;
+    let maxX = null;
+    for (const t of state.ticks) {
+      const v = Number(t.id);
+      if (!Number.isFinite(v)) continue;
+      if (minX == null || v < minX) minX = v;
+      if (maxX == null || v > maxX) maxX = v;
+    }
+
     chart.setOption({
       animation: false,
       grid: { left: 55, right: 25, top: 20, bottom: 60 },
@@ -250,6 +241,8 @@
       },
       xAxis: {
         type: "value",
+        min: minX != null ? minX : null,
+        max: maxX != null ? maxX : null,
         axisLabel: { formatter: (v) => Math.round(v) },
         splitLine: { show: true, lineStyle: { color: "rgba(26,43,85,35)" } },
       },
