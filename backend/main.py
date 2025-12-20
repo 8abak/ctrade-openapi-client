@@ -995,6 +995,265 @@ def api_review_breakline(payload: Dict[str, Any] = Body(...)):
     return {"result": result, "meta": meta}
 
 
+# ------------------------------ Regime API ------------------------------
+# Full-window regime viewer (no lazy loading).
+
+REGIME_MAX_LINES = 50
+REGIME_MAX_TICKS = 300_000
+
+
+def _segm_label(conn, segm_id: int) -> Optional[str]:
+    with dict_cur(conn) as cur:
+        cur.execute(
+            "SELECT (start_ts::date)::text AS date FROM public.segms WHERE id=%s",
+            (int(segm_id),),
+        )
+        row = cur.fetchone()
+        return row["date"] if row else None
+
+
+@app.get("/api/regime/segms")
+def api_regime_segms(limit: int = Query(200, ge=1, le=2000)):
+    conn = get_conn()
+    try:
+        with dict_cur(conn) as cur:
+            cur.execute(
+                """
+                SELECT s.id AS segm_id,
+                       (s.start_ts::date)::text AS date
+                FROM public.segms s
+                WHERE EXISTS (
+                  SELECT 1 FROM public.seglines l
+                  WHERE l.segm_id = s.id AND l.is_active = true
+                )
+                ORDER BY s.id DESC
+                LIMIT %s
+                """,
+                (int(limit),),
+            )
+            rows = cur.fetchall()
+
+        return [
+            {"segm_id": int(r["segm_id"]), "date": r["date"]}
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+@app.get("/api/regime/segm/{segm_id}/lines")
+def api_regime_lines(segm_id: int):
+    conn = get_conn()
+    try:
+        with dict_cur(conn) as cur:
+            cur.execute(
+                """
+                SELECT id, parent_id, depth, iteration,
+                       start_tick_id, end_tick_id,
+                       start_ts, end_ts,
+                       start_price, end_price,
+                       is_active
+                FROM public.seglines
+                WHERE segm_id=%s AND is_active=true
+                ORDER BY start_tick_id ASC, id ASC
+                """,
+                (int(segm_id),),
+            )
+            rows = cur.fetchall()
+
+        out: List[Dict[str, Any]] = []
+        for idx, r in enumerate(rows):
+            start_tick_id = int(r["start_tick_id"])
+            end_tick_id = int(r["end_tick_id"])
+            start_price = float(r["start_price"])
+            end_price = float(r["end_price"])
+
+            slope = None
+            intercept = None
+            if end_tick_id != start_tick_id:
+                slope = (end_price - start_price) / (end_tick_id - start_tick_id)
+                intercept = start_price - slope * start_tick_id
+
+            out.append(
+                {
+                    "id": int(r["id"]),
+                    "parent_id": int(r["parent_id"]) if r["parent_id"] is not None else None,
+                    "depth": int(r["depth"]) if r["depth"] is not None else None,
+                    "iteration": int(r["iteration"]) if r["iteration"] is not None else None,
+                    "start_tick_id": start_tick_id,
+                    "end_tick_id": end_tick_id,
+                    "start_ts": r["start_ts"].isoformat() if r["start_ts"] else None,
+                    "end_ts": r["end_ts"].isoformat() if r["end_ts"] else None,
+                    "start_price": start_price,
+                    "end_price": end_price,
+                    "slope": slope,
+                    "intercept": intercept,
+                    "order_index": idx,
+                }
+            )
+
+        return {"segm_id": int(segm_id), "lines": out}
+    finally:
+        conn.close()
+
+
+@app.post("/api/regime/window")
+def api_regime_window(payload: Dict[str, Any] = Body(...)):
+    segm_id = payload.get("segm_id", None)
+    start_segline_id = payload.get("start_segline_id", None)
+    line_count = payload.get("line_count", 3)
+
+    if segm_id is None or start_segline_id is None:
+        raise HTTPException(status_code=400, detail="segm_id and start_segline_id required")
+
+    segm_id = int(segm_id)
+    start_segline_id = int(start_segline_id)
+    line_count = int(line_count)
+
+    if line_count < 1:
+        raise HTTPException(status_code=400, detail="line_count must be >= 1")
+    if line_count > REGIME_MAX_LINES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"line_count too large (max {REGIME_MAX_LINES})",
+        )
+
+    conn = get_conn()
+    try:
+        with dict_cur(conn) as cur:
+            cur.execute(
+                """
+                SELECT id,
+                       start_tick_id, end_tick_id,
+                       start_ts, end_ts,
+                       start_price, end_price
+                FROM public.seglines
+                WHERE segm_id=%s AND is_active=true
+                ORDER BY start_tick_id ASC, id ASC
+                """,
+                (segm_id,),
+            )
+            lines = cur.fetchall()
+
+        if not lines:
+            raise HTTPException(status_code=404, detail="no seglines for segm_id")
+
+        start_index = None
+        for i, ln in enumerate(lines):
+            if int(ln["id"]) == start_segline_id:
+                start_index = i
+                break
+        if start_index is None:
+            raise HTTPException(status_code=400, detail="start_segline_id not found for segm")
+
+        end_index = min(start_index + line_count - 1, len(lines) - 1)
+
+        start_tick_id = int(lines[start_index]["start_tick_id"])
+        end_tick_id = int(lines[end_index]["end_tick_id"])
+
+        with dict_cur(conn) as cur:
+            cur.execute(
+                "SELECT COUNT(*)::int AS n FROM public.ticks WHERE id BETWEEN %s AND %s",
+                (start_tick_id, end_tick_id),
+            )
+            n_ticks = int(cur.fetchone()["n"])
+
+        if n_ticks > REGIME_MAX_TICKS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"tick range too large ({n_ticks} > {REGIME_MAX_TICKS}); reduce line_count",
+            )
+
+        ts_col, mid_expr, (has_bid, has_ask) = _ts_mid_cols(conn)
+        has_kal = _ticks_has_kal(conn)
+
+        bid_sel = ", bid" if has_bid else ""
+        ask_sel = ", ask" if has_ask else ""
+        kal_sel = ", kal" if has_kal else ""
+
+        with dict_cur(conn) as cur:
+            cur.execute(
+                f"""
+                SELECT id,
+                       {ts_col}   AS ts,
+                       {mid_expr} AS mid
+                       {kal_sel}{bid_sel}{ask_sel}
+                FROM public.ticks
+                WHERE id BETWEEN %s AND %s
+                ORDER BY id ASC
+                """,
+                (start_tick_id, end_tick_id),
+            )
+            ticks = cur.fetchall()
+
+        # normalize ticks
+        for r in ticks:
+            if isinstance(r.get("mid"), Decimal):
+                r["mid"] = float(r["mid"])
+
+            if has_kal:
+                if isinstance(r.get("kal"), Decimal):
+                    r["kal"] = float(r["kal"])
+            else:
+                r["kal"] = r.get("mid")
+
+            if has_bid and isinstance(r.get("bid"), Decimal):
+                r["bid"] = float(r["bid"])
+            if has_ask and isinstance(r.get("ask"), Decimal):
+                r["ask"] = float(r["ask"])
+
+            ts = r.get("ts")
+            if isinstance(ts, (datetime, date)):
+                r["ts"] = ts.isoformat()
+
+        # slice segLines for response
+        out_lines: List[Dict[str, Any]] = []
+        for idx, ln in enumerate(lines[start_index : end_index + 1]):
+            s_tid = int(ln["start_tick_id"])
+            e_tid = int(ln["end_tick_id"])
+            s_price = float(ln["start_price"])
+            e_price = float(ln["end_price"])
+
+            slope = None
+            intercept = None
+            if e_tid != s_tid:
+                slope = (e_price - s_price) / (e_tid - s_tid)
+                intercept = s_price - slope * s_tid
+
+            out_lines.append(
+                {
+                    "id": int(ln["id"]),
+                    "start_tick_id": s_tid,
+                    "end_tick_id": e_tid,
+                    "start_ts": ln["start_ts"].isoformat() if ln["start_ts"] else None,
+                    "end_ts": ln["end_ts"].isoformat() if ln["end_ts"] else None,
+                    "start_price": s_price,
+                    "end_price": e_price,
+                    "slope": slope,
+                    "intercept": intercept,
+                    "order_index": start_index + idx,
+                }
+            )
+
+        label = _segm_label(conn, segm_id)
+
+        return {
+            "segm": {"segm_id": segm_id, "label": label},
+            "range": {
+                "start_segline_id": int(lines[start_index]["id"]),
+                "end_segline_id": int(lines[end_index]["id"]),
+                "line_count": int(end_index - start_index + 1),
+                "start_tick_id": start_tick_id,
+                "end_tick_id": end_tick_id,
+                "tick_count": n_ticks,
+            },
+            "ticks": _jsonable(ticks),
+            "seglines": out_lines,
+        }
+    finally:
+        conn.close()
+
+
 # ------------------------------ Journal API ------------------------------
 # Adds a tiny append-only text journal under /src/journal/YYYY-MM-DD.txt
 # nginx serves /src, so it becomes reachable at:
