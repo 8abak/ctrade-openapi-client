@@ -1097,6 +1097,70 @@ def api_regime_lines(segm_id: int):
         conn.close()
 
 
+@app.get("/api/regime/legs")
+def api_regime_legs(segm_id: int = Query(..., ge=1)):
+    conn = get_conn()
+    try:
+        if not _table_exists(conn, "legs"):
+            return {"segm_id": int(segm_id), "legs": []}
+
+        with dict_cur(conn) as cur:
+            cur.execute(
+                """
+                SELECT
+                    segline_id,
+                    direction,
+                    a_tick_id, b_tick_id, c_tick_id, d_tick_id,
+                    a_mid, a_kal, b_mid, b_kal, c_mid, c_kal, d_mid, d_kal,
+                    ab_ticks, bc_ticks, cd_ticks,
+                    ab_move, bc_move, cd_move, bc_retrace_pct,
+                    has_b, has_c, has_d,
+                    reason
+                FROM public.legs
+                WHERE segm_id=%s
+                ORDER BY segline_id ASC
+                """,
+                (int(segm_id),),
+            )
+            rows = cur.fetchall()
+
+        out = []
+        for r in rows:
+            out.append(
+                {
+                    "segline_id": int(r["segline_id"]),
+                    "direction": int(r["direction"]) if r["direction"] is not None else None,
+                    "a_tick_id": int(r["a_tick_id"]) if r["a_tick_id"] is not None else None,
+                    "b_tick_id": int(r["b_tick_id"]) if r["b_tick_id"] is not None else None,
+                    "c_tick_id": int(r["c_tick_id"]) if r["c_tick_id"] is not None else None,
+                    "d_tick_id": int(r["d_tick_id"]) if r["d_tick_id"] is not None else None,
+                    "a_mid": float(r["a_mid"]) if r["a_mid"] is not None else None,
+                    "a_kal": float(r["a_kal"]) if r["a_kal"] is not None else None,
+                    "b_mid": float(r["b_mid"]) if r["b_mid"] is not None else None,
+                    "b_kal": float(r["b_kal"]) if r["b_kal"] is not None else None,
+                    "c_mid": float(r["c_mid"]) if r["c_mid"] is not None else None,
+                    "c_kal": float(r["c_kal"]) if r["c_kal"] is not None else None,
+                    "d_mid": float(r["d_mid"]) if r["d_mid"] is not None else None,
+                    "d_kal": float(r["d_kal"]) if r["d_kal"] is not None else None,
+                    "ab_ticks": int(r["ab_ticks"]) if r["ab_ticks"] is not None else None,
+                    "bc_ticks": int(r["bc_ticks"]) if r["bc_ticks"] is not None else None,
+                    "cd_ticks": int(r["cd_ticks"]) if r["cd_ticks"] is not None else None,
+                    "ab_move": float(r["ab_move"]) if r["ab_move"] is not None else None,
+                    "bc_move": float(r["bc_move"]) if r["bc_move"] is not None else None,
+                    "cd_move": float(r["cd_move"]) if r["cd_move"] is not None else None,
+                    "bc_retrace_pct": float(r["bc_retrace_pct"]) if r["bc_retrace_pct"] is not None else None,
+                    "has_b": bool(r["has_b"]),
+                    "has_c": bool(r["has_c"]),
+                    "has_d": bool(r["has_d"]),
+                    "reason": r["reason"],
+                }
+            )
+
+        return {"segm_id": int(segm_id), "legs": out}
+    finally:
+        conn.close()
+
+
 @app.post("/api/regime/window")
 def api_regime_window(payload: Dict[str, Any] = Body(...)):
     segm_id = payload.get("segm_id", None)

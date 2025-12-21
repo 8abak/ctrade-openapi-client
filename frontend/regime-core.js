@@ -15,10 +15,13 @@
     showBid: false,
     showAsk: false,
     showSegLines: true,
+    showLegs: true,
   };
 
   let chart = null;
   let tickById = new Map();
+  let legsByLine = new Map();
+  let zoomPending = false;
 
   function $(id) { return document.getElementById(id); }
 
@@ -109,15 +112,52 @@
     }
   }
 
-  function buildTickData(field) {
-    const out = [];
-    for (const t of state.ticks) {
-      const x = Number(t.id);
-      const y = t[field];
-      if (!Number.isFinite(x) || y == null) continue;
-      out.push([x, Number(y)]);
+  async function loadLegsForSegm() {
+    if (!state.segmId) return;
+    try {
+      const data = await fetchJSON(`/api/regime/legs?segm_id=${state.segmId}`);
+      const legs = Array.isArray(data) ? data : (data.legs ?? []);
+      legsByLine = new Map();
+      for (const l of legs) {
+        const id = Number(l.segline_id ?? l.segLine_id);
+        if (!Number.isFinite(id)) continue;
+        legsByLine.set(id, l);
+      }
+    } catch (e) {
+      console.warn("legs load failed", e);
+      legsByLine = new Map();
     }
-    return out;
+  }
+
+  function buildTickCache() {
+    state.tickIds = [];
+    state.tickSeries = { mid: [], kal: [], bid: [], ask: [] };
+    state.tickValues = { mid: [], kal: [], bid: [], ask: [] };
+
+    for (const t of state.ticks) {
+      const id = Number(t.id ?? t.tick_id);
+      if (!Number.isFinite(id)) continue;
+      state.tickIds.push(id);
+
+      const mid = t.mid != null ? Number(t.mid) : null;
+      const kal = t.kal != null ? Number(t.kal) : null;
+      const bid = t.bid != null ? Number(t.bid) : null;
+      const ask = t.ask != null ? Number(t.ask) : null;
+
+      state.tickValues.mid.push(Number.isFinite(mid) ? mid : null);
+      state.tickValues.kal.push(Number.isFinite(kal) ? kal : null);
+      state.tickValues.bid.push(Number.isFinite(bid) ? bid : null);
+      state.tickValues.ask.push(Number.isFinite(ask) ? ask : null);
+
+      if (Number.isFinite(mid)) state.tickSeries.mid.push([id, mid]);
+      if (Number.isFinite(kal)) state.tickSeries.kal.push([id, kal]);
+      if (Number.isFinite(bid)) state.tickSeries.bid.push([id, bid]);
+      if (Number.isFinite(ask)) state.tickSeries.ask.push([id, ask]);
+    }
+  }
+
+  function buildTickData(field) {
+    return (state.tickSeries && state.tickSeries[field]) ? state.tickSeries[field] : [];
   }
 
   function buildSegLineSeries(selectedId) {
@@ -148,6 +188,213 @@
     return series;
   }
 
+  function buildLegSeries() {
+    if (!state.showLegs || !state.rangeLines.length || !legsByLine.size) return [];
+
+    const out = [];
+    const addSeg = (segLineId, label, p1, p2) => {
+      if (!p1 || !p2) return;
+      if (!Number.isFinite(p1[0]) || !Number.isFinite(p2[0])) return;
+      if (!Number.isFinite(p1[1]) || !Number.isFinite(p2[1])) return;
+      out.push({
+        id: `leg_${segLineId}_${label}`,
+        name: "Legs",
+        type: "line",
+        data: [p1, p2],
+        showSymbol: false,
+        lineStyle: { width: 1, opacity: 0.8, type: "dashed", color: "#6bd4ff" },
+        silent: true,
+        z: 4,
+      });
+    };
+
+    for (const ln of state.rangeLines) {
+      const leg = legsByLine.get(Number(ln.id));
+      if (!leg || !leg.has_b || !leg.has_c) continue;
+
+      const a = [Number(leg.a_tick_id), Number(leg.a_kal)];
+      const b = [Number(leg.b_tick_id), Number(leg.b_kal)];
+      const c = [Number(leg.c_tick_id), Number(leg.c_kal)];
+      const d = leg.has_d ? [Number(leg.d_tick_id), Number(leg.d_kal)] : null;
+
+      addSeg(ln.id, "ab", a, b);
+      addSeg(ln.id, "bc", b, c);
+      if (d) addSeg(ln.id, "cd", c, d);
+    }
+
+    return out;
+  }
+
+  function lowerBound(arr, target) {
+    let lo = 0;
+    let hi = arr.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (arr[mid] < target) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  }
+
+  function upperBound(arr, target) {
+    let lo = 0;
+    let hi = arr.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (arr[mid] <= target) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  }
+
+  function getZoomWindow() {
+    if (!chart || !state.tickIds || !state.tickIds.length) return null;
+    const opt = chart.getOption();
+    const dz = opt && opt.dataZoom ? opt.dataZoom[0] : null;
+    if (!dz) return null;
+
+    let x0 = null;
+    let x1 = null;
+    if (dz.startValue != null && dz.endValue != null) {
+      x0 = Number(dz.startValue);
+      x1 = Number(dz.endValue);
+    } else {
+      const startPct = (dz.start != null ? dz.start : 0) / 100;
+      const endPct = (dz.end != null ? dz.end : 100) / 100;
+      const lastIdx = state.tickIds.length - 1;
+      const i0 = Math.max(0, Math.floor(startPct * lastIdx));
+      const i1 = Math.max(0, Math.ceil(endPct * lastIdx));
+      x0 = state.tickIds[i0];
+      x1 = state.tickIds[i1];
+    }
+
+    if (!Number.isFinite(x0) || !Number.isFinite(x1)) return null;
+    if (x0 > x1) [x0, x1] = [x1, x0];
+    return { x0, x1 };
+  }
+
+  function includeLineMinMax(bounds, x0, x1, p1, p2) {
+    const xA = Number(p1[0]);
+    const yA = Number(p1[1]);
+    const xB = Number(p2[0]);
+    const yB = Number(p2[1]);
+    if (!Number.isFinite(xA) || !Number.isFinite(yA) || !Number.isFinite(xB) || !Number.isFinite(yB)) return;
+
+    const segMin = Math.min(xA, xB);
+    const segMax = Math.max(xA, xB);
+    if (x1 < segMin || x0 > segMax) return;
+
+    if (xA === xB) {
+      bounds.min = bounds.min == null ? Math.min(yA, yB) : Math.min(bounds.min, yA, yB);
+      bounds.max = bounds.max == null ? Math.max(yA, yB) : Math.max(bounds.max, yA, yB);
+      return;
+    }
+
+    const leftX = Math.max(x0, segMin);
+    const rightX = Math.min(x1, segMax);
+    const slope = (yB - yA) / (xB - xA);
+    const yL = yA + slope * (leftX - xA);
+    const yR = yA + slope * (rightX - xA);
+
+    bounds.min = bounds.min == null ? Math.min(yL, yR) : Math.min(bounds.min, yL, yR);
+    bounds.max = bounds.max == null ? Math.max(yL, yR) : Math.max(bounds.max, yL, yR);
+  }
+
+  function computeMinMaxForWindow(x0, x1) {
+    const ids = state.tickIds || [];
+    if (!ids.length) return null;
+
+    const i0 = lowerBound(ids, x0);
+    const i1 = upperBound(ids, x1) - 1;
+    if (i0 > i1) return null;
+
+    const keys = [];
+    if (state.showMid) keys.push("mid");
+    if (state.showKal) keys.push("kal");
+    if (state.showBid) keys.push("bid");
+    if (state.showAsk) keys.push("ask");
+
+    const bounds = { min: null, max: null };
+    const span = i1 - i0 + 1;
+    let step = 1;
+    if (span > 200000) step = Math.ceil(span / 50000);
+    else if (span > 80000) step = Math.ceil(span / 30000);
+
+    for (const key of keys) {
+      const arr = state.tickValues[key] || [];
+      for (let i = i0; i <= i1; i += step) {
+        const v = arr[i];
+        if (v == null || !Number.isFinite(v)) continue;
+        bounds.min = bounds.min == null ? v : Math.min(bounds.min, v);
+        bounds.max = bounds.max == null ? v : Math.max(bounds.max, v);
+      }
+      if (i1 >= i0) {
+        const v = arr[i1];
+        if (v != null && Number.isFinite(v)) {
+          bounds.min = bounds.min == null ? v : Math.min(bounds.min, v);
+          bounds.max = bounds.max == null ? v : Math.max(bounds.max, v);
+        }
+      }
+    }
+
+    if (state.showSegLines && state.rangeLines.length) {
+      for (const ln of state.rangeLines) {
+        const a = [Number(ln.start_tick_id), Number(ln.start_price)];
+        const b = [Number(ln.end_tick_id), Number(ln.end_price)];
+        includeLineMinMax(bounds, x0, x1, a, b);
+      }
+    }
+
+    if (state.showLegs && legsByLine.size) {
+      for (const ln of state.rangeLines) {
+        const leg = legsByLine.get(Number(ln.id));
+        if (!leg || !leg.has_b || !leg.has_c) continue;
+        const a = [Number(leg.a_tick_id), Number(leg.a_kal)];
+        const b = [Number(leg.b_tick_id), Number(leg.b_kal)];
+        const c = [Number(leg.c_tick_id), Number(leg.c_kal)];
+        includeLineMinMax(bounds, x0, x1, a, b);
+        includeLineMinMax(bounds, x0, x1, b, c);
+        if (leg.has_d) {
+          const d = [Number(leg.d_tick_id), Number(leg.d_kal)];
+          includeLineMinMax(bounds, x0, x1, c, d);
+        }
+      }
+    }
+
+    if (bounds.min == null || bounds.max == null) return null;
+    return bounds;
+  }
+
+  function updateYAxisForZoom() {
+    if (!chart) return;
+    const win = getZoomWindow();
+    if (!win) return;
+    const bounds = computeMinMaxForWindow(win.x0, win.x1);
+    if (!bounds) return;
+
+    const range = bounds.max - bounds.min;
+    const pad = Math.max(0.3, range * 0.03);
+    const yMin = bounds.min - pad;
+    const yMax = bounds.max + pad;
+    if (!Number.isFinite(yMin) || !Number.isFinite(yMax)) return;
+
+    chart.setOption(
+      {
+        yAxis: { min: yMin, max: yMax },
+      },
+      { notMerge: false, lazyUpdate: true }
+    );
+  }
+
+  function scheduleRescale() {
+    if (zoomPending) return;
+    zoomPending = true;
+    requestAnimationFrame(() => {
+      zoomPending = false;
+      updateYAxisForZoom();
+    });
+  }
+
   function renderChart() {
     if (!chart) return;
 
@@ -159,7 +406,9 @@
         name: "Mid",
         type: "scatter",
         data: buildTickData("mid"),
-        symbolSize: 3,
+        symbolSize: 2,
+        large: true,
+        largeThreshold: 20000,
         itemStyle: { opacity: 0.8 },
         z: 3,
       });
@@ -196,12 +445,12 @@
     }
 
     const segLineSeries = buildSegLineSeries(selId);
-    const allSeries = series.concat(segLineSeries);
+    const legSeries = buildLegSeries();
+    const allSeries = series.concat(segLineSeries, legSeries);
 
     let minX = null;
     let maxX = null;
-    for (const t of state.ticks) {
-      const v = Number(t.id);
+    for (const v of state.tickIds || []) {
       if (!Number.isFinite(v)) continue;
       if (minX == null || v < minX) minX = v;
       if (maxX == null || v > maxX) maxX = v;
@@ -258,6 +507,8 @@
       ],
       series: allSeries,
     }, { notMerge: true });
+
+    updateYAxisForZoom();
   }
 
   function renderMeta() {
@@ -304,6 +555,8 @@
       if (Number.isFinite(id)) tickById.set(id, t);
     }
 
+    buildTickCache();
+
     renderChart();
     renderMeta();
   }
@@ -323,6 +576,7 @@
     $("segmSelect").addEventListener("change", async () => {
       state.segmId = parseInt($("segmSelect").value, 10);
       await loadLinesForSegm();
+      await loadLegsForSegm();
       try {
         await loadWindow();
       } catch (e) {
@@ -353,17 +607,20 @@
     const tBid = $("toggleBid");
     const tAsk = $("toggleAsk");
     const tLines = $("toggleSegLines");
+    const tLegs = $("toggleLegs");
 
     tMid.addEventListener("click", () => { state.showMid = !state.showMid; setToggle(tMid, state.showMid); renderChart(); });
     tKal.addEventListener("click", () => { state.showKal = !state.showKal; setToggle(tKal, state.showKal); renderChart(); });
     tBid.addEventListener("click", () => { state.showBid = !state.showBid; setToggle(tBid, state.showBid); renderChart(); });
     tAsk.addEventListener("click", () => { state.showAsk = !state.showAsk; setToggle(tAsk, state.showAsk); renderChart(); });
     tLines.addEventListener("click", () => { state.showSegLines = !state.showSegLines; setToggle(tLines, state.showSegLines); renderChart(); });
+    tLegs.addEventListener("click", () => { state.showLegs = !state.showLegs; setToggle(tLegs, state.showLegs); renderChart(); });
   }
 
   function initChart() {
     chart = echarts.init($("chart"));
     window.addEventListener("resize", () => chart && chart.resize());
+    chart.on("dataZoom", () => scheduleRescale());
   }
 
   async function init() {
@@ -373,9 +630,11 @@
     setToggle($("toggleBid"), state.showBid);
     setToggle($("toggleAsk"), state.showAsk);
     setToggle($("toggleSegLines"), state.showSegLines);
+    setToggle($("toggleLegs"), state.showLegs);
 
     await loadSegmList();
     await loadLinesForSegm();
+    await loadLegsForSegm();
     const lineCount = $("lineCount");
     if (lineCount && !lineCount.value) lineCount.value = "1";
     bindUI();
