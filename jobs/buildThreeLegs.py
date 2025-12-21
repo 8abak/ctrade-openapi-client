@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import argparse
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 from backend.db import get_conn, dict_cur, columns_exist, detect_mid_expr
 
@@ -50,69 +50,6 @@ def _direction_from_line(start_price: Optional[float], end_price: Optional[float
     return 1
 
 
-def _local_extrema_indices(vals: List[Optional[float]], k: int) -> Tuple[List[int], List[int]]:
-    highs: List[int] = []
-    lows: List[int] = []
-    n = len(vals)
-    if n <= (2 * k):
-        return highs, lows
-
-    for i in range(k, n - k):
-        v = vals[i]
-        if v is None:
-            continue
-        window = vals[i - k : i + k + 1]
-        if any(w is None for w in window):
-            continue
-        if v == max(window):
-            highs.append(i)
-        if v == min(window):
-            lows.append(i)
-    return highs, lows
-
-
-def _find_pivot_index(
-    indices: List[int],
-    vals: List[Optional[float]],
-    start_idx: int,
-    direction: int,
-    ref_val: float,
-    min_move: float,
-) -> Optional[int]:
-    for i in indices:
-        if i <= start_idx:
-            continue
-        v = vals[i]
-        if v is None:
-            continue
-        if direction * (v - ref_val) >= min_move:
-            return i
-    return None
-
-
-def _find_break_index(
-    vals: List[Optional[float]],
-    start_idx: int,
-    direction: int,
-    ref_val: float,
-    break_buffer: float,
-) -> Optional[int]:
-    n = len(vals)
-    if start_idx < 0:
-        start_idx = 0
-    for i in range(start_idx + 1, n):
-        v = vals[i]
-        if v is None:
-            continue
-        if direction > 0:
-            if v > ref_val + break_buffer:
-                return i
-        else:
-            if v < ref_val - break_buffer:
-                return i
-    return None
-
-
 def _tick_fields(ticks: List[Dict[str, float]], idx: Optional[int]) -> Tuple[Optional[int], Optional[float], Optional[float]]:
     if idx is None or idx < 0 or idx >= len(ticks):
         return None, None, None
@@ -138,7 +75,7 @@ def main() -> None:
     ap.add_argument("--early-max-ticks", type=int, default=20000)
     ap.add_argument("--k-neighborhood", type=int, default=60)
     ap.add_argument("--min-move", type=float, default=0.8)
-    ap.add_argument("--break-buffer", type=float, default=0.2)
+    ap.add_argument("--break-buffer", type=float, default=0.0)
     args = ap.parse_args()
 
     segm_id = int(args.segm_id)
@@ -203,33 +140,62 @@ def main() -> None:
                     b_idx = c_idx = d_idx = None
                 else:
                     direction = _direction_from_line(start_price, end_price, vals)
-                    highs, lows = _local_extrema_indices(vals, k)
+                    a_val = vals[a_idx]
+                    b_idx = a_idx
+                    b_val = a_val
+                    c_idx = None
+                    c_val = None
 
-                    if direction > 0:
-                        b_idx = _find_pivot_index(highs, vals, a_idx, 1, vals[a_idx], min_move)
-                    else:
-                        b_idx = _find_pivot_index(lows, vals, a_idx, -1, vals[a_idx], min_move)
+                    for i in range(a_idx + 1, len(vals)):
+                        v = vals[i]
+                        if v is None:
+                            continue
 
-                    if b_idx is None:
-                        reason = "NoAttempt"
-                        c_idx = d_idx = None
-                    else:
-                        has_b = True
-                        if direction > 0:
-                            c_idx = _find_pivot_index(lows, vals, b_idx, -1, vals[b_idx], min_move)
-                        else:
-                            c_idx = _find_pivot_index(highs, vals, b_idx, 1, vals[b_idx], min_move)
-
-                        if c_idx is None:
-                            reason = "NoCounter"
-                            d_idx = None
-                        else:
-                            has_c = True
-                            d_idx = _find_break_index(vals, c_idx, direction, vals[b_idx], break_buffer)
-                            if d_idx is None:
-                                reason = "NoConfirm"
+                        if not has_c:
+                            if direction > 0:
+                                if v >= b_val:
+                                    b_val = v
+                                    b_idx = i
+                                if (b_val - a_val) >= min_move:
+                                    has_b = True
+                                if has_b and (b_val - v) >= min_move:
+                                    has_c = True
+                                    c_idx = i
+                                    c_val = v
                             else:
-                                has_d = True
+                                if v <= b_val:
+                                    b_val = v
+                                    b_idx = i
+                                if (a_val - b_val) >= min_move:
+                                    has_b = True
+                                if has_b and (v - b_val) >= min_move:
+                                    has_c = True
+                                    c_idx = i
+                                    c_val = v
+                        else:
+                            if direction > 0:
+                                if v <= c_val:
+                                    c_val = v
+                                    c_idx = i
+                                if v > b_val + break_buffer:
+                                    d_idx = i
+                                    has_d = True
+                                    break
+                            else:
+                                if v >= c_val:
+                                    c_val = v
+                                    c_idx = i
+                                if v < b_val - break_buffer:
+                                    d_idx = i
+                                    has_d = True
+                                    break
+
+                    if not has_b:
+                        reason = "NoAttempt"
+                    elif not has_c:
+                        reason = "NoCounter"
+                    elif not has_d:
+                        reason = "NoConfirm"
 
             if ticks:
                 direction = _direction_from_line(start_price, end_price, vals)
