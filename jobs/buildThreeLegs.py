@@ -76,6 +76,7 @@ def main() -> None:
     ap.add_argument("--k-neighborhood", type=int, default=60)
     ap.add_argument("--min-move", type=float, default=0.8)
     ap.add_argument("--break-buffer", type=float, default=0.0)
+    ap.add_argument("--force", action="store_true")
     args = ap.parse_args()
 
     segm_id = int(args.segm_id)
@@ -89,6 +90,10 @@ def main() -> None:
     incomplete = 0
 
     try:
+        if args.force:
+            with dict_cur(conn) as cur:
+                cur.execute("DELETE FROM public.legs WHERE segm_id=%s", (segm_id,))
+
         with dict_cur(conn) as cur:
             cur.execute(
                 """
@@ -145,6 +150,7 @@ def main() -> None:
                     b_val = a_val
                     c_idx = None
                     c_val = None
+                    d_idx = None
 
                     for i in range(a_idx + 1, len(vals)):
                         v = vals[i]
