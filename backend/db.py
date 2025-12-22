@@ -325,3 +325,38 @@ def review_active_lines(conn, segm_id: int) -> Dict[str, Any]:
         )
 
     return {"segm_id": segm_id, "lines": out}
+
+
+def review_zig_pivots(conn, segm_id: int) -> Dict[str, Any]:
+    """
+    Returns zig pivots for segm_id:
+      { segm_id, pivots: [ ... ] }
+    """
+    segm_id = int(segm_id)
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            SELECT id, segm_id, tick_id, ts, price, direction, pivot_index
+            FROM public.zig_pivots
+            WHERE segm_id=%s
+            ORDER BY pivot_index ASC, ts ASC, id ASC
+            """,
+            (segm_id,),
+        )
+        rows = cur.fetchall()
+
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        out.append(
+            {
+                "id": int(r["id"]),
+                "segm_id": int(r["segm_id"]),
+                "tick_id": int(r["tick_id"]),
+                "ts": r["ts"].isoformat() if r["ts"] is not None else None,
+                "price": float(r["price"]),
+                "direction": r["direction"],
+                "pivot_index": int(r["pivot_index"]),
+            }
+        )
+
+    return {"segm_id": segm_id, "pivots": out}

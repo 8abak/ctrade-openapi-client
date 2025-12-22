@@ -24,6 +24,7 @@ from backend.db import (
     detect_ts_col,
     detect_mid_expr,
     detect_bid_ask,
+    review_zig_pivots,
 )
 
 VERSION = "2025.11.24.clean-v1"
@@ -1093,6 +1094,28 @@ def api_regime_lines(segm_id: int):
             )
 
         return {"segm_id": int(segm_id), "lines": out}
+    finally:
+        conn.close()
+
+
+@app.get("/api/regime/segm/{segm_id}/zig_pivots")
+def api_regime_zig_pivots(segm_id: int):
+    conn = get_conn()
+    try:
+        if not _table_exists(conn, "zig_pivots"):
+            return {"segm_id": int(segm_id), "pivots": []}
+        return review_zig_pivots(conn, int(segm_id))
+    finally:
+        conn.close()
+
+
+@app.get("/api/review/segm/{segm_id}/zig_pivots")
+def api_review_zig_pivots(segm_id: int):
+    conn = get_conn()
+    try:
+        if not _table_exists(conn, "zig_pivots"):
+            return {"segm_id": int(segm_id), "pivots": []}
+        return review_zig_pivots(conn, int(segm_id))
     finally:
         conn.close()
 
