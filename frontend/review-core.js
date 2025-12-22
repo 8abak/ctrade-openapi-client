@@ -7,15 +7,17 @@
   nextBreak: null, // { segtick_id, tick_id, segline_id, dist, ts_ms }
 
     segmId: null,
-    showMid: true,
+    showMid: false,
     showKal: true,
     showBid: false,
     showAsk: false,
-    showSegLines: true,
+    showSegLines: false,
+    showZig: true,
 
     // cached data
     ticks: [],
     lines: [],
+    zigPivots: [],
     meta: null,
   };
 
@@ -114,6 +116,13 @@
     // Tolerate older shapes too.
     const ticks = Array.isArray(data) ? data : (data.points ?? data.ticks ?? data.rows ?? []);
     state.ticks = ticks;
+  }
+
+  async function loadZigPivots() {
+    if (!state.segmId) return;
+    const data = await fetchJSON(`/api/review/segm/${state.segmId}/zig_pivots`);
+    const pivots = Array.isArray(data) ? data : (data.pivots ?? data.rows ?? []);
+    state.zigPivots = pivots;
   }
 
   
@@ -226,11 +235,44 @@ async function loadLines() {
     return out;
   }
 
+  function buildSeriesFromZig() {
+    if (!state.showZig || !state.zigPivots.length) return [];
+
+    const sorted = [...state.zigPivots].sort((a, b) => {
+      const ia = a.pivot_index ?? a.pivotIndex ?? 0;
+      const ib = b.pivot_index ?? b.pivotIndex ?? 0;
+      if (ia !== ib) return ia - ib;
+      const ta = tsToMs(a.ts ?? a.timestamp ?? a.time ?? a.t) ?? 0;
+      const tb = tsToMs(b.ts ?? b.timestamp ?? b.time ?? b.t) ?? 0;
+      return ta - tb;
+    });
+
+    const pts = [];
+    for (const p of sorted) {
+      const x = tsToMs(p.ts ?? p.timestamp ?? p.time ?? p.t);
+      const y = p.price;
+      if (x == null || y == null) continue;
+      pts.push([x, Number(y)]);
+    }
+
+    if (pts.length < 2) return [];
+    return [{
+      name: "Zig",
+      type: "line",
+      showSymbol: true,
+      symbolSize: 6,
+      data: pts,
+      lineStyle: { width: 2.0, opacity: 0.9, color: "#ff9f40" },
+      z: 9,
+    }];
+  }
+
   function renderChart() {
     if (!chart) return;
 
     const tickSeries = buildSeriesFromTicks();
     const lineSeries = buildSeriesFromLines();
+    const zigSeries = buildSeriesFromZig();
     
 if (state.nextBreak && state.nextBreak.ts_ms) {
   tickSeries.push({
@@ -253,7 +295,7 @@ if (state.nextBreak && state.nextBreak.ts_ms) {
   });
 }
 
-const allSeries = tickSeries.concat(lineSeries);
+const allSeries = tickSeries.concat(lineSeries, zigSeries);
 
     chart.setOption({
       animation: false,
@@ -350,6 +392,41 @@ const allSeries = tickSeries.concat(lineSeries);
     }
   }
 
+  function renderZigTable() {
+    const body = $("zigBody");
+    if (!body) return;
+    body.innerHTML = "";
+
+    const rows = [...state.zigPivots].sort((a, b) => {
+      const ia = a.pivot_index ?? a.pivotIndex ?? 0;
+      const ib = b.pivot_index ?? b.pivotIndex ?? 0;
+      if (ia !== ib) return ia - ib;
+      const ta = tsToMs(a.ts ?? a.timestamp ?? a.time ?? a.t) ?? 0;
+      const tb = tsToMs(b.ts ?? b.timestamp ?? b.time ?? b.t) ?? 0;
+      return ta - tb;
+    });
+
+    for (const p of rows) {
+      const tr = document.createElement("tr");
+      const id = p.id ?? "";
+      const segmId = p.segm_id ?? p.segmId ?? "";
+      const pivotIndex = p.pivot_index ?? p.pivotIndex ?? "";
+      const ts = fmtTime(p.ts ?? p.timestamp ?? p.time ?? p.t);
+      const price = p.price == null ? "" : Number(p.price).toFixed(4);
+      const dir = p.direction ?? "";
+
+      tr.innerHTML = `
+        <td class="mono">${id}</td>
+        <td class="mono">${segmId}</td>
+        <td>${pivotIndex}</td>
+        <td class="mono">${ts}</td>
+        <td class="mono">${price}</td>
+        <td>${dir}</td>
+      `;
+      body.appendChild(tr);
+    }
+  }
+
   function renderMeta() {
     const el = $("meta");
     if (!el) return;
@@ -376,9 +453,10 @@ const allSeries = tickSeries.concat(lineSeries);
   async function reloadAll() {
     const metaEl = $("meta");
     if (metaEl) metaEl.textContent = "Loading…";
-    await Promise.all([loadMeta(), loadTicks(), loadLines(), loadNextBreak()]);
+    await Promise.all([loadMeta(), loadTicks(), loadLines(), loadZigPivots(), loadNextBreak()]);
     renderChart();
     renderLinesTable();
+    renderZigTable();
     renderMeta();
   }
 
@@ -420,6 +498,7 @@ const allSeries = tickSeries.concat(lineSeries);
     const sel = $("segmSelect");
     sel.addEventListener("change", async () => {
       state.segmId = parseInt(sel.value, 10);
+      applyDefaultToggles();
       await reloadAll();
     });
 
@@ -428,12 +507,14 @@ const allSeries = tickSeries.concat(lineSeries);
     const tBid = $("toggleBid");
     const tAsk = $("toggleAsk");
     const tLines = $("toggleSegLines");
+    const tZig = $("toggleZig");
 
     tMid.addEventListener("click", () => { state.showMid = !state.showMid; setToggle(tMid, state.showMid); renderChart(); });
     tKal.addEventListener("click", () => { state.showKal = !state.showKal; setToggle(tKal, state.showKal); renderChart(); });
     tBid.addEventListener("click", () => { state.showBid = !state.showBid; setToggle(tBid, state.showBid); renderChart(); });
     tAsk.addEventListener("click", () => { state.showAsk = !state.showAsk; setToggle(tAsk, state.showAsk); renderChart(); });
     tLines.addEventListener("click", () => { state.showSegLines = !state.showSegLines; setToggle(tLines, state.showSegLines); renderChart(); });
+    tZig.addEventListener("click", () => { state.showZig = !state.showZig; setToggle(tZig, state.showZig); renderChart(); });
 
     $("btnBreak").addEventListener("click", doBreak);
   }
@@ -453,16 +534,27 @@ const allSeries = tickSeries.concat(lineSeries);
     });
   }
 
-  async function init() {
-    initChart();
-    await loadSegmList();
+  function applyDefaultToggles() {
+    state.showMid = false;
+    state.showKal = true;
+    state.showBid = false;
+    state.showAsk = false;
+    state.showSegLines = false;
+    state.showZig = true;
 
-    // init toggle styles
     setToggle($("toggleMid"), state.showMid);
     setToggle($("toggleKal"), state.showKal);
     setToggle($("toggleBid"), state.showBid);
     setToggle($("toggleAsk"), state.showAsk);
     setToggle($("toggleSegLines"), state.showSegLines);
+    setToggle($("toggleZig"), state.showZig);
+  }
+
+  async function init() {
+    initChart();
+    await loadSegmList();
+
+    applyDefaultToggles();
 
     bindUI();
     await reloadAll();

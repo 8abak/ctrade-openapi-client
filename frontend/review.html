@@ -60,11 +60,12 @@
     </div>
 
     <div class="Group">
-      <button id="toggleMid" class="Btn on">Mid</button>
-      <button id="toggleKal" class="Btn">Kal</button>
+      <button id="toggleMid" class="Btn">Mid</button>
+      <button id="toggleKal" class="Btn on">Kal</button>
+      <button id="toggleZig" class="Btn on">Zig</button>
       <button id="toggleBid" class="Btn">Bid</button>
       <button id="toggleAsk" class="Btn">Ask</button>
-      <button id="toggleSegLines" class="Btn on">SegLines</button>
+      <button id="toggleSegLines" class="Btn">SegLines</button>
     </div>
 
     <div class="Hint" id="NextBreakHint">next: —</div>
@@ -99,6 +100,22 @@
         </tr>
       </thead>
       <tbody id="linesBody"></tbody>
+    </table>
+  </div>
+
+  <div class="LinesWrap">
+    <table class="LinesTable" id="zigTable">
+      <thead>
+        <tr>
+          <th>id</th>
+          <th>segm_id</th>
+          <th>pivot_index</th>
+          <th>ts</th>
+          <th>price</th>
+          <th>direction</th>
+        </tr>
+      </thead>
+      <tbody id="zigBody"></tbody>
     </table>
   </div>
 

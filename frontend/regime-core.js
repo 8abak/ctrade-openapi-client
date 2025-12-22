@@ -10,12 +10,15 @@
     ticks: [],
     range: null,
 
-    showMid: true,
+    showMid: false,
     showKal: true,
     showBid: false,
     showAsk: false,
-    showSegLines: true,
-    showLegs: true,
+    showSegLines: false,
+    showLegs: false,
+    showZig: true,
+
+    zigPivots: [],
   };
 
   let chart = null;
@@ -129,6 +132,18 @@
     }
   }
 
+  async function loadZigPivots() {
+    if (!state.segmId) return;
+    try {
+      const data = await fetchJSON(`/api/regime/segm/${state.segmId}/zig_pivots`);
+      const pivots = Array.isArray(data) ? data : (data.pivots ?? []);
+      state.zigPivots = pivots;
+    } catch (e) {
+      console.warn("zig pivots load failed", e);
+      state.zigPivots = [];
+    }
+  }
+
   function buildTickCache() {
     state.tickIds = [];
     state.tickSeries = { mid: [], kal: [], bid: [], ask: [] };
@@ -223,6 +238,38 @@
     }
 
     return out;
+  }
+
+  function buildZigSeries() {
+    if (!state.showZig || !state.zigPivots.length) return [];
+
+    const sorted = [...state.zigPivots].sort((a, b) => {
+      const ia = a.pivot_index ?? a.pivotIndex ?? 0;
+      const ib = b.pivot_index ?? b.pivotIndex ?? 0;
+      if (ia !== ib) return ia - ib;
+      const ta = Number(a.tick_id ?? a.tickId) || 0;
+      const tb = Number(b.tick_id ?? b.tickId) || 0;
+      return ta - tb;
+    });
+
+    const pts = [];
+    for (const p of sorted) {
+      const x = Number(p.tick_id ?? p.tickId);
+      const y = p.price;
+      if (!Number.isFinite(x) || y == null) continue;
+      pts.push([x, Number(y)]);
+    }
+
+    if (pts.length < 2) return [];
+    return [{
+      name: "Zig",
+      type: "line",
+      data: pts,
+      showSymbol: true,
+      symbolSize: 6,
+      lineStyle: { width: 2.0, opacity: 0.9, color: "#ff9f40" },
+      z: 4,
+    }];
   }
 
   function lowerBound(arr, target) {
@@ -446,7 +493,8 @@
 
     const segLineSeries = buildSegLineSeries(selId);
     const legSeries = buildLegSeries();
-    const allSeries = series.concat(segLineSeries, legSeries);
+    const zigSeries = buildZigSeries();
+    const allSeries = series.concat(segLineSeries, legSeries, zigSeries);
 
     let minX = null;
     let maxX = null;
@@ -575,8 +623,10 @@
   function bindUI() {
     $("segmSelect").addEventListener("change", async () => {
       state.segmId = parseInt($("segmSelect").value, 10);
+      applyDefaultToggles();
       await loadLinesForSegm();
       await loadLegsForSegm();
+      await loadZigPivots();
       try {
         await loadWindow();
       } catch (e) {
@@ -608,6 +658,7 @@
     const tAsk = $("toggleAsk");
     const tLines = $("toggleSegLines");
     const tLegs = $("toggleLegs");
+    const tZig = $("toggleZig");
 
     tMid.addEventListener("click", () => { state.showMid = !state.showMid; setToggle(tMid, state.showMid); renderChart(); });
     tKal.addEventListener("click", () => { state.showKal = !state.showKal; setToggle(tKal, state.showKal); renderChart(); });
@@ -615,6 +666,7 @@
     tAsk.addEventListener("click", () => { state.showAsk = !state.showAsk; setToggle(tAsk, state.showAsk); renderChart(); });
     tLines.addEventListener("click", () => { state.showSegLines = !state.showSegLines; setToggle(tLines, state.showSegLines); renderChart(); });
     tLegs.addEventListener("click", () => { state.showLegs = !state.showLegs; setToggle(tLegs, state.showLegs); renderChart(); });
+    tZig.addEventListener("click", () => { state.showZig = !state.showZig; setToggle(tZig, state.showZig); renderChart(); });
   }
 
   function initChart() {
@@ -623,18 +675,32 @@
     chart.on("dataZoom", () => scheduleRescale());
   }
 
-  async function init() {
-    initChart();
+  function applyDefaultToggles() {
+    state.showMid = false;
+    state.showKal = true;
+    state.showBid = false;
+    state.showAsk = false;
+    state.showSegLines = false;
+    state.showLegs = false;
+    state.showZig = true;
+
     setToggle($("toggleMid"), state.showMid);
     setToggle($("toggleKal"), state.showKal);
     setToggle($("toggleBid"), state.showBid);
     setToggle($("toggleAsk"), state.showAsk);
     setToggle($("toggleSegLines"), state.showSegLines);
     setToggle($("toggleLegs"), state.showLegs);
+    setToggle($("toggleZig"), state.showZig);
+  }
+
+  async function init() {
+    initChart();
+    applyDefaultToggles();
 
     await loadSegmList();
     await loadLinesForSegm();
     await loadLegsForSegm();
+    await loadZigPivots();
     const lineCount = $("lineCount");
     if (lineCount && !lineCount.value) lineCount.value = "1";
     bindUI();
