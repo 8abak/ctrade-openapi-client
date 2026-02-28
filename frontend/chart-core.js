@@ -431,6 +431,10 @@ const ChartCore = (function () {
         }
       });
 
+      if (Number.isFinite(info.k2) && !html.includes(" K2:")) {
+        html += `K2: ${Number(info.k2).toFixed(2)}<br/>`;
+      }
+
       // segLine info at this time (simple containment)
       const ln = _findLineCoveringTs(axisValue);
       if (ln) {
@@ -473,14 +477,18 @@ const ChartCore = (function () {
     return false;
   }
 
-  function getLayerAvailability() {
+  function inferLayerAvailabilityFromTicks(ticks) {
     return {
       mid: true,
       bid: true,
       ask: true,
       kal: true,
-      k2: !!(state.layerAvailability && state.layerAvailability.k2),
+      k2: detectK2Availability(ticks),
     };
+  }
+
+  function getLayerAvailability() {
+    return inferLayerAvailabilityFromTicks(state.ticks);
   }
 
   function refreshLayerAvailability() {
@@ -740,5 +748,6 @@ const ChartCore = (function () {
 
     setLayerAvailabilityHandler,
     getLayerAvailability,
+    inferLayerAvailabilityFromTicks,
   };
 })();

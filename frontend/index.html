@@ -100,16 +100,19 @@
     }
 
     .status {
-      padding: 0.4rem 1rem;
+      padding: 0;
       color: var(--muted);
-      border-bottom: 1px solid var(--border);
-      background: rgba(18,26,43,0.5);
       font-size: 0.9rem;
+      margin-left: auto;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 38vw;
     }
 
     #segmeling-chart {
       width: 100%;
-      height: calc(100vh - 160px);
+      height: calc(100vh - 126px);
     }
   </style>
 </head>
@@ -183,6 +186,8 @@
 
       <button id="btn-review-jump" class="btn-run">Jump</button>
     </div>
+
+    <div id="status-line" class="status">Loading…</div>
   </header>
 
   <div class="toggles">
@@ -211,8 +216,6 @@
       K2 <span class="layer-na" data-layer-na-for="k2" hidden>(n/a)</span>
     </span>
   </div>
-
-  <div id="status-line" class="status">Loading…</div>
 
   <div id="segmeling-chart"></div>
 

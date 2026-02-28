@@ -41,17 +41,12 @@
     btn.classList.toggle("on", !!on);
   }
 
-  function hasFiniteK2(ticks) {
-    if (!Array.isArray(ticks) || !ticks.length) return false;
-    for (const t of ticks) {
-      const n = Number(t && t.k2);
-      if (Number.isFinite(n)) return true;
-    }
-    return false;
-  }
-
   function syncK2Availability() {
-    state.k2Available = hasFiniteK2(state.ticks);
+    const avail =
+      window.ChartCore && typeof window.ChartCore.inferLayerAvailabilityFromTicks === "function"
+        ? window.ChartCore.inferLayerAvailabilityFromTicks(state.ticks)
+        : { k2: false };
+    state.k2Available = !!avail.k2;
 
     const cb = document.querySelector('[data-layer-group="k2"]');
     const na = document.querySelector('[data-layer-na-for="k2"]');
