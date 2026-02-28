@@ -22,7 +22,13 @@ const ChartCore = (function () {
       bid: true,
       ask: true,
       kal: true,
+      k2: true,
     },
+
+    layerAvailability: {
+      k2: false,
+    },
+    layerAvailabilityHandler: null,
 
     // eval overlay state
     evals: [],
@@ -83,11 +89,13 @@ const ChartCore = (function () {
       const ask = safeNum(t.ask);
       const mid = safeNum(t.mid);
       const kal = safeNum(t.kal);
+      const k2 = safeNum(t.k2);
 
       if (bid != null) ys.push(bid);
       if (ask != null) ys.push(ask);
       if (mid != null) ys.push(mid);
       if (kal != null) ys.push(kal);
+      if (k2 != null) ys.push(k2);
     }
 
     if (!ys.length) return null;
@@ -174,11 +182,13 @@ const ChartCore = (function () {
   function buildSeries() {
     const xVals = state.ticks.map((t) => t.ts);
     const vis = state.visibility;
+    const hasK2 = !!(state.layerAvailability && state.layerAvailability.k2);
 
     const midData = state.ticks.map((t) => [t.ts, t.mid != null ? Number(t.mid) : null, { id: t.id }]);
     const kalData = state.ticks.map((t) => [t.ts, t.kal != null ? Number(t.kal) : null, { id: t.id }]);
     const bidData = state.ticks.map((t) => [t.ts, t.bid != null ? Number(t.bid) : null, { id: t.id }]);
     const askData = state.ticks.map((t) => [t.ts, t.ask != null ? Number(t.ask) : null, { id: t.id }]);
+    const k2Data = state.ticks.map((t) => [t.ts, safeNum(t.k2), { id: t.id }]);
 
     // tickId -> index map (for eval alignment)
     const idxByTickId = new Map();
@@ -228,6 +238,17 @@ const ChartCore = (function () {
         name: "Ask",
         type: "line",
         data: askData,
+        showSymbol: false,
+        smooth: false,
+      });
+    }
+
+    if (vis.k2 && hasK2) {
+      series.push({
+        id: "k2",
+        name: "K2",
+        type: "line",
+        data: k2Data,
         showSymbol: false,
         smooth: false,
       });
@@ -353,6 +374,7 @@ const ChartCore = (function () {
         ask: t.ask != null ? Number(t.ask) : null,
         mid: t.mid != null ? Number(t.mid) : null,
         kal: t.kal != null ? Number(t.kal) : null,
+        k2: safeNum(t.k2),
       });
     });
 
@@ -388,7 +410,14 @@ const ChartCore = (function () {
         const yVal = Array.isArray(data) ? data[1] : data;
         const yText = yVal == null ? "" : Number(yVal).toFixed(2);
 
-        if (seriesId === "mid" || seriesId === "kal" || seriesId === "bid" || seriesId === "ask") {
+        if (
+          seriesId === "mid" ||
+          seriesId === "kal" ||
+          seriesId === "bid" ||
+          seriesId === "ask" ||
+          seriesId === "k2"
+        ) {
+          if (!Number.isFinite(Number(yVal))) return;
           html += `${p.marker} ${p.seriesName}: ${yText}<br/>`;
         } else if (String(seriesId).startsWith("eval_L")) {
           const payload = Array.isArray(data) ? data[2] : null;
@@ -436,8 +465,46 @@ const ChartCore = (function () {
     });
   }
 
+  function detectK2Availability(ticks) {
+    if (!Array.isArray(ticks) || !ticks.length) return false;
+    for (const t of ticks) {
+      if (safeNum(t && t.k2) != null) return true;
+    }
+    return false;
+  }
+
+  function getLayerAvailability() {
+    return {
+      mid: true,
+      bid: true,
+      ask: true,
+      kal: true,
+      k2: !!(state.layerAvailability && state.layerAvailability.k2),
+    };
+  }
+
+  function refreshLayerAvailability() {
+    const nextK2 = detectK2Availability(state.ticks);
+    const prevK2 = !!(state.layerAvailability && state.layerAvailability.k2);
+
+    state.layerAvailability.k2 = nextK2;
+
+    if (prevK2 !== nextK2 && typeof state.layerAvailabilityHandler === "function") {
+      state.layerAvailabilityHandler(getLayerAvailability());
+    }
+  }
+
+  function setLayerAvailabilityHandler(fn) {
+    state.layerAvailabilityHandler = typeof fn === "function" ? fn : null;
+    if (state.layerAvailabilityHandler) {
+      state.layerAvailabilityHandler(getLayerAvailability());
+    }
+  }
+
   function render() {
     if (!chart) return;
+
+    refreshLayerAvailability();
 
     const { series, xVals } = buildSeries();
     const yAxisPatch = buildYAxisPatch(xVals);
@@ -670,5 +737,8 @@ const ChartCore = (function () {
     setTicks,
     setSegLines,
     setSegLinesVisibility,
+
+    setLayerAvailabilityHandler,
+    getLayerAvailability,
   };
 })();

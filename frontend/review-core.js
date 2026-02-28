@@ -11,8 +11,10 @@
     showKal: true,
     showBid: false,
     showAsk: false,
+    showK2: true,
     showSegLines: false,
     showZig: true,
+    k2Available: false,
 
     // cached data
     ticks: [],
@@ -35,7 +37,42 @@
   }
 
   function setToggle(btn, on) {
+    if (!btn) return;
     btn.classList.toggle("on", !!on);
+  }
+
+  function hasFiniteK2(ticks) {
+    if (!Array.isArray(ticks) || !ticks.length) return false;
+    for (const t of ticks) {
+      const n = Number(t && t.k2);
+      if (Number.isFinite(n)) return true;
+    }
+    return false;
+  }
+
+  function syncK2Availability() {
+    state.k2Available = hasFiniteK2(state.ticks);
+
+    const cb = document.querySelector('[data-layer-group="k2"]');
+    const na = document.querySelector('[data-layer-na-for="k2"]');
+    if (!cb) return;
+
+    if (!state.k2Available) {
+      cb.disabled = true;
+      cb.checked = false;
+      cb.dataset.autoUnavailable = "1";
+      state.showK2 = false;
+      if (na) na.hidden = false;
+      return;
+    }
+
+    cb.disabled = false;
+    if (na) na.hidden = true;
+    if (cb.dataset.autoUnavailable === "1") {
+      cb.checked = true;
+      cb.dataset.autoUnavailable = "";
+    }
+    state.showK2 = !!cb.checked;
   }
 
   function fmtTime(ts) {
@@ -207,6 +244,16 @@ async function loadLines() {
         lineStyle: { width: 2.0, opacity: 0.95 },
       });
     }
+    if (state.showK2 && state.k2Available) {
+      series.push({
+        name: "K2",
+        type: "line",
+        showSymbol: false,
+        sampling: "lttb",
+        data: pts("k2"),
+        lineStyle: { width: 1.6, opacity: 0.95 },
+      });
+    }
 
     return series;
   }
@@ -314,6 +361,7 @@ const allSeries = tickSeries.concat(lineSeries, zigSeries);
     for (const p of params) {
       const v = (p.data && p.data.value) ? p.data.value : p.value;
       const y = (v && v.length >= 2) ? v[1] : null;
+      if (p.seriesName === "K2" && !Number.isFinite(Number(y))) continue;
       const yTxt = (y == null || Number.isNaN(y)) ? "" : Number(y).toFixed(3);
       lines.push(`${p.marker} ${p.seriesName}: ${yTxt}`);
     }
@@ -454,6 +502,7 @@ const allSeries = tickSeries.concat(lineSeries, zigSeries);
     const metaEl = $("meta");
     if (metaEl) metaEl.textContent = "Loading…";
     await Promise.all([loadMeta(), loadTicks(), loadLines(), loadZigPivots(), loadNextBreak()]);
+    syncK2Availability();
     renderChart();
     renderLinesTable();
     renderZigTable();
@@ -515,6 +564,15 @@ const allSeries = tickSeries.concat(lineSeries, zigSeries);
     tAsk.addEventListener("click", () => { state.showAsk = !state.showAsk; setToggle(tAsk, state.showAsk); renderChart(); });
     tLines.addEventListener("click", () => { state.showSegLines = !state.showSegLines; setToggle(tLines, state.showSegLines); renderChart(); });
     tZig.addEventListener("click", () => { state.showZig = !state.showZig; setToggle(tZig, state.showZig); renderChart(); });
+    document.querySelectorAll("[data-layer-group]").forEach((cb) => {
+      cb.addEventListener("change", () => {
+        const group = cb.getAttribute("data-layer-group");
+        if (group === "k2") {
+          state.showK2 = !!cb.checked;
+          renderChart();
+        }
+      });
+    });
 
     $("btnBreak").addEventListener("click", doBreak);
   }
@@ -539,6 +597,7 @@ const allSeries = tickSeries.concat(lineSeries, zigSeries);
     state.showKal = true;
     state.showBid = false;
     state.showAsk = false;
+    state.showK2 = true;
     state.showSegLines = false;
     state.showZig = true;
 
@@ -548,6 +607,8 @@ const allSeries = tickSeries.concat(lineSeries, zigSeries);
     setToggle($("toggleAsk"), state.showAsk);
     setToggle($("toggleSegLines"), state.showSegLines);
     setToggle($("toggleZig"), state.showZig);
+    const k2 = document.querySelector('[data-layer-group="k2"]');
+    if (k2) k2.checked = state.showK2;
   }
 
   async function init() {
