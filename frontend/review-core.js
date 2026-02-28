@@ -48,26 +48,26 @@
         : { k2: false };
     state.k2Available = !!avail.k2;
 
-    const cb = document.querySelector('[data-layer-group="k2"]');
+    const btn = $("toggleK2");
     const na = document.querySelector('[data-layer-na-for="k2"]');
-    if (!cb) return;
+    if (!btn) return;
 
     if (!state.k2Available) {
-      cb.disabled = true;
-      cb.checked = false;
-      cb.dataset.autoUnavailable = "1";
+      btn.disabled = true;
+      btn.dataset.autoUnavailable = "1";
       state.showK2 = false;
+      setToggle(btn, false);
       if (na) na.hidden = false;
       return;
     }
 
-    cb.disabled = false;
+    btn.disabled = false;
     if (na) na.hidden = true;
-    if (cb.dataset.autoUnavailable === "1") {
-      cb.checked = true;
-      cb.dataset.autoUnavailable = "";
+    if (btn.dataset.autoUnavailable === "1") {
+      state.showK2 = true;
+      btn.dataset.autoUnavailable = "";
     }
-    state.showK2 = !!cb.checked;
+    setToggle(btn, state.showK2);
   }
 
   function fmtTime(ts) {
@@ -550,6 +550,7 @@ const allSeries = tickSeries.concat(lineSeries, zigSeries);
     const tKal = $("toggleKal");
     const tBid = $("toggleBid");
     const tAsk = $("toggleAsk");
+    const tK2 = $("toggleK2");
     const tLines = $("toggleSegLines");
     const tZig = $("toggleZig");
 
@@ -557,17 +558,9 @@ const allSeries = tickSeries.concat(lineSeries, zigSeries);
     tKal.addEventListener("click", () => { state.showKal = !state.showKal; setToggle(tKal, state.showKal); renderChart(); });
     tBid.addEventListener("click", () => { state.showBid = !state.showBid; setToggle(tBid, state.showBid); renderChart(); });
     tAsk.addEventListener("click", () => { state.showAsk = !state.showAsk; setToggle(tAsk, state.showAsk); renderChart(); });
+    tK2.addEventListener("click", () => { state.showK2 = !state.showK2; setToggle(tK2, state.showK2); renderChart(); });
     tLines.addEventListener("click", () => { state.showSegLines = !state.showSegLines; setToggle(tLines, state.showSegLines); renderChart(); });
     tZig.addEventListener("click", () => { state.showZig = !state.showZig; setToggle(tZig, state.showZig); renderChart(); });
-    document.querySelectorAll("[data-layer-group]").forEach((cb) => {
-      cb.addEventListener("change", () => {
-        const group = cb.getAttribute("data-layer-group");
-        if (group === "k2") {
-          state.showK2 = !!cb.checked;
-          renderChart();
-        }
-      });
-    });
 
     $("btnBreak").addEventListener("click", doBreak);
   }
@@ -588,7 +581,7 @@ const allSeries = tickSeries.concat(lineSeries, zigSeries);
   }
 
   function applyDefaultToggles() {
-    state.showMid = false;
+    state.showMid = true;
     state.showKal = true;
     state.showBid = false;
     state.showAsk = false;
@@ -600,10 +593,9 @@ const allSeries = tickSeries.concat(lineSeries, zigSeries);
     setToggle($("toggleKal"), state.showKal);
     setToggle($("toggleBid"), state.showBid);
     setToggle($("toggleAsk"), state.showAsk);
+    setToggle($("toggleK2"), state.showK2);
     setToggle($("toggleSegLines"), state.showSegLines);
     setToggle($("toggleZig"), state.showZig);
-    const k2 = document.querySelector('[data-layer-group="k2"]');
-    if (k2) k2.checked = state.showK2;
   }
 
   async function init() {
