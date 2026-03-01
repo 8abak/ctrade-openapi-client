@@ -159,43 +159,6 @@
     }
   }
 
-  function findLayerCheckbox(group) {
-    return (layerCheckboxes || []).find((cb) => cb.getAttribute("data-layer-group") === group) || null;
-  }
-
-  function setLayerAvailabilityUI(group, available) {
-    const cb = findLayerCheckbox(group);
-    if (!cb) return;
-
-    const na = document.querySelector(`[data-layer-na-for="${group}"]`);
-    const isAvailable = !!available;
-
-    if (!isAvailable) {
-      cb.disabled = true;
-      cb.checked = false;
-      cb.dataset.autoUnavailable = "1";
-      if (na) na.hidden = false;
-      ChartCore.setVisibility(group, false);
-      return;
-    }
-
-    cb.disabled = false;
-    if (na) na.hidden = true;
-
-    if (cb.dataset.autoUnavailable === "1") {
-      cb.checked = true;
-      cb.dataset.autoUnavailable = "";
-    }
-    ChartCore.setVisibility(group, !!cb.checked);
-  }
-
-  function applyLayerAvailability(avail) {
-    const a = avail || {};
-    if ("k2" in a) {
-      setLayerAvailabilityUI("k2", !!a.k2);
-    }
-  }
-
   function wireReviewJump() {
     if (!reviewJumpBtn) return;
 
@@ -275,10 +238,6 @@
     ChartCore.setWindowChangeHandler((info) => {
       scheduleEvalFetch(info);
     });
-    ChartCore.setLayerAvailabilityHandler((avail) => {
-      applyLayerAvailability(avail);
-    });
-
     wireModeAndRun();
     wireReviewJump();
     wireToggles();
@@ -290,8 +249,6 @@
 
     // ensure chart matches initial checkbox states immediately
     applyInitialToggleStatesToChart();
-    applyLayerAvailability(ChartCore.getLayerAvailability());
-
     // eval overlay toggle
     if (evalVisibleToggle) ChartCore.setEvalVisibility(!!evalVisibleToggle.checked);
 

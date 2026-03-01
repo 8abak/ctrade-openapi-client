@@ -48,28 +48,6 @@
         ? window.ChartCore.inferLayerAvailabilityFromTicks(state.ticks)
         : { k2: false };
     state.k2Available = !!avail.k2;
-
-    const cb = state.layerCheckboxes.find((el) => el.getAttribute("data-layer-group") === "k2");
-    const na = document.querySelector('[data-layer-na-for="k2"]');
-    if (!cb) return;
-
-    if (!state.k2Available) {
-      cb.disabled = true;
-      cb.checked = false;
-      cb.dataset.autoUnavailable = "1";
-      state.showK2 = false;
-      if (na) na.hidden = false;
-      return;
-    }
-
-    cb.disabled = false;
-    if (na) na.hidden = true;
-    if (cb.dataset.autoUnavailable === "1") {
-      state.showK2 = true;
-      cb.checked = true;
-      cb.dataset.autoUnavailable = "";
-    }
-    state.showK2 = !!cb.checked;
   }
 
   function fmtTime(ts) {
