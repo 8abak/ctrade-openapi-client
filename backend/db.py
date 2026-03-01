@@ -225,7 +225,7 @@ def review_ticks_sample(conn, segm_id: int, target_points: int = 5000) -> Dict[s
     """
     Downsample ticks for whole segm to ~target_points using row_number stride.
     Returns:
-      { segm_id, stride, points: [{id, ts, ask, bid, mid, kal}, ...] }
+      { segm_id, stride, points: [{id, ts, ask, bid, mid, kal, k2}, ...] }
     """
     segm_id = int(segm_id)
     target = int(target_points)
@@ -255,13 +255,13 @@ def review_ticks_sample(conn, segm_id: int, target_points: int = 5000) -> Dict[s
             WITH ordered AS (
               SELECT t.id AS id,
                      t.timestamp AS ts,
-                     t.ask, t.bid, t.mid, t.kal,
+                     t.ask, t.bid, t.mid, t.kal, t.k2,
                      ROW_NUMBER() OVER (ORDER BY t.timestamp ASC, t.id ASC) AS rn
               FROM public.segticks st
               JOIN public.ticks t ON t.id = st.tick_id
               WHERE st.segm_id=%s
             )
-            SELECT id, ts, ask, bid, mid, kal
+            SELECT id, ts, ask, bid, mid, kal, k2
             FROM ordered
             WHERE ((rn - 1) %% %s) = 0
             ORDER BY ts ASC, id ASC
@@ -280,6 +280,7 @@ def review_ticks_sample(conn, segm_id: int, target_points: int = 5000) -> Dict[s
                 "bid": float(r["bid"]) if r["bid"] is not None else None,
                 "mid": float(r["mid"]) if r["mid"] is not None else None,
                 "kal": float(r["kal"]) if r["kal"] is not None else None,
+                "k2": float(r["k2"]) if r["k2"] is not None else None,
             }
         )
 

@@ -93,6 +93,21 @@ def _ticks_has_kal(conn) -> bool:
         return cur.fetchone() is not None
 
 
+def _ticks_has_k2(conn) -> bool:
+    """Return True if ticks table has a 'k2' column."""
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name   = 'ticks'
+              AND column_name  = 'k2'
+            """
+        )
+        return cur.fetchone() is not None
+
+
 # --------------------------- Basic / Status ---------------------------
 
 @app.get("/")
@@ -325,10 +340,12 @@ def api_review_window(
     conn = get_conn()
     ts_col, mid_expr, (has_bid, has_ask) = _ts_mid_cols(conn)
     has_kal = _ticks_has_kal(conn)
+    has_k2 = _ticks_has_k2(conn)
 
     bid_sel = ", bid" if has_bid else ""
     ask_sel = ", ask" if has_ask else ""
     kal_sel = ", kal" if has_kal else ""
+    k2_sel = ", k2" if has_k2 else ""
 
     with dict_cur(conn) as cur:
         # ------------------------------------------------
@@ -339,7 +356,7 @@ def api_review_window(
             SELECT id,
                    {ts_col}   AS ts,
                    {mid_expr} AS mid
-                   {kal_sel}{bid_sel}{ask_sel}
+                   {kal_sel}{k2_sel}{bid_sel}{ask_sel}
             FROM ticks
             WHERE id BETWEEN %s AND %s
             ORDER BY id ASC
@@ -371,6 +388,12 @@ def api_review_window(
             else:
                 # mirror mid so frontend always has a kal value
                 r["kal"] = r.get("mid")
+
+            if has_k2:
+                if isinstance(r.get("k2"), Decimal):
+                    r["k2"] = float(r["k2"])
+            else:
+                r["k2"] = None
 
             if has_bid and isinstance(r.get("bid"), Decimal):
                 r["bid"] = float(r["bid"])
@@ -584,10 +607,12 @@ def api_live_window(
     conn = get_conn()
     ts_col, mid_expr, (has_bid, has_ask) = _ts_mid_cols(conn)
     has_kal = _ticks_has_kal(conn)
+    has_k2 = _ticks_has_k2(conn)
 
     bid_sel = ", bid" if has_bid else ""
     ask_sel = ", ask" if has_ask else ""
     kal_sel = ", kal" if has_kal else ""
+    k2_sel = ", k2" if has_k2 else ""
 
     with dict_cur(conn) as cur:
         if before_id is not None:
@@ -597,7 +622,7 @@ def api_live_window(
                 SELECT id,
                        {ts_col}   AS ts,
                        {mid_expr} AS mid
-                       {kal_sel}{bid_sel}{ask_sel}
+                       {kal_sel}{k2_sel}{bid_sel}{ask_sel}
                 FROM ticks
                 WHERE id <= %s
                 ORDER BY id DESC
@@ -613,7 +638,7 @@ def api_live_window(
                 SELECT id,
                        {ts_col}   AS ts,
                        {mid_expr} AS mid
-                       {kal_sel}{bid_sel}{ask_sel}
+                       {kal_sel}{k2_sel}{bid_sel}{ask_sel}
                 FROM ticks
                 WHERE id >= %s
                 ORDER BY id ASC
@@ -629,7 +654,7 @@ def api_live_window(
                 SELECT id,
                        {ts_col}   AS ts,
                        {mid_expr} AS mid
-                       {kal_sel}{bid_sel}{ask_sel}
+                       {kal_sel}{k2_sel}{bid_sel}{ask_sel}
                 FROM ticks
                 ORDER BY id DESC
                 LIMIT %s
@@ -651,6 +676,12 @@ def api_live_window(
         else:
             # If no kal column, mirror mid so frontend still has a value.
             r["kal"] = r.get("mid")
+
+        if has_k2:
+            if isinstance(r.get("k2"), Decimal):
+                r["k2"] = float(r["k2"])
+        else:
+            r["k2"] = None
 
         if has_bid and isinstance(r.get("bid"), Decimal):
             r["bid"] = float(r["bid"])
@@ -893,13 +924,13 @@ def api_review_ticks_sample(
                 WITH ordered AS (
                   SELECT t.id AS id,
                          t.timestamp AS ts,
-                         t.ask, t.bid, t.mid, t.kal,
+                         t.ask, t.bid, t.mid, t.kal, t.k2,
                          ROW_NUMBER() OVER (ORDER BY t.timestamp ASC, t.id ASC) AS rn
                   FROM public.segticks st
                   JOIN public.ticks t ON t.id = st.tick_id
                   WHERE st.segm_id=%s
                 )
-                SELECT id, ts, ask, bid, mid, kal
+                SELECT id, ts, ask, bid, mid, kal, k2
                 FROM ordered
                 WHERE ((rn - 1) %% %s) = 0
                 ORDER BY ts ASC, id ASC
@@ -918,6 +949,7 @@ def api_review_ticks_sample(
                     "bid": float(r["bid"]) if r["bid"] is not None else None,
                     "mid": float(r["mid"]) if r["mid"] is not None else None,
                     "kal": float(r["kal"]) if r["kal"] is not None else None,
+                    "k2": float(r["k2"]) if r.get("k2") is not None else None,
                 }
             )
 
