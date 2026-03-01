@@ -78,3 +78,21 @@ New decisions must be appended to this file in chronological order.
 ---
 
 (Add new decisions below as architecture and workflow evolve.)
+
+## 2026-03-01 — [DB/Jobs] — Daily Backtest Summary + Nightly Tuning Pipeline
+
+- Context:  
+  We need deterministic, day-bucketed backtesting over `ticks` and a safe runtime pipeline that tunes weekly parameters and prepares next-day live configuration without unsafe order execution by default.
+
+- Decision:  
+  Add a new table `backtest` (1 row per `symbol` + trading day) and implement jobs:
+  - `jobs.backtest_week` for deterministic daily summaries.
+  - `jobs.tune_week` for constrained grid search over last 7 days.
+  - `jobs.nightly_retrain` for promotion gating.
+  - `jobs.live_robot` as a paper-first execution skeleton.
+  Trading-day buckets are computed in Australia/Sydney time using 08:00 → next-day 07:00 session boundaries.
+
+- Consequences:  
+  - Daily strategy metrics are persisted and queryable by day/symbol.
+  - Runtime config is generated automatically under `runtime/configs/live_strategy.json`.
+  - Live mode remains safe by default (paper execution only unless a real adapter is explicitly implemented and enabled).

@@ -1,5 +1,7 @@
 # PATH: backend/db.py
 import os
+import json
+from datetime import date, datetime
 import psycopg2
 import psycopg2.extras
 from typing import List, Optional, Dict, Any
@@ -67,6 +69,124 @@ def detect_bid_ask(conn):
     """return tuple (has_bid, has_ask) booleans"""
     have = columns_exist(conn, "ticks", ["bid", "ask"])
     return ("bid" in have, "ask" in have)
+
+
+def fetch_ticks_for_range(conn, symbol: str, start_ts: datetime, end_ts: datetime) -> List[Dict[str, Any]]:
+    """
+    Fetch ticks for a symbol and time range [start_ts, end_ts).
+    Returns rows with: id, symbol, timestamp, bid, ask, mid, spread, kal, k2.
+    """
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            SELECT id, symbol, timestamp, bid, ask, mid, spread, kal, k2
+            FROM public.ticks
+            WHERE symbol = %s
+              AND timestamp >= %s
+              AND timestamp < %s
+            ORDER BY timestamp ASC, id ASC
+            """,
+            (symbol, start_ts, end_ts),
+        )
+        rows = cur.fetchall()
+
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        out.append(
+            {
+                "id": int(r["id"]),
+                "symbol": r["symbol"],
+                "timestamp": r["timestamp"],
+                "bid": float(r["bid"]) if r["bid"] is not None else None,
+                "ask": float(r["ask"]) if r["ask"] is not None else None,
+                "mid": float(r["mid"]) if r["mid"] is not None else None,
+                "spread": float(r["spread"]) if r["spread"] is not None else None,
+                "kal": float(r["kal"]) if r["kal"] is not None else None,
+                "k2": float(r["k2"]) if r["k2"] is not None else None,
+            }
+        )
+    return out
+
+
+def upsert_backtest_row(
+    conn,
+    *,
+    trading_day: date,
+    session_start_ts: datetime,
+    session_end_ts: datetime,
+    symbol: str,
+    config: Dict[str, Any],
+    trades_count: int,
+    wins_count: int,
+    losses_count: int,
+    win_rate: float,
+    total_profit: float,
+    avg_hold_sec: float,
+    max_hold_sec: int,
+    stopouts_count: int,
+    notes: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Insert or update one daily backtest summary for (symbol, trading_day).
+    """
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            INSERT INTO public.backtest (
+                trading_day,
+                session_start_ts,
+                session_end_ts,
+                symbol,
+                config,
+                trades_count,
+                wins_count,
+                losses_count,
+                win_rate,
+                total_profit,
+                avg_hold_sec,
+                max_hold_sec,
+                stopouts_count,
+                notes
+            )
+            VALUES (
+                %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            )
+            ON CONFLICT (symbol, trading_day)
+            DO UPDATE SET
+                session_start_ts = EXCLUDED.session_start_ts,
+                session_end_ts = EXCLUDED.session_end_ts,
+                config = EXCLUDED.config,
+                trades_count = EXCLUDED.trades_count,
+                wins_count = EXCLUDED.wins_count,
+                losses_count = EXCLUDED.losses_count,
+                win_rate = EXCLUDED.win_rate,
+                total_profit = EXCLUDED.total_profit,
+                avg_hold_sec = EXCLUDED.avg_hold_sec,
+                max_hold_sec = EXCLUDED.max_hold_sec,
+                stopouts_count = EXCLUDED.stopouts_count,
+                notes = EXCLUDED.notes,
+                created_at = now()
+            RETURNING id, trading_day, symbol
+            """,
+            (
+                trading_day,
+                session_start_ts,
+                session_end_ts,
+                symbol,
+                json.dumps(config, separators=(",", ":")),
+                int(trades_count),
+                int(wins_count),
+                int(losses_count),
+                float(win_rate),
+                float(total_profit),
+                float(avg_hold_sec),
+                int(max_hold_sec),
+                int(stopouts_count),
+                notes,
+            ),
+        )
+        row = cur.fetchone()
+    return dict(row) if row else {}
 
 
 # -------------------------------------------------------------------------
