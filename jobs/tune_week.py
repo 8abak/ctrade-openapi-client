@@ -25,7 +25,7 @@ def _daterange_end(days: int, end_day: date) -> date:
 
 
 def _grid() -> List[StrategyConfig]:
-    s_candidates = [0.0005, 0.0010, 0.0015]
+    s_candidates = [0.006, 0.010, 0.014, 0.018, 0.022, 0.026, 0.030]
     out: List[StrategyConfig] = []
     for n, r2_min, s_min, spread_mult, sigma_mult, cooldown_sec in itertools.product(
         [40, 60, 80],
@@ -48,21 +48,25 @@ def _grid() -> List[StrategyConfig]:
     return out
 
 
-def _evaluate(symbol: str, start_day: date, days: int, cfg: StrategyConfig) -> Dict[str, Any]:
-    rows = run_backtest(symbol=symbol, start_day=start_day, days=days, cfg=cfg, outdb=False)
-    in_range_days = sum(1 for r in rows if 4 <= int(r["trades_count"]) <= 20)
+def _evaluate(symbol: str, start_day: date, days: int, gap_sec: int, cfg: StrategyConfig) -> Dict[str, Any]:
+    rows = run_backtest(symbol=symbol, start_day=start_day, days=days, gap_sec=gap_sec, cfg=cfg, outdb=False)
+    in_range_sessions = sum(1 for r in rows if 4 <= int(r["trades_count"]) <= 20)
     max_hold_ok = all(int(r["max_hold_sec"]) <= 300 for r in rows)
     total_profit = sum(float(r["total_profit"]) for r in rows)
     stopouts = sum(int(r["stopouts_count"]) for r in rows)
+    min_ok_sessions = max(1, int(0.8 * max(1, len(rows))))
+    passes = in_range_sessions >= min_ok_sessions and max_hold_ok
     score = {
         "cfg": cfg.to_json(),
         "rows": rows,
-        "in_range_days": in_range_days,
+        "in_range_sessions": in_range_sessions,
+        "sessions_count": len(rows),
+        "min_ok_sessions": min_ok_sessions,
         "max_hold_ok": max_hold_ok,
         "total_profit": total_profit,
         "profit_var": profit_variance(rows),
         "stopouts_count": stopouts,
-        "passes": in_range_days >= min(5, len(rows)) and max_hold_ok,
+        "passes": passes,
     }
     return score
 
@@ -82,6 +86,7 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Grid-search tuner over the last N trading days.")
     p.add_argument("--symbol", required=True)
     p.add_argument("--days", type=int, default=7)
+    p.add_argument("--gap-sec", type=int, default=3300)
     p.add_argument("--end", default=None, help="End trading day YYYY-MM-DD (default: UTC today)")
     p.add_argument("--write_backtest", type=int, choices=[0, 1], default=0)
     args = p.parse_args()
@@ -91,11 +96,11 @@ def main() -> None:
 
     results: List[Dict[str, Any]] = []
     for i, cfg in enumerate(_grid(), start=1):
-        res = _evaluate(args.symbol, start_day, args.days, cfg)
+        res = _evaluate(args.symbol, start_day, args.days, max(1, args.gap_sec), cfg)
         results.append(res)
         print(
             f"[{i}] pass={res['passes']} pnl={res['total_profit']:.3f} "
-            f"var={res['profit_var']:.6f} in_range_days={res['in_range_days']}"
+            f"var={res['profit_var']:.6f} in_range_sessions={res['in_range_sessions']}/{res['sessions_count']}"
         )
 
     ranked = sorted(results, key=_sort_key)
@@ -114,9 +119,10 @@ def main() -> None:
     report = {
         "symbol": args.symbol,
         "days": args.days,
+        "gap_sec": max(1, args.gap_sec),
         "start_day": start_day.isoformat(),
         "end_day": end_day.isoformat(),
-        "passes_rule": ">=5 days with 4..20 trades AND max_hold_sec<=300 on all days",
+        "passes_rule": "at least 80% of sessions with 4..20 trades AND max_hold_sec<=300 on all sessions",
         "promoted": promoted,
         "best": best,
         "top10": ranked[:10],
@@ -128,6 +134,7 @@ def main() -> None:
             symbol=args.symbol,
             start_day=start_day,
             days=args.days,
+            gap_sec=max(1, args.gap_sec),
             cfg=StrategyConfig(**best["cfg"]),
             outdb=True,
         )

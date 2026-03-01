@@ -17,13 +17,15 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Nightly tuner + safe config promotion.")
     p.add_argument("--symbol", default="XAUUSD")
     p.add_argument("--days", type=int, default=7)
+    p.add_argument("--gap-sec", type=int, default=3300)
     p.add_argument("--end", default=None, help="YYYY-MM-DD trading day (default UTC today)")
     args = p.parse_args()
 
     end_day = datetime.fromisoformat(args.end).date() if args.end else datetime.now(timezone.utc).date()
     start_day = end_day - timedelta(days=max(1, args.days) - 1)
 
-    results = [_evaluate(args.symbol, start_day, args.days, cfg) for cfg in _grid()]
+    gap_sec = max(1, args.gap_sec)
+    results = [_evaluate(args.symbol, start_day, args.days, gap_sec, cfg) for cfg in _grid()]
     ranked = sorted(results, key=_sort_key)
     best = ranked[0] if ranked else None
 
@@ -55,6 +57,7 @@ def main() -> None:
     report = {
         "symbol": args.symbol,
         "days": args.days,
+        "gap_sec": gap_sec,
         "start_day": start_day.isoformat(),
         "end_day": end_day.isoformat(),
         "promoted": promote,
