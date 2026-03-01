@@ -29,6 +29,7 @@
     .ForceLabel { font-size:12px; color: rgba(215,224,255,0.75); }
     .LayerToggle { display:flex; align-items:center; gap:6px; font-size:12px; color: rgba(215,224,255,0.75); }
     .LayerNA { opacity: 0.7; }
+    .ToggleItem { display:flex; align-items:center; gap:5px; font-size:12px; color: rgba(215,224,255,0.9); }
     .ForceInput { width: 160px; }
     .LinesWrap { padding: 0 12px 16px; }
     .LinesTable {
@@ -63,12 +64,27 @@
     </div>
 
     <div class="Group">
-      <button id="toggleMid" class="Btn on">Mid</button>
-      <button id="toggleKal" class="Btn on">Kal</button>
+      <label class="ToggleItem">
+        <input type="checkbox" data-layer-group="mid" checked />
+        Mid
+      </label>
+      <label class="ToggleItem">
+        <input type="checkbox" data-layer-group="kal" checked />
+        Kal
+      </label>
       <button id="toggleZig" class="Btn on">Zig</button>
-      <button id="toggleBid" class="Btn">Bid</button>
-      <button id="toggleAsk" class="Btn">Ask</button>
-      <button id="toggleK2" class="Btn on">K2 <span class="LayerNA" data-layer-na-for="k2" hidden>(n/a)</span></button>
+      <label class="ToggleItem">
+        <input type="checkbox" data-layer-group="bid" />
+        Bid
+      </label>
+      <label class="ToggleItem">
+        <input type="checkbox" data-layer-group="ask" />
+        Ask
+      </label>
+      <label class="ToggleItem">
+        <input type="checkbox" data-layer-group="k2" checked />
+        K2 <span class="LayerNA" data-layer-na-for="k2" hidden>(n/a)</span>
+      </label>
       <button id="toggleSegLines" class="Btn">SegLines</button>
     </div>
 

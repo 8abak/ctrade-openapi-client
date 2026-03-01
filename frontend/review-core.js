@@ -15,6 +15,7 @@
     showSegLines: false,
     showZig: true,
     k2Available: false,
+    layerCheckboxes: [],
 
     // cached data
     ticks: [],
@@ -48,26 +49,27 @@
         : { k2: false };
     state.k2Available = !!avail.k2;
 
-    const btn = $("toggleK2");
+    const cb = state.layerCheckboxes.find((el) => el.getAttribute("data-layer-group") === "k2");
     const na = document.querySelector('[data-layer-na-for="k2"]');
-    if (!btn) return;
+    if (!cb) return;
 
     if (!state.k2Available) {
-      btn.disabled = true;
-      btn.dataset.autoUnavailable = "1";
+      cb.disabled = true;
+      cb.checked = false;
+      cb.dataset.autoUnavailable = "1";
       state.showK2 = false;
-      setToggle(btn, false);
       if (na) na.hidden = false;
       return;
     }
 
-    btn.disabled = false;
+    cb.disabled = false;
     if (na) na.hidden = true;
-    if (btn.dataset.autoUnavailable === "1") {
+    if (cb.dataset.autoUnavailable === "1") {
       state.showK2 = true;
-      btn.dataset.autoUnavailable = "";
+      cb.checked = true;
+      cb.dataset.autoUnavailable = "";
     }
-    setToggle(btn, state.showK2);
+    state.showK2 = !!cb.checked;
   }
 
   function fmtTime(ts) {
@@ -546,19 +548,23 @@ const allSeries = tickSeries.concat(lineSeries, zigSeries);
       await reloadAll();
     });
 
-    const tMid = $("toggleMid");
-    const tKal = $("toggleKal");
-    const tBid = $("toggleBid");
-    const tAsk = $("toggleAsk");
-    const tK2 = $("toggleK2");
     const tLines = $("toggleSegLines");
     const tZig = $("toggleZig");
+    state.layerCheckboxes = Array.from(document.querySelectorAll("[data-layer-group]"));
 
-    tMid.addEventListener("click", () => { state.showMid = !state.showMid; setToggle(tMid, state.showMid); renderChart(); });
-    tKal.addEventListener("click", () => { state.showKal = !state.showKal; setToggle(tKal, state.showKal); renderChart(); });
-    tBid.addEventListener("click", () => { state.showBid = !state.showBid; setToggle(tBid, state.showBid); renderChart(); });
-    tAsk.addEventListener("click", () => { state.showAsk = !state.showAsk; setToggle(tAsk, state.showAsk); renderChart(); });
-    tK2.addEventListener("click", () => { state.showK2 = !state.showK2; setToggle(tK2, state.showK2); renderChart(); });
+    state.layerCheckboxes.forEach((cb) => {
+      cb.addEventListener("change", () => {
+        const group = cb.getAttribute("data-layer-group");
+        const checked = !!cb.checked;
+        if (group === "mid") state.showMid = checked;
+        if (group === "kal") state.showKal = checked;
+        if (group === "bid") state.showBid = checked;
+        if (group === "ask") state.showAsk = checked;
+        if (group === "k2") state.showK2 = checked;
+        renderChart();
+      });
+    });
+
     tLines.addEventListener("click", () => { state.showSegLines = !state.showSegLines; setToggle(tLines, state.showSegLines); renderChart(); });
     tZig.addEventListener("click", () => { state.showZig = !state.showZig; setToggle(tZig, state.showZig); renderChart(); });
 
@@ -589,11 +595,17 @@ const allSeries = tickSeries.concat(lineSeries, zigSeries);
     state.showSegLines = false;
     state.showZig = true;
 
-    setToggle($("toggleMid"), state.showMid);
-    setToggle($("toggleKal"), state.showKal);
-    setToggle($("toggleBid"), state.showBid);
-    setToggle($("toggleAsk"), state.showAsk);
-    setToggle($("toggleK2"), state.showK2);
+    if (!state.layerCheckboxes.length) {
+      state.layerCheckboxes = Array.from(document.querySelectorAll("[data-layer-group]"));
+    }
+    state.layerCheckboxes.forEach((cb) => {
+      const group = cb.getAttribute("data-layer-group");
+      if (group === "mid") cb.checked = state.showMid;
+      if (group === "kal") cb.checked = state.showKal;
+      if (group === "bid") cb.checked = state.showBid;
+      if (group === "ask") cb.checked = state.showAsk;
+      if (group === "k2") cb.checked = state.showK2;
+    });
     setToggle($("toggleSegLines"), state.showSegLines);
     setToggle($("toggleZig"), state.showZig);
   }

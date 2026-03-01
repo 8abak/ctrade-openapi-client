@@ -74,9 +74,14 @@ const ChartCore = (function () {
     }
   }
 
-  function safeNum(v) {
-    const n = Number(v);
+  function toFiniteNumber(v) {
+    if (v === null || v === undefined) return null;
+    const n = typeof v === "number" ? v : parseFloat(String(v));
     return Number.isFinite(n) ? n : null;
+  }
+
+  function safeNum(v) {
+    return toFiniteNumber(v);
   }
 
   function computeYBoundsFromTicks(ticks, xFromTs, xToTs) {
@@ -431,8 +436,10 @@ const ChartCore = (function () {
         }
       });
 
-      if (Number.isFinite(info.k2) && !html.includes(" K2:")) {
-        html += `K2: ${Number(info.k2).toFixed(2)}<br/>`;
+      const k2Info = toFiniteNumber(info.k2);
+      const hasK2InSeries = params.some((p) => (p.seriesId || p.seriesName) === "k2");
+      if (!hasK2InSeries && k2Info != null) {
+        html += `K2: ${k2Info.toFixed(2)}<br/>`;
       }
 
       // segLine info at this time (simple containment)
