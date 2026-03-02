@@ -1,0 +1,17 @@
+[Unit]
+Description=cTrade Tick Calculator (DB Follower)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/home/ec2-user/cTrade
+ExecStart=/home/ec2-user/cTrade/venv/bin/python -u /home/ec2-user/cTrade/tickCalcFromDB.py
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

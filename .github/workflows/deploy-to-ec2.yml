@@ -1,4 +1,4 @@
-name: 🚀 Deploy to EC2
+name: Deploy to EC2
 
 on:
   push:
@@ -10,7 +10,7 @@ jobs:
     name: Deploy to EC2
     runs-on: ubuntu-latest
     steps:
-      - name: 📦 Deploy to EC2 via SSH
+      - name: Deploy to EC2 via SSH
         uses: appleboy/ssh-action@v0.1.5
         with:
           host: ${{ secrets.EC2_HOST }}
@@ -18,31 +18,85 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           port: 22
           script: |
+            set -euo pipefail
             cd ~/cTrade
-            git pull origin main
+
+            old_rev="$(git rev-parse HEAD)"
+            git pull --ff-only origin main
+            new_rev="$(git rev-parse HEAD)"
+
+            if [ "$old_rev" = "$new_rev" ]; then
+              changed=""
+            else
+              changed="$(git diff --name-only "$old_rev" "$new_rev")"
+            fi
+
             source venv/bin/activate
 
-            echo "🛠 Building version.json..."
-            node scripts/buildVersions.js || echo "⚠️ Failed to build version.json"
+            echo "Building version.json..."
+            node scripts/buildVersions.js || echo "Failed to build version.json"
 
-            #Run schema + route docs builders.
+            # Run schema + route docs builders.
             python -m jobs.buildSchema
             python -m jobs.buildRoots
 
-            # Detect changed files in latest commit
-            changed=$(git diff --name-only HEAD@{1})
+            echo "Changed files:"
+            echo "$changed"
 
-            # Restart backend if main.py changed
-            if echo "$changed" | grep -q 'main.py'; then
-              echo "🔁 Restarting backend service..."
+            backend_restart=false
+            tickcollector_restart=false
+            tickcalc_restart=false
+            units_changed=false
+
+            # Keep existing backend behavior (restart if main.py changed).
+            if echo "$changed" | grep -Eq '(^|/)main\.py$'; then
+              backend_restart=true
+            fi
+
+            if echo "$changed" | grep -Eq '^tickCollectorToDB\.py$|^tickCollectorRawToDB\.py$'; then
+              tickcollector_restart=true
+            fi
+
+            if echo "$changed" | grep -Eq '^tickCalcFromDB\.py$|^ml/kalman\.py$'; then
+              tickcalc_restart=true
+            fi
+
+            if echo "$changed" | grep -Eq '^deploy/systemd/.*\.service$'; then
+              units_changed=true
+              echo "Deploying systemd unit files..."
+              sudo cp deploy/systemd/*.service /etc/systemd/system/
+              sudo systemctl daemon-reload
+
+              # Ensure both tick daemons are enabled on boot.
+              sudo systemctl enable tickcollector.service
+              sudo systemctl enable tickcalc.service
+            fi
+
+            if [ "$units_changed" = true ] && echo "$changed" | grep -Eq '^deploy/systemd/tickcollector\.service$'; then
+              tickcollector_restart=true
+            fi
+
+            if [ "$units_changed" = true ] && echo "$changed" | grep -Eq '^deploy/systemd/tickcalc\.service$'; then
+              tickcalc_restart=true
+            fi
+
+            if [ "$units_changed" = true ] && echo "$changed" | grep -Eq '^deploy/systemd/backend\.service$'; then
+              backend_restart=true
+            fi
+
+            if [ "$backend_restart" = true ]; then
+              echo "Restarting backend.service..."
               sudo systemctl restart backend.service
             fi
 
-            # Restart tickCollector if it changed
-            if echo "$changed" | grep -q 'tickCollectorToDB.py'; then
-              echo "🔁 Restarting tickCollector service..."
+            if [ "$tickcollector_restart" = true ]; then
+              echo "Restarting tickcollector.service..."
               sudo systemctl restart tickcollector.service
             fi
 
-            echo "✅ Deployment complete"
+            if [ "$tickcalc_restart" = true ]; then
+              echo "Restarting tickcalc.service..."
+              sudo systemctl restart tickcalc.service
+            fi
 
+            echo "Deployment complete"
