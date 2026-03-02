@@ -56,7 +56,7 @@ lastValidAsk = None
 shutdown_event = Event()
 
 # --------------------------------------------
-# Simple 1D Kalman filter for mid -> kal
+# Simple 1D Kalman filter for mid -> kal, and kal -> k2
 # --------------------------------------------
 
 class ScalarKalmanFilter:
@@ -94,11 +94,64 @@ class ScalarKalmanFilter:
         self.P = P_post
         return x_post
 
+# mid -> kal (as you already had)
 kalman_filter = ScalarKalmanFilter(
     process_var=1e-4,
     meas_var=1e-2,
     init_var=1.0,
 )
+
+# kal -> k2 (same idea as buildK2.py: Q=1e-5, R=5e-3)
+k2_filter = ScalarKalmanFilter(
+    process_var=1e-5,
+    meas_var=5e-3,
+    init_var=1.0,
+)
+
+_k2_primed = False
+
+def prime_k2_filter():
+    """
+    Prime k2 filter state from the most recent DB tick so restarts don't cause a hard reset.
+    Priority:
+      1) last k2 if present
+      2) else last kal if present
+      3) else leave uninitialized (first step will init from current kal)
+    """
+    global _k2_primed, conn
+    if _k2_primed:
+        return
+
+    try:
+        ensure_conn()
+        with conn.cursor() as c:
+            c.execute(
+                """
+                SELECT k2, kal
+                FROM ticks
+                WHERE symbol = %s
+                ORDER BY timestamp DESC, id DESC
+                LIMIT 1
+                """,
+                ("XAUUSD",),
+            )
+            row = c.fetchone()
+
+        if row:
+            last_k2, last_kal = row[0], row[1]
+            if last_k2 is not None:
+                k2_filter.x = float(last_k2)
+                k2_filter.P = 1.0
+            elif last_kal is not None:
+                k2_filter.x = float(last_kal)
+                k2_filter.P = 1.0
+
+        _k2_primed = True
+
+    except Exception as e:
+        # Don't block tick ingestion if priming fails.
+        print(f"⚠️ K2 prime skipped due to DB error: {e}", flush=True)
+        _k2_primed = True
 
 
 # --------------------------------------------------
@@ -136,7 +189,7 @@ def refresh_tokens():
     return True
 
 # --------------------------------------------------
-# Write one tick  (fast path, no duplicate SELECT)
+# Write one tick (fast path)
 # --------------------------------------------------
 def writeTick(timestamp, _symbolId, bid, ask):
     global lastValidBid, lastValidAsk, conn
@@ -165,17 +218,25 @@ def writeTick(timestamp, _symbolId, bid, ask):
     # Scale cTrader prices from 1e-5 units
     bidFloat = bid / 100000.0
     askFloat = ask / 100000.0
+
     mid = round((bidFloat + askFloat) / 2.0, 2)
     spread = round(askFloat - bidFloat, 2)
-    kal = round(kalman_filter.step(mid),2)
+
+    kal = round(kalman_filter.step(mid), 2)
+
+    # Prime k2 filter from DB once (best effort)
+    prime_k2_filter()
+
+    # k2 = Kalman(kal), stored with 2 decimals
+    k2 = round(k2_filter.step(kal), 2)
 
     try:
         ensure_conn()
         with conn.cursor() as c:
             c.execute(
                 """
-                INSERT INTO ticks (symbol, timestamp, bid, ask, mid, spread, kal)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO ticks (symbol, timestamp, bid, ask, mid, spread, kal, k2)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     "XAUUSD",
@@ -185,12 +246,13 @@ def writeTick(timestamp, _symbolId, bid, ask):
                     mid,
                     spread,
                     kal,
+                    k2,
                 ),
             )
         conn.commit()
         print(
             f"✅ Saved tick: {sydney_dt} → bid={bidFloat:.2f}, ask={askFloat:.2f}, "
-            f"mid={mid:.2f}, spread={spread:.2f}",
+            f"mid={mid:.2f}, spread={spread:.2f}, kal={kal:.2f}, k2={k2:.2f}",
             flush=True,
         )
 
