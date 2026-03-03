@@ -108,6 +108,78 @@ def fetch_ticks_for_range(conn, symbol: str, start_ts: datetime, end_ts: datetim
     return out
 
 
+def get_k2_candles_window(
+    conn,
+    symbol: str,
+    limit: int = 500,
+    from_id: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Fetch k2 flip candles in ascending id order.
+    Output keys match frontend API contract:
+      id, start_tick_id, end_tick_id, start_ts, end_ts,
+      o, h, l, c, k2o, k2c, dir, tick_count
+    """
+    symbol = (symbol or "").strip() or "XAUUSD"
+    lim = max(1, min(int(limit), 5000))
+
+    where = ["symbol = %s"]
+    params: List[Any] = [symbol]
+    if from_id is not None:
+        where.append("id >= %s")
+        params.append(int(from_id))
+
+    order_sql = "ORDER BY id ASC" if from_id is not None else "ORDER BY id DESC"
+    sql = f"""
+    SELECT
+        id,
+        start_tick_id,
+        end_tick_id,
+        start_ts,
+        end_ts,
+        open  AS o,
+        high  AS h,
+        low   AS l,
+        close AS c,
+        k2_open  AS k2o,
+        k2_close AS k2c,
+        dir,
+        tick_count
+    FROM public.k2_candles
+    WHERE {" AND ".join(where)}
+    {order_sql}
+    LIMIT %s
+    """
+    params.append(lim)
+
+    with dict_cur(conn) as cur:
+        cur.execute(sql, tuple(params))
+        rows = cur.fetchall()
+
+    if from_id is None:
+        rows = list(reversed(rows))
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        out.append(
+            {
+                "id": int(r["id"]),
+                "start_tick_id": int(r["start_tick_id"]) if r["start_tick_id"] is not None else None,
+                "end_tick_id": int(r["end_tick_id"]) if r["end_tick_id"] is not None else None,
+                "start_ts": r["start_ts"].isoformat() if r["start_ts"] is not None else None,
+                "end_ts": r["end_ts"].isoformat() if r["end_ts"] is not None else None,
+                "o": float(r["o"]) if r["o"] is not None else None,
+                "h": float(r["h"]) if r["h"] is not None else None,
+                "l": float(r["l"]) if r["l"] is not None else None,
+                "c": float(r["c"]) if r["c"] is not None else None,
+                "k2o": float(r["k2o"]) if r["k2o"] is not None else None,
+                "k2c": float(r["k2c"]) if r["k2c"] is not None else None,
+                "dir": int(r["dir"]) if r["dir"] is not None else None,
+                "tick_count": int(r["tick_count"]) if r["tick_count"] is not None else None,
+            }
+        )
+    return out
+
+
 def upsert_backtest_row(
     conn,
     *,

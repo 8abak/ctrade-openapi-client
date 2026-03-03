@@ -9,6 +9,7 @@ const ChartCore = (function () {
     mode: "review", // "review" | "live"
     ticks: [],
     lastTickId: null,
+    k2Candles: [],
 
     liveTimer: null,
     liveLimit: 2000,
@@ -492,6 +493,93 @@ const ChartCore = (function () {
     });
   }
 
+  function buildK2CandleTooltipFormatter(candles) {
+    const byId = new Map();
+    candles.forEach((c) => byId.set(String(c.id), c));
+
+    return function (params) {
+      if (!params || !params.length) return "";
+      const p = params[0];
+      const axisValue = p.axisValue != null ? String(p.axisValue) : "";
+      const c = byId.get(axisValue) || {};
+      const v = Array.isArray(p.data) ? p.data : [];
+      const o = Number(v[0]);
+      const cl = Number(v[1]);
+      const lo = Number(v[2]);
+      const hi = Number(v[3]);
+
+      const fmt = (n) => (Number.isFinite(Number(n)) ? Number(n).toFixed(2) : "");
+      const k2o = c.k2o != null ? Number(c.k2o).toFixed(2) : "";
+      const k2c = c.k2c != null ? Number(c.k2c).toFixed(2) : "";
+
+      let html = "";
+      html += `<b>Candle #${axisValue}</b><br/>`;
+      if (c.start_tick_id != null || c.end_tick_id != null) {
+        html += `ticks: ${c.start_tick_id ?? ""} -> ${c.end_tick_id ?? ""}<br/>`;
+      }
+      if (c.start_ts) html += `start: ${c.start_ts}<br/>`;
+      if (c.end_ts) html += `end: ${c.end_ts}<br/>`;
+      html += `O: ${fmt(o)} H: ${fmt(hi)} L: ${fmt(lo)} C: ${fmt(cl)}<br/>`;
+      html += `k2o: ${k2o} k2c: ${k2c}<br/>`;
+      if (c.dir != null) html += `dir: ${c.dir}<br/>`;
+      if (c.tick_count != null) html += `tick_count: ${c.tick_count}<br/>`;
+      return html;
+    };
+  }
+
+  function renderK2Candles() {
+    if (!chart) return;
+
+    const candles = Array.isArray(state.k2Candles) ? state.k2Candles : [];
+    const xVals = candles.map((c) => String(c.id));
+    const data = candles.map((c) => [
+      toFiniteNumber(c.o),
+      toFiniteNumber(c.c),
+      toFiniteNumber(c.l),
+      toFiniteNumber(c.h),
+    ]);
+
+    chart.setOption(
+      {
+        animation: false,
+        grid: { left: 50, right: 20, top: 25, bottom: 60 },
+        tooltip: {
+          trigger: "axis",
+          axisPointer: { type: "cross" },
+          formatter: buildK2CandleTooltipFormatter(candles),
+        },
+        xAxis: {
+          type: "category",
+          data: xVals,
+          boundaryGap: true,
+        },
+        yAxis: {
+          type: "value",
+          scale: true,
+        },
+        dataZoom: [
+          { type: "inside", xAxisIndex: 0, filterMode: "none" },
+          { type: "slider", xAxisIndex: 0, filterMode: "none" },
+        ],
+        series: [
+          {
+            id: "k2_candles",
+            name: "K2 Flip Candles",
+            type: "candlestick",
+            data,
+            itemStyle: {
+              color: "#26a69a",
+              color0: "#ef5350",
+              borderColor: "#26a69a",
+              borderColor0: "#ef5350",
+            },
+          },
+        ],
+      },
+      { notMerge: true, lazyUpdate: true }
+    );
+  }
+
   function detectK2Availability(ticks) {
     if (!Array.isArray(ticks) || !ticks.length) return false;
     for (const t of ticks) {
@@ -534,6 +622,10 @@ const ChartCore = (function () {
 
   function render() {
     if (!chart) return;
+    if (state.mode === "k2candles") {
+      renderK2Candles();
+      return;
+    }
 
     refreshLayerAvailability();
 
@@ -765,6 +857,12 @@ const ChartCore = (function () {
     render();
   }
 
+  function setK2Candles(candles) {
+    state.mode = "k2candles";
+    state.k2Candles = Array.isArray(candles) ? candles : [];
+    render();
+  }
+
   return {
     init(domId) {
       const c = ensureChart(domId);
@@ -786,6 +884,7 @@ const ChartCore = (function () {
     setTicks,
     setSegLines,
     setSegLinesVisibility,
+    setK2Candles,
 
     setLayerAvailabilityHandler,
     getLayerAvailability,

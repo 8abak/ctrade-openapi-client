@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, Body, Query, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 import psycopg2.extras
@@ -24,6 +25,7 @@ from backend.db import (
     detect_ts_col,
     detect_mid_expr,
     detect_bid_ask,
+    get_k2_candles_window,
     review_zig_pivots,
 )
 
@@ -118,6 +120,33 @@ def root():
 @app.get("/version")
 def get_version():
     return {"version": VERSION}
+
+
+@app.get("/k2")
+def k2_page():
+    path = os.path.join(FRONTEND_DIR, "k2.html")
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="k2.html not found")
+    return FileResponse(path)
+
+
+@app.get("/api/k2candles/window")
+def api_k2candles_window(
+    symbol: str = Query("XAUUSD"),
+    limit: int = Query(500, ge=1, le=5000),
+    from_id: Optional[int] = Query(None, ge=1),
+):
+    conn = get_conn()
+    try:
+        rows = get_k2_candles_window(
+            conn=conn,
+            symbol=symbol,
+            limit=limit,
+            from_id=from_id,
+        )
+        return {"symbol": symbol, "candles": rows}
+    finally:
+        conn.close()
 
 
 # -------------------------- SQL Console APIs --------------------------
