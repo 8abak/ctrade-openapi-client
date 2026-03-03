@@ -663,32 +663,18 @@ const ChartCore = (function () {
       const oldOpt = chart.getOption();
       const dz = oldOpt && oldOpt.dataZoom ? oldOpt.dataZoom[0] : null;
 
-      // Root cause of repeated tooltip rows: merging repeated updates can keep
-      // stale/duplicated series model entries alive over long-running live updates.
-      // Use full replacement so each render has exactly one instance per series id.
       chart.setOption(
         {
           animation: false,
-          grid: { left: 45, right: 25, top: 20, bottom: 40 },
-          tooltip: { trigger: "axis", axisPointer: { type: "cross" }, ...tooltip },
           xAxis: {
             type: "category",
             data: xVals,
             axisLabel: { formatter: (v) => String(v).slice(11, 19) },
           },
-          yAxis: { type: "value", scale: true },
-          dataZoom: [
-            { type: "inside", xAxisIndex: 0, filterMode: "none" },
-            { type: "slider", xAxisIndex: 0, filterMode: "none" },
-          ],
-          markLines: {
-            silent: true,
-            data: buildSegLineMarkers(state.segLines)
-          },
           series,
           ...yAxisPatch,
         },
-        { notMerge: true, lazyUpdate: true }
+        { notMerge: false, lazyUpdate: true, replaceMerge: ["series"] }
       );
 
       if (dz && dz.start != null && dz.end != null) {
