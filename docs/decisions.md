@@ -96,3 +96,27 @@ New decisions must be appended to this file in chronological order.
   - Daily strategy metrics are persisted and queryable by day/symbol.
   - Runtime config is generated automatically under `runtime/configs/live_strategy.json`.
   - Live mode remains safe by default (paper execution only unless a real adapter is explicitly implemented and enabled).
+
+---
+
+## 2026-03-06 - [DB/Jobs] - Rolling 60s Flow Signal Engine
+
+- Context:  
+  We need a candle-free signal engine that tails `ticks` in id order, computes session aTVWAP plus rolling-60s flow metrics, and emits entry signals with explainable threshold context.
+
+- Decision:  
+  Add two additive tables:
+  - `flow_state` to persist per-symbol streaming state (`last_tick_id`, session accumulators, rolling/EMA/zscore fields, and state-machine fields).
+  - `flow_signals` to persist generated buy/sell entries with a compact JSON `reason`.
+  Implement `python -m jobs.flow60sSignals` to:
+  - tail ticks by id in batches,
+  - compute rolling 60s hi/lo/range/tick-rate/ret,
+  - maintain session reset behavior on configurable gap,
+  - maintain time-decay EMAs and EWMA z-scores,
+  - apply macro-bias + impulse/pullback/re-acceleration state logic,
+  - write signals and upsert state once per batch.
+
+- Consequences:  
+  - Flow logic is isolated in `jobs/` and does not add heavy logic to API routes.
+  - Signal generation is resumable from `flow_state.last_tick_id`.
+  - New DB objects are additive and do not modify `ticks` schema.

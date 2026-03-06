@@ -93,41 +93,23 @@ def refresh_tokens():
     return True
 
 
-def ensure_tables(conn):
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS tick_ingest_dedupe (
-                symbol text NOT NULL,
-                ts_ms bigint NOT NULL,
-                bid_int integer NOT NULL,
-                ask_int integer NOT NULL,
-                seen_at timestamptz NOT NULL DEFAULT now(),
-                PRIMARY KEY (symbol, ts_ms, bid_int, ask_int)
-            )
-            """
-        )
-    conn.commit()
-
-
 def writer_loop():
     global CONSUMED, LAST_VALID_BID_INT, LAST_VALID_ASK_INT
 
     conn = None
     inserted_total = 0
     inserted_since = 0
-    dedupe_gc_at = time.time() + 300.0
     stats_at = time.time()
     max_ts = None
+    last_flush_ms = 0.0
 
-    batch_size = 1000
-    flush_interval = 0.10
+    batch_size = 200
+    flush_interval = 0.02
 
     while not STOP_EVENT.is_set():
         try:
             if conn is None or conn.closed:
                 conn = db_connect()
-                ensure_tables(conn)
 
             batch = []
             started = time.time()
@@ -163,38 +145,28 @@ def writer_loop():
                 ts = utc_dt.astimezone(SYDNEY_TZ)
                 bid = bid_int / 100000.0
                 ask = ask_int / 100000.0
+                mid = round((bid + ask) / 2.0, 2)
+                spread = round(ask - bid, 2)
 
-                rows.append((SYMBOL_NAME, ts_ms, bid_int, ask_int, ts, bid, ask))
+                rows.append((SYMBOL_NAME, ts, bid, ask, mid, spread, None, None))
                 if max_ts is None or ts > max_ts:
                     max_ts = ts
 
             if rows:
+                flush_started = time.time()
                 with conn.cursor() as cur:
                     psycopg2.extras.execute_values(
                         cur,
                         """
-                        WITH incoming(symbol, ts_ms, bid_int, ask_int, ts, bid, ask) AS (VALUES %s),
-                        deduped AS (
-                            INSERT INTO tick_ingest_dedupe (symbol, ts_ms, bid_int, ask_int)
-                            SELECT symbol, ts_ms, bid_int, ask_int
-                            FROM incoming
-                            ON CONFLICT DO NOTHING
-                            RETURNING symbol, ts_ms, bid_int, ask_int
-                        )
-                        INSERT INTO ticks (symbol, timestamp, bid, ask)
-                        SELECT i.symbol, i.ts, i.bid, i.ask
-                        FROM incoming i
-                        JOIN deduped d
-                          ON d.symbol = i.symbol
-                         AND d.ts_ms = i.ts_ms
-                         AND d.bid_int = i.bid_int
-                         AND d.ask_int = i.ask_int
+                        INSERT INTO ticks (symbol, timestamp, bid, ask, mid, spread, kal, k2)
+                        VALUES %s
                         """,
                         rows,
                         page_size=min(1000, len(rows)),
                     )
-                    inserted = cur.rowcount if cur.rowcount > 0 else 0
+                    inserted = len(rows)
                 conn.commit()
+                last_flush_ms = (time.time() - flush_started) * 1000.0
                 inserted_total += inserted
                 inserted_since += inserted
 
@@ -202,14 +174,6 @@ def writer_loop():
                 CONSUMED += len(batch)
 
             now = time.time()
-            if now >= dedupe_gc_at:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "DELETE FROM tick_ingest_dedupe WHERE seen_at < now() - interval '3 days'"
-                    )
-                conn.commit()
-                dedupe_gc_at = now + 300.0
-
             if now - stats_at >= 5.0:
                 elapsed = now - stats_at
                 rate = inserted_since / elapsed if elapsed > 0 else 0.0
@@ -220,12 +184,12 @@ def writer_loop():
                     lag_s = (datetime.now(tz=SYDNEY_TZ) - max_ts).total_seconds()
                 if lag_s is None:
                     print(
-                        f"collector stats total={inserted_total} rate={rate:.1f}/s queue={qlen}",
+                        f"collector stats total={inserted_total} rate={rate:.1f}/s queue={qlen} flush_ms={last_flush_ms:.2f}",
                         flush=True,
                     )
                 else:
                     print(
-                        f"collector stats total={inserted_total} rate={rate:.1f}/s queue={qlen} lag={lag_s:.3f}s",
+                        f"collector stats total={inserted_total} rate={rate:.1f}/s queue={qlen} lag={lag_s:.3f}s flush_ms={last_flush_ms:.2f}",
                         flush=True,
                     )
                 inserted_since = 0

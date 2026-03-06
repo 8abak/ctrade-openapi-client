@@ -13,7 +13,7 @@ from ml.kalman import ScalarKalmanConfig, ScalarKalmanFilter
 
 
 SYMBOL = "XAUUSD"
-BATCH_SIZE = 2000
+BATCH_SIZE = 1000
 POLL_IDLE_SECONDS = 0.2
 
 KAL_CFG = ScalarKalmanConfig(process_var=1e-4, meas_var=1e-2, init_var=1.0)
@@ -142,12 +142,31 @@ def fetch_batch(conn, symbol, after_id, limit):
             FROM ticks
             WHERE symbol = %s
               AND id > %s
+              AND (
+                  mid IS NULL
+               OR spread IS NULL
+               OR kal IS NULL
+               OR k2 IS NULL
+              )
             ORDER BY id ASC
             LIMIT %s
             """,
             (symbol, after_id, limit),
         )
         return cur.fetchall()
+
+
+def get_head_id(conn, symbol):
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT COALESCE(MAX(id), 0)
+            FROM ticks
+            WHERE symbol = %s
+            """,
+            (symbol,),
+        )
+        return int(cur.fetchone()[0] or 0)
 
 
 def apply_updates(conn, updates):
@@ -198,8 +217,11 @@ def main():
 
     processed_total = 0
     processed_since = 0
+    updated_since = 0
     stats_at = time.time()
     last_ts = None
+    last_batch_ms = 0.0
+    last_batch_updated = 0
 
     print(
         f"tickcalc start symbol={SYMBOL} from_id={state.last_processed_id}",
@@ -214,23 +236,27 @@ def main():
                 now = time.time()
                 if now - stats_at >= 5.0:
                     rate = processed_since / (now - stats_at) if now > stats_at else 0.0
+                    head_id = get_head_id(conn, SYMBOL)
+                    behind = max(0, head_id - state.last_processed_id)
                     lag = None
                     if last_ts is not None:
                         lag = (datetime.now(timezone.utc) - last_ts.astimezone(timezone.utc)).total_seconds()
                     if lag is None:
                         print(
-                            f"tickcalc stats rate={rate:.1f}/s last_id={state.last_processed_id}",
+                            f"tickcalc stats rate={rate:.1f}/s updated={updated_since} behind={behind} last_id={state.last_processed_id} batch_updated={last_batch_updated} batch_ms={last_batch_ms:.2f}",
                             flush=True,
                         )
                     else:
                         print(
-                            f"tickcalc stats rate={rate:.1f}/s lag={lag:.3f}s last_id={state.last_processed_id}",
+                            f"tickcalc stats rate={rate:.1f}/s updated={updated_since} behind={behind} lag={lag:.3f}s last_id={state.last_processed_id} batch_updated={last_batch_updated} batch_ms={last_batch_ms:.2f}",
                             flush=True,
                         )
                     processed_since = 0
+                    updated_since = 0
                     stats_at = now
                 continue
 
+            batch_started = time.time()
             updates = []
             for row in rows:
                 bid = float(row["bid"]) if row["bid"] is not None else None
@@ -246,6 +272,7 @@ def main():
 
             if updates:
                 apply_updates(conn, updates)
+            last_batch_updated = len(updates)
 
             last_row = rows[-1]
             state.last_processed_id = int(last_row["id"])
@@ -258,25 +285,30 @@ def main():
 
             processed_total += len(rows)
             processed_since += len(rows)
+            updated_since += len(updates)
             last_ts = last_row["timestamp"]
+            last_batch_ms = (time.time() - batch_started) * 1000.0
 
             now = time.time()
             if now - stats_at >= 5.0:
                 rate = processed_since / (now - stats_at) if now > stats_at else 0.0
+                head_id = get_head_id(conn, SYMBOL)
+                behind = max(0, head_id - state.last_processed_id)
                 lag = None
                 if last_ts is not None:
                     lag = (datetime.now(timezone.utc) - last_ts.astimezone(timezone.utc)).total_seconds()
                 if lag is None:
                     print(
-                        f"tickcalc stats processed={processed_total} rate={rate:.1f}/s last_id={state.last_processed_id}",
+                        f"tickcalc stats processed={processed_total} rate={rate:.1f}/s updated={updated_since} behind={behind} last_id={state.last_processed_id} batch_updated={last_batch_updated} batch_ms={last_batch_ms:.2f}",
                         flush=True,
                     )
                 else:
                     print(
-                        f"tickcalc stats processed={processed_total} rate={rate:.1f}/s lag={lag:.3f}s last_id={state.last_processed_id}",
+                        f"tickcalc stats processed={processed_total} rate={rate:.1f}/s updated={updated_since} behind={behind} lag={lag:.3f}s last_id={state.last_processed_id} batch_updated={last_batch_updated} batch_ms={last_batch_ms:.2f}",
                         flush=True,
                     )
                 processed_since = 0
+                updated_since = 0
                 stats_at = now
 
         except Exception as e:
