@@ -120,3 +120,19 @@ New decisions must be appended to this file in chronological order.
   - Flow logic is isolated in `jobs/` and does not add heavy logic to API routes.
   - Signal generation is resumable from `flow_state.last_tick_id`.
   - New DB objects are additive and do not modify `ticks` schema.
+
+---
+
+## 2026-03-06 - [DB/Jobs] - Flow Signal Outcome Journal Evaluation
+
+- Context:  
+  We need a resumable backtest evaluator that replays `flow_signals` against future ticks and records first-hit TP/SL outcomes without duplicating previously evaluated signals.
+
+- Decision:  
+  Add an additive table `flow_signal_outcomes` keyed by `id` with uniqueness on `(symbol, signal_id)` plus entry-time and entry-tick indexes for efficient review queries.  
+  Add `python -m jobs.evalFlowSignals` to process signals in configurable id order (default newest to oldest), evaluate first TP/SL/no-hit within a max-hold horizon, and upsert outcomes.
+
+- Consequences:  
+  - Evaluation is resumable by uniqueness on `(symbol, signal_id)` and optional `--force` recomputation.
+  - Existing `ticks`, `flow_signals`, and API routes remain unchanged.
+  - Outcome stats (`tp/sl/no_hit`, duration) are persisted for downstream reporting.
