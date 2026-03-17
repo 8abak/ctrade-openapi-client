@@ -1,0 +1,235 @@
+"""
+Usage:
+  python -m jobs.countDays
+
+Rebuild public.days from public.ticks by splitting contiguous market-active
+blocks wherever the gap between consecutive ticks is >= 1 hour.
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Optional, Tuple
+
+from psycopg2 import sql
+
+from backend.db import detect_ts_col, get_conn
+
+
+GAP_THRESHOLD_SECONDS = 3600.0
+FETCH_BATCH_ROWS = 50_000
+LOG_EVERY_TICKS = 250_000
+
+ROOT = Path(__file__).resolve().parents[1]
+LOG_PATH = ROOT / "logs" / "countDay.log"
+
+
+def setup_logging() -> logging.Logger:
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    logger = logging.getLogger("countDays")
+    logger.setLevel(logging.INFO)
+
+    if not logger.handlers:
+        fh = logging.FileHandler(LOG_PATH, encoding="utf-8")
+        fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+        fh.setFormatter(fmt)
+        logger.addHandler(fh)
+
+    return logger
+
+
+def ensure_days_table(conn) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS public.days (
+                id      BIGSERIAL PRIMARY KEY,
+                startts TIMESTAMPTZ NOT NULL,
+                endts   TIMESTAMPTZ NOT NULL,
+                startid BIGINT NOT NULL,
+                endid   BIGINT NOT NULL,
+                donets  TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+            """
+        )
+
+
+def clear_days(conn) -> None:
+    with conn.cursor() as cur:
+        cur.execute("TRUNCATE TABLE public.days RESTART IDENTITY")
+
+
+def get_tick_bounds(conn, ts_col: str) -> Tuple[int, Optional[int], Optional[int]]:
+    q = sql.SQL(
+        """
+        SELECT COUNT(*)::bigint, MIN(id)::bigint, MAX(id)::bigint
+        FROM public.ticks
+        WHERE {ts_col} IS NOT NULL
+        """
+    ).format(ts_col=sql.Identifier(ts_col))
+
+    with conn.cursor() as cur:
+        cur.execute(q)
+        total_rows, min_id, max_id = cur.fetchone()
+    return int(total_rows), min_id, max_id
+
+
+def insert_day(conn, start_ts, end_ts, start_id: int, end_id: int) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO public.days (startts, endts, startid, endid, donets)
+            VALUES (%s, %s, %s, %s, now())
+            """,
+            (start_ts, end_ts, int(start_id), int(end_id)),
+        )
+
+
+def main() -> None:
+    logger = setup_logging()
+
+    write_conn = get_conn()
+    read_conn = get_conn()
+    read_conn.autocommit = False  # named cursor requires a transaction
+
+    try:
+        ts_col = detect_ts_col(write_conn)
+        total_ticks, min_id, max_id = get_tick_bounds(write_conn, ts_col)
+
+        logger.info(
+            "START countDays | ts_col=%s gap_seconds=%s fetch_batch=%s total_ticks=%s min_id=%s max_id=%s",
+            ts_col,
+            GAP_THRESHOLD_SECONDS,
+            FETCH_BATCH_ROWS,
+            total_ticks,
+            min_id,
+            max_id,
+        )
+
+        ensure_days_table(write_conn)
+        clear_days(write_conn)
+        logger.info("Cleared public.days")
+
+        if total_ticks <= 0:
+            logger.info("No ticks found. Finished with rows_written=0")
+            return
+
+        stream_sql = sql.SQL(
+            """
+            SELECT id, {ts_col}
+            FROM public.ticks
+            WHERE {ts_col} IS NOT NULL
+            ORDER BY {ts_col} ASC, id ASC
+            """
+        ).format(ts_col=sql.Identifier(ts_col))
+
+        cur = read_conn.cursor(name="count_days_stream")
+        cur.itersize = FETCH_BATCH_ROWS
+        cur.execute(stream_sql)
+
+        scanned_ticks = 0
+        rows_written = 0
+        last_scanned_id: Optional[int] = None
+
+        segment_start_id: Optional[int] = None
+        segment_start_ts = None
+        prev_id: Optional[int] = None
+        prev_ts = None
+
+        while True:
+            rows = cur.fetchmany(FETCH_BATCH_ROWS)
+            if not rows:
+                break
+
+            for tick_id, tick_ts in rows:
+                tick_id = int(tick_id)
+                scanned_ticks += 1
+                last_scanned_id = tick_id
+
+                if segment_start_id is None:
+                    segment_start_id = tick_id
+                    segment_start_ts = tick_ts
+                    prev_id = tick_id
+                    prev_ts = tick_ts
+                    continue
+
+                gap_seconds = (tick_ts - prev_ts).total_seconds()
+                if gap_seconds >= GAP_THRESHOLD_SECONDS:
+                    insert_day(
+                        write_conn,
+                        start_ts=segment_start_ts,
+                        end_ts=prev_ts,
+                        start_id=segment_start_id,
+                        end_id=prev_id,
+                    )
+                    rows_written += 1
+                    logger.info(
+                        "WROTE day | rows_written=%s startid=%s endid=%s startts=%s endts=%s gap_seconds=%.3f last_scanned_tick_id=%s",
+                        rows_written,
+                        segment_start_id,
+                        prev_id,
+                        segment_start_ts.isoformat(),
+                        prev_ts.isoformat(),
+                        gap_seconds,
+                        last_scanned_id,
+                    )
+
+                    segment_start_id = tick_id
+                    segment_start_ts = tick_ts
+
+                prev_id = tick_id
+                prev_ts = tick_ts
+
+                if scanned_ticks % LOG_EVERY_TICKS == 0:
+                    logger.info(
+                        "PROGRESS scanned_ticks=%s last_scanned_tick_id=%s rows_written=%s current_segment_start=%s",
+                        scanned_ticks,
+                        last_scanned_id,
+                        rows_written,
+                        segment_start_ts.isoformat() if segment_start_ts is not None else None,
+                    )
+
+        cur.close()
+
+        if segment_start_id is not None and prev_id is not None:
+            insert_day(
+                write_conn,
+                start_ts=segment_start_ts,
+                end_ts=prev_ts,
+                start_id=segment_start_id,
+                end_id=prev_id,
+            )
+            rows_written += 1
+            logger.info(
+                "WROTE final day | rows_written=%s startid=%s endid=%s startts=%s endts=%s last_scanned_tick_id=%s",
+                rows_written,
+                segment_start_id,
+                prev_id,
+                segment_start_ts.isoformat(),
+                prev_ts.isoformat(),
+                last_scanned_id,
+            )
+
+        logger.info(
+            "FINISH countDays | scanned_ticks=%s rows_written=%s last_scanned_tick_id=%s current_segment_start=%s",
+            scanned_ticks,
+            rows_written,
+            last_scanned_id,
+            segment_start_ts.isoformat() if segment_start_ts is not None else None,
+        )
+
+    finally:
+        try:
+            read_conn.close()
+        except Exception:
+            pass
+        try:
+            write_conn.close()
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    main()
