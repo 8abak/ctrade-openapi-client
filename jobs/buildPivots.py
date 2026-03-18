@@ -77,7 +77,7 @@ def ensure_pivots_table(conn) -> None:
                 tickid  BIGINT NOT NULL,
                 ts      TIMESTAMPTZ NOT NULL,
                 px      DOUBLE PRECISION NOT NULL,
-                ptype   SMALLINT NOT NULL,
+                ptype   CHAR(1) NOT NULL,
                 pivotno INTEGER NOT NULL,
                 dayrow  INTEGER NOT NULL
             )
@@ -228,7 +228,7 @@ def compute_layer_pivots(
                         int(cand_tick.id),
                         cand_tick.ts,
                         float(cand_tick.px),
-                        1,
+                        "h",
                         len(pivot_rows) + 1,
                         int(cand_tick.dayrow),
                     )
@@ -247,7 +247,7 @@ def compute_layer_pivots(
                         int(cand_tick.id),
                         cand_tick.ts,
                         float(cand_tick.px),
-                        -1,
+                        "l",
                         len(pivot_rows) + 1,
                         int(cand_tick.dayrow),
                     )
