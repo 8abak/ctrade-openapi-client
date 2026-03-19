@@ -15,6 +15,7 @@ from ml.kalman import ScalarKalmanConfig, ScalarKalmanFilter
 SYMBOL = "XAUUSD"
 BATCH_SIZE = 1000
 POLL_IDLE_SECONDS = 0.2
+DAY_GAP_SECONDS = 45.0 * 60.0
 
 KAL_CFG = ScalarKalmanConfig(process_var=1e-4, meas_var=1e-2, init_var=1.0)
 K2_CFG = ScalarKalmanConfig(process_var=1e-5, meas_var=5e-3, init_var=1.0)
@@ -57,6 +58,15 @@ class PivotState:
     cand_dayrow: Optional[int]
 
 
+@dataclass
+class DayState:
+    id: int
+    startid: int
+    endid: int
+    startts: datetime
+    endts: datetime
+
+
 def db_connect():
     conn = psycopg2.connect(DATABASE_URL)
     conn.autocommit = False
@@ -75,6 +85,23 @@ def ensure_state_table(conn):
                 k2_x double precision NULL,
                 k2_p double precision NOT NULL DEFAULT 1.0,
                 updated_at timestamptz NOT NULL DEFAULT now()
+            )
+            """
+        )
+    conn.commit()
+
+
+def ensure_days_table(conn):
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS public.days (
+                id BIGSERIAL PRIMARY KEY,
+                startts TIMESTAMPTZ NOT NULL,
+                endts TIMESTAMPTZ NOT NULL,
+                startid BIGINT NOT NULL,
+                endid BIGINT NOT NULL,
+                donets TIMESTAMPTZ NOT NULL DEFAULT now()
             )
             """
         )
@@ -215,6 +242,88 @@ def save_state(conn, st):
         )
 
 
+def load_latest_day(conn) -> Optional[DayState]:
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT id, startid, endid, startts, endts
+            FROM public.days
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        )
+        row = cur.fetchone()
+    if not row:
+        return None
+    return DayState(
+        id=int(row["id"]),
+        startid=int(row["startid"]),
+        endid=int(row["endid"]),
+        startts=row["startts"],
+        endts=row["endts"],
+    )
+
+
+def insert_day(conn, tick_id: int, tick_ts: datetime) -> DayState:
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            """
+            INSERT INTO public.days (startts, endts, startid, endid, donets)
+            VALUES (%s, %s, %s, %s, now())
+            RETURNING id, startid, endid, startts, endts
+            """,
+            (tick_ts, tick_ts, int(tick_id), int(tick_id)),
+        )
+        row = cur.fetchone()
+    return DayState(
+        id=int(row["id"]),
+        startid=int(row["startid"]),
+        endid=int(row["endid"]),
+        startts=row["startts"],
+        endts=row["endts"],
+    )
+
+
+def update_day_extent(conn, day: DayState) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE public.days
+            SET endid = %s,
+                endts = %s,
+                donets = now()
+            WHERE id = %s
+              AND (
+                  endid IS DISTINCT FROM %s
+               OR endts IS DISTINCT FROM %s
+              )
+            """,
+            (int(day.endid), day.endts, int(day.id), int(day.endid), day.endts),
+        )
+        return cur.rowcount > 0
+
+
+def assign_day_for_tick(
+    conn,
+    current_day: Optional[DayState],
+    tick_id: int,
+    tick_ts: datetime,
+) -> Tuple[DayState, int, int]:
+    if current_day is None:
+        current_day = insert_day(conn, tick_id, tick_ts)
+        return current_day, current_day.id, 1
+
+    gap_seconds = (tick_ts - current_day.endts).total_seconds()
+    if gap_seconds > DAY_GAP_SECONDS:
+        update_day_extent(conn, current_day)
+        current_day = insert_day(conn, tick_id, tick_ts)
+        return current_day, current_day.id, 1
+
+    current_day.endid = int(tick_id)
+    current_day.endts = tick_ts
+    return current_day, current_day.id, int(tick_id - current_day.startid + 1)
+
+
 def load_pivot_states(conn, symbol: str) -> Dict[Tuple[int, str], PivotState]:
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
@@ -305,36 +414,6 @@ def save_pivot_states(conn, states: Dict[Tuple[int, str], PivotState]):
             [row + (datetime.now(timezone.utc),) for row in rows],
             page_size=min(1000, len(rows)),
         )
-
-
-def fetch_day_ranges(conn, start_id: int, end_id: int) -> List[Tuple[int, int, int]]:
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT id, startid, endid
-            FROM public.days
-            WHERE endid >= %s
-              AND startid <= %s
-            ORDER BY startid ASC, id ASC
-            """,
-            (int(start_id), int(end_id)),
-        )
-        rows = cur.fetchall()
-    return [(int(dayid), int(startid), int(endid)) for dayid, startid, endid in rows]
-
-
-def find_day_for_tick(day_ranges: List[Tuple[int, int, int]], tick_id: int) -> Optional[Tuple[int, int]]:
-    if not day_ranges:
-        return None
-    for idx, (dayid, startid, endid) in enumerate(day_ranges):
-        next_start = day_ranges[idx + 1][1] if idx + 1 < len(day_ranges) else None
-        if startid <= tick_id <= endid:
-            return dayid, tick_id - startid + 1
-        if tick_id >= startid and next_start is None:
-            return dayid, tick_id - startid + 1
-        if tick_id >= startid and next_start is not None and tick_id < next_start:
-            return dayid, tick_id - startid + 1
-    return None
 
 
 def get_or_create_pivot_state(
@@ -569,8 +648,10 @@ def main():
 
     conn = db_connect()
     ensure_state_table(conn)
+    ensure_days_table(conn)
     ensure_pivot_tables(conn)
     state = load_or_init_state(conn, SYMBOL)
+    current_day = load_latest_day(conn)
     pivot_states = load_pivot_states(conn, SYMBOL)
 
     kal_filter = ScalarKalmanFilter(KAL_CFG)
@@ -624,7 +705,6 @@ def main():
             batch_started = time.time()
             updates = []
             pivot_rows = []
-            day_ranges = fetch_day_ranges(conn, int(rows[0]["id"]), int(rows[-1]["id"]))
             for row in rows:
                 bid = float(row["bid"]) if row["bid"] is not None else None
                 ask = float(row["ask"]) if row["ask"] is not None else None
@@ -637,10 +717,12 @@ def main():
                 k2 = round(k2_filter.step(kal), 2)
                 updates.append((int(row["id"]), mid, spread, kal, k2))
 
-                day_info = find_day_for_tick(day_ranges, int(row["id"]))
-                if day_info is None:
-                    continue
-                dayid, dayrow = day_info
+                current_day, dayid, dayrow = assign_day_for_tick(
+                    conn,
+                    current_day,
+                    int(row["id"]),
+                    row["timestamp"],
+                )
                 for layer, rev in PIVOT_LAYERS:
                     pst = get_or_create_pivot_state(
                         pivot_states,
@@ -665,6 +747,8 @@ def main():
 
             if updates:
                 apply_updates(conn, updates)
+            if current_day is not None:
+                update_day_extent(conn, current_day)
             if pivot_rows:
                 insert_pivots(conn, pivot_rows)
             last_batch_updated = len(updates)
