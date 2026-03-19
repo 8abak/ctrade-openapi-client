@@ -14,6 +14,8 @@
   let statusLine;
   let evalMinLevelSelect;
   let evalVisibleToggle;
+  let pivotVisibleToggle;
+  let pivotLevelSelect;
   let layerCheckboxes;
 
   let isLiveRunning = false;
@@ -65,6 +67,12 @@
   function getMinLevel() {
     const v = evalMinLevelSelect ? Number(evalMinLevelSelect.value) : 1;
     return Number.isFinite(v) ? v : 1;
+  }
+
+  function getWindowSize(forLive) {
+    const raw = reviewWindowInput ? Number(reviewWindowInput.value) : 2000;
+    const fallback = Number.isFinite(raw) && raw > 0 ? raw : 2000;
+    return forLive ? Math.max(500, fallback) : Math.max(1, fallback);
   }
 
   function scheduleEvalFetch(info) {
@@ -159,19 +167,32 @@
     }
   }
 
+  function wirePivotControls() {
+    if (pivotVisibleToggle) {
+      pivotVisibleToggle.addEventListener("change", () => {
+        ChartCore.setVisibility("piv", !!pivotVisibleToggle.checked);
+      });
+    }
+
+    if (pivotLevelSelect) {
+      pivotLevelSelect.addEventListener("change", () => {
+        ChartCore.setPivotLevel(Number(pivotLevelSelect.value) || 1);
+      });
+    }
+  }
+
   function wireReviewJump() {
     if (!reviewJumpBtn) return;
 
     reviewJumpBtn.addEventListener("click", async () => {
       const fromIdRaw = reviewFromIdInput ? reviewFromIdInput.value : "";
-      const winRaw = reviewWindowInput ? reviewWindowInput.value : "";
-      const windowSize = Math.max(1, Number(winRaw) || 2000);
+      const windowSize = getWindowSize(false);
 
       let fromId = Number(fromIdRaw);
 
       try {
         if (!Number.isFinite(fromId) || fromId <= 0) {
-          const res = await fetch(`/api/live_window?limit=${windowSize}`);
+          const res = await fetch(`/api/live_window?limit=${Math.max(500, windowSize)}`);
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           const data = await res.json();
           const ticks = data.ticks || [];
@@ -207,7 +228,7 @@
 
       if (mode === "live") {
         if (!isLiveRunning) {
-          ChartCore.startLive({ limit: 2000, intervalMs: 2000 });
+          ChartCore.startLive({ limit: getWindowSize(true), intervalMs: 2000 });
           setRunButton(true);
         } else {
           ChartCore.stopLive();
@@ -231,6 +252,8 @@
     statusLine = $("status-line");
     evalMinLevelSelect = $("eval-min-level");
     evalVisibleToggle = $("eval-visible-toggle");
+    pivotVisibleToggle = $("piv-visible-toggle");
+    pivotLevelSelect = $("piv-level-select");
     layerCheckboxes = Array.from(document.querySelectorAll("[data-layer-group]"));
 
     ChartCore.init("segmeling-chart");
@@ -242,6 +265,15 @@
     wireReviewJump();
     wireToggles();
     wireEvalControls();
+    wirePivotControls();
+
+    if (reviewWindowInput) {
+      reviewWindowInput.addEventListener("change", () => {
+        if (modeSelect && modeSelect.value === "live" && isLiveRunning) {
+          ChartCore.startLive({ limit: getWindowSize(true), intervalMs: 2000 });
+        }
+      });
+    }
 
     // defaults
     if (reviewWindowInput) reviewWindowInput.value = 2000;
@@ -251,6 +283,8 @@
     applyInitialToggleStatesToChart();
     // eval overlay toggle
     if (evalVisibleToggle) ChartCore.setEvalVisibility(!!evalVisibleToggle.checked);
+    if (pivotLevelSelect) ChartCore.setPivotLevel(Number(pivotLevelSelect.value) || 1);
+    if (pivotVisibleToggle) ChartCore.setVisibility("piv", !!pivotVisibleToggle.checked);
 
     setRunButton(false);
     setStatus("Idle – select mode and press Run.");

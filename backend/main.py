@@ -110,6 +110,50 @@ def _ticks_has_k2(conn) -> bool:
         return cur.fetchone() is not None
 
 
+PIVOT_LEVEL_BY_LAYER = {
+    "nano": 1,
+    "micro": 2,
+    "macro": 3,
+}
+
+
+def _get_window_pivots(conn, window_start: int, window_end: int) -> List[Dict[str, Any]]:
+    if not _table_exists(conn, "pivots"):
+        return []
+
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            SELECT id, dayid, layer, rev, tickid, ts, px, ptype, pivotno, dayrow
+            FROM public.pivots
+            WHERE tickid BETWEEN %s AND %s
+            ORDER BY tickid ASC, id ASC
+            """,
+            (int(window_start), int(window_end)),
+        )
+        rows = cur.fetchall()
+
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        layer = row.get("layer")
+        out.append(
+            {
+                "id": int(row["id"]),
+                "dayid": int(row["dayid"]) if row.get("dayid") is not None else None,
+                "layer": layer,
+                "level": PIVOT_LEVEL_BY_LAYER.get(layer),
+                "rev": float(row["rev"]) if row.get("rev") is not None else None,
+                "tickid": int(row["tickid"]) if row.get("tickid") is not None else None,
+                "ts": row["ts"].isoformat() if row.get("ts") is not None else None,
+                "px": float(row["px"]) if row.get("px") is not None else None,
+                "ptype": row.get("ptype"),
+                "pivotno": int(row["pivotno"]) if row.get("pivotno") is not None else None,
+                "dayrow": int(row["dayrow"]) if row.get("dayrow") is not None else None,
+            }
+        )
+    return out
+
+
 # --------------------------- Basic / Status ---------------------------
 
 @app.get("/")
@@ -400,6 +444,7 @@ def api_review_window(
                 "ticks":      [],
                 "segs":       [],
                 "zones":      [],
+                "pivots":     [],
                 "piv_hilo":   [],
                 "piv_swings": [],
                 "hhll":       [],
@@ -581,10 +626,13 @@ def api_review_window(
         else:
             zones_hhll = []
 
+        pivots = _get_window_pivots(conn, window_start, window_end)
+
     return {
         "ticks":      _jsonable(ticks),
         "segs":       _jsonable(segs),
         "zones":      _jsonable(zones),
+        "pivots":     _jsonable(pivots),
         "piv_hilo":   _jsonable(piv_hilo),
         "piv_swings": _jsonable(piv_swings),
         "hhll":       _jsonable(hhll),
@@ -693,7 +741,7 @@ def api_live_window(
             tick_rows = list(reversed(cur.fetchall()))
 
     if not tick_rows:
-        return {"ticks": [], "segments": [], "zones": []}
+        return {"ticks": [], "segments": [], "zones": [], "pivots": []}
 
     # normalize tick rows
     for r in tick_rows:
@@ -735,6 +783,7 @@ def api_live_window(
 
     segments: List[Dict[str, Any]] = []
     zones: List[Dict[str, Any]] = []
+    pivots: List[Dict[str, Any]] = []
 
     # kalseg segments
     if _table_exists(conn, "kalseg"):
@@ -766,10 +815,13 @@ def api_live_window(
             )
             zones = [dict(r) for r in cur.fetchall()]
 
+    pivots = _get_window_pivots(conn, window_start, window_end)
+
     return {
         "ticks": _jsonable(tick_rows),
         "segments": _jsonable(segments),
         "zones": _jsonable(zones),
+        "pivots": _jsonable(pivots),
     }
 
 

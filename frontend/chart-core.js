@@ -24,6 +24,7 @@ const ChartCore = (function () {
       ask: true,
       kal: true,
       k2: true,
+      piv: false,
     },
 
     layerAvailability: {
@@ -35,6 +36,10 @@ const ChartCore = (function () {
     evals: [],
     evalMinLevel: 1,
     evalVisibility: true,
+
+    // pivot overlay state
+    pivots: [],
+    pivotLevel: 1,
 
     // segLines overlay state
     segLines: [],              // active lines for current segm
@@ -102,6 +107,16 @@ const ChartCore = (function () {
       if (mid != null) ys.push(mid);
       if (kal != null) ys.push(kal);
       if (k2 != null) ys.push(k2);
+    }
+
+    if (state.visibility.piv && Array.isArray(state.pivots) && state.pivots.length) {
+      const selectedLevel = Number(state.pivotLevel) || 1;
+      for (const p of state.pivots) {
+        if (!p || !p.ts || p.ts < xFromTs || p.ts > xToTs) continue;
+        if (Number(p.level) !== selectedLevel) continue;
+        const px = safeNum(p.px);
+        if (px != null) ys.push(px);
+      }
     }
 
     if (!ys.length) return null;
@@ -258,6 +273,51 @@ const ChartCore = (function () {
         showSymbol: false,
         smooth: false,
       });
+    }
+
+    if (vis.piv && Array.isArray(state.pivots) && state.pivots.length) {
+      const selectedLevel = Number(state.pivotLevel) || 1;
+      const hiPivots = [];
+      const loPivots = [];
+
+      for (const p of state.pivots) {
+        if (!p || Number(p.level) !== selectedLevel) continue;
+        const ts = p.ts;
+        const px = safeNum(p.px);
+        if (!ts || px == null) continue;
+        const point = [ts, px, p];
+        if (String(p.ptype || "").toLowerCase() === "h") hiPivots.push(point);
+        else loPivots.push(point);
+      }
+
+      if (hiPivots.length) {
+        series.push({
+          id: "piv_hi",
+          name: `Piv L${selectedLevel} High`,
+          type: "scatter",
+          data: hiPivots,
+          symbol: "triangle",
+          symbolSize: 9,
+          itemStyle: { color: "#ffd166" },
+          tooltip: { trigger: "item" },
+          z: 7,
+        });
+      }
+
+      if (loPivots.length) {
+        series.push({
+          id: "piv_lo",
+          name: `Piv L${selectedLevel} Low`,
+          type: "scatter",
+          data: loPivots,
+          symbol: "triangle",
+          symbolRotate: 180,
+          symbolSize: 9,
+          itemStyle: { color: "#7bdff2" },
+          tooltip: { trigger: "item" },
+          z: 7,
+        });
+      }
     }
 
     // ---- segLines overlay (line) ----
@@ -451,6 +511,20 @@ const ChartCore = (function () {
             if (payload.promotion_path) extras.push(`Path – ${payload.promotion_path}`);
           }
         }
+      });
+
+      params.forEach((p) => {
+        const seriesId = p.seriesId || p.seriesName;
+        if (seriesId !== "piv_hi" && seriesId !== "piv_lo") return;
+        const data = p.data;
+        const yVal = Array.isArray(data) ? data[1] : data;
+        const yText = yVal == null ? "" : Number(yVal).toFixed(2);
+        const payload = Array.isArray(data) ? data[2] : null;
+        if (!payload) return;
+        const lvl = payload.level != null ? payload.level : "";
+        const ptype = payload.ptype === "h" ? "high" : "low";
+        const pivotNo = payload.pivotno != null ? payload.pivotno : "";
+        extras.push(`Pivot â€“ ${ptype} L${lvl} #${pivotNo} px:${yText}`);
       });
 
       const k2Info = toFiniteNumber(info.k2);
@@ -699,6 +773,7 @@ const ChartCore = (function () {
 
     state.mode = "live";
     state.ticks = Array.isArray(data.ticks) ? data.ticks : [];
+    state.pivots = Array.isArray(data.pivots) ? data.pivots : [];
 
     if (state.ticks.length) state.lastTickId = state.ticks[state.ticks.length - 1].id;
     else state.lastTickId = null;
@@ -719,52 +794,20 @@ const ChartCore = (function () {
 
     state.liveTimer = setInterval(async () => {
       try {
-        // Backend requires limit >= 500
-        const res = await fetch(`/api/live_window?limit=500`);
+        const res = await fetch(`/api/live_window?limit=${encodeURIComponent(state.liveLimit)}`);
         if (!res.ok) return;
 
         const d = await res.json();
         const ticks = Array.isArray(d.ticks) ? d.ticks : [];
+        const pivots = Array.isArray(d.pivots) ? d.pivots : [];
         const last = ticks.length ? ticks[ticks.length - 1] : null;
         const lastId = last && last.id != null ? Number(last.id) : null;
         if (!lastId) return;
 
-        // No new ticks
-        if (state.lastTickId != null && lastId <= Number(state.lastTickId)) return;
-
-        // If this is the first time, just load the full live window
-        if (state.lastTickId == null) {
-          await loadLiveOnce(limit);
-          return;
-        }
-
-        // Fetch only the missing ticks (handles bursts: 10 ticks in 2 seconds, etc.)
-        const fromId = Number(state.lastTickId) + 1;
-        const deltaUrl =
-          `/api/window?tick_from=${encodeURIComponent(fromId)}` +
-          `&tick_to=${encodeURIComponent(lastId)}` +
-          `&min_level=${encodeURIComponent(state.evalMinLevel || 2)}` +
-          `&max_rows=200000`;
-
-        const r2 = await fetch(deltaUrl);
-        if (!r2.ok) {
-          // If delta endpoint isn't available/compatible, fallback to full reload
-          await loadLiveOnce(limit);
-          return;
-        }
-
-        const d2 = await r2.json();
-        const newTicks = Array.isArray(d2.ticks) ? d2.ticks : [];
-
-        if (newTicks.length) {
-          // Append + keep last N ticks (your liveLimit)
-          state.ticks = state.ticks.concat(newTicks);
-          if (state.ticks.length > state.liveLimit) {
-            state.ticks = state.ticks.slice(state.ticks.length - state.liveLimit);
-          }
-          state.lastTickId = state.ticks[state.ticks.length - 1].id;
-          render();
-        }
+        state.ticks = ticks;
+        state.pivots = pivots;
+        state.lastTickId = lastId;
+        render();
       } catch (e) {
         console.warn("ChartCore live poll failed:", e);
       }
@@ -793,6 +836,7 @@ const ChartCore = (function () {
 
     state.mode = "review";
     state.ticks = Array.isArray(data.ticks) ? data.ticks : [];
+    state.pivots = Array.isArray(data.pivots) ? data.pivots : [];
 
     if (state.ticks.length) state.lastTickId = state.ticks[state.ticks.length - 1].id;
     else state.lastTickId = null;
@@ -805,6 +849,7 @@ const ChartCore = (function () {
   function setTicks(ticks) {
     state.mode = "review";
     state.ticks = Array.isArray(ticks) ? ticks : [];
+    state.pivots = [];
     if (state.ticks.length) state.lastTickId = state.ticks[state.ticks.length - 1].id;
     else state.lastTickId = null;
     render();
@@ -823,6 +868,12 @@ const ChartCore = (function () {
   function setEvals(rows, minLevel) {
     state.evals = Array.isArray(rows) ? rows : [];
     state.evalMinLevel = typeof minLevel === "number" ? minLevel : 1;
+    render();
+  }
+
+  function setPivotLevel(level) {
+    const next = Number(level);
+    state.pivotLevel = next >= 1 && next <= 3 ? next : 1;
     render();
   }
 
@@ -865,6 +916,7 @@ const ChartCore = (function () {
     loadLiveOnce,
     setEvals,
     setEvalVisibility,
+    setPivotLevel,
 
     // new API
     setTicks,
