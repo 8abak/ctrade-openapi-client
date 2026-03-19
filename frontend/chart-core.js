@@ -1,6 +1,6 @@
 // frontend/chart-core.js
 // ChartCore: single ECharts instance responsible for rendering tick price series
-// and overlays (evals + segLines). Public API used by controllers.
+// and overlays. Public API used by controllers.
 
 const ChartCore = (function () {
   let chart = null;
@@ -31,11 +31,6 @@ const ChartCore = (function () {
       k2: false,
     },
     layerAvailabilityHandler: null,
-
-    // eval overlay state
-    evals: [],
-    evalMinLevel: 1,
-    evalVisibility: true,
 
     // pivot overlay state
     pivots: [],
@@ -211,12 +206,6 @@ const ChartCore = (function () {
     const askData = state.ticks.map((t) => [t.ts, t.ask != null ? Number(t.ask) : null, { id: t.id }]);
     const k2Data = state.ticks.map((t) => [t.ts, safeNum(t.k2), { id: t.id }]);
 
-    // tickId -> index map (for eval alignment)
-    const idxByTickId = new Map();
-    state.ticks.forEach((t, idx) => {
-      if (t.id != null) idxByTickId.set(Number(t.id), idx);
-    });
-
     const series = [];
 
     // IMPORTANT: only push series if visible (ECharts ignores "show")
@@ -372,62 +361,6 @@ const ChartCore = (function () {
       }
     }
 
-    // ---- Evals overlays (scatter) ----
-    function colorForSign(sign) {
-      if (sign > 0) return "#4caf50";
-      if (sign < 0) return "#f44336";
-      return "#9e9e9e";
-    }
-    function sizeForLevel(level) {
-      const lvl = Number(level) || 1;
-      return Math.max(4, Math.min(22, 4 + 2 * lvl));
-    }
-
-    if (state.evalVisibility && Array.isArray(state.evals) && state.evals.length) {
-      const byLevel = new Map();
-
-      for (const r of state.evals) {
-        const level = Number(r.level);
-        if (!Number.isFinite(level) || level < state.evalMinLevel) continue;
-
-        const tickId = Number(r.tick_id);
-        const mid = Number(r.mid);
-        if (!Number.isFinite(tickId) || !Number.isFinite(mid)) continue;
-
-        const i = idxByTickId.get(tickId);
-        if (i == null) continue;
-
-        if (!byLevel.has(level)) byLevel.set(level, []);
-        byLevel.get(level).push({ i, mid, r });
-      }
-
-      for (const level of Array.from(byLevel.keys()).sort((a, b) => a - b)) {
-        const rows = byLevel.get(level);
-        const points = rows.map(({ i, mid, r }) => [xVals[i], mid, r]);
-
-        series.push({
-          id: `eval_L${level}`,
-          name: `Eval L${level}`,
-          type: "scatter",
-          symbol: "circle",
-          symbolSize: function (val) {
-            const payload = Array.isArray(val) ? val[2] : null;
-            return sizeForLevel(payload ? payload.level : level);
-          },
-          itemStyle: {
-            color: function (p) {
-              const payload = p && p.data ? p.data[2] : null;
-              const s = payload ? Number(payload.base_sign) : 0;
-              return colorForSign(s);
-            },
-          },
-          data: points,
-          emphasis: { focus: "series" },
-          tooltip: { trigger: "item" },
-        });
-      }
-    }
-
     return { xVals, series };
   }
 
@@ -478,7 +411,7 @@ const ChartCore = (function () {
           ? chart.getOption().legend[0].selected
           : null;
 
-      // show prices and eval details
+      // show prices
       params.forEach((p) => {
         const seriesId = p.seriesId || p.seriesName;
         const seriesKey = seriesId || p.seriesName || "";
@@ -865,20 +798,9 @@ const ChartCore = (function () {
     state.windowChangeHandler = typeof fn === "function" ? fn : null;
   }
 
-  function setEvals(rows, minLevel) {
-    state.evals = Array.isArray(rows) ? rows : [];
-    state.evalMinLevel = typeof minLevel === "number" ? minLevel : 1;
-    render();
-  }
-
   function setPivotLevel(level) {
     const next = Number(level);
     state.pivotLevel = next >= 1 && next <= 3 ? next : 1;
-    render();
-  }
-
-  function setEvalVisibility(visible) {
-    state.evalVisibility = !!visible;
     render();
   }
 
@@ -914,8 +836,6 @@ const ChartCore = (function () {
     setVisibility,
     setWindowChangeHandler,
     loadLiveOnce,
-    setEvals,
-    setEvalVisibility,
     setPivotLevel,
 
     // new API

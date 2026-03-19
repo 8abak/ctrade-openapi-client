@@ -27,6 +27,7 @@ PIVOT_LAYERS: Tuple[Tuple[str, float], ...] = (
 STOP = False
 
 
+
 @dataclass
 class CalcState:
     symbol: str

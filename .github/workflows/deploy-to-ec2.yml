@@ -31,45 +31,51 @@ jobs:
               changed="$(git diff --name-only "$old_rev" "$new_rev")"
             fi
 
+            echo "Changed files:"
+            echo "$changed"
+
             source venv/bin/activate
 
             echo "Building version.json..."
             node scripts/buildVersions.js || echo "Failed to build version.json"
 
-            # Run schema + route docs builders.
+            echo "Building schema + route docs..."
             python -m jobs.buildSchema
             python -m jobs.buildRoots
-
-            echo "Changed files:"
-            echo "$changed"
 
             backend_restart=false
             tickcollector_restart=false
             tickcalc_restart=false
             units_changed=false
 
-            # Keep existing backend behavior (restart if main.py changed).
-            if echo "$changed" | grep -Eq '(^|/)main\.py$'; then
+            # Backend restart rules
+            if echo "$changed" | grep -Eq '(^|/)main\.py$|^backend/.*\.py$'; then
               backend_restart=true
             fi
 
+            # Tick collector restart rules
             if echo "$changed" | grep -Eq '^tickCollectorToDB\.py$|^tickCollectorRawToDB\.py$'; then
               tickcollector_restart=true
             fi
 
+            # Tick calc restart rules
             if echo "$changed" | grep -Eq '^tickCalcFromDB\.py$|^ml/kalman\.py$'; then
               tickcalc_restart=true
             fi
 
+            # Deploy/refresh systemd units when unit files changed
             if echo "$changed" | grep -Eq '^deploy/systemd/.*\.service$'; then
               units_changed=true
               echo "Deploying systemd unit files..."
               sudo cp deploy/systemd/*.service /etc/systemd/system/
               sudo systemctl daemon-reload
-
-              # Ensure both tick daemons are enabled on boot.
+              sudo systemctl enable backend.service
               sudo systemctl enable tickcollector.service
               sudo systemctl enable tickcalc.service
+            fi
+
+            if [ "$units_changed" = true ] && echo "$changed" | grep -Eq '^deploy/systemd/backend\.service$'; then
+              backend_restart=true
             fi
 
             if [ "$units_changed" = true ] && echo "$changed" | grep -Eq '^deploy/systemd/tickcollector\.service$'; then
@@ -80,23 +86,22 @@ jobs:
               tickcalc_restart=true
             fi
 
-            if [ "$units_changed" = true ] && echo "$changed" | grep -Eq '^deploy/systemd/backend\.service$'; then
-              backend_restart=true
-            fi
-
             if [ "$backend_restart" = true ]; then
               echo "Restarting backend.service..."
               sudo systemctl restart backend.service
+              sudo systemctl status backend.service --no-pager -l || true
             fi
 
             if [ "$tickcollector_restart" = true ]; then
               echo "Restarting tickcollector.service..."
               sudo systemctl restart tickcollector.service
+              sudo systemctl status tickcollector.service --no-pager -l || true
             fi
 
             if [ "$tickcalc_restart" = true ]; then
               echo "Restarting tickcalc.service..."
               sudo systemctl restart tickcalc.service
+              sudo systemctl status tickcalc.service --no-pager -l || true
             fi
 
             echo "Deployment complete"

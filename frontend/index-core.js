@@ -1,10 +1,7 @@
 // frontend/index-core.js
-// Unified index controller: ticks (mid/bid/ask/kal) + eval dots.
+// Unified index controller: ticks (mid/bid/ask/kal/k2/piv).
 
 (function () {
-  const MAX_EVAL_ROWS = 200000;
-  const EVAL_DEBOUNCE_MS = 200;
-
   let modeSelect;
   let runStopBtn;
   let runStopLabel;
@@ -12,17 +9,11 @@
   let reviewWindowInput;
   let reviewJumpBtn;
   let statusLine;
-  let evalMinLevelSelect;
-  let evalVisibleToggle;
   let pivotVisibleToggle;
   let pivotLevelSelect;
   let layerCheckboxes;
 
   let isLiveRunning = false;
-  let lastWindowInfo = null; // {count, firstId, lastId}
-  let lastEvalInfo = null; // {minLevel, count, truncated, maxRows}
-
-  let evalFetchTimer = null;
 
   function $(id) {
     return document.getElementById(id);
@@ -49,24 +40,7 @@
 
   function formatWindowPart(info) {
     if (!info || !info.count) return "Ticks: 0";
-    return `Ticks: ${info.count} [id ${info.firstId}–${info.lastId}]`;
-  }
-
-  function formatEvalPart(ei) {
-    if (!ei) return "";
-    const trunc = ei.truncated ? " (truncated: yes)" : "";
-    return ` | Evals (>= L${ei.minLevel}): ${ei.count}${trunc}`;
-  }
-
-  function updateStatusLine() {
-    const base = formatWindowPart(lastWindowInfo);
-    const evals = formatEvalPart(lastEvalInfo);
-    setStatus(base + evals);
-  }
-
-  function getMinLevel() {
-    const v = evalMinLevelSelect ? Number(evalMinLevelSelect.value) : 1;
-    return Number.isFinite(v) ? v : 1;
+    return `Ticks: ${info.count} [id ${info.firstId}-${info.lastId}]`;
   }
 
   function getWindowSize(forLive) {
@@ -75,72 +49,13 @@
     return forLive ? Math.max(500, fallback) : Math.max(1, fallback);
   }
 
-  function scheduleEvalFetch(info) {
-    lastWindowInfo = info;
-    updateStatusLine();
-
-    if (evalFetchTimer) clearTimeout(evalFetchTimer);
-    evalFetchTimer = setTimeout(() => {
-      fetchAndAttachEvals(info);
-    }, EVAL_DEBOUNCE_MS);
-  }
-
-  async function fetchAndAttachEvals(info) {
-    const minLevel = getMinLevel();
-
-    if (!info || !info.count || !info.firstId || !info.lastId) {
-      ChartCore.setEvals([], minLevel);
-      lastEvalInfo = { minLevel, count: 0, truncated: false, maxRows: MAX_EVAL_ROWS };
-      updateStatusLine();
-      return;
-    }
-
-    const tickFrom = Number(info.firstId);
-    const tickTo = Number(info.lastId);
-    if (!Number.isFinite(tickFrom) || !Number.isFinite(tickTo)) {
-      ChartCore.setEvals([], minLevel);
-      lastEvalInfo = { minLevel, count: 0, truncated: false, maxRows: MAX_EVAL_ROWS };
-      updateStatusLine();
-      return;
-    }
-
-    try {
-      const url =
-        `/api/evals/window?tick_from=${tickFrom}` +
-        `&tick_to=${tickTo}` +
-        `&min_level=${minLevel}` +
-        `&max_rows=${MAX_EVAL_ROWS}`;
-
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-
-      const rows = Array.isArray(data.evals) ? data.evals : [];
-      ChartCore.setEvals(rows, minLevel);
-
-      lastEvalInfo = {
-        minLevel,
-        count: rows.length,
-        truncated: !!data.truncated,
-        maxRows: data.max_rows != null ? data.max_rows : MAX_EVAL_ROWS,
-      };
-      updateStatusLine();
-    } catch (err) {
-      console.error("index-core: eval fetch failed", err);
-      ChartCore.setEvals([], minLevel);
-      lastEvalInfo = { minLevel, count: 0, truncated: false, maxRows: MAX_EVAL_ROWS };
-      updateStatusLine();
-    }
-  }
-
   function wireToggles() {
     if (!layerCheckboxes) return;
 
     layerCheckboxes.forEach((cb) => {
       cb.addEventListener("change", () => {
         const group = cb.getAttribute("data-layer-group");
-        const checked = !!cb.checked;
-        ChartCore.setVisibility(group, checked);
+        ChartCore.setVisibility(group, !!cb.checked);
       });
     });
   }
@@ -151,20 +66,6 @@
       const group = cb.getAttribute("data-layer-group");
       ChartCore.setVisibility(group, !!cb.checked);
     });
-  }
-
-  function wireEvalControls() {
-    if (evalVisibleToggle) {
-      evalVisibleToggle.addEventListener("change", () => {
-        ChartCore.setEvalVisibility(!!evalVisibleToggle.checked);
-      });
-    }
-
-    if (evalMinLevelSelect) {
-      evalMinLevelSelect.addEventListener("change", () => {
-        if (lastWindowInfo) scheduleEvalFetch(lastWindowInfo);
-      });
-    }
   }
 
   function wirePivotControls() {
@@ -187,7 +88,6 @@
     reviewJumpBtn.addEventListener("click", async () => {
       const fromIdRaw = reviewFromIdInput ? reviewFromIdInput.value : "";
       const windowSize = getWindowSize(false);
-
       let fromId = Number(fromIdRaw);
 
       try {
@@ -214,19 +114,14 @@
     if (!modeSelect || !runStopBtn) return;
 
     modeSelect.addEventListener("change", () => {
-      const mode = modeSelect.value;
-      if (mode === "review") {
+      if (modeSelect.value === "review") {
         ChartCore.stopLive();
-        setRunButton(false);
-      } else {
-        setRunButton(false);
       }
+      setRunButton(false);
     });
 
     runStopBtn.addEventListener("click", async () => {
-      const mode = modeSelect.value;
-
-      if (mode === "live") {
+      if (modeSelect.value === "live") {
         if (!isLiveRunning) {
           ChartCore.startLive({ limit: getWindowSize(true), intervalMs: 2000 });
           setRunButton(true);
@@ -250,21 +145,18 @@
     reviewWindowInput = $("review-window");
     reviewJumpBtn = $("btn-review-jump");
     statusLine = $("status-line");
-    evalMinLevelSelect = $("eval-min-level");
-    evalVisibleToggle = $("eval-visible-toggle");
     pivotVisibleToggle = $("piv-visible-toggle");
     pivotLevelSelect = $("piv-level-select");
     layerCheckboxes = Array.from(document.querySelectorAll("[data-layer-group]"));
 
     ChartCore.init("segmeling-chart");
-
     ChartCore.setWindowChangeHandler((info) => {
-      scheduleEvalFetch(info);
+      setStatus(formatWindowPart(info));
     });
+
     wireModeAndRun();
     wireReviewJump();
     wireToggles();
-    wireEvalControls();
     wirePivotControls();
 
     if (reviewWindowInput) {
@@ -275,18 +167,14 @@
       });
     }
 
-    // defaults
     if (reviewWindowInput) reviewWindowInput.value = 2000;
     if (modeSelect) modeSelect.value = "live";
 
-    // ensure chart matches initial checkbox states immediately
     applyInitialToggleStatesToChart();
-    // eval overlay toggle
-    if (evalVisibleToggle) ChartCore.setEvalVisibility(!!evalVisibleToggle.checked);
     if (pivotLevelSelect) ChartCore.setPivotLevel(Number(pivotLevelSelect.value) || 1);
     if (pivotVisibleToggle) ChartCore.setVisibility("piv", !!pivotVisibleToggle.checked);
 
     setRunButton(false);
-    setStatus("Idle – select mode and press Run.");
+    setStatus("Idle - select mode and press Run.");
   });
 })();
