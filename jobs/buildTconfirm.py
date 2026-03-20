@@ -20,6 +20,7 @@ import psycopg2.extras
 
 from backend.db import columns_exist, detect_mid_expr, detect_ts_col, get_conn, table_columns
 from jobs.layer2common import (
+    DEFAULT_BUILDVER as DEFAULT_LAYER2_BUILDVER,
     DayRow,
     PivotRow,
     add_day_args,
@@ -117,14 +118,20 @@ class TickEvent:
     ts: object
 
 
+class SkipEpisodeError(RuntimeError):
+    def __init__(self, reason: str, message: str):
+        super().__init__(message)
+        self.reason = str(reason)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build Layer 3 tconfirm rows from tepisode.")
     add_day_args(parser)
     parser.add_argument("--buildver", default=DEFAULT_BUILDVER, help="Target build version")
     parser.add_argument(
         "--episode-buildver",
-        default=None,
-        help="tepisode build version used as the source (defaults to --buildver)",
+        default=DEFAULT_LAYER2_BUILDVER,
+        help="tepisode build version used as the source (defaults to layer2.v1)",
     )
     parser.add_argument(
         "--delete-all-buildvers",
@@ -353,7 +360,10 @@ def build_confirm_row(
     anchor_price = float(anchor_pivot.px)
     anchor_idx = bisect_right(tick_ids, anchor_tickid) - 1
     if anchor_idx < 0 or anchor_idx >= len(ticks) or int(ticks[anchor_idx].id) != anchor_tickid:
-        raise RuntimeError(f"Anchor tick {anchor_tickid} for tepisode {episode.id} was not found in ticks.")
+        raise SkipEpisodeError(
+            "missinganchortick",
+            f"Anchor tick {anchor_tickid} for tepisode {episode.id} was not found in ticks.",
+        )
 
     micro_reversal = first_pivot_after(micro_lows, micro_low_ids, anchor_tickid)
     lower_high = None
@@ -422,8 +432,12 @@ def build_confirm_row(
     if has_k2 and anchor_tick is not None and anchor_tick.kal is not None and anchor_tick.k2 is not None:
         kal_minus_k2_at_high = float(anchor_tick.kal - anchor_tick.k2)
 
-    zone_pos = episode.zonepos or "unassigned"
-    in_zone = str(zone_pos).lower() == "inside"
+    zone_pos = episode.zonepos
+    in_zone = bool(
+        episode.tzoneid is not None
+        and zone_pos is not None
+        and str(zone_pos).lower() == "inside"
+    )
     truth_match = bool(in_zone)
 
     values = {
@@ -512,7 +526,7 @@ def process_day(conn, logger, day: DayRow, args: argparse.Namespace) -> Dict[str
     tepisodes = load_tepisodes(
         conn,
         day_id=day.id,
-        buildver=args.episode_buildver or args.buildver,
+        buildver=args.episode_buildver,
         dir_name=args.dir,
     )
     anchor_pivots = load_day_pivots(conn, day_id=day.id, layer=args.anchor_layer, ptype="h")
@@ -529,30 +543,63 @@ def process_day(conn, logger, day: DayRow, args: argparse.Namespace) -> Dict[str
     created_at = datetime.now(timezone.utc)
     rows: List[Dict[str, object]] = []
     states = {"confirmed": 0, "invalidated": 0, "unfinished": 0}
+    skipped = 0
+    skip_reasons: Dict[str, int] = {}
+
+    logger.info(
+        "DAY source | day_id=%s tepisodes_read=%s episode_buildver=%s anchor_pivots=%s micro_highs=%s micro_lows=%s ticks=%s",
+        day.id,
+        len(tepisodes),
+        args.episode_buildver,
+        len(anchor_pivots),
+        len(micro_highs),
+        len(micro_lows),
+        len(ticks),
+    )
 
     for episode in tepisodes:
         anchor_pivot = anchor_by_id.get(int(episode.reppivotid))
         if anchor_pivot is None:
-            raise RuntimeError(
-                f"tepisode {episode.id} reppivotid {episode.reppivotid} was not found in {args.anchor_layer} pivots."
+            skipped += 1
+            skip_reasons["missinganchorpivot"] = skip_reasons.get("missinganchorpivot", 0) + 1
+            logger.warning(
+                "EPISODE skip | day_id=%s tepisode_id=%s reason=missinganchorpivot reppivotid=%s anchor_layer=%s",
+                day.id,
+                episode.id,
+                episode.reppivotid,
+                args.anchor_layer,
             )
+            continue
 
-        row, state = build_confirm_row(
-            episode=episode,
-            anchor_pivot=anchor_pivot,
-            micro_highs=micro_highs,
-            micro_high_ids=micro_high_ids,
-            micro_lows=micro_lows,
-            micro_low_ids=micro_low_ids,
-            tick_by_id=tick_by_id,
-            ticks=ticks,
-            tick_ids=tick_ids,
-            has_k2=has_k2,
-            args=args,
-            created_at=created_at,
-            insert_cols=insert_cols,
-            col_types=col_types,
-        )
+        try:
+            row, state = build_confirm_row(
+                episode=episode,
+                anchor_pivot=anchor_pivot,
+                micro_highs=micro_highs,
+                micro_high_ids=micro_high_ids,
+                micro_lows=micro_lows,
+                micro_low_ids=micro_low_ids,
+                tick_by_id=tick_by_id,
+                ticks=ticks,
+                tick_ids=tick_ids,
+                has_k2=has_k2,
+                args=args,
+                created_at=created_at,
+                insert_cols=insert_cols,
+                col_types=col_types,
+            )
+        except SkipEpisodeError as exc:
+            skipped += 1
+            skip_reasons[exc.reason] = skip_reasons.get(exc.reason, 0) + 1
+            logger.warning(
+                "EPISODE skip | day_id=%s tepisode_id=%s reason=%s detail=%s",
+                day.id,
+                episode.id,
+                exc.reason,
+                str(exc),
+            )
+            continue
+
         rows.append(row)
         states[state] += 1
 
@@ -560,10 +607,12 @@ def process_day(conn, logger, day: DayRow, args: argparse.Namespace) -> Dict[str
     conn.commit()
 
     logger.info(
-        "DAY finish | day_id=%s deleted=%s tepisodes=%s anchor_pivots=%s micro_highs=%s micro_lows=%s ticks=%s inserted=%s confirmed=%s invalidated=%s unfinished=%s buildver=%s episode_buildver=%s",
+        "DAY finish | day_id=%s deleted=%s tepisodes_read=%s tepisodes_skipped=%s skip_reasons=%s anchor_pivots=%s micro_highs=%s micro_lows=%s ticks=%s inserted=%s confirmed=%s invalidated=%s unfinished=%s buildver=%s episode_buildver=%s",
         day.id,
         deleted,
         len(tepisodes),
+        skipped,
+        ",".join(f"{k}:{v}" for k, v in sorted(skip_reasons.items())) or "none",
         len(anchor_pivots),
         len(micro_highs),
         len(micro_lows),
@@ -573,11 +622,12 @@ def process_day(conn, logger, day: DayRow, args: argparse.Namespace) -> Dict[str
         states["invalidated"],
         states["unfinished"],
         args.buildver,
-        args.episode_buildver or args.buildver,
+        args.episode_buildver,
     )
     return {
         "deleted": deleted,
         "tepisodes": len(tepisodes),
+        "skipped": skipped,
         "inserted": inserted,
         "confirmed": states["confirmed"],
         "invalidated": states["invalidated"],
@@ -612,7 +662,7 @@ def main() -> None:
             args.end_day_id,
             len(days),
             args.buildver,
-            args.episode_buildver or args.buildver,
+            args.episode_buildver,
             args.dir,
             args.anchor_layer,
             args.cascade_layer,
@@ -622,6 +672,7 @@ def main() -> None:
             "days": 0,
             "deleted": 0,
             "tepisodes": 0,
+            "skipped": 0,
             "inserted": 0,
             "confirmed": 0,
             "invalidated": 0,
@@ -633,6 +684,7 @@ def main() -> None:
                 totals["days"] += 1
                 totals["deleted"] += int(stats["deleted"])
                 totals["tepisodes"] += int(stats["tepisodes"])
+                totals["skipped"] += int(stats["skipped"])
                 totals["inserted"] += int(stats["inserted"])
                 totals["confirmed"] += int(stats["confirmed"])
                 totals["invalidated"] += int(stats["invalidated"])
@@ -643,16 +695,17 @@ def main() -> None:
                 raise
 
         logger.info(
-            "FINISH buildTconfirm | days=%s deleted=%s tepisodes=%s inserted=%s confirmed=%s invalidated=%s unfinished=%s buildver=%s episode_buildver=%s",
+            "FINISH buildTconfirm | days=%s deleted=%s tepisodes_read=%s tepisodes_skipped=%s inserted=%s confirmed=%s invalidated=%s unfinished=%s buildver=%s episode_buildver=%s",
             totals["days"],
             totals["deleted"],
             totals["tepisodes"],
+            totals["skipped"],
             totals["inserted"],
             totals["confirmed"],
             totals["invalidated"],
             totals["unfinished"],
             args.buildver,
-            args.episode_buildver or args.buildver,
+            args.episode_buildver,
         )
     finally:
         try:
