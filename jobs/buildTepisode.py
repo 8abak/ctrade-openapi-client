@@ -39,6 +39,7 @@ from jobs.layer2common import (
 DEFAULT_MERGE_GAP_MS = 90_000
 DEFAULT_MERGE_GAP_TICKS = 12
 DEFAULT_ZONE_NEAR_MS = 90_000
+DEFAULT_ZONE_NEAR_TICKS = 20
 TARGET_DIR = "top"
 TARGET_EPISODE_STATE = "closed"
 SOURCE_LAYER = "nano"
@@ -96,6 +97,8 @@ class TzoneRow:
     startts: object
     endts: object
     topprice: float
+    lowprice: float
+    highprice: float
 
 
 @dataclass
@@ -158,6 +161,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--merge-gap-ms", type=int, default=DEFAULT_MERGE_GAP_MS)
     parser.add_argument("--merge-gap-ticks", type=int, default=DEFAULT_MERGE_GAP_TICKS)
     parser.add_argument("--zone-near-ms", type=int, default=DEFAULT_ZONE_NEAR_MS)
+    parser.add_argument("--zone-near-ticks", type=int, default=DEFAULT_ZONE_NEAR_TICKS)
     parser.add_argument("--episodestate", default=TARGET_EPISODE_STATE)
     parser.add_argument("--dir", default=TARGET_DIR)
     parser.add_argument("--source-layer", default=SOURCE_LAYER)
@@ -168,7 +172,7 @@ def load_tzones(conn, *, day_id: int, buildver: str, dir_name: str) -> List[Tzon
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             """
-            SELECT id, centerts, startts, endts, topprice
+            SELECT id, centerts, startts, endts, topprice, lowprice, highprice
             FROM public.tzone
             WHERE dayid = %s
               AND buildver = %s
@@ -186,6 +190,8 @@ def load_tzones(conn, *, day_id: int, buildver: str, dir_name: str) -> List[Tzon
             startts=row["startts"],
             endts=row["endts"],
             topprice=float(row["topprice"]),
+            lowprice=float(row["lowprice"]),
+            highprice=float(row["highprice"]),
         )
         for row in rows
     ]
@@ -210,31 +216,79 @@ def compress_episodes(pivots: List[PivotRow], args: argparse.Namespace) -> List[
     return episodes
 
 
-def classify_zone_position(rep_ts, zone: TzoneRow, near_ms: int) -> str:
+def time_gap_ms(rep_ts, zone: TzoneRow) -> int:
     if zone.startts <= rep_ts <= zone.endts:
-        return "inside"
-    if rep_ts < zone.startts and duration_ms(rep_ts, zone.startts) <= int(near_ms):
+        return 0
+    if rep_ts < zone.startts:
+        return duration_ms(rep_ts, zone.startts)
+    return duration_ms(zone.endts, rep_ts)
+
+
+def price_gap(rep_px: float, zone: TzoneRow) -> float:
+    if float(zone.lowprice) <= float(rep_px) <= float(zone.highprice):
+        return 0.0
+    if float(rep_px) < float(zone.lowprice):
+        return float(zone.lowprice) - float(rep_px)
+    return float(rep_px) - float(zone.highprice)
+
+
+def pick_inside_zone(rep_ts, rep_px: float, zones: List[TzoneRow]) -> Optional[TzoneRow]:
+    inside = [
+        zone
+        for zone in zones
+        if zone.startts <= rep_ts <= zone.endts
+        and float(zone.lowprice) <= float(rep_px) <= float(zone.highprice)
+    ]
+    if not inside:
+        return None
+    return min(
+        inside,
+        key=lambda zone: (
+            absolute_duration_ms(zone.centerts, rep_ts),
+            abs(float(zone.topprice) - float(rep_px)),
+            zone.id,
+        ),
+    )
+
+
+def classify_fallback_zone(rep_ts, rep_px: float, zone: TzoneRow, near_ms: int, near_price_gap: float) -> str:
+    gap_ms = time_gap_ms(rep_ts, zone)
+    gap_px = price_gap(rep_px, zone)
+
+    if rep_ts < zone.startts and gap_ms <= int(near_ms) and gap_px <= float(near_price_gap):
         return "nearbefore"
-    if rep_ts > zone.endts and duration_ms(zone.endts, rep_ts) <= int(near_ms):
+    if rep_ts > zone.endts and gap_ms <= int(near_ms) and gap_px <= float(near_price_gap):
         return "nearafter"
     return "outside"
 
 
-def pick_zone(episode: EpisodeAccumulator, zones: List[TzoneRow], near_ms: int) -> Tuple[Optional[int], str]:
+def pick_zone(
+    episode: EpisodeAccumulator,
+    zones: List[TzoneRow],
+    near_ms: int,
+    near_price_gap: float,
+) -> Tuple[Optional[int], str]:
     if not zones:
         return None, "unassigned"
 
     rep_ts = episode.reppivot.ts
     rep_px = float(episode.reppivot.px)
+
+    inside = pick_inside_zone(rep_ts, rep_px, zones)
+    if inside is not None:
+        return int(inside.id), "inside"
+
     best = min(
         zones,
         key=lambda zone: (
+            time_gap_ms(rep_ts, zone),
+            price_gap(rep_px, zone),
             absolute_duration_ms(zone.centerts, rep_ts),
-            abs(float(zone.topprice) - rep_px),
+            abs(float(zone.topprice) - float(rep_px)),
             zone.id,
         ),
     )
-    return int(best.id), classify_zone_position(rep_ts, best, near_ms)
+    return int(best.id), classify_fallback_zone(rep_ts, rep_px, best, near_ms, near_price_gap)
 
 
 def make_tepisode_rows(
@@ -245,9 +299,15 @@ def make_tepisode_rows(
 ) -> List[tuple]:
     created_at = datetime.now(timezone.utc)
     rows: List[tuple] = []
+    near_price_gap = max(0, int(args.zone_near_ticks)) * float(args.tick_size)
 
     for episode in episodes:
-        zone_id, zone_pos = pick_zone(episode, zones, max(0, int(args.zone_near_ms)))
+        zone_id, zone_pos = pick_zone(
+            episode,
+            zones,
+            max(0, int(args.zone_near_ms)),
+            near_price_gap,
+        )
         rows.append(
             (
                 int(day.id),
@@ -311,13 +371,24 @@ def process_day(conn, logger, day: DayRow, args: argparse.Namespace) -> Dict[str
     inserted = insert_tepisodes(conn, rows)
     conn.commit()
 
+    linked = 0
+    zonepos_counts: Dict[str, int] = {}
+    for row in rows:
+        zone_id = row[1]
+        zone_pos = str(row[16])
+        if zone_id is not None:
+            linked += 1
+        zonepos_counts[zone_pos] = zonepos_counts.get(zone_pos, 0) + 1
+
     logger.info(
-        "DAY finish | day_id=%s deleted=%s nano_high_pivots=%s zones=%s episodes=%s inserted=%s buildver=%s zone_buildver=%s",
+        "DAY finish | day_id=%s deleted=%s nano_high_pivots=%s zones=%s episodes=%s linked=%s zonepos=%s inserted=%s buildver=%s zone_buildver=%s",
         day.id,
         deleted,
         len(pivots),
         len(zones),
         len(episodes),
+        linked,
+        ",".join(f"{k}:{v}" for k, v in sorted(zonepos_counts.items())) or "none",
         inserted,
         args.buildver,
         args.zone_buildver or args.buildver,
@@ -327,6 +398,7 @@ def process_day(conn, logger, day: DayRow, args: argparse.Namespace) -> Dict[str
         "pivots": len(pivots),
         "zones": len(zones),
         "episodes": len(episodes),
+        "linked": linked,
         "inserted": inserted,
     }
 
@@ -360,7 +432,7 @@ def main() -> None:
             args.source_layer,
         )
 
-        totals = {"days": 0, "deleted": 0, "pivots": 0, "zones": 0, "episodes": 0, "inserted": 0}
+        totals = {"days": 0, "deleted": 0, "pivots": 0, "zones": 0, "episodes": 0, "linked": 0, "inserted": 0}
         for day in days:
             try:
                 stats = process_day(conn, logger, day, args)
@@ -369,6 +441,7 @@ def main() -> None:
                 totals["pivots"] += int(stats["pivots"])
                 totals["zones"] += int(stats["zones"])
                 totals["episodes"] += int(stats["episodes"])
+                totals["linked"] += int(stats["linked"])
                 totals["inserted"] += int(stats["inserted"])
             except Exception:
                 conn.rollback()
@@ -376,12 +449,13 @@ def main() -> None:
                 raise
 
         logger.info(
-            "FINISH buildTepisode | days=%s deleted=%s pivots=%s zones=%s episodes=%s inserted=%s buildver=%s zone_buildver=%s",
+            "FINISH buildTepisode | days=%s deleted=%s pivots=%s zones=%s episodes=%s linked=%s inserted=%s buildver=%s zone_buildver=%s",
             totals["days"],
             totals["deleted"],
             totals["pivots"],
             totals["zones"],
             totals["episodes"],
+            totals["linked"],
             totals["inserted"],
             args.buildver,
             args.zone_buildver or args.buildver,
