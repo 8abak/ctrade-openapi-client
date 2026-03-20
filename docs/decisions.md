@@ -136,3 +136,18 @@ New decisions must be appended to this file in chronological order.
   - Evaluation is resumable by uniqueness on `(symbol, signal_id)` and optional `--force` recomputation.
   - Existing `ticks`, `flow_signals`, and API routes remain unchanged.
   - Outcome stats (`tp/sl/no_hit`, duration) are persisted for downstream reporting.
+
+---
+
+## 2026-03-20 - [DB/Jobs] - First Online Rule-Family Layer (`trulehit`)
+
+- Context:  
+  Structural layers now produce `tconfirm` rows with truth linkage, and we need the first explicit online rule-family layer that evaluates simple inspectable thresholds without introducing ML or live trading logic.
+
+- Decision:  
+  Add additive table `trulehit` and job `python -m jobs.buildTrulehit`. The first implemented slice is top-direction `StrictB` `v1`, evaluated 1:1 from `tconfirm` rows for a selected day and source build version with explicit pass/fail reason codes.
+
+- Consequences:  
+  - Rule hits become a persisted, inspectable layer keyed to `tconfirm`.
+  - Rebuilds remain day-driven and resumable by deleting and rebuilding only the requested day/rule slice.
+  - Additional families or directions can be added later without changing the current `tconfirm` contract.
