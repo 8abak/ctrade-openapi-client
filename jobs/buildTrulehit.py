@@ -100,13 +100,26 @@ def parse_args() -> argparse.Namespace:
         help="Delete all existing day rows for the rule slice regardless of buildver before rebuilding",
     )
     parser.add_argument("--dir", default=TARGET_DIR)
+    parser.add_argument("--rulename", default=RULE_NAME)
+    parser.add_argument("--rulever", default=RULE_VERSION)
     parser.add_argument("--microreversal-max-ticks", type=int, default=DEFAULT_MICROREVERSAL_MAX_TICKS)
     parser.add_argument("--lowerhigh-max-ticks", type=int, default=DEFAULT_LOWERHIGH_MAX_TICKS)
     parser.add_argument("--lowerlow-max-ticks", type=int, default=DEFAULT_LOWERLOW_MAX_TICKS)
     parser.add_argument("--incomingmove200-min", type=float, default=DEFAULT_INCOMINGMOVE200_MIN)
     parser.add_argument("--kalminusk2-min", type=float, default=DEFAULT_KALMINUSK2_MIN)
     parser.add_argument("--compression-max", type=float, default=DEFAULT_COMPRESSION_MAX)
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.dir = str(args.dir).strip().lower()
+    args.rulename = str(args.rulename).strip()
+    args.rulever = str(args.rulever).strip()
+    return args
+
+
+def validate_rule_args(args: argparse.Namespace) -> None:
+    if args.dir != TARGET_DIR:
+        raise RuntimeError("buildTrulehit currently supports only dir='top'.")
+    if args.rulename != RULE_NAME or args.rulever != RULE_VERSION:
+        raise RuntimeError(f"buildTrulehit currently supports only {RULE_NAME} {RULE_VERSION}.")
 
 
 def load_column_types(conn, table: str) -> Dict[str, str]:
@@ -248,6 +261,23 @@ def load_tconfirms(
     ]
 
 
+def load_tconfirm_buildver_counts(conn, *, day_id: int, dir_name: str) -> Dict[str, int]:
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT buildver, COUNT(*)::bigint AS rowcount
+            FROM public.tconfirm
+            WHERE dayid = %s
+              AND dir = %s
+            GROUP BY buildver
+            ORDER BY buildver ASC
+            """,
+            (int(day_id), str(dir_name)),
+        )
+        rows = cur.fetchall()
+    return {str(row["buildver"]): int(row["rowcount"]) for row in rows}
+
+
 def delete_day_rule_rows(
     conn,
     *,
@@ -266,8 +296,8 @@ def delete_day_rule_rows(
     params: List[object] = [
         int(day_id),
         str(dir_name),
-        RULE_NAME,
-        RULE_VERSION,
+        str(RULE_NAME),
+        str(RULE_VERSION),
     ]
     if has_buildver and not delete_all_buildvers:
         where.append("buildver = %s")
@@ -340,8 +370,8 @@ def make_rule_row(
         "tconfirmid": int(row.id),
         "confirmid": int(row.id),
         "dir": str(row.dir),
-        "rulename": RULE_NAME,
-        "rulever": RULE_VERSION,
+        "rulename": str(args.rulename),
+        "rulever": str(args.rulever),
         "ishit": bool(is_hit),
         "score": float(score),
         "reason": str(reason),
@@ -386,6 +416,7 @@ def process_day(
     col_types: Dict[str, str],
     has_buildver: bool,
 ) -> Dict[str, int]:
+    buildver_counts = load_tconfirm_buildver_counts(conn, day_id=day.id, dir_name=args.dir)
     deleted = delete_day_rule_rows(
         conn,
         day_id=day.id,
@@ -401,6 +432,28 @@ def process_day(
         dir_name=args.dir,
         episode_col=episode_col,
     )
+    source_rows_found = len(tconfirms)
+    eligible_rows = source_rows_found
+    skip_count = 0
+
+    logger.info(
+        "DAY source | day_id=%s source_rows_found=%s eligible=%s skips=%s confirm_buildver=%s dir=%s available_buildvers=%s",
+        day.id,
+        source_rows_found,
+        eligible_rows,
+        skip_count,
+        args.confirm_buildver,
+        args.dir,
+        ",".join(f"{k}:{v}" for k, v in sorted(buildver_counts.items())) or "none",
+    )
+    if source_rows_found == 0:
+        logger.warning(
+            "DAY no_source_rows | day_id=%s confirm_buildver=%s dir=%s available_buildvers=%s",
+            day.id,
+            args.confirm_buildver,
+            args.dir,
+            ",".join(f"{k}:{v}" for k, v in sorted(buildver_counts.items())) or "none",
+        )
 
     created_at = datetime.now(timezone.utc)
     rows = [
@@ -428,26 +481,30 @@ def process_day(
         reason_counts[reason] = reason_counts.get(reason, 0) + 1
 
     logger.info(
-        "DAY finish | day_id=%s deleted=%s tconfirms_read=%s inserted=%s hits=%s misses=%s reasons=%s buildver=%s confirm_buildver=%s rulename=%s rulever=%s dir=%s",
+        "DAY finish | day_id=%s deleted=%s source_rows_found=%s eligible=%s inserted=%s hits=%s misses=%s skips=%s reasons=%s buildver=%s confirm_buildver=%s rulename=%s rulever=%s dir=%s",
         day.id,
         deleted,
-        len(tconfirms),
+        source_rows_found,
+        eligible_rows,
         inserted,
         hits,
         misses,
+        skip_count,
         ",".join(f"{k}:{v}" for k, v in sorted(reason_counts.items())) or "none",
         args.buildver,
         args.confirm_buildver,
-        RULE_NAME,
-        RULE_VERSION,
+        args.rulename,
+        args.rulever,
         args.dir,
     )
     return {
         "deleted": deleted,
-        "tconfirms": len(tconfirms),
+        "source_rows_found": source_rows_found,
+        "eligible": eligible_rows,
         "inserted": inserted,
         "hits": hits,
         "misses": misses,
+        "skips": skip_count,
     }
 
 
@@ -455,8 +512,7 @@ def main() -> None:
     args = parse_args()
     logger = setup_logger("buildTrulehit", "buildTrulehit.log")
 
-    if str(args.dir).lower() != TARGET_DIR:
-        raise RuntimeError("buildTrulehit currently supports only dir='top'.")
+    validate_rule_args(args)
 
     conn = get_conn()
     conn.autocommit = False
@@ -475,18 +531,20 @@ def main() -> None:
             len(days),
             args.buildver,
             args.confirm_buildver,
-            RULE_NAME,
-            RULE_VERSION,
+            args.rulename,
+            args.rulever,
             args.dir,
         )
 
         totals = {
             "days": 0,
             "deleted": 0,
-            "tconfirms": 0,
+            "source_rows_found": 0,
+            "eligible": 0,
             "inserted": 0,
             "hits": 0,
             "misses": 0,
+            "skips": 0,
         }
         for day in days:
             try:
@@ -502,27 +560,31 @@ def main() -> None:
                 )
                 totals["days"] += 1
                 totals["deleted"] += int(stats["deleted"])
-                totals["tconfirms"] += int(stats["tconfirms"])
+                totals["source_rows_found"] += int(stats["source_rows_found"])
+                totals["eligible"] += int(stats["eligible"])
                 totals["inserted"] += int(stats["inserted"])
                 totals["hits"] += int(stats["hits"])
                 totals["misses"] += int(stats["misses"])
+                totals["skips"] += int(stats["skips"])
             except Exception:
                 conn.rollback()
                 logger.exception("DAY error | day_id=%s", day.id)
                 raise
 
         logger.info(
-            "FINISH buildTrulehit | days=%s deleted=%s tconfirms_read=%s inserted=%s hits=%s misses=%s buildver=%s confirm_buildver=%s rulename=%s rulever=%s dir=%s",
+            "FINISH buildTrulehit | days=%s deleted=%s source_rows_found=%s eligible=%s inserted=%s hits=%s misses=%s skips=%s buildver=%s confirm_buildver=%s rulename=%s rulever=%s dir=%s",
             totals["days"],
             totals["deleted"],
-            totals["tconfirms"],
+            totals["source_rows_found"],
+            totals["eligible"],
             totals["inserted"],
             totals["hits"],
             totals["misses"],
+            totals["skips"],
             args.buildver,
             args.confirm_buildver,
-            RULE_NAME,
-            RULE_VERSION,
+            args.rulename,
+            args.rulever,
             args.dir,
         )
     finally:
