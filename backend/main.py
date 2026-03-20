@@ -26,6 +26,9 @@ from backend.db import (
     detect_mid_expr,
     detect_bid_ask,
     get_k2_candles_window,
+    get_structure_day,
+    get_structure_window,
+    list_structure_days,
     review_zig_pivots,
 )
 
@@ -174,6 +177,14 @@ def k2_page():
     return FileResponse(path)
 
 
+@app.get("/structure")
+def structure_page():
+    path = os.path.join(FRONTEND_DIR, "structure.html")
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="structure.html not found")
+    return FileResponse(path)
+
+
 @app.get("/api/k2candles/window")
 def api_k2candles_window(
     symbol: str = Query("XAUUSD"),
@@ -189,6 +200,50 @@ def api_k2candles_window(
             from_id=from_id,
         )
         return {"symbol": symbol, "candles": rows}
+    finally:
+        conn.close()
+
+
+@app.get("/api/structure/days")
+def api_structure_days(
+    limit: int = Query(60, ge=1, le=365),
+):
+    conn = get_conn()
+    try:
+        return {"days": list_structure_days(conn, limit=limit)}
+    finally:
+        conn.close()
+
+
+@app.get("/api/structure/day")
+def api_structure_day(
+    day_id: int = Query(..., ge=1),
+    include_ticks: bool = Query(False),
+):
+    conn = get_conn()
+    try:
+        data = get_structure_day(conn, day_id=int(day_id), include_ticks=bool(include_ticks))
+        if not data.get("day"):
+            raise HTTPException(status_code=404, detail=f"days.id={int(day_id)} not found")
+        return data
+    finally:
+        conn.close()
+
+
+@app.get("/api/structure/window")
+def api_structure_window(
+    from_id: int = Query(..., ge=1),
+    window: int = Query(5000, ge=100, le=200000),
+    include_ticks: bool = Query(False),
+):
+    conn = get_conn()
+    try:
+        return get_structure_window(
+            conn,
+            from_id=int(from_id),
+            window=int(window),
+            include_ticks=bool(include_ticks),
+        )
     finally:
         conn.close()
 

@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Structure Inspection</title>
+  <style>
+    :root {
+      --bg: #08101d;
+      --panel: #0d1628;
+      --panel2: #101c31;
+      --text: #dbe7ff;
+      --muted: #91a3c3;
+      --line: rgba(255,255,255,0.1);
+      --accent: #56b4e9;
+    }
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
+    }
+    body {
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+    }
+    .TopBar, .ToggleBar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--line);
+      flex-wrap: wrap;
+    }
+    .ToggleBar {
+      background: var(--panel2);
+      padding-top: 8px;
+      padding-bottom: 8px;
+    }
+    .Group {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .Hint {
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    input, select, button {
+      background: #0a1425;
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 6px 9px;
+      outline: none;
+    }
+    input[type="checkbox"] {
+      accent-color: var(--accent);
+    }
+    button {
+      cursor: pointer;
+    }
+    .Primary {
+      border-color: rgba(86,180,233,0.5);
+    }
+    .Layout {
+      min-height: 0;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 320px;
+      gap: 0;
+    }
+    .ChartWrap {
+      min-width: 0;
+      min-height: 0;
+      padding: 10px 12px 12px;
+    }
+    #structure-chart {
+      width: 100%;
+      height: calc(100vh - 123px);
+      min-height: 420px;
+      border-radius: 14px;
+      overflow: hidden;
+      background: rgba(255,255,255,0.02);
+    }
+    .Side {
+      border-left: 1px solid var(--line);
+      background: rgba(255,255,255,0.02);
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+    }
+    .SideHead {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      font-weight: 600;
+    }
+    #detail-body {
+      margin: 0;
+      padding: 12px 14px 18px;
+      color: var(--muted);
+      white-space: pre-wrap;
+      overflow: auto;
+      font-size: 12px;
+      line-height: 1.45;
+      flex: 1 1 auto;
+    }
+    #structure-status {
+      margin-left: auto;
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 42vw;
+    }
+    @media (max-width: 1100px) {
+      .Layout {
+        grid-template-columns: 1fr;
+      }
+      .Side {
+        border-left: 0;
+        border-top: 1px solid var(--line);
+      }
+      #structure-chart {
+        height: calc(100vh - 123px - 220px);
+      }
+    }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+  <script src="/frontend/chart-core.js"></script>
+  <script src="/frontend/structure-core.js"></script>
+</head>
+<body>
+  <div class="TopBar">
+    <div class="Group">
+      <span class="Hint">Mode</span>
+      <select id="structure-mode">
+        <option value="day">Day</option>
+        <option value="window">Tick Window</option>
+      </select>
+    </div>
+    <div class="Group">
+      <span class="Hint">Day</span>
+      <select id="structure-day"></select>
+    </div>
+    <button id="structure-refresh-days">Refresh Days</button>
+    <div class="Group">
+      <span class="Hint">From ID</span>
+      <input id="structure-from-id" type="number" min="1" step="1" value="1" />
+    </div>
+    <div class="Group">
+      <span class="Hint">Window</span>
+      <input id="structure-window" type="number" min="100" max="200000" step="100" value="20000" />
+    </div>
+    <button id="structure-load" class="Primary">Load</button>
+    <button id="structure-reset-zoom">Reset Zoom</button>
+    <div id="structure-status">Loading latest day...</div>
+  </div>
+
+  <div class="ToggleBar">
+    <label class="Group"><input id="toggle-ticks" type="checkbox" /> <span class="Hint">Show ticks</span></label>
+    <label class="Group"><input id="toggle-kal" type="checkbox" /> <span class="Hint">Show kal</span></label>
+    <label class="Group"><input id="toggle-pivots" type="checkbox" checked /> <span class="Hint">Show pivots</span></label>
+    <label class="Group"><input id="toggle-tpivots" type="checkbox" checked /> <span class="Hint">Show tpivots</span></label>
+    <label class="Group"><input id="toggle-zones" type="checkbox" checked /> <span class="Hint">Show zones</span></label>
+    <label class="Group"><input id="toggle-episodes" type="checkbox" checked /> <span class="Hint">Show episodes</span></label>
+  </div>
+
+  <div class="Layout">
+    <div class="ChartWrap">
+      <div id="structure-chart"></div>
+    </div>
+    <aside class="Side">
+      <div class="SideHead">Details</div>
+      <pre id="detail-body">Click a pivot, tpivot, zone, or episode to inspect it.</pre>
+    </aside>
+  </div>
+</body>
+</html>

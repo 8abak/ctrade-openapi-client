@@ -25,6 +25,9 @@ const ChartCore = (function () {
       kal: true,
       k2: true,
       piv: false,
+      tpiv: false,
+      tzone: true,
+      tepisode: true,
     },
 
     layerAvailability: {
@@ -34,7 +37,11 @@ const ChartCore = (function () {
 
     // pivot overlay state
     pivots: [],
+    tpivots: [],
+    tzones: [],
+    tepisodes: [],
     pivotLevel: 1,
+    clickHandler: null,
 
     // segLines overlay state
     segLines: [],              // active lines for current segm
@@ -79,6 +86,13 @@ const ChartCore = (function () {
     if (v === null || v === undefined) return null;
     const n = typeof v === "number" ? v : parseFloat(String(v));
     return Number.isFinite(n) ? n : null;
+  }
+
+  function tsToMs(ts) {
+    if (ts == null || ts === "") return null;
+    if (typeof ts === "number") return Number.isFinite(ts) ? ts : null;
+    const ms = new Date(ts).getTime();
+    return Number.isFinite(ms) ? ms : null;
   }
 
   function safeNum(v) {
@@ -364,6 +378,16 @@ const ChartCore = (function () {
     return { xVals, series };
   }
 
+  function extractClickPayload(params) {
+    if (!params) return null;
+    const data = params.data;
+    if (data && typeof data === "object" && data.payload) return data.payload;
+    if (Array.isArray(data) && data.length >= 3 && data[2] && typeof data[2] === "object") {
+      return data[2];
+    }
+    return null;
+  }
+
   function buildTooltipFormatter(xVals, ticks) {
     const infoByTs = new Map();
     ticks.forEach((t) => {
@@ -534,6 +558,363 @@ const ChartCore = (function () {
     };
   }
 
+  function structureTs(row) {
+    return row && (row.ts || row.repts || row.centerts || row.firstts || row.startts || null);
+  }
+
+  function structurePx(row) {
+    const px = row && (
+      row.px != null ? row.px :
+      row.topprice != null ? row.topprice :
+      row.highprice != null ? row.highprice :
+      row.lowprice != null ? row.lowprice :
+      null
+    );
+    return safeNum(px);
+  }
+
+  function buildStructureBounds() {
+    const ys = [];
+    const vis = state.visibility;
+
+    if (vis.mid || vis.kal) {
+      for (const t of state.ticks || []) {
+        if (vis.mid) {
+          const mid = safeNum(t && t.mid);
+          if (mid != null) ys.push(mid);
+        }
+        if (vis.kal) {
+          const kal = safeNum(t && t.kal);
+          if (kal != null) ys.push(kal);
+        }
+      }
+    }
+
+    if (vis.piv) {
+      for (const p of state.pivots || []) {
+        const px = structurePx(p);
+        if (px != null) ys.push(px);
+      }
+    }
+
+    if (vis.tpiv) {
+      for (const p of state.tpivots || []) {
+        const px = structurePx(p);
+        if (px != null) ys.push(px);
+      }
+    }
+
+    if (vis.tzone) {
+      for (const z of state.tzones || []) {
+        const lo = safeNum(z && z.lowprice);
+        const hi = safeNum(z && z.highprice);
+        if (lo != null) ys.push(lo);
+        if (hi != null) ys.push(hi);
+      }
+    }
+
+    if (vis.tepisode) {
+      for (const e of state.tepisodes || []) {
+        const lo = safeNum(e && e.lowprice);
+        const hi = safeNum(e && e.highprice);
+        const top = safeNum(e && e.topprice);
+        if (lo != null) ys.push(lo);
+        if (hi != null) ys.push(hi);
+        if (top != null) ys.push(top);
+      }
+    }
+
+    if (!ys.length) return null;
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+    const pad = Math.max(0.25, (maxY - minY) * 0.04);
+    return { min: minY - pad, max: maxY + pad };
+  }
+
+  function buildRectSeries(id, name, rows, opts) {
+    if (!rows.length) return null;
+    const data = [];
+
+    for (const row of rows) {
+      const x0 = tsToMs(row[opts.startKey]);
+      const x1 = tsToMs(row[opts.endKey]);
+      const y0 = safeNum(row[opts.lowKey]);
+      const y1 = safeNum(row[opts.highKey]);
+      if (x0 == null || x1 == null || y0 == null || y1 == null) continue;
+      data.push({
+        value: [x0, y0, x1, y1],
+        payload: row,
+      });
+    }
+
+    if (!data.length) return null;
+
+    return {
+      id,
+      name,
+      type: "custom",
+      coordinateSystem: "cartesian2d",
+      renderItem(params, api) {
+        const start = api.coord([api.value(0), api.value(1)]);
+        const end = api.coord([api.value(2), api.value(3)]);
+        const rect = echarts.graphic.clipRectByRect(
+          {
+            x: Math.min(start[0], end[0]),
+            y: Math.min(start[1], end[1]),
+            width: Math.max(1, Math.abs(end[0] - start[0])),
+            height: Math.max(1, Math.abs(end[1] - start[1])),
+          },
+          {
+            x: params.coordSys.x,
+            y: params.coordSys.y,
+            width: params.coordSys.width,
+            height: params.coordSys.height,
+          }
+        );
+        if (!rect) return null;
+        return {
+          type: "rect",
+          shape: rect,
+          style: api.style({
+            fill: opts.fill,
+            stroke: opts.stroke,
+            lineWidth: 1,
+          }),
+        };
+      },
+      encode: { x: [0, 2], y: [1, 3] },
+      data,
+      z: opts.z || 1,
+      silent: false,
+      tooltip: { trigger: "item" },
+    };
+  }
+
+  function buildScatterSeries(id, name, rows, opts) {
+    if (!rows.length) return null;
+    const data = [];
+    for (const row of rows) {
+      const ts = tsToMs(opts.tsAccessor(row));
+      const px = safeNum(opts.pxAccessor(row));
+      if (ts == null || px == null) continue;
+      data.push({
+        value: [ts, px],
+        payload: row,
+      });
+    }
+    if (!data.length) return null;
+
+    return {
+      id,
+      name,
+      type: "scatter",
+      data,
+      symbol: opts.symbol || "circle",
+      symbolRotate: opts.symbolRotate || 0,
+      symbolSize: opts.symbolSize || 8,
+      itemStyle: { color: opts.color || "#ffffff" },
+      z: opts.z || 5,
+      tooltip: { trigger: "item" },
+    };
+  }
+
+  function buildStructureSeries() {
+    const vis = state.visibility;
+    const series = [];
+
+    if (vis.mid && Array.isArray(state.ticks) && state.ticks.length) {
+      const midData = state.ticks
+        .map((t) => {
+          const ts = tsToMs(t.ts);
+          const mid = safeNum(t.mid);
+          if (ts == null || mid == null) return null;
+          return { value: [ts, mid], payload: t };
+        })
+        .filter(Boolean);
+      if (midData.length) {
+        series.push({
+          id: "structure_mid",
+          name: "Ticks",
+          type: "line",
+          data: midData,
+          showSymbol: false,
+          smooth: false,
+          lineStyle: { width: 1, color: "#7aa2ff" },
+          z: 3,
+        });
+      }
+    }
+
+    if (vis.kal && Array.isArray(state.ticks) && state.ticks.length) {
+      const kalData = state.ticks
+        .map((t) => {
+          const ts = tsToMs(t.ts);
+          const kal = safeNum(t.kal);
+          if (ts == null || kal == null) return null;
+          return { value: [ts, kal], payload: t };
+        })
+        .filter(Boolean);
+      if (kalData.length) {
+        series.push({
+          id: "structure_kal",
+          name: "Kal",
+          type: "line",
+          data: kalData,
+          showSymbol: false,
+          smooth: false,
+          lineStyle: { width: 1.4, color: "#8ee3c8" },
+          z: 4,
+        });
+      }
+    }
+
+    if (vis.tzone && Array.isArray(state.tzones) && state.tzones.length) {
+      const zoneSeries = buildRectSeries("structure_tzone", "TZone", state.tzones, {
+        startKey: "startts",
+        endKey: "endts",
+        lowKey: "lowprice",
+        highKey: "highprice",
+        fill: "rgba(86, 180, 233, 0.15)",
+        stroke: "#56b4e9",
+        z: 1,
+      });
+      if (zoneSeries) series.push(zoneSeries);
+    }
+
+    if (vis.tepisode && Array.isArray(state.tepisodes) && state.tepisodes.length) {
+      const episodeSeries = buildRectSeries("structure_tepisode", "TEpisode", state.tepisodes, {
+        startKey: "firstts",
+        endKey: "lastts",
+        lowKey: "lowprice",
+        highKey: "highprice",
+        fill: "rgba(255, 196, 61, 0.22)",
+        stroke: "#ffc43d",
+        z: 2,
+      });
+      if (episodeSeries) series.push(episodeSeries);
+
+      const repSeries = buildScatterSeries("structure_tepisode_rep", "TEpisode Rep", state.tepisodes, {
+        tsAccessor: (row) => row.repts,
+        pxAccessor: (row) => row.topprice,
+        symbol: "diamond",
+        symbolSize: 10,
+        color: "#ffd166",
+        z: 7,
+      });
+      if (repSeries) series.push(repSeries);
+    }
+
+    if (vis.piv && Array.isArray(state.pivots) && state.pivots.length) {
+      const pivotConfigs = [
+        { layer: "nano", ptype: "h", id: "piv_nano_hi", name: "Piv Nano High", symbol: "circle", size: 6, color: "#ffb703" },
+        { layer: "nano", ptype: "l", id: "piv_nano_lo", name: "Piv Nano Low", symbol: "circle", size: 6, color: "#7bdff2" },
+        { layer: "micro", ptype: "h", id: "piv_micro_hi", name: "Piv Micro High", symbol: "triangle", size: 8, color: "#fb8500" },
+        { layer: "micro", ptype: "l", id: "piv_micro_lo", name: "Piv Micro Low", symbol: "triangle", size: 8, color: "#4cc9f0", rotate: 180 },
+        { layer: "macro", ptype: "h", id: "piv_macro_hi", name: "Piv Macro High", symbol: "diamond", size: 10, color: "#ff6b6b" },
+        { layer: "macro", ptype: "l", id: "piv_macro_lo", name: "Piv Macro Low", symbol: "diamond", size: 10, color: "#72efdd" },
+      ];
+
+      for (const cfg of pivotConfigs) {
+        const rows = state.pivots.filter((p) => p && p.layer === cfg.layer && String(p.ptype || "").toLowerCase() === cfg.ptype);
+        const s = buildScatterSeries(cfg.id, cfg.name, rows, {
+          tsAccessor: (row) => row.ts,
+          pxAccessor: (row) => row.px,
+          symbol: cfg.symbol,
+          symbolRotate: cfg.rotate || 0,
+          symbolSize: cfg.size,
+          color: cfg.color,
+          z: 6,
+        });
+        if (s) series.push(s);
+      }
+    }
+
+    if (vis.tpiv && Array.isArray(state.tpivots) && state.tpivots.length) {
+      const highRows = state.tpivots.filter((p) => String((p && (p.ptype || p.dir || "")) || "").toLowerCase().startsWith("h") || String((p && p.dir) || "").toLowerCase() === "top");
+      const lowRows = state.tpivots.filter((p) => !highRows.includes(p));
+
+      const highSeries = buildScatterSeries("structure_tpiv_hi", "TPivots High", highRows, {
+        tsAccessor: (row) => structureTs(row),
+        pxAccessor: (row) => structurePx(row),
+        symbol: "pin",
+        symbolSize: 14,
+        color: "#ff4d6d",
+        z: 8,
+      });
+      if (highSeries) series.push(highSeries);
+
+      const lowSeries = buildScatterSeries("structure_tpiv_lo", "TPivots Low", lowRows, {
+        tsAccessor: (row) => structureTs(row),
+        pxAccessor: (row) => structurePx(row),
+        symbol: "pin",
+        symbolRotate: 180,
+        symbolSize: 14,
+        color: "#5eead4",
+        z: 8,
+      });
+      if (lowSeries) series.push(lowSeries);
+    }
+
+    return series;
+  }
+
+  function buildStructureTooltipFormatter() {
+    return function (params) {
+      const payload = extractClickPayload(params);
+      if (!payload) return params && params.seriesName ? params.seriesName : "";
+
+      const ts = payload.ts || payload.repts || payload.centerts || payload.firstts || payload.startts || "";
+      const px =
+        payload.px != null ? payload.px :
+        payload.topprice != null ? payload.topprice :
+        payload.highprice != null ? payload.highprice :
+        "";
+
+      let html = `<b>${params.seriesName || ""}</b><br/>`;
+      if (payload.id != null) html += `id: ${payload.id}<br/>`;
+      if (ts) html += `ts: ${ts}<br/>`;
+      if (px !== "") html += `px: ${Number(px).toFixed ? Number(px).toFixed(2) : px}<br/>`;
+      if (payload.layer) html += `layer: ${payload.layer}<br/>`;
+      if (payload.zonepos) html += `zonepos: ${payload.zonepos}<br/>`;
+      if (payload.pivotcount != null) html += `pivotcount: ${payload.pivotcount}<br/>`;
+      return html;
+    };
+  }
+
+  function renderStructure() {
+    const series = buildStructureSeries();
+    const bounds = buildStructureBounds();
+
+    chart.setOption(
+      {
+        animation: false,
+        grid: { left: 55, right: 24, top: 22, bottom: 58 },
+        tooltip: {
+          trigger: "item",
+          confine: true,
+          formatter: buildStructureTooltipFormatter(),
+        },
+        legend: {
+          top: 0,
+          textStyle: { color: "#cdd6f4" },
+        },
+        xAxis: {
+          type: "time",
+          axisLabel: { formatter: (value) => toISO(value).slice(11, 19) },
+        },
+        yAxis: bounds ? { type: "value", scale: true, min: bounds.min, max: bounds.max } : { type: "value", scale: true },
+        dataZoom: [
+          { type: "inside", xAxisIndex: 0, filterMode: "none" },
+          { type: "slider", xAxisIndex: 0, filterMode: "none" },
+        ],
+        series,
+      },
+      { notMerge: true, lazyUpdate: true }
+    );
+    state.hasInit = true;
+    notifyWindowChange();
+  }
+
   function renderK2Candles() {
     if (!chart) return;
 
@@ -633,6 +1014,10 @@ const ChartCore = (function () {
       renderK2Candles();
       return;
     }
+    if (state.mode === "structure") {
+      renderStructure();
+      return;
+    }
 
     refreshLayerAvailability();
 
@@ -693,6 +1078,7 @@ const ChartCore = (function () {
   }
 
   function handleDataZoom() {
+    if (state.mode === "structure") return;
     recomputeYFromVisibleWindow(chart, state);
   }
 
@@ -707,6 +1093,9 @@ const ChartCore = (function () {
     state.mode = "live";
     state.ticks = Array.isArray(data.ticks) ? data.ticks : [];
     state.pivots = Array.isArray(data.pivots) ? data.pivots : [];
+    state.tpivots = [];
+    state.tzones = [];
+    state.tepisodes = [];
 
     if (state.ticks.length) state.lastTickId = state.ticks[state.ticks.length - 1].id;
     else state.lastTickId = null;
@@ -739,6 +1128,9 @@ const ChartCore = (function () {
 
         state.ticks = ticks;
         state.pivots = pivots;
+        state.tpivots = [];
+        state.tzones = [];
+        state.tepisodes = [];
         state.lastTickId = lastId;
         render();
       } catch (e) {
@@ -770,6 +1162,9 @@ const ChartCore = (function () {
     state.mode = "review";
     state.ticks = Array.isArray(data.ticks) ? data.ticks : [];
     state.pivots = Array.isArray(data.pivots) ? data.pivots : [];
+    state.tpivots = [];
+    state.tzones = [];
+    state.tepisodes = [];
 
     if (state.ticks.length) state.lastTickId = state.ticks[state.ticks.length - 1].id;
     else state.lastTickId = null;
@@ -783,8 +1178,23 @@ const ChartCore = (function () {
     state.mode = "review";
     state.ticks = Array.isArray(ticks) ? ticks : [];
     state.pivots = [];
+    state.tpivots = [];
+    state.tzones = [];
+    state.tepisodes = [];
     if (state.ticks.length) state.lastTickId = state.ticks[state.ticks.length - 1].id;
     else state.lastTickId = null;
+    render();
+  }
+
+  function setStructureData(payload) {
+    const data = payload || {};
+    state.mode = "structure";
+    state.ticks = Array.isArray(data.ticks) ? data.ticks : [];
+    state.pivots = Array.isArray(data.pivots) ? data.pivots : [];
+    state.tpivots = Array.isArray(data.tpivots) ? data.tpivots : [];
+    state.tzones = Array.isArray(data.tzone) ? data.tzone : [];
+    state.tepisodes = Array.isArray(data.tepisode) ? data.tepisode : [];
+    state.lastTickId = state.ticks.length ? state.ticks[state.ticks.length - 1].id : null;
     render();
   }
 
@@ -822,6 +1232,26 @@ const ChartCore = (function () {
     render();
   }
 
+  function setClickHandler(fn) {
+    state.clickHandler = typeof fn === "function" ? fn : null;
+  }
+
+  function handleChartClick(params) {
+    if (!state.clickHandler) return;
+    const payload = extractClickPayload(params);
+    if (!payload) return;
+    state.clickHandler({
+      seriesId: params.seriesId || "",
+      seriesName: params.seriesName || "",
+      payload,
+    });
+  }
+
+  function resetZoom() {
+    if (!chart) return;
+    chart.dispatchAction({ type: "dataZoom", start: 0, end: 100 });
+  }
+
   return {
     init(domId) {
       const c = ensureChart(domId);
@@ -829,6 +1259,8 @@ const ChartCore = (function () {
 
       c.off && c.off("dataZoom");
       c.on("dataZoom", handleDataZoom);
+      c.off && c.off("click");
+      c.on("click", handleChartClick);
     },
     loadWindow,
     startLive,
@@ -840,9 +1272,12 @@ const ChartCore = (function () {
 
     // new API
     setTicks,
+    setStructureData,
     setSegLines,
     setSegLinesVisibility,
     setK2Candles,
+    setClickHandler,
+    resetZoom,
 
     setLayerAvailabilityHandler,
     getLayerAvailability,

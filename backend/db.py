@@ -2,6 +2,7 @@
 import os
 import json
 from datetime import date, datetime
+from decimal import Decimal
 import psycopg2
 import psycopg2.extras
 from typing import List, Optional, Dict, Any
@@ -178,6 +179,474 @@ def get_k2_candles_window(
             }
         )
     return out
+
+
+def table_exists(conn, table: str) -> bool:
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema = 'public'
+              AND table_name = %s
+            """,
+            (table,),
+        )
+        return cur.fetchone() is not None
+
+
+def table_columns(conn, table: str) -> set:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = %s
+            """,
+            (table,),
+        )
+        return {str(r[0]) for r in cur.fetchall()}
+
+
+def _jsonable_db(o):
+    if isinstance(o, Decimal):
+        return float(o)
+    if isinstance(o, (datetime, date)):
+        return o.isoformat()
+    if isinstance(o, dict):
+        return {k: _jsonable_db(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [_jsonable_db(v) for v in o]
+    return o
+
+
+def _normalize_tick_rows(
+    rows: List[Dict[str, Any]],
+    *,
+    has_kal: bool,
+    has_k2: bool,
+    has_bid: bool,
+    has_ask: bool,
+) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+
+        if isinstance(item.get("mid"), Decimal):
+            item["mid"] = float(item["mid"])
+        if has_kal:
+            if isinstance(item.get("kal"), Decimal):
+                item["kal"] = float(item["kal"])
+        else:
+            item["kal"] = item.get("mid")
+
+        if has_k2:
+            if isinstance(item.get("k2"), Decimal):
+                item["k2"] = float(item["k2"])
+        else:
+            item["k2"] = None
+
+        if has_bid and isinstance(item.get("bid"), Decimal):
+            item["bid"] = float(item["bid"])
+        if has_ask and isinstance(item.get("ask"), Decimal):
+            item["ask"] = float(item["ask"])
+
+        item["spread"] = (
+            (item.get("ask") - item.get("bid"))
+            if (
+                has_bid
+                and has_ask
+                and item.get("ask") is not None
+                and item.get("bid") is not None
+            )
+            else None
+        )
+
+        ts = item.get("ts")
+        if isinstance(ts, (datetime, date)):
+            item["ts"] = ts.isoformat()
+
+        out.append(item)
+    return out
+
+
+def _fetch_ticks_by_id_range(conn, start_id: int, end_id: int) -> List[Dict[str, Any]]:
+    ts_col = detect_ts_col(conn)
+    mid_expr = detect_mid_expr(conn)
+    has_bid, has_ask = detect_bid_ask(conn)
+    has_kal = "kal" in columns_exist(conn, "ticks", ["kal"])
+    has_k2 = "k2" in columns_exist(conn, "ticks", ["k2"])
+
+    bid_sel = ", bid" if has_bid else ""
+    ask_sel = ", ask" if has_ask else ""
+    kal_sel = ", kal" if has_kal else ""
+    k2_sel = ", k2" if has_k2 else ""
+
+    with dict_cur(conn) as cur:
+        cur.execute(
+            f"""
+            SELECT id,
+                   {ts_col} AS ts,
+                   {mid_expr} AS mid
+                   {kal_sel}{k2_sel}{bid_sel}{ask_sel}
+            FROM public.ticks
+            WHERE id BETWEEN %s AND %s
+            ORDER BY id ASC
+            """,
+            (int(start_id), int(end_id)),
+        )
+        rows = cur.fetchall()
+
+    return _normalize_tick_rows(
+        [dict(r) for r in rows],
+        has_kal=has_kal,
+        has_k2=has_k2,
+        has_bid=has_bid,
+        has_ask=has_ask,
+    )
+
+
+def _get_tick_range_meta(conn, start_id: int, end_id: int) -> Optional[Dict[str, Any]]:
+    ts_col = detect_ts_col(conn)
+    with dict_cur(conn) as cur:
+        cur.execute(
+            f"""
+            SELECT
+                MIN(id) AS startid,
+                MAX(id) AS endid,
+                MIN({ts_col}) AS startts,
+                MAX({ts_col}) AS endts,
+                COUNT(*)::bigint AS tickcount
+            FROM public.ticks
+            WHERE id BETWEEN %s AND %s
+            """,
+            (int(start_id), int(end_id)),
+        )
+        row = cur.fetchone()
+
+    if not row or row["startid"] is None or row["endid"] is None:
+        return None
+
+    return {
+        "startid": int(row["startid"]),
+        "endid": int(row["endid"]),
+        "startts": row["startts"],
+        "endts": row["endts"],
+        "tickcount": int(row["tickcount"] or 0),
+    }
+
+
+def _get_overlapping_days(conn, start_id: int, end_id: int) -> List[Dict[str, Any]]:
+    if not table_exists(conn, "days"):
+        return []
+
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            SELECT id, startid, endid, startts, endts
+            FROM public.days
+            WHERE endid >= %s
+              AND startid <= %s
+            ORDER BY id ASC
+            """,
+            (int(start_id), int(end_id)),
+        )
+        rows = cur.fetchall()
+    return [_jsonable_db(dict(r)) for r in rows]
+
+
+def _get_pivots_for_day(conn, day_id: int) -> List[Dict[str, Any]]:
+    if not table_exists(conn, "pivots"):
+        return []
+
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            SELECT id, dayid, layer, rev, tickid, ts, px, ptype, pivotno, dayrow
+            FROM public.pivots
+            WHERE dayid = %s
+            ORDER BY ts ASC, id ASC
+            """,
+            (int(day_id),),
+        )
+        rows = cur.fetchall()
+    return [_jsonable_db(dict(r)) for r in rows]
+
+
+def _get_pivots_for_tick_range(conn, start_id: int, end_id: int) -> List[Dict[str, Any]]:
+    if not table_exists(conn, "pivots"):
+        return []
+
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            SELECT id, dayid, layer, rev, tickid, ts, px, ptype, pivotno, dayrow
+            FROM public.pivots
+            WHERE tickid BETWEEN %s AND %s
+            ORDER BY tickid ASC, id ASC
+            """,
+            (int(start_id), int(end_id)),
+        )
+        rows = cur.fetchall()
+    return [_jsonable_db(dict(r)) for r in rows]
+
+
+def _fetch_optional_tpivots(
+    conn,
+    *,
+    day_id: Optional[int] = None,
+    start_ts: Optional[datetime] = None,
+    end_ts: Optional[datetime] = None,
+    start_id: Optional[int] = None,
+    end_id: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    if not table_exists(conn, "tpivots"):
+        return []
+
+    cols = table_columns(conn, "tpivots")
+    where = []
+    params: List[Any] = []
+
+    if day_id is not None and "dayid" in cols:
+        where.append("dayid = %s")
+        params.append(int(day_id))
+    elif start_id is not None and end_id is not None and "tickid" in cols:
+        where.append("tickid BETWEEN %s AND %s")
+        params.extend([int(start_id), int(end_id)])
+    elif start_ts is not None and end_ts is not None:
+        if {"startts", "endts"}.issubset(cols):
+            where.append("COALESCE(endts, startts) >= %s AND startts <= %s")
+            params.extend([start_ts, end_ts])
+        elif {"firstts", "lastts"}.issubset(cols):
+            where.append("COALESCE(lastts, firstts) >= %s AND firstts <= %s")
+            params.extend([start_ts, end_ts])
+        elif "ts" in cols:
+            where.append("ts BETWEEN %s AND %s")
+            params.extend([start_ts, end_ts])
+        elif "centerts" in cols:
+            where.append("centerts BETWEEN %s AND %s")
+            params.extend([start_ts, end_ts])
+        elif "repts" in cols:
+            where.append("repts BETWEEN %s AND %s")
+            params.extend([start_ts, end_ts])
+        else:
+            return []
+    else:
+        return []
+
+    order_col = "ts"
+    if "tickid" in cols:
+        order_col = "tickid"
+    elif "startts" in cols:
+        order_col = "startts"
+    elif "firstts" in cols:
+        order_col = "firstts"
+    elif "centerts" in cols:
+        order_col = "centerts"
+    elif "repts" in cols:
+        order_col = "repts"
+
+    with dict_cur(conn) as cur:
+        cur.execute(
+            f"""
+            SELECT *
+            FROM public.tpivots
+            WHERE {' AND '.join(where)}
+            ORDER BY {order_col} ASC, id ASC
+            """,
+            tuple(params),
+        )
+        rows = cur.fetchall()
+    return [_jsonable_db(dict(r)) for r in rows]
+
+
+def _get_tzones_for_day(conn, day_id: int) -> List[Dict[str, Any]]:
+    if not table_exists(conn, "tzone"):
+        return []
+
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            SELECT *
+            FROM public.tzone
+            WHERE dayid = %s
+            ORDER BY centerts ASC, id ASC
+            """,
+            (int(day_id),),
+        )
+        rows = cur.fetchall()
+    return [_jsonable_db(dict(r)) for r in rows]
+
+
+def _get_tzones_for_time_range(conn, start_ts: datetime, end_ts: datetime) -> List[Dict[str, Any]]:
+    if not table_exists(conn, "tzone"):
+        return []
+
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            SELECT *
+            FROM public.tzone
+            WHERE endts >= %s
+              AND startts <= %s
+            ORDER BY startts ASC, id ASC
+            """,
+            (start_ts, end_ts),
+        )
+        rows = cur.fetchall()
+    return [_jsonable_db(dict(r)) for r in rows]
+
+
+def _get_tepisodes_for_day(conn, day_id: int) -> List[Dict[str, Any]]:
+    if not table_exists(conn, "tepisode"):
+        return []
+
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            SELECT *
+            FROM public.tepisode
+            WHERE dayid = %s
+            ORDER BY firstts ASC, id ASC
+            """,
+            (int(day_id),),
+        )
+        rows = cur.fetchall()
+    return [_jsonable_db(dict(r)) for r in rows]
+
+
+def _get_tepisodes_for_time_range(conn, start_ts: datetime, end_ts: datetime) -> List[Dict[str, Any]]:
+    if not table_exists(conn, "tepisode"):
+        return []
+
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            SELECT *
+            FROM public.tepisode
+            WHERE lastts >= %s
+              AND firstts <= %s
+            ORDER BY firstts ASC, id ASC
+            """,
+            (start_ts, end_ts),
+        )
+        rows = cur.fetchall()
+    return [_jsonable_db(dict(r)) for r in rows]
+
+
+def list_structure_days(conn, limit: int = 60) -> List[Dict[str, Any]]:
+    if not table_exists(conn, "days"):
+        return []
+
+    lim = max(1, min(int(limit), 365))
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            SELECT
+                id,
+                startid,
+                endid,
+                startts,
+                endts,
+                (startts::date)::text AS daydate
+            FROM public.days
+            ORDER BY id DESC
+            LIMIT %s
+            """,
+            (lim,),
+        )
+        rows = cur.fetchall()
+    return [_jsonable_db(dict(r)) for r in rows]
+
+
+def get_structure_day(conn, *, day_id: int, include_ticks: bool = False) -> Dict[str, Any]:
+    if not table_exists(conn, "days"):
+        return {"day": None, "ticks": [], "pivots": [], "tpivots": [], "tzone": [], "tepisode": []}
+
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            SELECT id, startid, endid, startts, endts, (startts::date)::text AS daydate
+            FROM public.days
+            WHERE id = %s
+            """,
+            (int(day_id),),
+        )
+        day_row = cur.fetchone()
+
+    if not day_row:
+        return {"day": None, "ticks": [], "pivots": [], "tpivots": [], "tzone": [], "tepisode": []}
+
+    day_info = _jsonable_db(dict(day_row))
+    start_id = int(day_row["startid"])
+    end_id = int(day_row["endid"])
+    start_ts = day_row["startts"]
+    end_ts = day_row["endts"]
+
+    ticks = _fetch_ticks_by_id_range(conn, start_id, end_id) if include_ticks else []
+    pivots = _get_pivots_for_day(conn, int(day_id))
+    tpivots = _fetch_optional_tpivots(conn, day_id=int(day_id), start_ts=start_ts, end_ts=end_ts)
+    tzones = _get_tzones_for_day(conn, int(day_id))
+    tepisodes = _get_tepisodes_for_day(conn, int(day_id))
+
+    return {
+        "mode": "day",
+        "day": day_info,
+        "range": {
+            "startid": start_id,
+            "endid": end_id,
+            "startts": _jsonable_db(start_ts),
+            "endts": _jsonable_db(end_ts),
+        },
+        "ticks": ticks,
+        "pivots": pivots,
+        "tpivots": tpivots,
+        "tzone": tzones,
+        "tepisode": tepisodes,
+    }
+
+
+def get_structure_window(conn, *, from_id: int, window: int, include_ticks: bool = False) -> Dict[str, Any]:
+    start_id = int(from_id)
+    end_id = int(from_id) + max(1, int(window)) - 1
+
+    meta = _get_tick_range_meta(conn, start_id, end_id)
+    if not meta:
+        return {
+            "mode": "window",
+            "range": {"startid": start_id, "endid": end_id, "tickcount": 0},
+            "days": [],
+            "ticks": [],
+            "pivots": [],
+            "tpivots": [],
+            "tzone": [],
+            "tepisode": [],
+        }
+
+    ticks = _fetch_ticks_by_id_range(conn, start_id, end_id) if include_ticks else []
+    pivots = _get_pivots_for_tick_range(conn, start_id, end_id)
+    tpivots = _fetch_optional_tpivots(
+        conn,
+        start_id=start_id,
+        end_id=end_id,
+        start_ts=meta["startts"],
+        end_ts=meta["endts"],
+    )
+    tzones = _get_tzones_for_time_range(conn, meta["startts"], meta["endts"])
+    tepisodes = _get_tepisodes_for_time_range(conn, meta["startts"], meta["endts"])
+    days = _get_overlapping_days(conn, start_id, end_id)
+
+    return {
+        "mode": "window",
+        "range": _jsonable_db(meta),
+        "days": days,
+        "ticks": ticks,
+        "pivots": pivots,
+        "tpivots": tpivots,
+        "tzone": tzones,
+        "tepisode": tepisodes,
+    }
 
 
 def upsert_backtest_row(
