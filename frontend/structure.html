@@ -24,9 +24,9 @@
     }
     body {
       display: grid;
-      grid-template-rows: auto auto 1fr;
+      grid-template-rows: auto auto auto 1fr;
     }
-    .TopBar, .ToggleBar {
+    .TopBar, .ToggleBar, .FilterBar {
       display: flex;
       align-items: center;
       gap: 10px;
@@ -37,6 +37,11 @@
     }
     .ToggleBar {
       background: var(--panel2);
+      padding-top: 8px;
+      padding-bottom: 8px;
+    }
+    .FilterBar {
+      background: rgba(255,255,255,0.03);
       padding-top: 8px;
       padding-bottom: 8px;
     }
@@ -67,6 +72,13 @@
     .Primary {
       border-color: rgba(86,180,233,0.5);
     }
+    .Quick {
+      padding: 5px 9px;
+      font-size: 12px;
+    }
+    .ScoreInput {
+      width: 84px;
+    }
     .Layout {
       min-height: 0;
       display: grid;
@@ -80,7 +92,7 @@
     }
     #structure-chart {
       width: 100%;
-      height: calc(100vh - 123px);
+      height: calc(100vh - 178px);
       min-height: 420px;
       border-radius: 14px;
       overflow: hidden;
@@ -126,7 +138,7 @@
         border-top: 1px solid var(--line);
       }
       #structure-chart {
-        height: calc(100vh - 123px - 220px);
+        height: calc(100vh - 178px - 220px);
       }
     }
   </style>
@@ -154,7 +166,7 @@
     </div>
     <div class="Group">
       <span class="Hint">Window</span>
-      <input id="structure-window" type="number" min="100" max="200000" step="100" value="20000" />
+      <input id="structure-window" type="number" min="100" max="200000" step="100" value="80000" />
     </div>
     <button id="structure-load" class="Primary">Load</button>
     <button id="structure-reset-zoom">Reset Zoom</button>
@@ -165,9 +177,32 @@
     <label class="Group"><input id="toggle-ticks" type="checkbox" /> <span class="Hint">Show ticks</span></label>
     <label class="Group"><input id="toggle-kal" type="checkbox" /> <span class="Hint">Show kal</span></label>
     <label class="Group"><input id="toggle-pivots" type="checkbox" checked /> <span class="Hint">Show pivots</span></label>
-    <label class="Group"><input id="toggle-tpivots" type="checkbox" checked /> <span class="Hint">Show tpivots</span></label>
     <label class="Group"><input id="toggle-zones" type="checkbox" checked /> <span class="Hint">Show zones</span></label>
     <label class="Group"><input id="toggle-episodes" type="checkbox" checked /> <span class="Hint">Show episodes</span></label>
+    <label class="Group"><input id="toggle-confirms" type="checkbox" checked /> <span class="Hint">Show confirms</span></label>
+    <label class="Group"><input id="toggle-scores" type="checkbox" checked /> <span class="Hint">Show scores</span></label>
+  </div>
+
+  <div class="FilterBar">
+    <div class="Group">
+      <span class="Hint">Min score</span>
+      <input id="filter-min-score" class="ScoreInput" type="number" min="0" max="100" step="1" value="0" />
+    </div>
+    <div class="Group">
+      <span class="Hint">Grades</span>
+      <label class="Group"><input id="grade-A" type="checkbox" checked /> <span class="Hint">A</span></label>
+      <label class="Group"><input id="grade-B" type="checkbox" checked /> <span class="Hint">B</span></label>
+      <label class="Group"><input id="grade-C" type="checkbox" checked /> <span class="Hint">C</span></label>
+      <label class="Group"><input id="grade-D" type="checkbox" checked /> <span class="Hint">D</span></label>
+      <label class="Group"><input id="grade-F" type="checkbox" checked /> <span class="Hint">F</span></label>
+    </div>
+    <label class="Group"><input id="filter-truthmatched" type="checkbox" /> <span class="Hint">Only truthmatched</span></label>
+    <label class="Group"><input id="filter-confirmed" type="checkbox" /> <span class="Hint">Only confirmed</span></label>
+    <label class="Group"><input id="filter-invalidated" type="checkbox" /> <span class="Hint">Only invalidated</span></label>
+    <button id="preset-clear" class="Quick" data-preset="clear">Clear Filters</button>
+    <button id="preset-ab" class="Quick" data-preset="ab">Show Only A/B</button>
+    <button id="preset-confirmed60" class="Quick" data-preset="confirmed60">Confirmed + Score &gt;= 60</button>
+    <button id="preset-truth60" class="Quick" data-preset="truth60">Truthmatched + Score &gt;= 60</button>
   </div>
 
   <div class="Layout">
@@ -176,7 +211,7 @@
     </div>
     <aside class="Side">
       <div class="SideHead">Details</div>
-      <pre id="detail-body">Click a pivot, tpivot, zone, or episode to inspect it.</pre>
+      <pre id="detail-body">Click a score, confirm, zone, or episode to inspect it.</pre>
     </aside>
   </div>
 </body>
