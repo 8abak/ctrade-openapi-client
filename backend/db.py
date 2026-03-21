@@ -1037,6 +1037,103 @@ def get_structure_window(
     }
 
 
+def get_unity_recent(
+    conn,
+    *,
+    symbol: str = "XAUUSD",
+    limit: int = 100,
+) -> Dict[str, Any]:
+    tables = {"unitystate", "unitytick", "unitysignal", "unitytrade", "unityevent"}
+    if any(not table_exists(conn, name) for name in tables):
+        return {
+            "state": None,
+            "opentrade": None,
+            "signals": [],
+            "trades": [],
+            "ticks": [],
+            "events": [],
+        }
+
+    lim = max(1, min(int(limit), 1000))
+    out: Dict[str, Any] = {}
+
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            SELECT symbol, tickid, time, mode, status, updated
+            FROM public.unitystate
+            WHERE symbol=%s
+            """,
+            (symbol,),
+        )
+        row = cur.fetchone()
+        out["state"] = _jsonable_db(dict(row)) if row else None
+
+        cur.execute(
+            """
+            SELECT *
+            FROM public.unitytrade
+            WHERE symbol=%s
+              AND status='open'
+            ORDER BY opentick DESC
+            LIMIT 1
+            """,
+            (symbol,),
+        )
+        row = cur.fetchone()
+        out["opentrade"] = _jsonable_db(dict(row)) if row else None
+
+        cur.execute(
+            """
+            SELECT *
+            FROM public.unitysignal
+            WHERE symbol=%s
+            ORDER BY tickid DESC, id DESC
+            LIMIT %s
+            """,
+            (symbol, lim),
+        )
+        out["signals"] = [_jsonable_db(dict(r)) for r in cur.fetchall()]
+
+        cur.execute(
+            """
+            SELECT *
+            FROM public.unitytrade
+            WHERE symbol=%s
+            ORDER BY COALESCE(closetick, opentick) DESC, id DESC
+            LIMIT %s
+            """,
+            (symbol, lim),
+        )
+        out["trades"] = [_jsonable_db(dict(r)) for r in cur.fetchall()]
+
+        cur.execute(
+            """
+            SELECT *
+            FROM public.unitytick
+            WHERE symbol=%s
+            ORDER BY tickid DESC
+            LIMIT %s
+            """,
+            (symbol, lim),
+        )
+        out["ticks"] = [_jsonable_db(dict(r)) for r in cur.fetchall()]
+
+        cur.execute(
+            """
+            SELECT *
+            FROM public.unityevent
+            WHERE symbol=%s
+            ORDER BY tickid DESC, id DESC
+            LIMIT %s
+            """,
+            (symbol, lim),
+        )
+        out["events"] = [_jsonable_db(dict(r)) for r in cur.fetchall()]
+
+    return out
+
+
 def upsert_backtest_row(
     conn,
     *,

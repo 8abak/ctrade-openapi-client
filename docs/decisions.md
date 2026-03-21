@@ -151,3 +151,29 @@ New decisions must be appended to this file in chronological order.
   - Rule hits become a persisted, inspectable layer keyed to `tconfirm`.
   - Rebuilds remain day-driven and resumable by deleting and rebuilding only the requested day/rule slice.
   - Additional families or directions can be added later without changing the current `tconfirm` contract.
+
+---
+
+## 2026-03-21 - [DB/Jobs/API] - Incremental UNITY Paper Signal Engine
+
+- Context:  
+  The UNITY notebook logic needs to move from research-only code into an online processor that follows live `ticks`, keeps causal and cleaned structural labels separate, and journals paper-only trade decisions for later review.
+
+- Decision:  
+  Add a new additive UNITY stack:
+  - `unitystate` for resumable processor state and serialized rolling context.
+  - `unitypivot` for causal confirmed pivot events.
+  - `unityswing` for bounded cleaned swing segments.
+  - `unitytick` for per-tick causal and cleaned states.
+  - `unitysignal` for scored signal candidates and skip reasons.
+  - `unitytrade` for one-at-a-time paper trades.
+  - `unityevent` for append-only paper trade journal events.
+  Implement:
+  - `jobs/unity_core.py` as the shared notebook-derived engine.
+  - `unityFromDB.py` as the incremental backfill/live follower.
+  - `/api/unity/recent` for quick read access.
+
+- Consequences:  
+  - Live decisions stay causal and immutable once emitted.
+  - Cleaned structural history may repaint only inside a recent bounded window around the latest differentiating pivots.
+  - No real trading adapter is introduced; the stack is paper-only and database-backed.

@@ -25,6 +25,7 @@ from backend.db import (
     detect_ts_col,
     detect_mid_expr,
     detect_bid_ask,
+    get_unity_recent,
     get_k2_candles_window,
     get_structure_day,
     get_structure_window,
@@ -272,6 +273,18 @@ def api_structure_window(
             only_confirmed=bool(only_confirmed),
             only_invalidated=bool(only_invalidated),
         )
+    finally:
+        conn.close()
+
+
+@app.get("/api/unity/recent")
+def api_unity_recent(
+    symbol: str = Query("XAUUSD"),
+    limit: int = Query(100, ge=1, le=1000),
+):
+    conn = get_conn()
+    try:
+        return get_unity_recent(conn, symbol=symbol, limit=limit)
     finally:
         conn.close()
 
