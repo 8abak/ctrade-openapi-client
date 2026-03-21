@@ -535,6 +535,316 @@ def _get_tepisodes_for_time_range(conn, start_ts: datetime, end_ts: datetime) ->
     return [_jsonable_db(dict(r)) for r in rows]
 
 
+def _normalize_grade_filters(grades: Optional[Any]) -> List[str]:
+    if grades is None:
+        return []
+    if isinstance(grades, str):
+        raw_parts = grades.split(",")
+    elif isinstance(grades, (list, tuple, set)):
+        raw_parts = list(grades)
+    else:
+        raw_parts = [grades]
+
+    allowed = {"A", "B", "C", "D", "F"}
+    out: List[str] = []
+    for part in raw_parts:
+        grade = str(part or "").strip().upper()
+        if grade and grade in allowed and grade not in out:
+            out.append(grade)
+    return out
+
+
+def _normalize_structure_filters(
+    *,
+    min_score: Optional[float] = None,
+    grades: Optional[Any] = None,
+    only_truthmatched: bool = False,
+    only_confirmed: bool = False,
+    only_invalidated: bool = False,
+) -> Dict[str, Any]:
+    normalized_min_score: Optional[float]
+    if min_score is None:
+        normalized_min_score = None
+    else:
+        try:
+            normalized_min_score = float(min_score)
+        except Exception:
+            normalized_min_score = None
+        if normalized_min_score is not None:
+            normalized_min_score = max(0.0, min(100.0, normalized_min_score))
+
+    return {
+        "min_score": normalized_min_score,
+        "grades": _normalize_grade_filters(grades),
+        "only_truthmatched": bool(only_truthmatched),
+        "only_confirmed": bool(only_confirmed),
+        "only_invalidated": bool(only_invalidated),
+    }
+
+
+def _get_tconfirms_for_day(conn, day_id: int) -> List[Dict[str, Any]]:
+    if not table_exists(conn, "tconfirm"):
+        return []
+
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            SELECT *
+            FROM public.tconfirm
+            WHERE dayid = %s
+            ORDER BY anchorts ASC NULLS LAST, id ASC
+            """,
+            (int(day_id),),
+        )
+        rows = cur.fetchall()
+    return [_jsonable_db(dict(r)) for r in rows]
+
+
+def _get_tconfirms_for_time_range(conn, start_ts: datetime, end_ts: datetime) -> List[Dict[str, Any]]:
+    if not table_exists(conn, "tconfirm"):
+        return []
+
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            SELECT *
+            FROM public.tconfirm
+            WHERE anchorts >= %s
+              AND anchorts <= %s
+            ORDER BY anchorts ASC NULLS LAST, id ASC
+            """,
+            (start_ts, end_ts),
+        )
+        rows = cur.fetchall()
+    return [_jsonable_db(dict(r)) for r in rows]
+
+
+def _get_tscores_for_day(conn, day_id: int) -> List[Dict[str, Any]]:
+    if not table_exists(conn, "tscore"):
+        return []
+
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            SELECT *
+            FROM public.tscore
+            WHERE dayid = %s
+            ORDER BY totalscore DESC, tconfirmid ASC, id ASC
+            """,
+            (int(day_id),),
+        )
+        rows = cur.fetchall()
+    return [_jsonable_db(dict(r)) for r in rows]
+
+
+def _get_tscores_for_time_range(conn, start_ts: datetime, end_ts: datetime) -> List[Dict[str, Any]]:
+    if not table_exists(conn, "tscore") or not table_exists(conn, "tconfirm"):
+        return []
+
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            SELECT s.*
+            FROM public.tscore s
+            WHERE EXISTS (
+                SELECT 1
+                FROM public.tconfirm c
+                WHERE c.id = s.tconfirmid
+                  AND c.anchorts >= %s
+                  AND c.anchorts <= %s
+            )
+            ORDER BY s.totalscore DESC, s.tconfirmid ASC, s.id ASC
+            """,
+            (start_ts, end_ts),
+        )
+        rows = cur.fetchall()
+    return [_jsonable_db(dict(r)) for r in rows]
+
+
+def _get_trulehits_for_day(conn, day_id: int) -> List[Dict[str, Any]]:
+    if not table_exists(conn, "trulehit"):
+        return []
+
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            SELECT *
+            FROM public.trulehit
+            WHERE dayid = %s
+            ORDER BY tconfirmid ASC, id ASC
+            """,
+            (int(day_id),),
+        )
+        rows = cur.fetchall()
+    return [_jsonable_db(dict(r)) for r in rows]
+
+
+def _get_trulehits_for_time_range(conn, start_ts: datetime, end_ts: datetime) -> List[Dict[str, Any]]:
+    if not table_exists(conn, "trulehit") or not table_exists(conn, "tconfirm"):
+        return []
+
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            SELECT r.*
+            FROM public.trulehit r
+            WHERE EXISTS (
+                SELECT 1
+                FROM public.tconfirm c
+                WHERE c.id = r.tconfirmid
+                  AND c.anchorts >= %s
+                  AND c.anchorts <= %s
+            )
+            ORDER BY r.tconfirmid ASC, r.id ASC
+            """,
+            (start_ts, end_ts),
+        )
+        rows = cur.fetchall()
+    return [_jsonable_db(dict(r)) for r in rows]
+
+
+def _row_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    text = str(value).strip().lower()
+    return text in {"1", "t", "true", "y", "yes"}
+
+
+def _confirm_passes_filters(row: Dict[str, Any], linked_scores: List[Dict[str, Any]], filters: Dict[str, Any]) -> bool:
+    confirm_state = str(row.get("confirmstate") or "").strip().lower()
+
+    if filters["only_truthmatched"] and not _row_bool(row.get("truthmatch")):
+        return False
+    if filters["only_confirmed"] and confirm_state != "confirmed":
+        return False
+    if filters["only_invalidated"] and confirm_state != "invalidated":
+        return False
+
+    wants_score_filter = filters["min_score"] is not None or bool(filters["grades"])
+    if not wants_score_filter:
+        return True
+
+    for score_row in linked_scores:
+        if _score_passes_filters(score_row, row, filters):
+            return True
+    return False
+
+
+def _score_passes_filters(
+    score_row: Dict[str, Any],
+    linked_confirm: Optional[Dict[str, Any]],
+    filters: Dict[str, Any],
+) -> bool:
+    if filters["min_score"] is not None:
+        try:
+            total_score = float(score_row.get("totalscore"))
+        except Exception:
+            return False
+        if total_score < float(filters["min_score"]):
+            return False
+
+    if filters["grades"]:
+        grade = str(score_row.get("scoregrade") or "").strip().upper()
+        if grade not in filters["grades"]:
+            return False
+
+    confirm_row = linked_confirm or {}
+    confirm_state = str(confirm_row.get("confirmstate") or "").strip().lower()
+
+    if filters["only_truthmatched"] and not _row_bool(confirm_row.get("truthmatch")):
+        return False
+    if filters["only_confirmed"] and confirm_state != "confirmed":
+        return False
+    if filters["only_invalidated"] and confirm_state != "invalidated":
+        return False
+
+    return True
+
+
+def _apply_structure_stack_filters(
+    *,
+    tconfirms: List[Dict[str, Any]],
+    tscores: List[Dict[str, Any]],
+    trulehits: List[Dict[str, Any]],
+    min_score: Optional[float] = None,
+    grades: Optional[Any] = None,
+    only_truthmatched: bool = False,
+    only_confirmed: bool = False,
+    only_invalidated: bool = False,
+) -> Dict[str, List[Dict[str, Any]]]:
+    filters = _normalize_structure_filters(
+        min_score=min_score,
+        grades=grades,
+        only_truthmatched=only_truthmatched,
+        only_confirmed=only_confirmed,
+        only_invalidated=only_invalidated,
+    )
+
+    if (
+        filters["min_score"] is None
+        and not filters["grades"]
+        and not filters["only_truthmatched"]
+        and not filters["only_confirmed"]
+        and not filters["only_invalidated"]
+    ):
+        return {
+            "tconfirm": tconfirms,
+            "tscore": tscores,
+            "trulehit": trulehits,
+        }
+
+    scores_by_confirm_id: Dict[int, List[Dict[str, Any]]] = {}
+    for row in tscores:
+        try:
+            confirm_id = int(row["tconfirmid"])
+        except Exception:
+            continue
+        scores_by_confirm_id.setdefault(confirm_id, []).append(row)
+
+    confirms_by_id: Dict[int, Dict[str, Any]] = {}
+    filtered_confirms: List[Dict[str, Any]] = []
+    for row in tconfirms:
+        try:
+            confirm_id = int(row["id"])
+        except Exception:
+            continue
+        linked_scores = scores_by_confirm_id.get(confirm_id, [])
+        if not _confirm_passes_filters(row, linked_scores, filters):
+            continue
+        confirms_by_id[confirm_id] = row
+        filtered_confirms.append(row)
+
+    filtered_scores: List[Dict[str, Any]] = []
+    visible_confirm_ids = set(confirms_by_id)
+    for row in tscores:
+        try:
+            confirm_id = int(row["tconfirmid"])
+        except Exception:
+            continue
+        linked_confirm = confirms_by_id.get(confirm_id)
+        if linked_confirm is None:
+            continue
+        if _score_passes_filters(row, linked_confirm, filters):
+            filtered_scores.append(row)
+
+    filtered_rulehits: List[Dict[str, Any]] = []
+    for row in trulehits:
+        try:
+            confirm_id = int(row["tconfirmid"])
+        except Exception:
+            continue
+        if confirm_id in visible_confirm_ids:
+            filtered_rulehits.append(row)
+
+    return {
+        "tconfirm": filtered_confirms,
+        "tscore": filtered_scores,
+        "trulehit": filtered_rulehits,
+    }
+
+
 def list_structure_days(conn, limit: int = 60) -> List[Dict[str, Any]]:
     if not table_exists(conn, "days"):
         return []
@@ -560,9 +870,30 @@ def list_structure_days(conn, limit: int = 60) -> List[Dict[str, Any]]:
     return [_jsonable_db(dict(r)) for r in rows]
 
 
-def get_structure_day(conn, *, day_id: int, include_ticks: bool = False) -> Dict[str, Any]:
+def get_structure_day(
+    conn,
+    *,
+    day_id: int,
+    include_ticks: bool = False,
+    include_rulehits: bool = True,
+    min_score: Optional[float] = None,
+    grades: Optional[Any] = None,
+    only_truthmatched: bool = False,
+    only_confirmed: bool = False,
+    only_invalidated: bool = False,
+) -> Dict[str, Any]:
     if not table_exists(conn, "days"):
-        return {"day": None, "ticks": [], "pivots": [], "tpivots": [], "tzone": [], "tepisode": []}
+        return {
+            "day": None,
+            "ticks": [],
+            "pivots": [],
+            "tpivots": [],
+            "tzone": [],
+            "tepisode": [],
+            "tconfirm": [],
+            "tscore": [],
+            "trulehit": [],
+        }
 
     with dict_cur(conn) as cur:
         cur.execute(
@@ -576,7 +907,17 @@ def get_structure_day(conn, *, day_id: int, include_ticks: bool = False) -> Dict
         day_row = cur.fetchone()
 
     if not day_row:
-        return {"day": None, "ticks": [], "pivots": [], "tpivots": [], "tzone": [], "tepisode": []}
+        return {
+            "day": None,
+            "ticks": [],
+            "pivots": [],
+            "tpivots": [],
+            "tzone": [],
+            "tepisode": [],
+            "tconfirm": [],
+            "tscore": [],
+            "trulehit": [],
+        }
 
     day_info = _jsonable_db(dict(day_row))
     start_id = int(day_row["startid"])
@@ -589,6 +930,19 @@ def get_structure_day(conn, *, day_id: int, include_ticks: bool = False) -> Dict
     tpivots = _fetch_optional_tpivots(conn, day_id=int(day_id), start_ts=start_ts, end_ts=end_ts)
     tzones = _get_tzones_for_day(conn, int(day_id))
     tepisodes = _get_tepisodes_for_day(conn, int(day_id))
+    tconfirms = _get_tconfirms_for_day(conn, int(day_id))
+    tscores = _get_tscores_for_day(conn, int(day_id))
+    trulehits = _get_trulehits_for_day(conn, int(day_id)) if include_rulehits else []
+    filtered = _apply_structure_stack_filters(
+        tconfirms=tconfirms,
+        tscores=tscores,
+        trulehits=trulehits,
+        min_score=min_score,
+        grades=grades,
+        only_truthmatched=only_truthmatched,
+        only_confirmed=only_confirmed,
+        only_invalidated=only_invalidated,
+    )
 
     return {
         "mode": "day",
@@ -604,10 +958,25 @@ def get_structure_day(conn, *, day_id: int, include_ticks: bool = False) -> Dict
         "tpivots": tpivots,
         "tzone": tzones,
         "tepisode": tepisodes,
+        "tconfirm": filtered["tconfirm"],
+        "tscore": filtered["tscore"],
+        "trulehit": filtered["trulehit"],
     }
 
 
-def get_structure_window(conn, *, from_id: int, window: int, include_ticks: bool = False) -> Dict[str, Any]:
+def get_structure_window(
+    conn,
+    *,
+    from_id: int,
+    window: int,
+    include_ticks: bool = False,
+    include_rulehits: bool = True,
+    min_score: Optional[float] = None,
+    grades: Optional[Any] = None,
+    only_truthmatched: bool = False,
+    only_confirmed: bool = False,
+    only_invalidated: bool = False,
+) -> Dict[str, Any]:
     start_id = int(from_id)
     end_id = int(from_id) + max(1, int(window)) - 1
 
@@ -622,6 +991,9 @@ def get_structure_window(conn, *, from_id: int, window: int, include_ticks: bool
             "tpivots": [],
             "tzone": [],
             "tepisode": [],
+            "tconfirm": [],
+            "tscore": [],
+            "trulehit": [],
         }
 
     ticks = _fetch_ticks_by_id_range(conn, start_id, end_id) if include_ticks else []
@@ -635,6 +1007,19 @@ def get_structure_window(conn, *, from_id: int, window: int, include_ticks: bool
     )
     tzones = _get_tzones_for_time_range(conn, meta["startts"], meta["endts"])
     tepisodes = _get_tepisodes_for_time_range(conn, meta["startts"], meta["endts"])
+    tconfirms = _get_tconfirms_for_time_range(conn, meta["startts"], meta["endts"])
+    tscores = _get_tscores_for_time_range(conn, meta["startts"], meta["endts"])
+    trulehits = _get_trulehits_for_time_range(conn, meta["startts"], meta["endts"]) if include_rulehits else []
+    filtered = _apply_structure_stack_filters(
+        tconfirms=tconfirms,
+        tscores=tscores,
+        trulehits=trulehits,
+        min_score=min_score,
+        grades=grades,
+        only_truthmatched=only_truthmatched,
+        only_confirmed=only_confirmed,
+        only_invalidated=only_invalidated,
+    )
     days = _get_overlapping_days(conn, start_id, end_id)
 
     return {
@@ -646,6 +1031,9 @@ def get_structure_window(conn, *, from_id: int, window: int, include_ticks: bool
         "tpivots": tpivots,
         "tzone": tzones,
         "tepisode": tepisodes,
+        "tconfirm": filtered["tconfirm"],
+        "tscore": filtered["tscore"],
+        "trulehit": filtered["trulehit"],
     }
 
 

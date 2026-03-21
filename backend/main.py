@@ -219,10 +219,26 @@ def api_structure_days(
 def api_structure_day(
     day_id: int = Query(..., ge=1),
     include_ticks: bool = Query(False),
+    include_rulehits: bool = Query(True),
+    min_score: Optional[float] = Query(None, ge=0, le=100),
+    grades: Optional[str] = Query(None),
+    only_truthmatched: bool = Query(False),
+    only_confirmed: bool = Query(False),
+    only_invalidated: bool = Query(False),
 ):
     conn = get_conn()
     try:
-        data = get_structure_day(conn, day_id=int(day_id), include_ticks=bool(include_ticks))
+        data = get_structure_day(
+            conn,
+            day_id=int(day_id),
+            include_ticks=bool(include_ticks),
+            include_rulehits=bool(include_rulehits),
+            min_score=min_score,
+            grades=grades,
+            only_truthmatched=bool(only_truthmatched),
+            only_confirmed=bool(only_confirmed),
+            only_invalidated=bool(only_invalidated),
+        )
         if not data.get("day"):
             raise HTTPException(status_code=404, detail=f"days.id={int(day_id)} not found")
         return data
@@ -235,6 +251,12 @@ def api_structure_window(
     from_id: int = Query(..., ge=1),
     window: int = Query(5000, ge=100, le=200000),
     include_ticks: bool = Query(False),
+    include_rulehits: bool = Query(True),
+    min_score: Optional[float] = Query(None, ge=0, le=100),
+    grades: Optional[str] = Query(None),
+    only_truthmatched: bool = Query(False),
+    only_confirmed: bool = Query(False),
+    only_invalidated: bool = Query(False),
 ):
     conn = get_conn()
     try:
@@ -243,6 +265,12 @@ def api_structure_window(
             from_id=int(from_id),
             window=int(window),
             include_ticks=bool(include_ticks),
+            include_rulehits=bool(include_rulehits),
+            min_score=min_score,
+            grades=grades,
+            only_truthmatched=bool(only_truthmatched),
+            only_confirmed=bool(only_confirmed),
+            only_invalidated=bool(only_invalidated),
         )
     finally:
         conn.close()

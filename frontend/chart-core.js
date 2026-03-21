@@ -28,6 +28,8 @@ const ChartCore = (function () {
       tpiv: false,
       tzone: true,
       tepisode: true,
+      tconfirm: true,
+      tscore: true,
     },
 
     layerAvailability: {
@@ -40,6 +42,9 @@ const ChartCore = (function () {
     tpivots: [],
     tzones: [],
     tepisodes: [],
+    tconfirms: [],
+    tscores: [],
+    trulehits: [],
     pivotLevel: 1,
     clickHandler: null,
 
@@ -624,6 +629,20 @@ const ChartCore = (function () {
       }
     }
 
+    if (vis.tconfirm) {
+      for (const c of state.tconfirms || []) {
+        const px = safeNum(c && c.anchorprice);
+        if (px != null) ys.push(px);
+      }
+    }
+
+    if (vis.tscore) {
+      for (const s of state.tscores || []) {
+        const px = safeNum(s && s.anchorprice);
+        if (px != null) ys.push(px);
+      }
+    }
+
     if (!ys.length) return null;
     const minY = Math.min(...ys);
     const maxY = Math.max(...ys);
@@ -697,13 +716,31 @@ const ChartCore = (function () {
       const ts = tsToMs(opts.tsAccessor(row));
       const px = safeNum(opts.pxAccessor(row));
       if (ts == null || px == null) continue;
-      data.push({
+      const point = {
         value: [ts, px],
         payload: row,
-      });
+      };
+      if (typeof opts.itemStyleAccessor === "function") {
+        const itemStyle = opts.itemStyleAccessor(row);
+        if (itemStyle) point.itemStyle = itemStyle;
+      }
+      if (typeof opts.symbolAccessor === "function") {
+        const symbol = opts.symbolAccessor(row);
+        if (symbol) point.symbol = symbol;
+      }
+      if (typeof opts.symbolRotateAccessor === "function") {
+        const rotate = opts.symbolRotateAccessor(row);
+        if (rotate != null) point.symbolRotate = rotate;
+      }
+      if (typeof opts.symbolSizeAccessor === "function") {
+        const size = opts.symbolSizeAccessor(row);
+        if (size != null) point.symbolSize = size;
+      }
+      data.push(point);
     }
     if (!data.length) return null;
 
+    const baseItemStyle = opts.itemStyle || { color: opts.color || "#ffffff" };
     return {
       id,
       name,
@@ -712,7 +749,7 @@ const ChartCore = (function () {
       symbol: opts.symbol || "circle",
       symbolRotate: opts.symbolRotate || 0,
       symbolSize: opts.symbolSize || 8,
-      itemStyle: { color: opts.color || "#ffffff" },
+      itemStyle: baseItemStyle,
       z: opts.z || 5,
       tooltip: { trigger: "item" },
     };
@@ -804,6 +841,94 @@ const ChartCore = (function () {
       if (repSeries) series.push(repSeries);
     }
 
+    if (vis.tconfirm && Array.isArray(state.tconfirms) && state.tconfirms.length) {
+      const confirmConfigs = [
+        {
+          state: "confirmed",
+          id: "structure_tconfirm_confirmed",
+          name: "TConfirm Confirmed",
+          symbol: "triangle",
+          size: 11,
+          color: "#4cc9a6",
+          rotate: 0,
+        },
+        {
+          state: "invalidated",
+          id: "structure_tconfirm_invalidated",
+          name: "TConfirm Invalidated",
+          symbol: "diamond",
+          size: 11,
+          color: "#ff6b6b",
+          rotate: 0,
+        },
+        {
+          state: "unfinished",
+          id: "structure_tconfirm_unfinished",
+          name: "TConfirm Unfinished",
+          symbol: "circle",
+          size: 10,
+          color: "#ffc43d",
+          rotate: 0,
+        },
+      ];
+
+      for (const cfg of confirmConfigs) {
+        const rows = state.tconfirms.filter(
+          (row) => String((row && row.confirmstate) || "").trim().toLowerCase() === cfg.state
+        );
+        const confirmSeries = buildScatterSeries(cfg.id, cfg.name, rows, {
+          tsAccessor: (row) => row.anchorts,
+          pxAccessor: (row) => row.anchorprice,
+          symbol: cfg.symbol,
+          symbolRotate: cfg.rotate,
+          symbolSize: cfg.size,
+          color: cfg.color,
+          itemStyle: {
+            color: cfg.color,
+            borderColor: "#08101d",
+            borderWidth: 1.2,
+            opacity: 0.95,
+          },
+          z: 8,
+        });
+        if (confirmSeries) series.push(confirmSeries);
+      }
+    }
+
+    if (vis.tscore && Array.isArray(state.tscores) && state.tscores.length) {
+      const scoreSeries = buildScatterSeries("structure_tscore", "TScore", state.tscores, {
+        tsAccessor: (row) => row.anchorts,
+        pxAccessor: (row) => row.anchorprice,
+        symbol: "circle",
+        symbolSizeAccessor: (row) => {
+          const total = safeNum(row && row.totalscore);
+          if (total == null) return 10;
+          return Math.max(8, Math.min(26, 8 + total * 0.18));
+        },
+        itemStyleAccessor: (row) => {
+          const grade = String((row && row.scoregrade) || "").trim().toUpperCase();
+          const colorByGrade = {
+            A: "#f94144",
+            B: "#f8961e",
+            C: "#f9c74f",
+            D: "#90be6d",
+            F: "#577590",
+          };
+          const color = colorByGrade[grade] || "#8ecae6";
+          return {
+            color,
+            opacity: 0.78,
+            borderColor: "#ffffff",
+            borderWidth: 1.1,
+            shadowBlur: 10,
+            shadowColor: color,
+          };
+        },
+        z: 10,
+      });
+      if (scoreSeries) series.push(scoreSeries);
+    }
+
     if (vis.piv && Array.isArray(state.pivots) && state.pivots.length) {
       const pivotConfigs = [
         { layer: "nano", ptype: "h", id: "piv_nano_hi", name: "Piv Nano High", symbol: "circle", size: 6, color: "#ffb703" },
@@ -863,8 +988,16 @@ const ChartCore = (function () {
       const payload = extractClickPayload(params);
       if (!payload) return params && params.seriesName ? params.seriesName : "";
 
-      const ts = payload.ts || payload.repts || payload.centerts || payload.firstts || payload.startts || "";
+      const ts =
+        payload.anchorts ||
+        payload.ts ||
+        payload.repts ||
+        payload.centerts ||
+        payload.firstts ||
+        payload.startts ||
+        "";
       const px =
+        payload.anchorprice != null ? payload.anchorprice :
         payload.px != null ? payload.px :
         payload.topprice != null ? payload.topprice :
         payload.highprice != null ? payload.highprice :
@@ -872,9 +1005,14 @@ const ChartCore = (function () {
 
       let html = `<b>${params.seriesName || ""}</b><br/>`;
       if (payload.id != null) html += `id: ${payload.id}<br/>`;
+      if (payload.tconfirmid != null) html += `tconfirmid: ${payload.tconfirmid}<br/>`;
+      if (payload.tepisodeid != null) html += `tepisodeid: ${payload.tepisodeid}<br/>`;
       if (ts) html += `ts: ${ts}<br/>`;
       if (px !== "") html += `px: ${Number(px).toFixed ? Number(px).toFixed(2) : px}<br/>`;
       if (payload.layer) html += `layer: ${payload.layer}<br/>`;
+      if (payload.confirmstate) html += `state: ${payload.confirmstate}<br/>`;
+      if (payload.totalscore != null) html += `score: ${Number(payload.totalscore).toFixed(1)} (${payload.scoregrade || ""})<br/>`;
+      if (payload.reason) html += `reason: ${payload.reason}<br/>`;
       if (payload.zonepos) html += `zonepos: ${payload.zonepos}<br/>`;
       if (payload.pivotcount != null) html += `pivotcount: ${payload.pivotcount}<br/>`;
       return html;
@@ -885,32 +1023,40 @@ const ChartCore = (function () {
     const series = buildStructureSeries();
     const bounds = buildStructureBounds();
 
-    chart.setOption(
-      {
-        animation: false,
-        grid: { left: 55, right: 24, top: 22, bottom: 58 },
-        tooltip: {
-          trigger: "item",
-          confine: true,
-          formatter: buildStructureTooltipFormatter(),
-        },
-        legend: {
-          top: 0,
-          textStyle: { color: "#cdd6f4" },
-        },
-        xAxis: {
-          type: "time",
-          axisLabel: { formatter: (value) => toISO(value).slice(11, 19) },
-        },
-        yAxis: bounds ? { type: "value", scale: true, min: bounds.min, max: bounds.max } : { type: "value", scale: true },
-        dataZoom: [
-          { type: "inside", xAxisIndex: 0, filterMode: "none" },
-          { type: "slider", xAxisIndex: 0, filterMode: "none" },
-        ],
-        series,
+    const option = {
+      animation: false,
+      grid: { left: 55, right: 24, top: 22, bottom: 58 },
+      tooltip: {
+        trigger: "item",
+        confine: true,
+        formatter: buildStructureTooltipFormatter(),
       },
-      { notMerge: true, lazyUpdate: true }
-    );
+      legend: {
+        top: 0,
+        textStyle: { color: "#cdd6f4" },
+      },
+      xAxis: {
+        type: "time",
+        axisLabel: { formatter: (value) => toISO(value).slice(11, 19) },
+      },
+      yAxis: bounds ? { type: "value", scale: true, min: bounds.min, max: bounds.max } : { type: "value", scale: true },
+      dataZoom: [
+        { type: "inside", xAxisIndex: 0, filterMode: "none" },
+        { type: "slider", xAxisIndex: 0, filterMode: "none" },
+      ],
+      series,
+    };
+
+    if (!state.hasInit) {
+      chart.setOption(option, { notMerge: true, lazyUpdate: true });
+    } else {
+      const oldOpt = chart.getOption();
+      const dz = oldOpt && oldOpt.dataZoom ? oldOpt.dataZoom[0] : null;
+      chart.setOption(option, { notMerge: true, lazyUpdate: true });
+      if (dz && dz.start != null && dz.end != null) {
+        chart.dispatchAction({ type: "dataZoom", start: dz.start, end: dz.end });
+      }
+    }
     state.hasInit = true;
     notifyWindowChange();
   }
@@ -1096,6 +1242,9 @@ const ChartCore = (function () {
     state.tpivots = [];
     state.tzones = [];
     state.tepisodes = [];
+    state.tconfirms = [];
+    state.tscores = [];
+    state.trulehits = [];
 
     if (state.ticks.length) state.lastTickId = state.ticks[state.ticks.length - 1].id;
     else state.lastTickId = null;
@@ -1131,6 +1280,9 @@ const ChartCore = (function () {
         state.tpivots = [];
         state.tzones = [];
         state.tepisodes = [];
+        state.tconfirms = [];
+        state.tscores = [];
+        state.trulehits = [];
         state.lastTickId = lastId;
         render();
       } catch (e) {
@@ -1165,6 +1317,9 @@ const ChartCore = (function () {
     state.tpivots = [];
     state.tzones = [];
     state.tepisodes = [];
+    state.tconfirms = [];
+    state.tscores = [];
+    state.trulehits = [];
 
     if (state.ticks.length) state.lastTickId = state.ticks[state.ticks.length - 1].id;
     else state.lastTickId = null;
@@ -1181,6 +1336,9 @@ const ChartCore = (function () {
     state.tpivots = [];
     state.tzones = [];
     state.tepisodes = [];
+    state.tconfirms = [];
+    state.tscores = [];
+    state.trulehits = [];
     if (state.ticks.length) state.lastTickId = state.ticks[state.ticks.length - 1].id;
     else state.lastTickId = null;
     render();
@@ -1194,6 +1352,9 @@ const ChartCore = (function () {
     state.tpivots = Array.isArray(data.tpivots) ? data.tpivots : [];
     state.tzones = Array.isArray(data.tzone) ? data.tzone : [];
     state.tepisodes = Array.isArray(data.tepisode) ? data.tepisode : [];
+    state.tconfirms = Array.isArray(data.tconfirm) ? data.tconfirm : [];
+    state.tscores = Array.isArray(data.tscore) ? data.tscore : [];
+    state.trulehits = Array.isArray(data.trulehit) ? data.trulehit : [];
     state.lastTickId = state.ticks.length ? state.ticks[state.ticks.length - 1].id : null;
     render();
   }
