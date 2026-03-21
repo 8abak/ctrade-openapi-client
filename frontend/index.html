@@ -75,6 +75,10 @@
 
     .btn-run { border-color: rgba(74,163,255,0.6); }
     .btn-stop { border-color: rgba(255,74,106,0.6); }
+    .btn-run:disabled, .btn-stop:disabled, select:disabled, input:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+    }
 
     .toggles {
       display: flex;
@@ -155,7 +159,7 @@
         <input
           id="review-window"
           type="number"
-          min="10"
+          min="100"
           step="10"
           inputmode="numeric"
           value="2000"
@@ -164,6 +168,37 @@
       </label>
 
       <button id="btn-review-jump" class="btn-run">Jump</button>
+    </div>
+
+    <div id="review-playback-controls" class="top-group" style="gap:0.5rem;">
+      <button id="btn-review-play-pause" class="btn-run">Play</button>
+      <button id="btn-review-step-back" class="btn-run">Step -</button>
+      <button id="btn-review-step-forward" class="btn-run">Step +</button>
+      <button id="btn-review-reset" class="btn-run">Reset</button>
+
+      <label>
+        Speed
+        <select id="review-speed">
+          <option value="0.25">0.25x</option>
+          <option value="0.5">0.5x</option>
+          <option value="1" selected>1x</option>
+          <option value="2">2x</option>
+          <option value="4">4x</option>
+          <option value="8">8x</option>
+          <option value="max">Max</option>
+        </select>
+      </label>
+
+      <label>
+        Ticks/step
+        <select id="review-step-size">
+          <option value="1" selected>1</option>
+          <option value="2">2</option>
+          <option value="5">5</option>
+          <option value="10">10</option>
+          <option value="25">25</option>
+        </select>
+      </label>
     </div>
 
     <div id="status-line" class="status">Loading…</div>

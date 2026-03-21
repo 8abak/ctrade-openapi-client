@@ -1228,17 +1228,11 @@ const ChartCore = (function () {
     recomputeYFromVisibleWindow(chart, state);
   }
 
-  async function loadLiveOnce(limit) {
-    const lim = limit != null ? Number(limit) : state.liveLimit;
-    const url = `/api/live_window?limit=${encodeURIComponent(lim)}`;
-
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`live_window failed: ${res.status}`);
-    const data = await res.json();
-
-    state.mode = "live";
-    state.ticks = Array.isArray(data.ticks) ? data.ticks : [];
-    state.pivots = Array.isArray(data.pivots) ? data.pivots : [];
+  function applyTickWindowData(mode, data) {
+    const payload = data || {};
+    state.mode = mode;
+    state.ticks = Array.isArray(payload.ticks) ? payload.ticks : [];
+    state.pivots = Array.isArray(payload.pivots) ? payload.pivots : [];
     state.tpivots = [];
     state.tzones = [];
     state.tepisodes = [];
@@ -1248,7 +1242,17 @@ const ChartCore = (function () {
 
     if (state.ticks.length) state.lastTickId = state.ticks[state.ticks.length - 1].id;
     else state.lastTickId = null;
+  }
 
+  async function loadLiveOnce(limit) {
+    const lim = limit != null ? Number(limit) : state.liveLimit;
+    const url = `/api/live_window?limit=${encodeURIComponent(lim)}`;
+
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`live_window failed: ${res.status}`);
+    const data = await res.json();
+
+    applyTickWindowData("live", data);
     render();
     return data;
   }
@@ -1275,14 +1279,7 @@ const ChartCore = (function () {
         const lastId = last && last.id != null ? Number(last.id) : null;
         if (!lastId) return;
 
-        state.ticks = ticks;
-        state.pivots = pivots;
-        state.tpivots = [];
-        state.tzones = [];
-        state.tepisodes = [];
-        state.tconfirms = [];
-        state.tscores = [];
-        state.trulehits = [];
+        applyTickWindowData("live", { ticks, pivots });
         state.lastTickId = lastId;
         render();
       } catch (e) {
@@ -1311,21 +1308,14 @@ const ChartCore = (function () {
     if (!res.ok) throw new Error(`review/window failed: ${res.status}`);
     const data = await res.json();
 
-    state.mode = "review";
-    state.ticks = Array.isArray(data.ticks) ? data.ticks : [];
-    state.pivots = Array.isArray(data.pivots) ? data.pivots : [];
-    state.tpivots = [];
-    state.tzones = [];
-    state.tepisodes = [];
-    state.tconfirms = [];
-    state.tscores = [];
-    state.trulehits = [];
-
-    if (state.ticks.length) state.lastTickId = state.ticks[state.ticks.length - 1].id;
-    else state.lastTickId = null;
-
+    applyTickWindowData("review", data);
     render();
     return data;
+  }
+
+  function setReviewData(data) {
+    applyTickWindowData("review", data);
+    render();
   }
 
   // NEW: inject ticks directly (used by segLines review page)
@@ -1432,6 +1422,7 @@ const ChartCore = (function () {
     setPivotLevel,
 
     // new API
+    setReviewData,
     setTicks,
     setStructureData,
     setSegLines,
