@@ -383,7 +383,7 @@ class UnityEngine:
                 for t in self.ticks
             ],
             "rows": [
-                {**row, "time": row["time"].isoformat()}
+                _json_value(row)
                 for row in self.rows
             ],
             "pivots": [p.to_dict() for p in self.pivots],
