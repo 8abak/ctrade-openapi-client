@@ -9,6 +9,7 @@ from typing import Any, Deque, Dict, Iterable, List, Optional, Tuple
 
 
 EPS = 1e-9
+UNITY_FEATURE_VERSION = "unity-candidate-v1"
 
 
 @dataclass
@@ -286,6 +287,7 @@ class UnityEngine:
         self.dirtytickids: set[int] = set()
         self.newpivots: List[Dict[str, Any]] = []
         self.newsignals: List[Dict[str, Any]] = []
+        self.newcandidates: List[Dict[str, Any]] = []
         self.newtrades: Dict[int, Dict[str, Any]] = {}
         self.tradeevents: List[Dict[str, Any]] = []
         self.swingdirtyfrom: Optional[int] = None
@@ -409,12 +411,14 @@ class UnityEngine:
             "swings": swings,
             "swingdirtyfrom": self.swingdirtyfrom,
             "signals": list(self.newsignals),
+            "candidates": list(self.newcandidates),
             "trades": list(self.newtrades.values()),
             "events": list(self.tradeevents),
         }
         self.dirtytickids.clear()
         self.newpivots.clear()
         self.newsignals.clear()
+        self.newcandidates.clear()
         self.newtrades.clear()
         self.tradeevents.clear()
         self.swingdirtyfrom = None
@@ -423,6 +427,7 @@ class UnityEngine:
     def process_tick(self, raw: Dict[str, Any]) -> None:
         tick = TickData.from_row(raw)
         trade_open_at_start = self.opentrade is not None
+        prior_causal_state = self.prevcausalstate
 
         diff = 0.0 if self.prevmid is None else abs(tick.mid - self.prevmid)
         if self.prevmid is not None:
@@ -440,13 +445,14 @@ class UnityEngine:
 
         signal = self._maybe_emit_signal(row)
         if signal is not None:
+            plan = self._build_trade_plan(row, signal["side"])
             if trade_open_at_start and signal["favored"]:
                 signal["used"] = False
                 signal["status"] = "skipped"
                 signal["skipreason"] = "opentrade"
                 self.newsignals.append(signal)
             elif signal["favored"]:
-                opened = self._open_trade_if_possible(row, signal)
+                opened = self._open_trade_if_possible(row, signal, plan=plan)
                 if opened is not None:
                     signal["used"] = True
                     signal["status"] = "opened"
@@ -459,6 +465,7 @@ class UnityEngine:
                 signal["used"] = False
                 signal["status"] = "rejected"
                 self.newsignals.append(signal)
+            self.newcandidates.append(self._build_candidate(row, signal, plan, prior_causal_state))
 
         self._update_trade(row)
         self.prevmid = tick.mid
@@ -940,18 +947,24 @@ class UnityEngine:
         }
         return score, favored, ",".join(reasons), detail
 
-    def _open_trade_if_possible(self, row: Dict[str, Any], signal: Dict[str, Any]) -> Optional[TradeState]:
-        if self.opentrade is not None:
-            return None
-        pivot = self._trade_pivot_for_side(signal["side"])
+    def _build_trade_plan(self, row: Dict[str, Any], side: str) -> Dict[str, Any]:
+        pivot = self._trade_pivot_for_side(side)
         if pivot is None:
-            signal["skipreason"] = "nopivot"
-            signal["reason"] = f"{signal['reason']},nopivot"
-            signal["favored"] = False
-            return None
+            return {
+                "eligible": False,
+                "skipreason": "nopivot",
+                "entryprice": None,
+                "pivotkind": None,
+                "pivottickid": None,
+                "pivotprice": None,
+                "buffer": None,
+                "risk": None,
+                "stopprice": None,
+                "targetprice": None,
+            }
 
         tick = self.ticks[-1]
-        if signal["side"] == "long":
+        if side == "long":
             entry = tick.ask if tick.ask is not None else tick.mid
         else:
             entry = tick.bid if tick.bid is not None else tick.mid
@@ -961,7 +974,7 @@ class UnityEngine:
             self.config.tradenoisebuffer * float(row["noise"]),
             self.config.tradespreadbuffer * float(row["spread"]),
         )
-        if signal["side"] == "long":
+        if side == "long":
             stop = pivot.price - buffer
             risk = entry - stop
             target = entry + risk
@@ -971,8 +984,121 @@ class UnityEngine:
             target = entry - risk
 
         if risk < self.config.trademinrisk or risk > self.config.trademaxrisk:
-            signal["skipreason"] = "risk"
-            signal["reason"] = f"{signal['reason']},risk"
+            return {
+                "eligible": False,
+                "skipreason": "risk",
+                "entryprice": float(entry),
+                "pivotkind": pivot.kind,
+                "pivottickid": pivot.tickid,
+                "pivotprice": pivot.price,
+                "buffer": float(buffer),
+                "risk": float(risk),
+                "stopprice": float(stop),
+                "targetprice": float(target),
+            }
+
+        return {
+            "eligible": True,
+            "skipreason": None,
+            "entryprice": float(entry),
+            "pivotkind": pivot.kind,
+            "pivottickid": pivot.tickid,
+            "pivotprice": pivot.price,
+            "buffer": float(buffer),
+            "risk": float(risk),
+            "stopprice": float(stop),
+            "targetprice": float(target),
+        }
+
+    def _build_candidate(
+        self,
+        row: Dict[str, Any],
+        signal: Dict[str, Any],
+        plan: Dict[str, Any],
+        prior_causal_state: str,
+    ) -> Dict[str, Any]:
+        feature_snapshot = {
+            "tickid": int(row["tickid"]),
+            "time": row["time"],
+            "side": signal["side"],
+            "regimefrom": prior_causal_state,
+            "regimeto": row["causalstate"],
+            "price": float(row["price"]),
+            "spread": float(row["spread"]),
+            "noise": float(row["noise"]),
+            "thresh": float(row["thresh"]),
+            "legtick": int(row["legtick"]),
+            "legdir": int(row["legdir"]),
+            "legeff": float(row["legeff"]),
+            "legmultiple": float(row["legmultiple"]),
+            "causalscore": float(row["causalscore"]),
+            "causalstate": row["causalstate"],
+            "cleanstate": row["cleanstate"],
+            "cleanconviction": float(row["cleanconviction"]),
+            "score": float(signal["score"]),
+            "reason": signal["reason"],
+            "detail": signal["detail"],
+            "context": signal["context"],
+            "plan": {
+                "eligible": bool(plan["eligible"]),
+                "skipreason": plan["skipreason"],
+                "entryprice": plan["entryprice"],
+                "pivotkind": plan["pivotkind"],
+                "pivottickid": plan["pivottickid"],
+                "pivotprice": plan["pivotprice"],
+                "buffer": plan["buffer"],
+                "risk": plan["risk"],
+                "stopprice": plan["stopprice"],
+                "targetprice": plan["targetprice"],
+            },
+        }
+        return {
+            "symbol": self.config.symbol,
+            "signaltickid": int(signal["tickid"]),
+            "time": row["time"],
+            "side": str(signal["side"]),
+            "regimefrom": prior_causal_state,
+            "regimeto": str(row["causalstate"]),
+            "price": float(row["price"]),
+            "spread": float(row["spread"]),
+            "causalstate": str(row["causalstate"]),
+            "cleanstate": str(row["cleanstate"]),
+            "score": float(signal["score"]),
+            "reason": str(signal["reason"]),
+            "detail": _json_value(signal["detail"]),
+            "context": _json_value(signal["context"]),
+            "pivottickid": int(plan["pivottickid"]) if plan["pivottickid"] is not None else None,
+            "pivotkind": plan["pivotkind"],
+            "pivotprice": float(plan["pivotprice"]) if plan["pivotprice"] is not None else None,
+            "entryprice": float(plan["entryprice"]) if plan["entryprice"] is not None else None,
+            "buffer": float(plan["buffer"]) if plan["buffer"] is not None else None,
+            "risk": float(plan["risk"]) if plan["risk"] is not None else None,
+            "baselinetp": float(plan["targetprice"]) if plan["targetprice"] is not None else None,
+            "baselinesl": float(plan["stopprice"]) if plan["stopprice"] is not None else None,
+            "eligible": bool(plan["eligible"]),
+            "eligibilityreason": plan["skipreason"],
+            "favored": bool(signal["favored"]),
+            "signalstatus": str(signal["status"]),
+            "skipreason": signal["skipreason"],
+            "tradeopened": bool(signal["used"]),
+            "featurever": UNITY_FEATURE_VERSION,
+            "features": _json_value(feature_snapshot),
+        }
+
+    def _open_trade_if_possible(
+        self,
+        row: Dict[str, Any],
+        signal: Dict[str, Any],
+        *,
+        plan: Optional[Dict[str, Any]] = None,
+    ) -> Optional[TradeState]:
+        if self.opentrade is not None:
+            return None
+
+        trade_plan = plan or self._build_trade_plan(row, signal["side"])
+        if not trade_plan["eligible"]:
+            signal["skipreason"] = trade_plan["skipreason"]
+            signal["reason"] = f"{signal['reason']},{trade_plan['skipreason']}"
             signal["favored"] = False
             return None
 
@@ -982,15 +1108,15 @@ class UnityEngine:
             state=str(signal["state"]),
             opentick=int(signal["tickid"]),
             opentime=row["time"],
-            openprice=float(entry),
-            pivotkind=pivot.kind,
-            pivottickid=pivot.tickid,
-            pivotprice=pivot.price,
-            buffer=float(buffer),
-            risk=float(risk),
-            stopprice=float(stop),
-            targetprice=float(target),
-            bestprice=float(entry),
+            openprice=float(trade_plan["entryprice"]),
+            pivotkind=str(trade_plan["pivotkind"]),
+            pivottickid=int(trade_plan["pivottickid"]),
+            pivotprice=float(trade_plan["pivotprice"]),
+            buffer=float(trade_plan["buffer"]),
+            risk=float(trade_plan["risk"]),
+            stopprice=float(trade_plan["stopprice"]),
+            targetprice=float(trade_plan["targetprice"]),
+            bestprice=float(trade_plan["entryprice"]),
         )
         self.opentrade = trade
         payload = {

@@ -1,6 +1,6 @@
 [Unit]
-Description=cTrade UNITY Processor (Paper Signal + Journal)
-After=network-online.target postgresql.service
+Description=cTrade UNITY Processor (Candidate Birth + Paper Journal)
+After=network-online.target postgresql.service tickcalc.service
 Wants=network-online.target
 
 [Service]

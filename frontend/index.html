@@ -2,249 +2,265 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Segmeling – Live/Review</title>
-
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>UNITY Control Surface</title>
   <style>
     :root {
-      --bg: #0b1220;
-      --panel: #121a2b;
-      --text: #e8eefc;
-      --muted: #9fb0d0;
-      --border: #22304a;
+      --bg: #08111b;
+      --panel: rgba(9, 20, 33, 0.78);
+      --panel-strong: rgba(15, 31, 50, 0.92);
+      --line: rgba(154, 197, 255, 0.18);
+      --text: #eef5ff;
+      --muted: #9cb2cc;
+      --accent: #4fd1a1;
+      --accent-2: #f2b84b;
+      --danger: #ff7c6b;
     }
+
+    * { box-sizing: border-box; }
 
     html, body {
-      height: 100%;
       margin: 0;
-      background: var(--bg);
+      min-height: 100%;
+      background:
+        radial-gradient(circle at top left, rgba(79, 209, 161, 0.16), transparent 34%),
+        radial-gradient(circle at top right, rgba(79, 136, 255, 0.20), transparent 30%),
+        linear-gradient(180deg, #07111d 0%, #08111b 52%, #050a10 100%);
       color: var(--text);
-      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      font-family: "Avenir Next Condensed", "Trebuchet MS", "Segoe UI", sans-serif;
     }
 
-    .top-bar {
-      display: flex;
-      align-items: center;
-      gap: 1rem;
-      padding: 0.75rem 1rem;
-      border-bottom: 1px solid var(--border);
-      background: var(--panel);
+    body {
+      padding: 28px;
+      display: grid;
+      gap: 20px;
     }
 
-    .brand {
-      font-weight: 700;
-      letter-spacing: 0.03em;
-      color: var(--text);
-      user-select: none;
-    }
-
-    .top-group {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      flex-wrap: wrap;
-    }
-
-    label {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.5rem;
-      color: var(--muted);
-      font-size: 0.9rem;
-      white-space: nowrap;
-    }
-
-    select, input[type="number"] {
-      background: #0c1426;
-      color: var(--text);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 0.25rem 0.4rem;
-      outline: none;
-    }
-
-    .btn-run, .btn-stop {
-      border: 1px solid var(--border);
-      background: #0c1426;
-      color: var(--text);
-      border-radius: 8px;
-      padding: 0.35rem 0.7rem;
-      cursor: pointer;
-      font-weight: 600;
-    }
-
-    .btn-run { border-color: rgba(74,163,255,0.6); }
-    .btn-stop { border-color: rgba(255,74,106,0.6); }
-    .btn-run:disabled, .btn-stop:disabled, select:disabled, input:disabled {
-      opacity: 0.55;
-      cursor: not-allowed;
-    }
-
-    .toggles {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      padding: 0.5rem 1rem;
-      border-bottom: 1px solid var(--border);
-      background: rgba(18,26,43,0.7);
-      flex-wrap: wrap;
-    }
-
-    .toggle-item {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.45rem;
-      color: var(--muted);
-      font-size: 0.9rem;
-    }
-
-    .layer-na {
-      opacity: 0.75;
-      font-size: 0.8rem;
-    }
-
-    .status {
-      padding: 0;
-      color: var(--muted);
-      font-size: 0.9rem;
-      margin-left: auto;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      max-width: 38vw;
-    }
-
-    #segmeling-chart {
+    .shell {
+      max-width: 1220px;
       width: 100%;
-      height: calc(100vh - 126px);
+      margin: 0 auto;
+      display: grid;
+      gap: 20px;
+    }
+
+    .hero,
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      background: var(--panel);
+      backdrop-filter: blur(14px);
+      box-shadow: 0 18px 54px rgba(0, 0, 0, 0.28);
+    }
+
+    .hero {
+      padding: 28px;
+      overflow: hidden;
+      position: relative;
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      inset: auto -120px -120px auto;
+      width: 320px;
+      height: 320px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(79, 209, 161, 0.20), transparent 66%);
+      pointer-events: none;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 12px;
+      border: 1px solid rgba(79, 209, 161, 0.32);
+      border-radius: 999px;
+      color: #bfead9;
+      font-size: 13px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      background: rgba(79, 209, 161, 0.08);
+    }
+
+    h1 {
+      margin: 16px 0 10px;
+      font-size: clamp(34px, 6vw, 64px);
+      line-height: 0.95;
+      letter-spacing: 0.02em;
+      max-width: 900px;
+    }
+
+    .hero p {
+      margin: 0;
+      max-width: 880px;
+      color: var(--muted);
+      font-size: 18px;
+      line-height: 1.5;
+    }
+
+    .nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 24px;
+    }
+
+    .nav a {
+      color: var(--text);
+      text-decoration: none;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.04);
+      border-radius: 999px;
+      padding: 11px 16px;
+      font-size: 14px;
+    }
+
+    .nav a.primary {
+      background: linear-gradient(135deg, rgba(79, 209, 161, 0.25), rgba(79, 136, 255, 0.18));
+      border-color: rgba(79, 209, 161, 0.34);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .panel {
+      padding: 20px;
+    }
+
+    .panel h2,
+    .panel h3 {
+      margin: 0 0 8px;
+      letter-spacing: 0.03em;
+    }
+
+    .panel p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+
+    .cta {
+      display: inline-flex;
+      margin-top: 16px;
+      color: var(--text);
+      text-decoration: none;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      font-size: 12px;
+    }
+
+    .badge-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    .badge {
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      border: 1px solid transparent;
+    }
+
+    .badge.active {
+      color: #cbf6e8;
+      border-color: rgba(79, 209, 161, 0.26);
+      background: rgba(79, 209, 161, 0.08);
+    }
+
+    .badge.caution {
+      color: #ffe0a8;
+      border-color: rgba(242, 184, 75, 0.26);
+      background: rgba(242, 184, 75, 0.08);
+    }
+
+    .badge.legacy {
+      color: #ffc7bd;
+      border-color: rgba(255, 124, 107, 0.22);
+      background: rgba(255, 124, 107, 0.08);
+    }
+
+    .legacy-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    @media (max-width: 960px) {
+      body { padding: 16px; }
+      .grid,
+      .legacy-grid {
+        grid-template-columns: 1fr;
+      }
     }
   </style>
 </head>
-
 <body>
-  <header class="top-bar">
-    <div class="brand">SEGEMLING</div>
+  <main class="shell">
+    <section class="hero">
+      <div class="eyebrow">Active Path: UNITY / Regime Candidate Pipeline</div>
+      <h1>UNITY is now the main live workflow.</h1>
+      <p>The active production path is live tick ingest to derived tick calc to causal UNITY regime processing to shadow candidate outcome resolution. The older T-family stack remains accessible for reference, but it is no longer the primary operating surface.</p>
+      <nav class="nav">
+        <a class="primary" href="/unity">Open UNITY Dashboard</a>
+        <a href="/regime">Open Regime Explorer</a>
+        <a href="/sql">Open SQL Console</a>
+        <a href="/frontend/live.html">Open Legacy Live Chart</a>
+      </nav>
+    </section>
 
-    <div class="top-group">
-      <label>
-        Mode
-        <select id="mode-select">
-          <option value="live">Live</option>
-          <option value="review">Review</option>
-        </select>
-      </label>
+    <section class="grid">
+      <article class="panel">
+        <div class="badge-row">
+          <span class="badge active">Primary</span>
+          <span class="badge active">Live Candidate Feed</span>
+        </div>
+        <h2>UNITY Dashboard</h2>
+        <p>Recent regime-born candidates, paper trades, baseline outcomes, and scenario rows from the active live pipeline.</p>
+        <a class="cta" href="/unity">Launch Dashboard</a>
+      </article>
 
-      <button id="btn-run-stop" class="btn-run">
-        <span class="label">Run</span>
-      </button>
-    </div>
+      <article class="panel">
+        <div class="badge-row">
+          <span class="badge active">Primary</span>
+          <span class="badge caution">Research</span>
+        </div>
+        <h2>Regime Explorer</h2>
+        <p>Windowed regime inspection for structural context and line/leg overlays around current UNITY work.</p>
+        <a class="cta" href="/regime">Launch Explorer</a>
+      </article>
 
-    <!-- Review jump controls -->
-    <div class="top-group" style="margin-left:auto; gap:0.5rem;">
-      <label>
-        From Id
-        <input
-          id="review-from-id"
-          type="number"
-          min="1"
-          step="1"
-          inputmode="numeric"
-          placeholder="(optional)"
-          style="width: 10rem;"
-        />
-      </label>
+      <article class="panel">
+        <div class="badge-row">
+          <span class="badge active">Primary</span>
+          <span class="badge caution">Ops</span>
+        </div>
+        <h2>SQL Console</h2>
+        <p>Direct access to the live database for checking `unitycandidate`, `unitycandoutcome`, and `unitycandscenario` growth.</p>
+        <a class="cta" href="/sql">Open SQL Console</a>
+      </article>
+    </section>
 
-      <label>
-        Window
-        <input
-          id="review-window"
-          type="number"
-          min="100"
-          step="10"
-          inputmode="numeric"
-          value="2000"
-          style="width: 6rem;"
-        />
-      </label>
-
-      <button id="btn-review-jump" class="btn-run">Jump</button>
-    </div>
-
-    <div id="review-playback-controls" class="top-group" style="gap:0.5rem;">
-      <button id="btn-review-play-pause" class="btn-run">Play</button>
-      <button id="btn-review-step-back" class="btn-run">Step -</button>
-      <button id="btn-review-step-forward" class="btn-run">Step +</button>
-      <button id="btn-review-reset" class="btn-run">Reset</button>
-
-      <label>
-        Speed
-        <select id="review-speed">
-          <option value="0.25">0.25x</option>
-          <option value="0.5">0.5x</option>
-          <option value="1" selected>1x</option>
-          <option value="2">2x</option>
-          <option value="4">4x</option>
-          <option value="8">8x</option>
-          <option value="max">Max</option>
-        </select>
-      </label>
-
-      <label>
-        Ticks/step
-        <select id="review-step-size">
-          <option value="1" selected>1</option>
-          <option value="2">2</option>
-          <option value="5">5</option>
-          <option value="10">10</option>
-          <option value="25">25</option>
-        </select>
-      </label>
-    </div>
-
-    <div id="status-line" class="status">Loading…</div>
-  </header>
-
-  <div class="toggles">
-    <span class="toggle-item">
-      <input type="checkbox" data-layer-group="mid" checked />
-      Mid
-    </span>
-
-    <span class="toggle-item">
-      <input type="checkbox" data-layer-group="bid" />
-      Bid
-    </span>
-
-    <span class="toggle-item">
-      <input type="checkbox" data-layer-group="ask" />
-      Ask
-    </span>
-
-    <span class="toggle-item">
-      <input type="checkbox" data-layer-group="kal" checked />
-      Kal
-    </span>
-
-    <span class="toggle-item">
-      <input type="checkbox" data-layer-group="k2" checked />
-      K2
-    </span>
-
-    <span class="toggle-item">
-      <input id="piv-visible-toggle" type="checkbox" data-layer-group="piv" />
-      Piv
-      <select id="piv-level-select" aria-label="Pivot level">
-        <option value="1" selected>1</option>
-        <option value="2">2</option>
-        <option value="3">3</option>
-      </select>
-    </span>
-  </div>
-
-  <div id="segmeling-chart"></div>
-
-  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
-  <script src="chart-core.js"></script>
-  <script src="index-core.js"></script>
+    <section class="panel">
+      <div class="badge-row">
+        <span class="badge legacy">Legacy / De-emphasized</span>
+      </div>
+      <h3>Older T-family and structure surfaces remain available, but they are no longer the main navigation path.</h3>
+      <p>Use them only for comparison, historical inspection, or safe fallback while UNITY becomes the visible default.</p>
+      <div class="legacy-grid" style="margin-top:16px;">
+        <a class="cta" href="/structure">Open Legacy Structure Page</a>
+        <a class="cta" href="/frontend/review.html">Open Legacy Review Page</a>
+      </div>
+    </section>
+  </main>
 </body>
 </html>

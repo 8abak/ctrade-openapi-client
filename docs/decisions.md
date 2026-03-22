@@ -177,3 +177,25 @@ New decisions must be appended to this file in chronological order.
   - Live decisions stay causal and immutable once emitted.
   - Cleaned structural history may repaint only inside a recent bounded window around the latest differentiating pivots.
   - No real trading adapter is introduced; the stack is paper-only and database-backed.
+
+---
+
+## 2026-03-22 - [DB/Jobs/API/Deploy] - UNITY Candidate + Shadow Outcome Pipeline
+
+- Context:  
+  UNITY paper trades alone are too sparse for training. We need one causal birth row per meaningful regime change plus a separate shadow resolver that labels what would have happened under baseline and small scenario-grid TP/SL settings.
+
+- Decision:  
+  Add additive UNITY objects:
+  - `unitycandidate` for causal birth rows and feature snapshots.
+  - `unitycandoutcome` for default baseline outcome labels.
+  - `unitycandscenario` for a fixed starter scenario grid.
+  - `unitycandtrain` as a flattened training-ready view.
+  Extend `jobs/unity_core.py` and `unityFromDB.py` so candidate birth happens in causal order inside the live UNITY processor.  
+  Add `unityResolveFromDB.py` as a separate worker for hindsight-heavy resolution and `jobs/unity_dataset.py` for reproducible dataset export.  
+  Promote UNITY to the primary frontend landing path and add `deploy/systemd/unityresolver.service`.
+
+- Consequences:  
+  - The hot live path remains lightweight while all outcomes become ML-ready.
+  - Decision logging now covers both traded and non-traded candidates.
+  - Active EC2 runtime is explicitly `tickcollector -> tickcalc -> unity -> unityresolver`.

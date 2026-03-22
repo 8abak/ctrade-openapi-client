@@ -37,6 +37,9 @@ def ensure_tables_exist(conn):
         "unityswing",
         "unitytick",
         "unitysignal",
+        "unitycandidate",
+        "unitycandoutcome",
+        "unitycandscenario",
         "unitytrade",
         "unityevent",
     }
@@ -119,6 +122,8 @@ def fetch_batch(conn, *, symbol: str, after_id: int, limit: int, to_id: Optional
                 FROM public.ticks
                 WHERE symbol=%s
                   AND id>%s
+                  AND mid IS NOT NULL
+                  AND spread IS NOT NULL
                 ORDER BY id ASC
                 LIMIT %s
                 """,
@@ -132,6 +137,8 @@ def fetch_batch(conn, *, symbol: str, after_id: int, limit: int, to_id: Optional
                 WHERE symbol=%s
                   AND id>%s
                   AND id<=%s
+                  AND mid IS NOT NULL
+                  AND spread IS NOT NULL
                 ORDER BY id ASC
                 LIMIT %s
                 """,
@@ -143,10 +150,26 @@ def fetch_batch(conn, *, symbol: str, after_id: int, limit: int, to_id: Optional
 def fetch_head_id(conn, *, symbol: str, to_id: Optional[int] = None) -> int:
     with conn.cursor() as cur:
         if to_id is None:
-            cur.execute("SELECT COALESCE(MAX(id), 0) FROM public.ticks WHERE symbol=%s", (symbol,))
+            cur.execute(
+                """
+                SELECT COALESCE(MAX(id), 0)
+                FROM public.ticks
+                WHERE symbol=%s
+                  AND mid IS NOT NULL
+                  AND spread IS NOT NULL
+                """,
+                (symbol,),
+            )
         else:
             cur.execute(
-                "SELECT COALESCE(MAX(id), 0) FROM public.ticks WHERE symbol=%s AND id<=%s",
+                """
+                SELECT COALESCE(MAX(id), 0)
+                FROM public.ticks
+                WHERE symbol=%s
+                  AND id<=%s
+                  AND mid IS NOT NULL
+                  AND spread IS NOT NULL
+                """,
                 (symbol, int(to_id)),
             )
         return int(cur.fetchone()[0] or 0)
@@ -161,6 +184,10 @@ def delete_symbol_data(conn, *, symbol: str, from_id: Optional[int]):
     tick_where = " AND ".join(clauses)
 
     with conn.cursor() as cur:
+        cur.execute(
+            f"DELETE FROM public.unitycandidate WHERE {tick_where.replace('tickid', 'signaltickid')}",
+            tuple(params),
+        )
         cur.execute(f"DELETE FROM public.unityevent WHERE {tick_where.replace('tickid', 'COALESCE(tickid, signaltickid)')}", tuple(params))
         cur.execute(f"DELETE FROM public.unitytrade WHERE {tick_where.replace('tickid', 'signaltickid')}", tuple(params))
         cur.execute(f"DELETE FROM public.unitysignal WHERE {tick_where}", tuple(params))
@@ -369,6 +396,92 @@ def apply_signals(conn, rows: List[Dict[str, Any]]):
         )
 
 
+def apply_candidates(conn, rows: List[Dict[str, Any]]):
+    if not rows:
+        return
+    vals = [
+        (
+            row["symbol"],
+            int(row["signaltickid"]),
+            row["time"],
+            str(row["side"]),
+            str(row["regimefrom"]),
+            str(row["regimeto"]),
+            float(row["price"]),
+            float(row["spread"]),
+            str(row["causalstate"]),
+            str(row["cleanstate"]),
+            float(row["score"]),
+            str(row["reason"]),
+            json.dumps(row["detail"], separators=(",", ":")),
+            json.dumps(row["context"], separators=(",", ":")),
+            row.get("pivottickid"),
+            row.get("pivotkind"),
+            float(row["pivotprice"]) if row.get("pivotprice") is not None else None,
+            float(row["entryprice"]) if row.get("entryprice") is not None else None,
+            float(row["buffer"]) if row.get("buffer") is not None else None,
+            float(row["risk"]) if row.get("risk") is not None else None,
+            float(row["baselinetp"]) if row.get("baselinetp") is not None else None,
+            float(row["baselinesl"]) if row.get("baselinesl") is not None else None,
+            bool(row["eligible"]),
+            row.get("eligibilityreason"),
+            bool(row["favored"]),
+            str(row["signalstatus"]),
+            row.get("skipreason"),
+            bool(row["tradeopened"]),
+            str(row["featurever"]),
+            json.dumps(row["features"], separators=(",", ":")),
+        )
+        for row in rows
+    ]
+    with conn.cursor() as cur:
+        psycopg2.extras.execute_values(
+            cur,
+            """
+            INSERT INTO public.unitycandidate (
+                symbol, signaltickid, time, side, regimefrom, regimeto, price, spread,
+                causalstate, cleanstate, score, reason, detail, context,
+                pivottickid, pivotkind, pivotprice, entryprice, buffer, risk,
+                baselinetp, baselinesl, eligible, eligibilityreason,
+                favored, signalstatus, skipreason, tradeopened, featurever, features, updated
+            )
+            VALUES %s
+            ON CONFLICT (symbol, signaltickid, side) DO UPDATE SET
+                time = EXCLUDED.time,
+                regimefrom = EXCLUDED.regimefrom,
+                regimeto = EXCLUDED.regimeto,
+                price = EXCLUDED.price,
+                spread = EXCLUDED.spread,
+                causalstate = EXCLUDED.causalstate,
+                cleanstate = EXCLUDED.cleanstate,
+                score = EXCLUDED.score,
+                reason = EXCLUDED.reason,
+                detail = EXCLUDED.detail,
+                context = EXCLUDED.context,
+                pivottickid = EXCLUDED.pivottickid,
+                pivotkind = EXCLUDED.pivotkind,
+                pivotprice = EXCLUDED.pivotprice,
+                entryprice = EXCLUDED.entryprice,
+                buffer = EXCLUDED.buffer,
+                risk = EXCLUDED.risk,
+                baselinetp = EXCLUDED.baselinetp,
+                baselinesl = EXCLUDED.baselinesl,
+                eligible = EXCLUDED.eligible,
+                eligibilityreason = EXCLUDED.eligibilityreason,
+                favored = EXCLUDED.favored,
+                signalstatus = EXCLUDED.signalstatus,
+                skipreason = EXCLUDED.skipreason,
+                tradeopened = EXCLUDED.tradeopened,
+                featurever = EXCLUDED.featurever,
+                features = EXCLUDED.features,
+                updated = now()
+            """,
+            vals,
+            template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now())",
+            page_size=min(1000, len(vals)),
+        )
+
+
 def apply_trades(conn, rows: List[Dict[str, Any]]):
     if not rows:
         return
@@ -430,6 +543,31 @@ def apply_trades(conn, rows: List[Dict[str, Any]]):
             """,
             vals,
             page_size=min(1000, len(vals)),
+        )
+
+
+def link_candidate_trades(conn, rows: List[Dict[str, Any]]):
+    if not rows:
+        return
+    tickids = [int(row["signaltickid"]) for row in rows if row.get("tradeopened")]
+    if not tickids:
+        return
+    symbols = sorted({str(row["symbol"]) for row in rows if row.get("tradeopened")})
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE public.unitycandidate c
+            SET tradeid = t.id,
+                tradeopened = true,
+                updated = now()
+            FROM public.unitytrade t
+            WHERE c.symbol = t.symbol
+              AND c.signaltickid = t.signaltickid
+              AND c.symbol = ANY(%s)
+              AND c.signaltickid = ANY(%s)
+              AND (c.tradeid IS DISTINCT FROM t.id OR c.tradeopened IS DISTINCT FROM true)
+            """,
+            (symbols, tickids),
         )
 
 
@@ -546,7 +684,9 @@ def main():
             apply_pivots(conn, changes["pivots"])
             replace_swings(conn, symbol=config.symbol, dirty_from=changes["swingdirtyfrom"], rows=changes["swings"])
             apply_signals(conn, changes["signals"])
+            apply_candidates(conn, changes["candidates"])
             apply_trades(conn, changes["trades"])
+            link_candidate_trades(conn, changes["candidates"])
             apply_events(conn, changes["events"])
 
             last_tick = rows[-1]

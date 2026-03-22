@@ -1,0 +1,17 @@
+[Unit]
+Description=cTrade UNITY Candidate Resolver (Baseline + Scenario Outcomes)
+After=network-online.target postgresql.service tickcalc.service unity.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/home/ec2-user/cTrade
+ExecStart=/home/ec2-user/cTrade/venv/bin/python -u /home/ec2-user/cTrade/unityResolveFromDB.py --symbol XAUUSD --timeoutsec 900
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

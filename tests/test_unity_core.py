@@ -91,6 +91,21 @@ def test_unity_skips_favored_signal_when_trade_already_open():
     assert any(row["status"] == "skipped" and row["skipreason"] == "opentrade" for row in signals)
 
 
+def test_unity_emits_shadow_candidates_with_causal_snapshot():
+    prices = [100, 101, 102, 103, 104, 105, 104, 103, 102, 101, 100, 99, 98, 99, 100, 101, 102, 103, 104]
+    _eng, changes = run_engine(prices)
+
+    signals = [row for batch in changes for row in batch["signals"]]
+    candidates = [row for batch in changes for row in batch["candidates"]]
+
+    assert candidates
+    assert len(candidates) == len(signals)
+    assert all(row["featurever"] == "unity-candidate-v1" for row in candidates)
+    assert all(row["regimeto"] in {"green", "red"} for row in candidates)
+    assert all("detail" in row["features"] for row in candidates)
+    assert all("plan" in row["features"] for row in candidates)
+
+
 def test_unity_arms_breakeven_and_trailing():
     prices = [100, 101, 102, 103, 104, 105, 104, 103, 102, 101, 100, 99, 98, 99, 100, 101, 102, 103, 104, 103, 102.5, 102]
     _eng, changes = run_engine(prices)

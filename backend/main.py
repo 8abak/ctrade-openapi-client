@@ -170,20 +170,36 @@ def get_version():
     return {"version": VERSION}
 
 
+def _frontend_page(name: str):
+    path = os.path.join(FRONTEND_DIR, name)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail=f"{name} not found")
+    return FileResponse(path)
+
+
+@app.get("/unity")
+def unity_page():
+    return _frontend_page("unity.html")
+
+
+@app.get("/regime")
+def regime_page():
+    return _frontend_page("regime.html")
+
+
+@app.get("/sql")
+def sql_page():
+    return _frontend_page("sql.html")
+
+
 @app.get("/k2")
 def k2_page():
-    path = os.path.join(FRONTEND_DIR, "k2.html")
-    if not os.path.exists(path):
-        raise HTTPException(status_code=404, detail="k2.html not found")
-    return FileResponse(path)
+    return _frontend_page("k2.html")
 
 
 @app.get("/structure")
 def structure_page():
-    path = os.path.join(FRONTEND_DIR, "structure.html")
-    if not os.path.exists(path):
-        raise HTTPException(status_code=404, detail="structure.html not found")
-    return FileResponse(path)
+    return _frontend_page("structure.html")
 
 
 @app.get("/api/k2candles/window")

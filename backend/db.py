@@ -1052,6 +1052,10 @@ def get_unity_recent(
             "trades": [],
             "ticks": [],
             "events": [],
+            "candidates": [],
+            "outcomes": [],
+            "scenarios": [],
+            "candidatestats": None,
         }
 
     lim = max(1, min(int(limit), 1000))
@@ -1130,6 +1134,70 @@ def get_unity_recent(
             (symbol, lim),
         )
         out["events"] = [_jsonable_db(dict(r)) for r in cur.fetchall()]
+
+        if table_exists(conn, "unitycandidate"):
+            cur.execute(
+                """
+                SELECT
+                    COUNT(*)::bigint AS total,
+                    COUNT(*) FILTER (WHERE eligible)::bigint AS eligible,
+                    COUNT(*) FILTER (WHERE tradeopened)::bigint AS tradeopened,
+                    COUNT(*) FILTER (WHERE favored)::bigint AS favored
+                FROM public.unitycandidate
+                WHERE symbol=%s
+                """,
+                (symbol,),
+            )
+            row = cur.fetchone()
+            out["candidatestats"] = _jsonable_db(dict(row)) if row else None
+
+            cur.execute(
+                """
+                SELECT *
+                FROM public.unitycandidate
+                WHERE symbol=%s
+                ORDER BY signaltickid DESC, id DESC
+                LIMIT %s
+                """,
+                (symbol, lim),
+            )
+            candidates = [_jsonable_db(dict(r)) for r in cur.fetchall()]
+            out["candidates"] = candidates
+
+            candidate_ids = [int(row["id"]) for row in candidates if row.get("id") is not None]
+            if candidate_ids and table_exists(conn, "unitycandoutcome"):
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM public.unitycandoutcome
+                    WHERE candidateid = ANY(%s)
+                    ORDER BY candidateid DESC
+                    """,
+                    (candidate_ids,),
+                )
+                out["outcomes"] = [_jsonable_db(dict(r)) for r in cur.fetchall()]
+            else:
+                out["outcomes"] = []
+
+            if candidate_ids and table_exists(conn, "unitycandscenario"):
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM public.unitycandscenario
+                    WHERE candidateid = ANY(%s)
+                    ORDER BY candidateid DESC, code ASC
+                    LIMIT %s
+                    """,
+                    (candidate_ids, lim * 6),
+                )
+                out["scenarios"] = [_jsonable_db(dict(r)) for r in cur.fetchall()]
+            else:
+                out["scenarios"] = []
+        else:
+            out["candidatestats"] = None
+            out["candidates"] = []
+            out["outcomes"] = []
+            out["scenarios"] = []
 
     return out
 
