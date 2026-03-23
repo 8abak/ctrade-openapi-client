@@ -1,12 +1,29 @@
 // frontend/regime-core.js
-// Regime page: full window load for selected segm + segLine range.
+// UNITY-first Regime Explorer with legacy fallback.
 
 (() => {
   const state = {
+    symbol: "XAUUSD",
+    mode: "unity",
+    availableModes: [],
+    status: null,
+    errors: [],
+
+    legacySegms: [],
     segmId: null,
-    segmLabel: "",
-    allLines: [],
-    rangeLines: [],
+    legacyLines: [],
+    legacyLegs: new Map(),
+    zigPivots: [],
+
+    unityContexts: [],
+    focus: null,
+    unityPivots: [],
+    unitySwings: [],
+    unitySignals: [],
+    unityCandidates: [],
+    unityEvents: [],
+    unityTrades: [],
+
     ticks: [],
     range: null,
 
@@ -16,15 +33,20 @@
     showAsk: false,
     showSegLines: false,
     showLegs: false,
-    showZig: true,
-
-    zigPivots: [],
+    showZig: false,
+    showUnityPivots: true,
+    showUnitySwings: true,
+    showUnitySignals: true,
+    showUnityCandidates: true,
+    showUnityEvents: true,
   };
 
   let chart = null;
-  let tickById = new Map();
-  let legsByLine = new Map();
-  let zoomPending = false;
+  let tickMap = new Map();
+  let pivotMap = new Map();
+  let signalMap = new Map();
+  let candidateMap = new Map();
+  let eventMap = new Map();
 
   function $(id) { return document.getElementById(id); }
 
@@ -37,686 +59,650 @@
     return res.json();
   }
 
-  function setToggle(btn, on) {
-    btn.classList.toggle("on", !!on);
+  async function safeFetch(url, opts, { silent = false } = {}) {
+    try {
+      const data = await fetchJSON(url, opts);
+      clearError(url);
+      return data;
+    } catch (err) {
+      pushError(url, err);
+      if (!silent) throw err;
+      return null;
+    }
+  }
+
+  function pushError(endpoint, err) {
+    const message = String(err && (err.message || err) || "Unknown error");
+    const row = { endpoint, message };
+    const idx = state.errors.findIndex((v) => v.endpoint === endpoint);
+    if (idx >= 0) state.errors[idx] = row;
+    else state.errors.push(row);
+    renderErrors();
+  }
+
+  function clearError(endpoint) {
+    const next = state.errors.filter((v) => v.endpoint !== endpoint);
+    if (next.length !== state.errors.length) {
+      state.errors = next;
+      renderErrors();
+    }
+  }
+
+  function setToggle(id, on) {
+    const el = $(id);
+    if (el) el.classList.toggle("on", !!on);
   }
 
   function pad2(n) {
     return String(n).padStart(2, "0");
   }
 
-  function formatDateTime(ts) {
-    if (!ts) return { date: "", time: "" };
+  function formatTs(ts) {
+    if (!ts) return "-";
     const d = new Date(ts);
-    if (Number.isNaN(d.getTime())) return { date: "", time: "" };
-    const date = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-    const ms = d.getMilliseconds();
-    const timeBase = `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
-    const time = ms ? `${timeBase}.${String(ms).padStart(3, "0")}` : timeBase;
-    return { date, time };
+    if (Number.isNaN(d.getTime())) return String(ts);
+    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
   }
 
-  function lineValueAt(line, tickId) {
-    if (!line || tickId == null) return null;
-    const x0 = Number(line.start_tick_id);
-    const x1 = Number(line.end_tick_id);
-    if (!Number.isFinite(x0) || !Number.isFinite(x1) || x1 === x0) return null;
-    if (tickId < Math.min(x0, x1) || tickId > Math.max(x0, x1)) return null;
-
-    const slope = line.slope != null ? Number(line.slope) : null;
-    const intercept = line.intercept != null ? Number(line.intercept) : null;
-    if (slope != null && intercept != null) {
-      return slope * tickId + intercept;
-    }
-
-    const y0 = Number(line.start_price);
-    const y1 = Number(line.end_price);
-    if (!Number.isFinite(y0) || !Number.isFinite(y1)) return null;
-    const t = (tickId - x0) / (x1 - x0);
-    return y0 + (y1 - y0) * t;
+  function fmt(v, digits = 2) {
+    const n = Number(v);
+    return Number.isFinite(n) ? n.toFixed(digits) : "-";
   }
 
-  async function loadSegmList() {
-    const segms = await fetchJSON("/api/regime/segms");
-    const sel = $("segmSelect");
-    sel.innerHTML = "";
-
-    for (const s of segms) {
-      const segmId = s.segm_id ?? s.id ?? s.segmId;
-      const date = s.date ?? "";
-      const opt = document.createElement("option");
-      opt.value = String(segmId);
-      opt.textContent = `${date} (#${segmId})`;
-      sel.appendChild(opt);
-    }
-
-    if (segms.length) {
-      state.segmId = parseInt(sel.value, 10);
-    }
+  function colorForState(v) {
+    if (v === "green" || v === "long") return "#4fd1a1";
+    if (v === "red" || v === "short") return "#ff7c6b";
+    if (v === "yellow") return "#f2b84b";
+    return "#9bb0cb";
   }
 
-  async function loadLinesForSegm() {
-    if (!state.segmId) return;
-    const data = await fetchJSON(`/api/regime/segm/${state.segmId}/lines`);
-    const lines = Array.isArray(data) ? data : (data.lines ?? []);
-    state.allLines = lines;
+  function rebuildMaps() {
+    tickMap = new Map();
+    pivotMap = new Map();
+    signalMap = new Map();
+    candidateMap = new Map();
+    eventMap = new Map();
 
-    const sel = $("lineSelect");
-    sel.innerHTML = "";
-    for (const ln of lines) {
-      const opt = document.createElement("option");
-      opt.value = String(ln.id);
-      opt.textContent = `L${ln.id} ${ln.start_tick_id} -> ${ln.end_tick_id}`;
-      sel.appendChild(opt);
-    }
-
-    if (lines.length) {
-      sel.value = String(lines[0].id);
-    }
-  }
-
-  async function loadLegsForSegm() {
-    if (!state.segmId) return;
-    try {
-      const data = await fetchJSON(`/api/regime/legs?segm_id=${state.segmId}`);
-      const legs = Array.isArray(data) ? data : (data.legs ?? []);
-      legsByLine = new Map();
-      for (const l of legs) {
-        const id = Number(l.segline_id ?? l.segLine_id);
-        if (!Number.isFinite(id)) continue;
-        legsByLine.set(id, l);
-      }
-    } catch (e) {
-      console.warn("legs load failed", e);
-      legsByLine = new Map();
-    }
-  }
-
-  async function loadZigPivots() {
-    if (!state.segmId) return;
-    try {
-      const data = await fetchJSON(`/api/regime/segm/${state.segmId}/zig_pivots`);
-      const pivots = Array.isArray(data) ? data : (data.pivots ?? []);
-      state.zigPivots = pivots;
-    } catch (e) {
-      console.warn("zig pivots load failed", e);
-      state.zigPivots = [];
-    }
-  }
-
-  function buildTickCache() {
-    state.tickIds = [];
-    state.tickSeries = { mid: [], kal: [], bid: [], ask: [] };
-    state.tickValues = { mid: [], kal: [], bid: [], ask: [] };
-
-    for (const t of state.ticks) {
-      const id = Number(t.id ?? t.tick_id);
-      if (!Number.isFinite(id)) continue;
-      state.tickIds.push(id);
-
-      const mid = t.mid != null ? Number(t.mid) : null;
-      const kal = t.kal != null ? Number(t.kal) : null;
-      const bid = t.bid != null ? Number(t.bid) : null;
-      const ask = t.ask != null ? Number(t.ask) : null;
-
-      state.tickValues.mid.push(Number.isFinite(mid) ? mid : null);
-      state.tickValues.kal.push(Number.isFinite(kal) ? kal : null);
-      state.tickValues.bid.push(Number.isFinite(bid) ? bid : null);
-      state.tickValues.ask.push(Number.isFinite(ask) ? ask : null);
-
-      if (Number.isFinite(mid)) state.tickSeries.mid.push([id, mid]);
-      if (Number.isFinite(kal)) state.tickSeries.kal.push([id, kal]);
-      if (Number.isFinite(bid)) state.tickSeries.bid.push([id, bid]);
-      if (Number.isFinite(ask)) state.tickSeries.ask.push([id, ask]);
-    }
-  }
-
-  function buildTickData(field) {
-    return (state.tickSeries && state.tickSeries[field]) ? state.tickSeries[field] : [];
-  }
-
-  function buildSegLineSeries(selectedId) {
-    if (!state.showSegLines || !state.rangeLines.length) return [];
-
-    const selId = selectedId != null ? Number(selectedId) : null;
-
-    const series = [];
-    for (const ln of state.rangeLines) {
-      const isPrimary = selId != null && Number(ln.id) === selId;
-      const a = [Number(ln.start_tick_id), Number(ln.start_price)];
-      const b = [Number(ln.end_tick_id), Number(ln.end_price)];
-      if (!Number.isFinite(a[0]) || !Number.isFinite(b[0])) continue;
-
-      series.push({
-        id: `segline_${ln.id}`,
-        name: isPrimary ? "SegLine (primary)" : "SegLine",
-        type: "line",
-        data: [a, b],
-        showSymbol: false,
-        lineStyle: isPrimary
-          ? { width: 4, opacity: 0.95, color: "#ffd54a" }
-          : { width: 2, opacity: 0.65 },
-        silent: true,
-        z: isPrimary ? 6 : 5,
-      });
-    }
-    return series;
-  }
-
-  function buildLegSeries() {
-    if (!state.showLegs || !state.rangeLines.length || !legsByLine.size) return [];
-
-    const out = [];
-    const addSeg = (segLineId, label, p1, p2) => {
-      if (!p1 || !p2) return;
-      if (!Number.isFinite(p1[0]) || !Number.isFinite(p2[0])) return;
-      if (!Number.isFinite(p1[1]) || !Number.isFinite(p2[1])) return;
-      out.push({
-        id: `leg_${segLineId}_${label}`,
-        name: "Legs",
-        type: "line",
-        data: [p1, p2],
-        showSymbol: false,
-        lineStyle: { width: 1, opacity: 0.8, type: "dashed", color: "#6bd4ff" },
-        silent: true,
-        z: 4,
-      });
+    const add = (map, key, row) => {
+      if (!Number.isFinite(key)) return;
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(row);
     };
 
-    for (const ln of state.rangeLines) {
-      const leg = legsByLine.get(Number(ln.id));
-      if (!leg || !leg.has_b || !leg.has_c) continue;
+    for (const row of state.ticks) add(tickMap, Number(row.id), row);
+    for (const row of state.unityPivots) add(pivotMap, Number(row.tickid), row);
+    for (const row of state.unitySignals) add(signalMap, Number(row.tickid), row);
+    for (const row of state.unityCandidates) add(candidateMap, Number(row.focus_tick_id), row);
+    for (const row of state.unityEvents) add(eventMap, Number(row.tickid), row);
+  }
 
-      const a = [Number(leg.a_tick_id), Number(leg.a_kal)];
-      const b = [Number(leg.b_tick_id), Number(leg.b_kal)];
-      const c = [Number(leg.c_tick_id), Number(leg.c_kal)];
-      const d = leg.has_d ? [Number(leg.d_tick_id), Number(leg.d_kal)] : null;
+  function buildLineSeries(rows, field, name, opts = {}) {
+    return {
+      name,
+      type: opts.type || "line",
+      data: rows
+        .map((r) => {
+          if (r[field] == null) return null;
+          return [Number(r.id), Number(r[field])];
+        })
+        .filter((v) => v && Number.isFinite(v[0]) && Number.isFinite(v[1])),
+      showSymbol: false,
+      symbolSize: opts.symbolSize || 6,
+      lineStyle: opts.lineStyle || { width: 2, color: "#7ae3ff" },
+      itemStyle: opts.itemStyle,
+      z: opts.z || 2,
+    };
+  }
 
-      addSeg(ln.id, "ab", a, b);
-      addSeg(ln.id, "bc", b, c);
-      if (d) addSeg(ln.id, "cd", c, d);
+  function buildLegacySeries() {
+    const out = [];
+    if (state.showSegLines) {
+      for (const row of state.legacyLines) {
+        out.push({
+          type: "line",
+          data: [[Number(row.start_tick_id), Number(row.start_price)], [Number(row.end_tick_id), Number(row.end_price)]],
+          showSymbol: false,
+          lineStyle: { width: 2, color: "#ffd54a", opacity: 0.8 },
+          z: 5,
+        });
+      }
     }
-
+    if (state.showLegs) {
+      for (const row of state.legacyLines) {
+        const leg = state.legacyLegs.get(Number(row.id));
+        if (!leg || !leg.has_b || !leg.has_c) continue;
+        const parts = [
+          [[Number(leg.a_tick_id), Number(leg.a_kal)], [Number(leg.b_tick_id), Number(leg.b_kal)]],
+          [[Number(leg.b_tick_id), Number(leg.b_kal)], [Number(leg.c_tick_id), Number(leg.c_kal)]],
+        ];
+        if (leg.has_d) parts.push([[Number(leg.c_tick_id), Number(leg.c_kal)], [Number(leg.d_tick_id), Number(leg.d_kal)]]);
+        for (const seg of parts) {
+          out.push({
+            type: "line",
+            data: seg,
+            showSymbol: false,
+            lineStyle: { width: 1, color: "#6bd4ff", type: "dashed", opacity: 0.8 },
+            z: 4,
+          });
+        }
+      }
+    }
+    if (state.showZig && state.zigPivots.length) {
+      out.push({
+        name: "Zig",
+        type: "line",
+        data: state.zigPivots
+          .map((r) => [Number(r.tick_id ?? r.tickId), Number(r.price)])
+          .filter((v) => Number.isFinite(v[0]) && Number.isFinite(v[1])),
+        showSymbol: true,
+        symbolSize: 5,
+        lineStyle: { width: 2, color: "#ff9f40" },
+        z: 4,
+      });
+    }
     return out;
   }
 
-  function buildZigSeries() {
-    if (!state.showZig || !state.zigPivots.length) return [];
-
-    const sorted = [...state.zigPivots].sort((a, b) => {
-      const ia = a.pivot_index ?? a.pivotIndex ?? 0;
-      const ib = b.pivot_index ?? b.pivotIndex ?? 0;
-      if (ia !== ib) return ia - ib;
-      const ta = Number(a.tick_id ?? a.tickId) || 0;
-      const tb = Number(b.tick_id ?? b.tickId) || 0;
-      return ta - tb;
-    });
-
-    const pts = [];
-    for (const p of sorted) {
-      const x = Number(p.tick_id ?? p.tickId);
-      const y = p.price;
-      if (!Number.isFinite(x) || y == null) continue;
-      pts.push([x, Number(y)]);
-    }
-
-    if (pts.length < 2) return [];
-    return [{
-      name: "Zig",
-      type: "line",
-      data: pts,
-      showSymbol: true,
-      symbolSize: 6,
-      lineStyle: { width: 2.0, opacity: 0.9, color: "#ff9f40" },
-      z: 4,
-    }];
-  }
-
-  function lowerBound(arr, target) {
-    let lo = 0;
-    let hi = arr.length;
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if (arr[mid] < target) lo = mid + 1;
-      else hi = mid;
-    }
-    return lo;
-  }
-
-  function upperBound(arr, target) {
-    let lo = 0;
-    let hi = arr.length;
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if (arr[mid] <= target) lo = mid + 1;
-      else hi = mid;
-    }
-    return lo;
-  }
-
-  function getZoomWindow() {
-    if (!chart || !state.tickIds || !state.tickIds.length) return null;
-    const opt = chart.getOption();
-    const dz = opt && opt.dataZoom ? opt.dataZoom[0] : null;
-    if (!dz) return null;
-
-    let x0 = null;
-    let x1 = null;
-    if (dz.startValue != null && dz.endValue != null) {
-      x0 = Number(dz.startValue);
-      x1 = Number(dz.endValue);
-    } else {
-      const startPct = (dz.start != null ? dz.start : 0) / 100;
-      const endPct = (dz.end != null ? dz.end : 100) / 100;
-      const lastIdx = state.tickIds.length - 1;
-      const i0 = Math.max(0, Math.floor(startPct * lastIdx));
-      const i1 = Math.max(0, Math.ceil(endPct * lastIdx));
-      x0 = state.tickIds[i0];
-      x1 = state.tickIds[i1];
-    }
-
-    if (!Number.isFinite(x0) || !Number.isFinite(x1)) return null;
-    if (x0 > x1) [x0, x1] = [x1, x0];
-    return { x0, x1 };
-  }
-
-  function includeLineMinMax(bounds, x0, x1, p1, p2) {
-    const xA = Number(p1[0]);
-    const yA = Number(p1[1]);
-    const xB = Number(p2[0]);
-    const yB = Number(p2[1]);
-    if (!Number.isFinite(xA) || !Number.isFinite(yA) || !Number.isFinite(xB) || !Number.isFinite(yB)) return;
-
-    const segMin = Math.min(xA, xB);
-    const segMax = Math.max(xA, xB);
-    if (x1 < segMin || x0 > segMax) return;
-
-    if (xA === xB) {
-      bounds.min = bounds.min == null ? Math.min(yA, yB) : Math.min(bounds.min, yA, yB);
-      bounds.max = bounds.max == null ? Math.max(yA, yB) : Math.max(bounds.max, yA, yB);
-      return;
-    }
-
-    const leftX = Math.max(x0, segMin);
-    const rightX = Math.min(x1, segMax);
-    const slope = (yB - yA) / (xB - xA);
-    const yL = yA + slope * (leftX - xA);
-    const yR = yA + slope * (rightX - xA);
-
-    bounds.min = bounds.min == null ? Math.min(yL, yR) : Math.min(bounds.min, yL, yR);
-    bounds.max = bounds.max == null ? Math.max(yL, yR) : Math.max(bounds.max, yL, yR);
-  }
-
-  function computeMinMaxForWindow(x0, x1) {
-    const ids = state.tickIds || [];
-    if (!ids.length) return null;
-
-    const i0 = lowerBound(ids, x0);
-    const i1 = upperBound(ids, x1) - 1;
-    if (i0 > i1) return null;
-
-    const keys = [];
-    if (state.showMid) keys.push("mid");
-    if (state.showKal) keys.push("kal");
-    if (state.showBid) keys.push("bid");
-    if (state.showAsk) keys.push("ask");
-
-    const bounds = { min: null, max: null };
-    const span = i1 - i0 + 1;
-    let step = 1;
-    if (span > 200000) step = Math.ceil(span / 50000);
-    else if (span > 80000) step = Math.ceil(span / 30000);
-
-    for (const key of keys) {
-      const arr = state.tickValues[key] || [];
-      for (let i = i0; i <= i1; i += step) {
-        const v = arr[i];
-        if (v == null || !Number.isFinite(v)) continue;
-        bounds.min = bounds.min == null ? v : Math.min(bounds.min, v);
-        bounds.max = bounds.max == null ? v : Math.max(bounds.max, v);
-      }
-      if (i1 >= i0) {
-        const v = arr[i1];
-        if (v != null && Number.isFinite(v)) {
-          bounds.min = bounds.min == null ? v : Math.min(bounds.min, v);
-          bounds.max = bounds.max == null ? v : Math.max(bounds.max, v);
-        }
+  function buildUnitySeries() {
+    const out = [];
+    if (state.showUnitySwings) {
+      for (const row of state.unitySwings) {
+        out.push({
+          type: "line",
+          data: [[Number(row.starttick), Number(row.startprice)], [Number(row.endtick), Number(row.endprice)]],
+          showSymbol: false,
+          lineStyle: { width: 3, color: colorForState(row.state), opacity: 0.85 },
+          z: 5,
+        });
       }
     }
-
-    if (state.showSegLines && state.rangeLines.length) {
-      for (const ln of state.rangeLines) {
-        const a = [Number(ln.start_tick_id), Number(ln.start_price)];
-        const b = [Number(ln.end_tick_id), Number(ln.end_price)];
-        includeLineMinMax(bounds, x0, x1, a, b);
-      }
+    if (state.showUnityPivots && state.unityPivots.length) {
+      out.push({
+        name: "UNITY Pivots",
+        type: "scatter",
+        symbol: "diamond",
+        symbolSize: 9,
+        data: state.unityPivots
+          .map((r) => ({
+            value: [Number(r.tickid), Number(r.price)],
+            itemStyle: { color: r.kind === "high" ? "#ff8c69" : "#4fd1a1" },
+          }))
+          .filter((v) => Number.isFinite(v.value[0]) && Number.isFinite(v.value[1])),
+        z: 7,
+      });
     }
-
-    if (state.showLegs && legsByLine.size) {
-      for (const ln of state.rangeLines) {
-        const leg = legsByLine.get(Number(ln.id));
-        if (!leg || !leg.has_b || !leg.has_c) continue;
-        const a = [Number(leg.a_tick_id), Number(leg.a_kal)];
-        const b = [Number(leg.b_tick_id), Number(leg.b_kal)];
-        const c = [Number(leg.c_tick_id), Number(leg.c_kal)];
-        includeLineMinMax(bounds, x0, x1, a, b);
-        includeLineMinMax(bounds, x0, x1, b, c);
-        if (leg.has_d) {
-          const d = [Number(leg.d_tick_id), Number(leg.d_kal)];
-          includeLineMinMax(bounds, x0, x1, c, d);
-        }
-      }
+    if (state.showUnitySignals && state.unitySignals.length) {
+      out.push({
+        name: "UNITY Signals",
+        type: "scatter",
+        symbol: "rect",
+        symbolSize: 8,
+        data: state.unitySignals
+          .map((r) => ({
+            value: [Number(r.tickid), Number(r.price)],
+            itemStyle: { color: r.favored ? "#7ae3ff" : (r.status === "rejected" ? "#8d99ad" : "#f2b84b") },
+          }))
+          .filter((v) => Number.isFinite(v.value[0]) && Number.isFinite(v.value[1])),
+        z: 8,
+      });
     }
-
-    if (bounds.min == null || bounds.max == null) return null;
-    return bounds;
-  }
-
-  function updateYAxisForZoom() {
-    if (!chart) return;
-    const win = getZoomWindow();
-    if (!win) return;
-    const bounds = computeMinMaxForWindow(win.x0, win.x1);
-    if (!bounds) return;
-
-    const range = bounds.max - bounds.min;
-    const pad = Math.max(0.3, range * 0.03);
-    const yMin = bounds.min - pad;
-    const yMax = bounds.max + pad;
-    if (!Number.isFinite(yMin) || !Number.isFinite(yMax)) return;
-
-    chart.setOption(
-      {
-        yAxis: { min: yMin, max: yMax },
-      },
-      { notMerge: false, lazyUpdate: true }
-    );
-  }
-
-  function scheduleRescale() {
-    if (zoomPending) return;
-    zoomPending = true;
-    requestAnimationFrame(() => {
-      zoomPending = false;
-      updateYAxisForZoom();
-    });
+    if (state.showUnityCandidates && state.unityCandidates.length) {
+      const selectedId = Number(state.focus && state.focus.candidate_id);
+      out.push({
+        name: "UNITY Candidates",
+        type: "scatter",
+        symbol: "triangle",
+        symbolSize: 11,
+        data: state.unityCandidates
+          .map((r) => ({
+            value: [Number(r.focus_tick_id), Number(r.price)],
+            symbolSize: Number(r.candidate_id) === selectedId ? 14 : 11,
+            itemStyle: {
+              color: r.outcome_status === "resolved" && r.firsthit === "tp"
+                ? "#4fd1a1"
+                : (r.outcome_status === "resolved" ? "#ff7c6b" : "#f2b84b"),
+            },
+          }))
+          .filter((v) => Number.isFinite(v.value[0]) && Number.isFinite(v.value[1])),
+        z: 9,
+      });
+    }
+    if (state.showUnityEvents && state.unityEvents.length) {
+      out.push({
+        name: "UNITY Events",
+        type: "scatter",
+        symbol: "circle",
+        symbolSize: 8,
+        data: state.unityEvents
+          .map((r) => ({
+            value: [Number(r.tickid), Number(r.price)],
+            itemStyle: { color: r.kind === "open" ? "#7ae3ff" : "#ffb454" },
+          }))
+          .filter((v) => Number.isFinite(v.value[0]) && Number.isFinite(v.value[1])),
+        z: 10,
+      });
+    }
+    return out;
   }
 
   function renderChart() {
     if (!chart) return;
 
-    const selId = Number($("lineSelect").value || 0) || null;
-
     const series = [];
-    if (state.showMid) {
-      series.push({
-        name: "Mid",
-        type: "scatter",
-        data: buildTickData("mid"),
-        symbolSize: 2,
-        large: true,
-        largeThreshold: 20000,
-        itemStyle: { opacity: 0.8 },
-        z: 3,
-      });
-    }
-    if (state.showKal) {
-      series.push({
-        name: "Kal",
-        type: "line",
-        data: buildTickData("kal"),
-        showSymbol: false,
-        lineStyle: { width: 2.0, opacity: 0.9 },
-        z: 2,
-      });
-    }
-    if (state.showBid) {
-      series.push({
-        name: "Bid",
-        type: "line",
-        data: buildTickData("bid"),
-        showSymbol: false,
-        lineStyle: { width: 1.0, opacity: 0.7 },
-        z: 1,
-      });
-    }
-    if (state.showAsk) {
-      series.push({
-        name: "Ask",
-        type: "line",
-        data: buildTickData("ask"),
-        showSymbol: false,
-        lineStyle: { width: 1.0, opacity: 0.7 },
-        z: 1,
-      });
-    }
+    if (state.showMid) series.push(buildLineSeries(state.ticks, "mid", "Mid", { type: "scatter", symbolSize: 2, z: 1, lineStyle: { width: 0 } }));
+    if (state.showKal) series.push(buildLineSeries(state.ticks, "kal", "Kal", { z: 2, lineStyle: { width: 2, color: "#7ae3ff" } }));
+    if (state.showBid) series.push(buildLineSeries(state.ticks, "bid", "Bid", { z: 1, lineStyle: { width: 1, color: "#8d99ad" } }));
+    if (state.showAsk) series.push(buildLineSeries(state.ticks, "ask", "Ask", { z: 1, lineStyle: { width: 1, color: "#f2b84b" } }));
 
-    const segLineSeries = buildSegLineSeries(selId);
-    const legSeries = buildLegSeries();
-    const zigSeries = buildZigSeries();
-    const allSeries = series.concat(segLineSeries, legSeries, zigSeries);
+    series.push(...buildLegacySeries());
+    series.push(...buildUnitySeries());
 
-    let minX = null;
-    let maxX = null;
-    for (const v of state.tickIds || []) {
-      if (!Number.isFinite(v)) continue;
-      if (minX == null || v < minX) minX = v;
-      if (maxX == null || v > maxX) maxX = v;
-    }
+    const ids = state.ticks.map((r) => Number(r.id)).filter(Number.isFinite);
+    const minX = ids.length ? Math.min(...ids) : null;
+    const maxX = ids.length ? Math.max(...ids) : null;
 
     chart.setOption({
       animation: false,
-      grid: { left: 55, right: 25, top: 20, bottom: 60 },
+      grid: { left: 60, right: 26, top: 24, bottom: 64 },
       tooltip: {
         trigger: "axis",
         axisPointer: { type: "cross" },
         formatter: (params) => {
           if (!params || !params.length) return "";
-          const axisValue = params[0].axisValue;
-          const tickId = Number(axisValue);
-          const tick = tickById.get(tickId);
-          const dt = formatDateTime(tick && (tick.ts ?? tick.timestamp));
-
-          const lines = [];
-          lines.push(`<b>id:</b> ${Number.isFinite(tickId) ? tickId : ""}`);
-          if (dt.date) lines.push(`<b>date:</b> ${dt.date}`);
-          if (dt.time) lines.push(`<b>time:</b> ${dt.time}`);
-
+          const tickId = Number(params[0].axisValue);
+          const tick = tickMap.get(tickId);
+          const lines = [
+            `<b>tick:</b> ${tickId}`,
+            `<b>time:</b> ${formatTs(tick && tick.ts)}`,
+          ];
           if (tick) {
-            if (tick.mid != null) lines.push(`<b>mid:</b> ${Number(tick.mid).toFixed(4)}`);
-            if (tick.kal != null) lines.push(`<b>kal:</b> ${Number(tick.kal).toFixed(4)}`);
-            if (state.showBid && tick.bid != null) lines.push(`<b>bid:</b> ${Number(tick.bid).toFixed(4)}`);
-            if (state.showAsk && tick.ask != null) lines.push(`<b>ask:</b> ${Number(tick.ask).toFixed(4)}`);
+            if (tick.mid != null) lines.push(`<b>mid:</b> ${fmt(tick.mid, 4)}`);
+            if (tick.kal != null) lines.push(`<b>kal:</b> ${fmt(tick.kal, 4)}`);
           }
-
-          const primary = state.rangeLines.find((l) => Number(l.id) === selId);
-          const lv = lineValueAt(primary, tickId);
-          lines.push(`<b>line:</b> ${lv == null ? "n/a" : Number(lv).toFixed(4)}`);
-
+          const pivots = pivotMap.get(tickId) || [];
+          const signals = signalMap.get(tickId) || [];
+          const candidates = candidateMap.get(tickId) || [];
+          const events = eventMap.get(tickId) || [];
+          if (pivots.length) lines.push(`<b>pivots:</b> ${pivots.map((r) => r.kind).join(", ")}`);
+          if (signals.length) lines.push(`<b>signals:</b> ${signals.map((r) => `${r.side}/${r.status}`).join(", ")}`);
+          if (candidates.length) lines.push(`<b>candidates:</b> ${candidates.map((r) => `#${r.candidate_id} ${r.outcome_status}`).join(", ")}`);
+          if (events.length) lines.push(`<b>events:</b> ${events.map((r) => `${r.kind}/${r.reason}`).join(", ")}`);
           return lines.join("<br/>");
         },
       },
       xAxis: {
         type: "value",
-        min: minX != null ? minX : null,
-        max: maxX != null ? maxX : null,
-        axisLabel: { formatter: (v) => Math.round(v) },
-        splitLine: { show: true, lineStyle: { color: "rgba(26,43,85,35)" } },
+        min: minX,
+        max: maxX,
+        axisLabel: { color: "#a7b6cd" },
+        splitLine: { show: true, lineStyle: { color: "rgba(30,51,89,0.45)" } },
       },
       yAxis: {
         type: "value",
         scale: true,
-        axisLabel: { formatter: (v) => Math.round(v) },
-        splitLine: { show: true, lineStyle: { color: "rgba(26,43,85,35)" } },
+        axisLabel: { color: "#a7b6cd" },
+        splitLine: { show: true, lineStyle: { color: "rgba(30,51,89,0.45)" } },
       },
       dataZoom: [
         { type: "inside", xAxisIndex: 0, filterMode: "none" },
-        { type: "slider", xAxisIndex: 0, height: 18, bottom: 10 },
+        { type: "slider", xAxisIndex: 0, height: 18, bottom: 12 },
       ],
-      series: allSeries,
+      graphic: state.ticks.length ? [] : [{
+        type: "text",
+        left: "center",
+        top: "middle",
+        style: { text: "No chart data for the current selection.", fill: "#a7b6cd", fontSize: 16 },
+      }],
+      series,
     }, { notMerge: true });
+  }
 
-    updateYAxisForZoom();
+  function renderErrors() {
+    const panel = $("errorPanel");
+    const list = $("errorList");
+    if (!panel || !list) return;
+    if (!state.errors.length) {
+      panel.hidden = true;
+      list.innerHTML = "";
+      return;
+    }
+    panel.hidden = false;
+    list.innerHTML = state.errors
+      .map((r) => `<li><span class="Endpoint">${r.endpoint}</span><span>${r.message.replace(/</g, "&lt;")}</span></li>`)
+      .join("");
+  }
+
+  function renderWorkflow() {
+    const el = $("workflowBody");
+    if (!el) return;
+    const summary = state.status && state.status.unity && state.status.unity.summary ? state.status.unity.summary : {};
+    const stats = [
+      summary.ticks ? `unitytick ${summary.ticks.count}` : null,
+      summary.pivots ? `unitypivot ${summary.pivots.count}` : null,
+      summary.signals ? `unitysignal ${summary.signals.count}` : null,
+      summary.candidates ? `unitycandidate ${summary.candidates.count}` : null,
+      summary.outcomes ? `unitycandoutcome ${summary.outcomes.count}` : null,
+      summary.events ? `unityevent ${summary.events.count}` : null,
+      summary.trades ? `unitytrade ${summary.trades.count}` : null,
+    ].filter(Boolean).join(" · ");
+
+    el.innerHTML = `
+      <p><strong>UNITY is the current live chain.</strong> The verified code path is <code>ticks</code> -> derived tick calc -> <code>unitytick</code>/<code>unitypivot</code>/<code>unityswing</code> -> <code>unitysignal</code> -> <code>unitycandidate</code> -> <code>unitycandoutcome</code>/<code>unitycandscenario</code> -> <code>unityevent</code>/<code>unitytrade</code>.</p>
+      <p><strong>Shadow vs actual journal:</strong> <code>unitycandoutcome</code> and <code>unitycandscenario</code> are shadow labels only. <code>unitytrade</code> and <code>unityevent</code> are the paper trade/event log.</p>
+      <p><strong>Live summary:</strong> ${stats || "No UNITY summary counts were returned."}</p>
+    `;
+  }
+
+  function renderFocus() {
+    const el = $("focusBody");
+    if (!el) return;
+    if (!state.focus) {
+      el.innerHTML = "<p>No live UNITY focus row was returned.</p>";
+      return;
+    }
+    const trade = state.unityTrades.length ? state.unityTrades[state.unityTrades.length - 1] : null;
+    el.innerHTML = `
+      <p><strong>Focus:</strong> ${state.focus.candidate_id ? `candidate #${state.focus.candidate_id}` : `tick ${state.focus.focus_tick_id}`}</p>
+      <p><strong>Time:</strong> ${formatTs(state.focus.time)}</p>
+      <p><strong>Direction:</strong> ${state.focus.side || state.focus.regimeto || "-"} | <strong>Status:</strong> ${state.focus.signalstatus || state.focus.outcome_status || "-"}</p>
+      <p><strong>Outcome:</strong> ${state.focus.outcome_status || "-"} ${state.focus.firsthit ? `(${state.focus.firsthit})` : ""} | <strong>PnL:</strong> ${fmt(state.focus.pnl, 2)}</p>
+      <p><strong>Window:</strong> ${state.range ? `${state.range.start_tick_id} -> ${state.range.end_tick_id} (${state.range.tick_count} ticks)` : "-"}</p>
+      <p><strong>Trade context:</strong> ${trade ? `${trade.side} ${trade.status} pnl ${fmt(trade.pnl, 2)} exit ${trade.exitreason || "-"}` : "No paper trade in this window."}</p>
+    `;
   }
 
   function renderMeta() {
     const el = $("meta");
     if (!el) return;
-    const segm = state.segmId != null ? `segm:${state.segmId}` : "segm:-";
-    const label = state.segmLabel ? ` ${state.segmLabel}` : "";
-    const lineInfo = state.range ? ` lines:${state.range.line_count}` : "";
-    const tickInfo = state.range ? ` ticks:${state.range.tick_count}` : "";
-    el.textContent = `${segm}${label}${lineInfo}${tickInfo}`;
+    const parts = [`mode:${state.mode}`, `symbol:${state.symbol}`];
+    if (state.focus && state.focus.focus_tick_id != null) parts.push(`focus:${state.focus.focus_tick_id}`);
+    if (state.range && state.range.tick_count != null) parts.push(`ticks:${state.range.tick_count}`);
+    if (state.mode === "legacy" && state.segmId != null) parts.push(`segm:${state.segmId}`);
+    el.textContent = parts.join("  ");
   }
 
-  function showError(msg) {
-    const el = $("meta");
-    if (el) el.textContent = String(msg || "Error");
+  function renderMode() {
+    $("modeBadge").textContent = state.mode === "legacy" ? "Mode: Legacy Segm" : "Mode: UNITY";
+    $("contextLabel").textContent = state.mode === "legacy" ? "Segm:" : "Context:";
+    $("legacyControls").hidden = state.mode !== "legacy";
+    $("unityControls").hidden = state.mode !== "unity";
+    $("legacyToggles").hidden = state.mode !== "legacy";
+    $("modeSelect").parentElement.hidden = state.availableModes.length <= 1;
   }
 
-  async function loadWindow() {
-    const segmId = state.segmId;
-    const lineId = parseInt($("lineSelect").value, 10);
-    const lineCount = parseInt($("lineCount").value, 10) || 1;
-    if (!segmId || !lineId) return;
+  function renderAll() {
+    rebuildMaps();
+    renderErrors();
+    renderWorkflow();
+    renderFocus();
+    renderMeta();
+    renderMode();
+    renderChart();
+  }
 
-    const payload = {
-      segm_id: segmId,
-      start_segline_id: lineId,
-      line_count: lineCount,
-    };
+  function parseContextValue() {
+    const value = $("contextSelect").value || "";
+    if (value.startsWith("c:")) return { candidateId: Number(value.slice(2)), focusTickId: null };
+    if (value.startsWith("t:")) return { candidateId: null, focusTickId: Number(value.slice(2)) };
+    return { candidateId: null, focusTickId: null };
+  }
 
-    const data = await fetchJSON("/api/regime/window", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
+  async function loadStatus() {
+    const data = await safeFetch(`/api/regime/status?symbol=${encodeURIComponent(state.symbol)}`, null, { silent: true });
+    state.status = data;
+    const modes = [];
+    if (data && data.unity && data.unity.available) modes.push({ value: "unity", label: "UNITY" });
+    if (data && data.legacy && data.legacy.available) modes.push({ value: "legacy", label: "Legacy" });
+    if (!modes.length) modes.push({ value: "unity", label: "UNITY" });
+    state.availableModes = modes;
+    if (!modes.some((v) => v.value === state.mode)) state.mode = data && data.preferred_mode ? data.preferred_mode : modes[0].value;
 
-    state.segmLabel = data.segm ? data.segm.label : "";
-    state.range = data.range || null;
-    state.ticks = Array.isArray(data.ticks) ? data.ticks : [];
-    state.rangeLines = Array.isArray(data.seglines) ? data.seglines : [];
+    const sel = $("modeSelect");
+    sel.innerHTML = "";
+    for (const row of modes) {
+      const opt = document.createElement("option");
+      opt.value = row.value;
+      opt.textContent = row.label;
+      sel.appendChild(opt);
+    }
+    sel.value = state.mode;
+  }
 
-    tickById = new Map();
-    for (const t of state.ticks) {
-      const id = Number(t.id ?? t.tick_id);
-      if (Number.isFinite(id)) tickById.set(id, t);
+  async function loadUnityContexts() {
+    const data = await safeFetch(`/api/regime/unity/contexts?symbol=${encodeURIComponent(state.symbol)}&limit=200`, null, { silent: true });
+    state.unityContexts = data && Array.isArray(data.rows) ? data.rows : [];
+    const sel = $("contextSelect");
+    sel.innerHTML = "";
+    if (!state.unityContexts.length) {
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "Latest live UNITY window";
+      sel.appendChild(opt);
+      return;
+    }
+    for (const row of state.unityContexts) {
+      const opt = document.createElement("option");
+      opt.value = row.candidate_id != null ? `c:${row.candidate_id}` : `t:${row.focus_tick_id}`;
+      opt.textContent = `${formatTs(row.time)} | ${row.candidate_id ? `#${row.candidate_id}` : `tick ${row.focus_tick_id}`} | ${row.side || row.regimeto || "-"} | ${row.signalstatus || row.outcome_status || "-"}`;
+      sel.appendChild(opt);
+    }
+  }
+
+  async function loadLegacySegms() {
+    const rows = await safeFetch("/api/regime/segms", null, { silent: true });
+    state.legacySegms = Array.isArray(rows) ? rows : [];
+    const sel = $("contextSelect");
+    sel.innerHTML = "";
+    if (!state.legacySegms.length) {
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "No legacy segms available";
+      sel.appendChild(opt);
+      state.segmId = null;
+      return;
+    }
+    for (const row of state.legacySegms) {
+      const opt = document.createElement("option");
+      opt.value = String(row.segm_id);
+      opt.textContent = `${row.date || ""} (#${row.segm_id})`;
+      sel.appendChild(opt);
+    }
+    state.segmId = Number(sel.value) || null;
+  }
+
+  async function loadLegacyLines() {
+    if (!state.segmId) {
+      state.legacyLines = [];
+      $("lineSelect").innerHTML = "";
+      return;
+    }
+    const data = await safeFetch(`/api/regime/segm/${state.segmId}/lines`, null, { silent: true });
+    state.legacyLines = data && Array.isArray(data.lines) ? data.lines : [];
+    const sel = $("lineSelect");
+    sel.innerHTML = "";
+    for (const row of state.legacyLines) {
+      const opt = document.createElement("option");
+      opt.value = String(row.id);
+      opt.textContent = `L${row.id} ${row.start_tick_id} -> ${row.end_tick_id}`;
+      sel.appendChild(opt);
+    }
+  }
+
+  async function loadLegacyExtras() {
+    state.legacyLegs = new Map();
+    state.zigPivots = [];
+    if (!state.segmId) return;
+
+    const legs = await safeFetch(`/api/regime/legs?segm_id=${state.segmId}`, null, { silent: true });
+    for (const row of (legs && Array.isArray(legs.legs) ? legs.legs : [])) {
+      state.legacyLegs.set(Number(row.segline_id), row);
     }
 
-    buildTickCache();
-
-    renderChart();
-    renderMeta();
+    const zig = await safeFetch(`/api/regime/segm/${state.segmId}/zig_pivots`, null, { silent: true });
+    state.zigPivots = zig && Array.isArray(zig.pivots) ? zig.pivots : [];
   }
 
-  function moveLine(delta) {
-    const sel = $("lineSelect");
-    const curId = parseInt(sel.value, 10);
-    const idx = state.allLines.findIndex((l) => Number(l.id) === curId);
-    if (idx < 0) return;
-    const next = state.allLines[idx + delta];
-    if (!next) return;
-    sel.value = String(next.id);
-    loadWindow().catch((e) => alert(String(e.message ?? e)));
+  async function loadUnityWindow() {
+    const { candidateId, focusTickId } = parseContextValue();
+    const params = new URLSearchParams({
+      symbol: state.symbol,
+      ticks_before: String(Number($("ticksBefore").value || 900) || 900),
+      ticks_after: String(Number($("ticksAfter").value || 450) || 450),
+    });
+    if (candidateId) params.set("candidate_id", String(candidateId));
+    if (!candidateId && focusTickId) params.set("focus_tick_id", String(focusTickId));
+
+    const data = await safeFetch(`/api/regime/unity/window?${params.toString()}`, null, { silent: true });
+    state.focus = data ? data.focus || null : null;
+    state.range = data ? data.range || null : null;
+    state.ticks = data && Array.isArray(data.ticks) ? data.ticks : [];
+
+    const unity = data && data.unity ? data.unity : {};
+    state.unityPivots = Array.isArray(unity.pivots) ? unity.pivots : [];
+    state.unitySwings = Array.isArray(unity.swings) ? unity.swings : [];
+    state.unitySignals = Array.isArray(unity.signals) ? unity.signals : [];
+    state.unityCandidates = Array.isArray(unity.candidates) ? unity.candidates : [];
+    state.unityEvents = Array.isArray(unity.events) ? unity.events : [];
+    state.unityTrades = Array.isArray(unity.trades) ? unity.trades : [];
+
+    state.legacyLines = [];
+    state.legacyLegs = new Map();
+    state.zigPivots = [];
+  }
+
+  async function loadLegacyWindow() {
+    const lineId = Number($("lineSelect").value || 0);
+    const lineCount = Number($("lineCount").value || 1) || 1;
+    if (!state.segmId || !lineId) {
+      state.focus = null;
+      state.range = null;
+      state.ticks = [];
+      state.legacyLines = [];
+      return;
+    }
+
+    const data = await safeFetch("/api/regime/window", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ segm_id: state.segmId, start_segline_id: lineId, line_count: lineCount }),
+    }, { silent: true });
+
+    state.focus = null;
+    state.range = data ? data.range || null : null;
+    state.ticks = data && Array.isArray(data.ticks) ? data.ticks : [];
+    state.legacyLines = data && Array.isArray(data.seglines) ? data.seglines : [];
+
+    state.unityPivots = [];
+    state.unitySwings = [];
+    state.unitySignals = [];
+    state.unityCandidates = [];
+    state.unityEvents = [];
+    state.unityTrades = [];
+  }
+
+  async function loadMode(mode) {
+    state.mode = mode;
+    if (state.mode === "legacy") {
+      await loadLegacySegms();
+      await loadLegacyLines();
+      await loadLegacyExtras();
+      await loadLegacyWindow();
+    } else {
+      await loadUnityContexts();
+      await loadUnityWindow();
+    }
+    renderAll();
   }
 
   function bindUI() {
-    $("segmSelect").addEventListener("change", async () => {
-      state.segmId = parseInt($("segmSelect").value, 10);
-      applyDefaultToggles();
-      await loadLinesForSegm();
-      await loadLegsForSegm();
-      await loadZigPivots();
-      try {
-        await loadWindow();
-      } catch (e) {
-        console.error(e);
-        showError(e.message ?? String(e));
+    $("modeSelect").addEventListener("change", () => loadMode($("modeSelect").value));
+    $("contextSelect").addEventListener("change", async () => {
+      if (state.mode === "legacy") {
+        state.segmId = Number($("contextSelect").value || 0) || null;
+        await loadLegacyLines();
+        await loadLegacyExtras();
       }
+      await (state.mode === "legacy" ? loadLegacyWindow() : loadUnityWindow());
+      renderAll();
     });
+    $("lineSelect").addEventListener("change", async () => {
+      await loadLegacyWindow();
+      renderAll();
+    });
+    $("btnLoad").addEventListener("click", async () => {
+      await (state.mode === "legacy" ? loadLegacyWindow() : loadUnityWindow());
+      renderAll();
+    });
+    $("btnPrev").addEventListener("click", () => stepSelection(-1));
+    $("btnNext").addEventListener("click", () => stepSelection(1));
 
-    $("lineSelect").addEventListener("change", () => {
-      loadWindow().catch((e) => {
-        console.error(e);
-        showError(e.message ?? String(e));
+    const toggles = [
+      ["toggleMid", "showMid"],
+      ["toggleKal", "showKal"],
+      ["toggleBid", "showBid"],
+      ["toggleAsk", "showAsk"],
+      ["toggleSegLines", "showSegLines"],
+      ["toggleLegs", "showLegs"],
+      ["toggleZig", "showZig"],
+      ["toggleUnityPivots", "showUnityPivots"],
+      ["toggleUnitySwings", "showUnitySwings"],
+      ["toggleUnitySignals", "showUnitySignals"],
+      ["toggleUnityCandidates", "showUnityCandidates"],
+      ["toggleUnityEvents", "showUnityEvents"],
+    ];
+    for (const [id, key] of toggles) {
+      $(id).addEventListener("click", () => {
+        state[key] = !state[key];
+        setToggle(id, state[key]);
+        renderChart();
       });
-    });
+    }
+  }
 
-    $("btnLoad").addEventListener("click", () => {
-      loadWindow().catch((e) => {
-        console.error(e);
-        showError(e.message ?? String(e));
-      });
-    });
-
-    $("btnPrev").addEventListener("click", () => moveLine(-1));
-    $("btnNext").addEventListener("click", () => moveLine(1));
-
-    const tMid = $("toggleMid");
-    const tKal = $("toggleKal");
-    const tBid = $("toggleBid");
-    const tAsk = $("toggleAsk");
-    const tLines = $("toggleSegLines");
-    const tLegs = $("toggleLegs");
-    const tZig = $("toggleZig");
-
-    tMid.addEventListener("click", () => { state.showMid = !state.showMid; setToggle(tMid, state.showMid); renderChart(); });
-    tKal.addEventListener("click", () => { state.showKal = !state.showKal; setToggle(tKal, state.showKal); renderChart(); });
-    tBid.addEventListener("click", () => { state.showBid = !state.showBid; setToggle(tBid, state.showBid); renderChart(); });
-    tAsk.addEventListener("click", () => { state.showAsk = !state.showAsk; setToggle(tAsk, state.showAsk); renderChart(); });
-    tLines.addEventListener("click", () => { state.showSegLines = !state.showSegLines; setToggle(tLines, state.showSegLines); renderChart(); });
-    tLegs.addEventListener("click", () => { state.showLegs = !state.showLegs; setToggle(tLegs, state.showLegs); renderChart(); });
-    tZig.addEventListener("click", () => { state.showZig = !state.showZig; setToggle(tZig, state.showZig); renderChart(); });
+  function stepSelection(delta) {
+    const id = state.mode === "legacy" ? "lineSelect" : "contextSelect";
+    const sel = $(id);
+    if (!sel || !sel.options.length) return;
+    const next = Math.max(0, Math.min(sel.selectedIndex + delta, sel.options.length - 1));
+    if (next === sel.selectedIndex) return;
+    sel.selectedIndex = next;
+    sel.dispatchEvent(new Event("change"));
   }
 
   function initChart() {
     chart = echarts.init($("chart"));
-    window.addEventListener("resize", () => chart && chart.resize());
-    chart.on("dataZoom", () => scheduleRescale());
+    window.addEventListener("resize", () => chart.resize());
   }
 
-  function applyDefaultToggles() {
-    state.showMid = false;
-    state.showKal = true;
-    state.showBid = false;
-    state.showAsk = false;
-    state.showSegLines = false;
-    state.showLegs = false;
-    state.showZig = true;
-
-    setToggle($("toggleMid"), state.showMid);
-    setToggle($("toggleKal"), state.showKal);
-    setToggle($("toggleBid"), state.showBid);
-    setToggle($("toggleAsk"), state.showAsk);
-    setToggle($("toggleSegLines"), state.showSegLines);
-    setToggle($("toggleLegs"), state.showLegs);
-    setToggle($("toggleZig"), state.showZig);
+  function initToggles() {
+    for (const [id, value] of [
+      ["toggleMid", state.showMid],
+      ["toggleKal", state.showKal],
+      ["toggleBid", state.showBid],
+      ["toggleAsk", state.showAsk],
+      ["toggleSegLines", state.showSegLines],
+      ["toggleLegs", state.showLegs],
+      ["toggleZig", state.showZig],
+      ["toggleUnityPivots", state.showUnityPivots],
+      ["toggleUnitySwings", state.showUnitySwings],
+      ["toggleUnitySignals", state.showUnitySignals],
+      ["toggleUnityCandidates", state.showUnityCandidates],
+      ["toggleUnityEvents", state.showUnityEvents],
+    ]) setToggle(id, value);
   }
 
   async function init() {
     initChart();
-    applyDefaultToggles();
-
-    await loadSegmList();
-    await loadLinesForSegm();
-    await loadLegsForSegm();
-    await loadZigPivots();
-    const lineCount = $("lineCount");
-    if (lineCount && !lineCount.value) lineCount.value = "1";
+    initToggles();
     bindUI();
-    try {
-      await loadWindow();
-    } catch (e) {
-      console.error(e);
-      showError(e.message ?? String(e));
-    }
+    await loadStatus();
+    await loadMode(state.mode);
   }
 
   document.addEventListener("DOMContentLoaded", () => {
-    init().catch((e) => {
-      console.error(e);
-      const el = $("meta");
-      if (el) el.textContent = "Init failed: " + (e.message ?? String(e));
+    init().catch((err) => {
+      pushError("/regime:init", err);
+      renderAll();
     });
   });
 })();

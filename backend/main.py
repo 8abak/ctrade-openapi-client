@@ -7,6 +7,7 @@
 
 import os
 import json
+import logging
 from datetime import datetime, date
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
@@ -34,6 +35,7 @@ from backend.db import (
 )
 
 VERSION = "2025.11.24.clean-v1"
+logger = logging.getLogger("cTrade.main")
 
 app = FastAPI(title="cTrade backend (clean)")
 
@@ -112,6 +114,584 @@ def _ticks_has_k2(conn) -> bool:
             """
         )
         return cur.fetchone() is not None
+
+
+def _ticks_has_symbol(conn) -> bool:
+    with dict_cur(conn) as cur:
+        cur.execute(
+            """
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name   = 'ticks'
+              AND column_name  = 'symbol'
+            """
+        )
+        return cur.fetchone() is not None
+
+
+def _regime_http_error(endpoint: str, exc: Exception) -> HTTPException:
+    logger.exception("Regime endpoint failed: %s", endpoint)
+    return HTTPException(
+        status_code=500,
+        detail=f"{endpoint} failed: {type(exc).__name__}: {exc}",
+    )
+
+
+def _legacy_regime_available(conn) -> bool:
+    return _table_exists(conn, "segms") and _table_exists(conn, "seglines")
+
+
+def _normalize_tick_rows(
+    rows: List[Dict[str, Any]],
+    *,
+    has_kal: bool,
+    has_bid: bool,
+    has_ask: bool,
+) -> List[Dict[str, Any]]:
+    for r in rows:
+        if isinstance(r.get("mid"), Decimal):
+            r["mid"] = float(r["mid"])
+
+        if has_kal:
+            if isinstance(r.get("kal"), Decimal):
+                r["kal"] = float(r["kal"])
+        else:
+            r["kal"] = r.get("mid")
+
+        if has_bid and isinstance(r.get("bid"), Decimal):
+            r["bid"] = float(r["bid"])
+        if has_ask and isinstance(r.get("ask"), Decimal):
+            r["ask"] = float(r["ask"])
+
+        ts = r.get("ts")
+        if isinstance(ts, (datetime, date)):
+            r["ts"] = ts.isoformat()
+    return rows
+
+
+def _fetch_ticks_between(
+    conn,
+    *,
+    start_tick_id: int,
+    end_tick_id: int,
+    symbol: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    ts_col, mid_expr, (has_bid, has_ask) = _ts_mid_cols(conn)
+    has_kal = _ticks_has_kal(conn)
+    has_symbol = bool(symbol) and _ticks_has_symbol(conn)
+
+    bid_sel = ", bid" if has_bid else ""
+    ask_sel = ", ask" if has_ask else ""
+    kal_sel = ", kal" if has_kal else ""
+    symbol_sql = " AND symbol=%s" if has_symbol else ""
+    params: List[Any] = [int(start_tick_id), int(end_tick_id)]
+    if has_symbol:
+        params.append(str(symbol))
+
+    with dict_cur(conn) as cur:
+        cur.execute(
+            f"""
+            SELECT id,
+                   {ts_col}   AS ts,
+                   {mid_expr} AS mid
+                   {kal_sel}{bid_sel}{ask_sel}
+            FROM public.ticks
+            WHERE id BETWEEN %s AND %s
+            {symbol_sql}
+            ORDER BY id ASC
+            """,
+            tuple(params),
+        )
+        rows = cur.fetchall()
+
+    return _normalize_tick_rows(
+        rows,
+        has_kal=has_kal,
+        has_bid=has_bid,
+        has_ask=has_ask,
+    )
+
+
+def _regime_status_payload(conn, *, symbol: str) -> Dict[str, Any]:
+    legacy_tables = {
+        name: _table_exists(conn, name)
+        for name in ("segms", "seglines", "segticks", "legs", "zig_pivots")
+    }
+    unity_tables = {
+        name: _table_exists(conn, name)
+        for name in (
+            "unitystate",
+            "unitytick",
+            "unitypivot",
+            "unityswing",
+            "unitysignal",
+            "unitycandidate",
+            "unitycandoutcome",
+            "unitycandscenario",
+            "unityevent",
+            "unitytrade",
+        )
+    }
+
+    legacy_available = legacy_tables["segms"] and legacy_tables["seglines"]
+    unity_available = unity_tables["unitytick"] and unity_tables["unitysignal"]
+
+    out: Dict[str, Any] = {
+        "symbol": symbol,
+        "preferred_mode": "unity" if unity_available else ("legacy" if legacy_available else "unity"),
+        "legacy": {
+            "available": legacy_available,
+            "tables": legacy_tables,
+        },
+        "unity": {
+            "available": unity_available,
+            "tables": unity_tables,
+        },
+        "workflow": {
+            "source": ["ticks"],
+            "derived": ["tickcalc_state", "pivots", "days"],
+            "unity_live": ["unitytick", "unitypivot", "unityswing", "unitystate", "unitysignal", "unitycandidate"],
+            "shadow": ["unitycandscenario", "unitycandoutcome"],
+            "journal": ["unityevent", "unitytrade"],
+            "notes": [
+                "unityFromDB.py tails derived ticks and writes causal state, pivots, swings, signals, candidates, and paper trade journal rows.",
+                "unityResolveFromDB.py resolves unitycandidate rows into unitycandoutcome and unitycandscenario shadow labels.",
+                "unitycandoutcome and unitycandscenario are shadow evaluation tables only; unitytrade and unityevent are the actual paper trade/event log.",
+            ],
+        },
+    }
+
+    if legacy_available:
+        with dict_cur(conn) as cur:
+            cur.execute("SELECT COUNT(*)::bigint AS n FROM public.segms")
+            segm_count = int(cur.fetchone()["n"])
+            cur.execute("SELECT COUNT(*)::bigint AS n FROM public.seglines WHERE is_active=true")
+            active_lines = int(cur.fetchone()["n"])
+        out["legacy"]["counts"] = {
+            "segms": segm_count,
+            "active_seglines": active_lines,
+        }
+
+    if unity_available:
+        summary: Dict[str, Any] = {}
+        with dict_cur(conn) as cur:
+            if unity_tables["unitystate"]:
+                cur.execute(
+                    """
+                    SELECT symbol, tickid, time, mode, status, updated
+                    FROM public.unitystate
+                    WHERE symbol=%s
+                    """,
+                    (symbol,),
+                )
+                row = cur.fetchone()
+                summary["state"] = _jsonable(dict(row)) if row else None
+            else:
+                summary["state"] = None
+
+            if unity_tables["unitytick"]:
+                cur.execute(
+                    """
+                    SELECT COUNT(*)::bigint AS count,
+                           MAX(tickid) AS latest_tickid,
+                           MAX(time) AS latest_time
+                    FROM public.unitytick
+                    WHERE symbol=%s
+                    """,
+                    (symbol,),
+                )
+                summary["ticks"] = _jsonable(dict(cur.fetchone()))
+
+            if unity_tables["unitypivot"]:
+                cur.execute(
+                    """
+                    SELECT COUNT(*)::bigint AS count,
+                           MAX(tickid) AS latest_tickid
+                    FROM public.unitypivot
+                    WHERE symbol=%s
+                    """,
+                    (symbol,),
+                )
+                summary["pivots"] = _jsonable(dict(cur.fetchone()))
+
+            if unity_tables["unitysignal"]:
+                cur.execute(
+                    """
+                    SELECT COUNT(*)::bigint AS count,
+                           COUNT(*) FILTER (WHERE favored)::bigint AS favored,
+                           COUNT(*) FILTER (WHERE status='rejected')::bigint AS rejected,
+                           MAX(tickid) AS latest_tickid
+                    FROM public.unitysignal
+                    WHERE symbol=%s
+                    """,
+                    (symbol,),
+                )
+                summary["signals"] = _jsonable(dict(cur.fetchone()))
+
+            if unity_tables["unitycandidate"]:
+                cur.execute(
+                    """
+                    SELECT COUNT(*)::bigint AS count,
+                           COUNT(*) FILTER (WHERE eligible)::bigint AS eligible,
+                           COUNT(*) FILTER (WHERE tradeopened)::bigint AS tradeopened,
+                           MAX(signaltickid) AS latest_tickid
+                    FROM public.unitycandidate
+                    WHERE symbol=%s
+                    """,
+                    (symbol,),
+                )
+                summary["candidates"] = _jsonable(dict(cur.fetchone()))
+
+            if unity_tables["unitycandoutcome"]:
+                cur.execute(
+                    """
+                    SELECT COUNT(*)::bigint AS count,
+                           COUNT(*) FILTER (WHERE status='resolved')::bigint AS resolved,
+                           COUNT(*) FILTER (WHERE status='unresolved')::bigint AS unresolved
+                    FROM public.unitycandoutcome
+                    WHERE candidateid IN (
+                        SELECT id
+                        FROM public.unitycandidate
+                        WHERE symbol=%s
+                    )
+                    """,
+                    (symbol,),
+                )
+                summary["outcomes"] = _jsonable(dict(cur.fetchone()))
+
+            if unity_tables["unitytrade"]:
+                cur.execute(
+                    """
+                    SELECT COUNT(*)::bigint AS count,
+                           COUNT(*) FILTER (WHERE status='open')::bigint AS open_count,
+                           MAX(COALESCE(closetick, opentick)) AS latest_tickid
+                    FROM public.unitytrade
+                    WHERE symbol=%s
+                    """,
+                    (symbol,),
+                )
+                summary["trades"] = _jsonable(dict(cur.fetchone()))
+
+            if unity_tables["unityevent"]:
+                cur.execute(
+                    """
+                    SELECT COUNT(*)::bigint AS count,
+                           MAX(tickid) AS latest_tickid
+                    FROM public.unityevent
+                    WHERE symbol=%s
+                    """,
+                    (symbol,),
+                )
+                summary["events"] = _jsonable(dict(cur.fetchone()))
+
+        out["unity"]["summary"] = summary
+
+    return out
+
+
+def _regime_unity_contexts(conn, *, symbol: str, limit: int) -> Dict[str, Any]:
+    if _table_exists(conn, "unitycandidate"):
+        has_outcome = _table_exists(conn, "unitycandoutcome")
+        has_trade = _table_exists(conn, "unitytrade")
+        outcome_join = "LEFT JOIN public.unitycandoutcome o ON o.candidateid = c.id" if has_outcome else ""
+        trade_join = "LEFT JOIN public.unitytrade t ON t.id = c.tradeid" if has_trade else ""
+        with dict_cur(conn) as cur:
+            cur.execute(
+                f"""
+                SELECT
+                    c.id AS candidate_id,
+                    c.symbol,
+                    c.signaltickid AS focus_tickid,
+                    c.time,
+                    c.side,
+                    c.regimefrom,
+                    c.regimeto,
+                    c.score,
+                    c.signalstatus,
+                    c.eligible,
+                    c.favored,
+                    c.tradeopened,
+                    c.cleanstate,
+                    c.causalstate,
+                    c.reason,
+                    {("COALESCE(o.status, 'missing')" if has_outcome else "'missing'")} AS outcome_status,
+                    {("o.firsthit" if has_outcome else "NULL::text")} AS firsthit,
+                    {("o.pnl" if has_outcome else "NULL::double precision")} AS pnl,
+                    {("o.resolveseconds" if has_outcome else "NULL::integer")} AS resolveseconds,
+                    {("t.status" if has_trade else "NULL::text")} AS trade_status,
+                    {("t.exitreason" if has_trade else "NULL::text")} AS exitreason
+                FROM public.unitycandidate c
+                {outcome_join}
+                {trade_join}
+                WHERE c.symbol=%s
+                ORDER BY c.signaltickid DESC, c.id DESC
+                LIMIT %s
+                """,
+                (symbol, int(limit)),
+            )
+            rows = [_jsonable(dict(r)) for r in cur.fetchall()]
+        return {"kind": "candidate", "rows": rows}
+
+    if _table_exists(conn, "unitysignal"):
+        with dict_cur(conn) as cur:
+            cur.execute(
+                """
+                SELECT
+                    NULL::bigint AS candidate_id,
+                    symbol,
+                    tickid AS focus_tickid,
+                    time,
+                    side,
+                    NULL::text AS regimefrom,
+                    state AS regimeto,
+                    score,
+                    status AS signalstatus,
+                    NULL::boolean AS eligible,
+                    favored,
+                    used AS tradeopened,
+                    NULL::text AS cleanstate,
+                    state AS causalstate,
+                    reason,
+                    'missing'::text AS outcome_status,
+                    NULL::text AS firsthit,
+                    NULL::double precision AS pnl,
+                    NULL::integer AS resolveseconds,
+                    NULL::text AS trade_status,
+                    skipreason AS exitreason
+                FROM public.unitysignal
+                WHERE symbol=%s
+                ORDER BY tickid DESC, id DESC
+                LIMIT %s
+                """,
+                (symbol, int(limit)),
+            )
+            rows = [_jsonable(dict(r)) for r in cur.fetchall()]
+        return {"kind": "signal", "rows": rows}
+
+    return {"kind": "empty", "rows": []}
+
+
+def _regime_unity_focus_row(
+    conn,
+    *,
+    symbol: str,
+    candidate_id: Optional[int],
+    focus_tick_id: Optional[int],
+) -> Optional[Dict[str, Any]]:
+    if _table_exists(conn, "unitycandidate"):
+        has_outcome = _table_exists(conn, "unitycandoutcome")
+        has_trade = _table_exists(conn, "unitytrade")
+        outcome_join = "LEFT JOIN public.unitycandoutcome o ON o.candidateid = c.id" if has_outcome else ""
+        trade_join = "LEFT JOIN public.unitytrade t ON t.id = c.tradeid" if has_trade else ""
+        candidate_select = f"""
+                    SELECT
+                        'candidate'::text AS focus_type,
+                        c.id AS candidate_id,
+                        c.symbol,
+                        c.signaltickid AS focus_tick_id,
+                        c.time,
+                        c.side,
+                        c.regimefrom,
+                        c.regimeto,
+                        c.score,
+                        c.signalstatus,
+                        c.eligible,
+                        c.favored,
+                        c.tradeopened,
+                        c.cleanstate,
+                        c.causalstate,
+                        c.reason,
+                        c.price,
+                        c.entryprice,
+                        c.baselinetp,
+                        c.baselinesl,
+                        c.pivottickid,
+                        c.pivotkind,
+                        c.pivotprice,
+                        {("COALESCE(o.status, 'missing')" if has_outcome else "'missing'")} AS outcome_status,
+                        {("o.firsthit" if has_outcome else "NULL::text")} AS firsthit,
+                        {("o.pnl" if has_outcome else "NULL::double precision")} AS pnl,
+                        {("o.resolveseconds" if has_outcome else "NULL::integer")} AS resolveseconds,
+                        {("t.status" if has_trade else "NULL::text")} AS trade_status,
+                        {("t.exitreason" if has_trade else "NULL::text")} AS exitreason,
+                        {("t.pnl" if has_trade else "NULL::double precision")} AS trade_pnl
+                    FROM public.unitycandidate c
+                    {outcome_join}
+                    {trade_join}
+        """
+        with dict_cur(conn) as cur:
+            if candidate_id is not None:
+                cur.execute(
+                    f"""
+                    {candidate_select}
+                    WHERE c.symbol=%s
+                      AND c.id=%s
+                    LIMIT 1
+                    """,
+                    (symbol, int(candidate_id)),
+                )
+            elif focus_tick_id is not None:
+                cur.execute(
+                    f"""
+                    {candidate_select}
+                    WHERE c.symbol=%s
+                      AND c.signaltickid=%s
+                    ORDER BY c.id DESC
+                    LIMIT 1
+                    """,
+                    (symbol, int(focus_tick_id)),
+                )
+            else:
+                cur.execute(
+                    f"""
+                    {candidate_select}
+                    WHERE c.symbol=%s
+                    ORDER BY c.signaltickid DESC, c.id DESC
+                    LIMIT 1
+                    """,
+                    (symbol,),
+                )
+            row = cur.fetchone()
+            if row:
+                return _jsonable(dict(row))
+
+    if _table_exists(conn, "unitysignal"):
+        with dict_cur(conn) as cur:
+            if focus_tick_id is not None:
+                cur.execute(
+                    """
+                    SELECT
+                        'signal'::text AS focus_type,
+                        NULL::bigint AS candidate_id,
+                        symbol,
+                        tickid AS focus_tick_id,
+                        time,
+                        side,
+                        NULL::text AS regimefrom,
+                        state AS regimeto,
+                        score,
+                        status AS signalstatus,
+                        NULL::boolean AS eligible,
+                        favored,
+                        used AS tradeopened,
+                        NULL::text AS cleanstate,
+                        state AS causalstate,
+                        reason,
+                        price,
+                        NULL::double precision AS entryprice,
+                        NULL::double precision AS baselinetp,
+                        NULL::double precision AS baselinesl,
+                        NULL::bigint AS pivottickid,
+                        NULL::text AS pivotkind,
+                        NULL::double precision AS pivotprice,
+                        'missing'::text AS outcome_status,
+                        NULL::text AS firsthit,
+                        NULL::double precision AS pnl,
+                        NULL::integer AS resolveseconds,
+                        NULL::text AS trade_status,
+                        skipreason AS exitreason,
+                        NULL::double precision AS trade_pnl
+                    FROM public.unitysignal
+                    WHERE symbol=%s
+                      AND tickid=%s
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (symbol, int(focus_tick_id)),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT
+                        'signal'::text AS focus_type,
+                        NULL::bigint AS candidate_id,
+                        symbol,
+                        tickid AS focus_tick_id,
+                        time,
+                        side,
+                        NULL::text AS regimefrom,
+                        state AS regimeto,
+                        score,
+                        status AS signalstatus,
+                        NULL::boolean AS eligible,
+                        favored,
+                        used AS tradeopened,
+                        NULL::text AS cleanstate,
+                        state AS causalstate,
+                        reason,
+                        price,
+                        NULL::double precision AS entryprice,
+                        NULL::double precision AS baselinetp,
+                        NULL::double precision AS baselinesl,
+                        NULL::bigint AS pivottickid,
+                        NULL::text AS pivotkind,
+                        NULL::double precision AS pivotprice,
+                        'missing'::text AS outcome_status,
+                        NULL::text AS firsthit,
+                        NULL::double precision AS pnl,
+                        NULL::integer AS resolveseconds,
+                        NULL::text AS trade_status,
+                        skipreason AS exitreason,
+                        NULL::double precision AS trade_pnl
+                    FROM public.unitysignal
+                    WHERE symbol=%s
+                    ORDER BY tickid DESC, id DESC
+                    LIMIT 1
+                    """,
+                    (symbol,),
+                )
+            row = cur.fetchone()
+            if row:
+                return _jsonable(dict(row))
+
+    if _table_exists(conn, "unitytick"):
+        with dict_cur(conn) as cur:
+            cur.execute(
+                """
+                SELECT
+                    'tick'::text AS focus_type,
+                    NULL::bigint AS candidate_id,
+                    symbol,
+                    tickid AS focus_tick_id,
+                    time,
+                    NULL::text AS side,
+                    NULL::text AS regimefrom,
+                    causalstate AS regimeto,
+                    causalscore AS score,
+                    NULL::text AS signalstatus,
+                    NULL::boolean AS eligible,
+                    NULL::boolean AS favored,
+                    NULL::boolean AS tradeopened,
+                    cleanstate,
+                    causalstate,
+                    NULL::text AS reason,
+                    price,
+                    NULL::double precision AS entryprice,
+                    NULL::double precision AS baselinetp,
+                    NULL::double precision AS baselinesl,
+                    NULL::bigint AS pivottickid,
+                    NULL::text AS pivotkind,
+                    NULL::double precision AS pivotprice,
+                    'missing'::text AS outcome_status,
+                    NULL::text AS firsthit,
+                    NULL::double precision AS pnl,
+                    NULL::integer AS resolveseconds,
+                    NULL::text AS trade_status,
+                    NULL::text AS exitreason,
+                    NULL::double precision AS trade_pnl
+                FROM public.unitytick
+                WHERE symbol=%s
+                ORDER BY tickid DESC, id DESC
+                LIMIT 1
+                """,
+                (symbol,),
+            )
+            row = cur.fetchone()
+            if row:
+                return _jsonable(dict(row))
+
+    return None
 
 
 PIVOT_LEVEL_BY_LAYER = {
@@ -1188,6 +1768,8 @@ def _segm_label(conn, segm_id: int) -> Optional[str]:
 def api_regime_segms(limit: int = Query(200, ge=1, le=2000)):
     conn = get_conn()
     try:
+        if not _legacy_regime_available(conn):
+            return []
         with dict_cur(conn) as cur:
             cur.execute(
                 """
@@ -1209,6 +1791,10 @@ def api_regime_segms(limit: int = Query(200, ge=1, le=2000)):
             {"segm_id": int(r["segm_id"]), "date": r["date"]}
             for r in rows
         ]
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _regime_http_error("/api/regime/segms", exc)
     finally:
         conn.close()
 
@@ -1217,6 +1803,8 @@ def api_regime_segms(limit: int = Query(200, ge=1, le=2000)):
 def api_regime_lines(segm_id: int):
     conn = get_conn()
     try:
+        if not _legacy_regime_available(conn):
+            raise HTTPException(status_code=404, detail="Legacy regime tables are unavailable on this system.")
         with dict_cur(conn) as cur:
             cur.execute(
                 """
@@ -1265,6 +1853,10 @@ def api_regime_lines(segm_id: int):
             )
 
         return {"segm_id": int(segm_id), "lines": out}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _regime_http_error(f"/api/regime/segm/{segm_id}/lines", exc)
     finally:
         conn.close()
 
@@ -1273,9 +1865,15 @@ def api_regime_lines(segm_id: int):
 def api_regime_zig_pivots(segm_id: int):
     conn = get_conn()
     try:
+        if not _legacy_regime_available(conn):
+            return {"segm_id": int(segm_id), "pivots": []}
         if not _table_exists(conn, "zig_pivots"):
             return {"segm_id": int(segm_id), "pivots": []}
         return review_zig_pivots(conn, int(segm_id))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _regime_http_error(f"/api/regime/segm/{segm_id}/zig_pivots", exc)
     finally:
         conn.close()
 
@@ -1295,6 +1893,8 @@ def api_review_zig_pivots(segm_id: int):
 def api_regime_legs(segm_id: int = Query(..., ge=1)):
     conn = get_conn()
     try:
+        if not _legacy_regime_available(conn):
+            return {"segm_id": int(segm_id), "legs": []}
         if not _table_exists(conn, "legs"):
             return {"segm_id": int(segm_id), "legs": []}
 
@@ -1351,6 +1951,10 @@ def api_regime_legs(segm_id: int = Query(..., ge=1)):
             )
 
         return {"segm_id": int(segm_id), "legs": out}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _regime_http_error("/api/regime/legs", exc)
     finally:
         conn.close()
 
@@ -1378,6 +1982,8 @@ def api_regime_window(payload: Dict[str, Any] = Body(...)):
 
     conn = get_conn()
     try:
+        if not _legacy_regime_available(conn):
+            raise HTTPException(status_code=404, detail="Legacy regime tables are unavailable on this system.")
         with dict_cur(conn) as cur:
             cur.execute(
                 """
@@ -1508,6 +2114,228 @@ def api_regime_window(payload: Dict[str, Any] = Body(...)):
             "ticks": _jsonable(ticks),
             "seglines": out_lines,
         }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _regime_http_error("/api/regime/window", exc)
+    finally:
+        conn.close()
+
+
+@app.get("/api/regime/status")
+def api_regime_status(symbol: str = Query("XAUUSD")):
+    conn = get_conn()
+    try:
+        return _regime_status_payload(conn, symbol=symbol)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _regime_http_error("/api/regime/status", exc)
+    finally:
+        conn.close()
+
+
+@app.get("/api/regime/unity/contexts")
+def api_regime_unity_contexts(
+    symbol: str = Query("XAUUSD"),
+    limit: int = Query(200, ge=1, le=2000),
+):
+    conn = get_conn()
+    try:
+        return _regime_unity_contexts(conn, symbol=symbol, limit=limit)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _regime_http_error("/api/regime/unity/contexts", exc)
+    finally:
+        conn.close()
+
+
+@app.get("/api/regime/unity/window")
+def api_regime_unity_window(
+    symbol: str = Query("XAUUSD"),
+    candidate_id: Optional[int] = Query(None, ge=1),
+    focus_tick_id: Optional[int] = Query(None, ge=1),
+    ticks_before: int = Query(900, ge=50, le=20_000),
+    ticks_after: int = Query(450, ge=50, le=20_000),
+):
+    if ticks_before + ticks_after + 1 > REGIME_MAX_TICKS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"tick window too large ({ticks_before + ticks_after + 1} > {REGIME_MAX_TICKS})",
+        )
+
+    conn = get_conn()
+    try:
+        focus = _regime_unity_focus_row(
+            conn,
+            symbol=symbol,
+            candidate_id=candidate_id,
+            focus_tick_id=focus_tick_id,
+        )
+        if not focus:
+            return {
+                "mode": "unity",
+                "symbol": symbol,
+                "focus": None,
+                "range": None,
+                "ticks": [],
+                "unity": {
+                    "pivots": [],
+                    "swings": [],
+                    "signals": [],
+                    "candidates": [],
+                    "events": [],
+                    "trades": [],
+                },
+            }
+
+        focus_id = int(focus["focus_tick_id"])
+        start_tick_id = max(1, focus_id - int(ticks_before))
+        end_tick_id = focus_id + int(ticks_after)
+        ticks = _fetch_ticks_between(
+            conn,
+            start_tick_id=start_tick_id,
+            end_tick_id=end_tick_id,
+            symbol=symbol,
+        )
+
+        unity: Dict[str, Any] = {
+            "pivots": [],
+            "swings": [],
+            "signals": [],
+            "candidates": [],
+            "events": [],
+            "trades": [],
+        }
+
+        with dict_cur(conn) as cur:
+            if _table_exists(conn, "unitypivot"):
+                cur.execute(
+                    """
+                    SELECT tickid, time, price, kind, noise, thresh, state, legtick
+                    FROM public.unitypivot
+                    WHERE symbol=%s
+                      AND tickid BETWEEN %s AND %s
+                    ORDER BY tickid ASC, id ASC
+                    """,
+                    (symbol, start_tick_id, end_tick_id),
+                )
+                unity["pivots"] = [_jsonable(dict(r)) for r in cur.fetchall()]
+
+            if _table_exists(conn, "unityswing"):
+                cur.execute(
+                    """
+                    SELECT starttick, endtick, starttime, endtime, startprice, endprice,
+                           state, ticks, move, efficiency, multiple, conviction
+                    FROM public.unityswing
+                    WHERE symbol=%s
+                      AND endtick >= %s
+                      AND starttick <= %s
+                    ORDER BY starttick ASC, endtick ASC
+                    """,
+                    (symbol, start_tick_id, end_tick_id),
+                )
+                unity["swings"] = [_jsonable(dict(r)) for r in cur.fetchall()]
+
+            if _table_exists(conn, "unitysignal"):
+                cur.execute(
+                    """
+                    SELECT tickid, time, side, state, price, score, favored,
+                           reason, used, skipreason, status
+                    FROM public.unitysignal
+                    WHERE symbol=%s
+                      AND tickid BETWEEN %s AND %s
+                    ORDER BY tickid ASC, id ASC
+                    """,
+                    (symbol, start_tick_id, end_tick_id),
+                )
+                unity["signals"] = [_jsonable(dict(r)) for r in cur.fetchall()]
+
+            if _table_exists(conn, "unitycandidate"):
+                has_outcome = _table_exists(conn, "unitycandoutcome")
+                outcome_join = "LEFT JOIN public.unitycandoutcome o ON o.candidateid = c.id" if has_outcome else ""
+                cur.execute(
+                    f"""
+                    SELECT
+                        c.id AS candidate_id,
+                        c.signaltickid AS focus_tick_id,
+                        c.time,
+                        c.side,
+                        c.regimefrom,
+                        c.regimeto,
+                        c.price,
+                        c.score,
+                        c.signalstatus,
+                        c.eligible,
+                        c.favored,
+                        c.tradeopened,
+                        c.reason,
+                        c.entryprice,
+                        c.baselinetp,
+                        c.baselinesl,
+                        {("COALESCE(o.status, 'missing')" if has_outcome else "'missing'")} AS outcome_status,
+                        {("o.firsthit" if has_outcome else "NULL::text")} AS firsthit,
+                        {("o.pnl" if has_outcome else "NULL::double precision")} AS pnl,
+                        {("o.resolveseconds" if has_outcome else "NULL::integer")} AS resolveseconds
+                    FROM public.unitycandidate c
+                    {outcome_join}
+                    WHERE c.symbol=%s
+                      AND c.signaltickid BETWEEN %s AND %s
+                    ORDER BY c.signaltickid ASC, c.id ASC
+                    """,
+                    (symbol, start_tick_id, end_tick_id),
+                )
+                unity["candidates"] = [_jsonable(dict(r)) for r in cur.fetchall()]
+
+            if _table_exists(conn, "unityevent"):
+                cur.execute(
+                    """
+                    SELECT signaltickid, tickid, time, kind, price, stopprice, targetprice, reason, detail
+                    FROM public.unityevent
+                    WHERE symbol=%s
+                      AND tickid BETWEEN %s AND %s
+                    ORDER BY tickid ASC, id ASC
+                    """,
+                    (symbol, start_tick_id, end_tick_id),
+                )
+                unity["events"] = [_jsonable(dict(r)) for r in cur.fetchall()]
+
+            if _table_exists(conn, "unitytrade"):
+                cur.execute(
+                    """
+                    SELECT signaltickid, side, state, opentick, opentime, openprice,
+                           stopprice, targetprice, closetick, closetime, closeprice,
+                           pnl, exitreason, status
+                    FROM public.unitytrade
+                    WHERE symbol=%s
+                      AND (
+                        opentick BETWEEN %s AND %s
+                        OR COALESCE(closetick, opentick) BETWEEN %s AND %s
+                      )
+                    ORDER BY opentick ASC, id ASC
+                    """,
+                    (symbol, start_tick_id, end_tick_id, start_tick_id, end_tick_id),
+                )
+                unity["trades"] = [_jsonable(dict(r)) for r in cur.fetchall()]
+
+        return {
+            "mode": "unity",
+            "symbol": symbol,
+            "focus": focus,
+            "range": {
+                "focus_tick_id": focus_id,
+                "start_tick_id": start_tick_id,
+                "end_tick_id": end_tick_id,
+                "tick_count": len(ticks),
+            },
+            "ticks": ticks,
+            "unity": unity,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _regime_http_error("/api/regime/unity/window", exc)
     finally:
         conn.close()
 
