@@ -228,6 +228,12 @@ select {
   padding: 0 0.1rem;
 }
 
+.live-info {
+  display: grid;
+  justify-items: end;
+  gap: 0.16rem;
+}
+
 .live-brand {
   font-size: 0.74rem;
   font-weight: 700;
@@ -236,6 +242,11 @@ select {
 .page-live .meta-strip {
   text-align: right;
   font-size: 0.84rem;
+}
+
+.live-status {
+  font-size: 0.73rem;
+  opacity: 0.82;
 }
 
 .control-panel,
@@ -253,7 +264,7 @@ select {
 }
 
 .live-control-panel {
-  padding: 0.68rem 0.8rem 0.56rem;
+  padding: 0.62rem 0.8rem 0.5rem;
 }
 
 .toolbar-live {
@@ -315,14 +326,6 @@ select {
   border-radius: 12px;
 }
 
-.control-footer {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 0.75rem;
-  margin-top: 0.42rem;
-}
-
 .ghost-button {
   font-size: 0.82rem;
 }
@@ -337,8 +340,9 @@ select {
 }
 
 .page-live .chart-panel {
+  position: relative;
   padding: 0.45rem;
-  min-height: calc(100vh - 176px);
+  min-height: calc(100vh - 150px);
 }
 
 .chart-host {
@@ -348,7 +352,17 @@ select {
 }
 
 .page-live .chart-host {
-  min-height: calc(100vh - 188px);
+  min-height: calc(100vh - 162px);
+}
+
+.chart-fullscreen-button {
+  position: absolute;
+  left: 0.9rem;
+  bottom: 4.2rem;
+  z-index: 5;
+  padding: 0.42rem 0.66rem;
+  font-size: 0.76rem;
+  opacity: 0.9;
 }
 
 .page-live .chart-panel:fullscreen {
@@ -506,9 +520,8 @@ select {
     text-align: left;
   }
 
-  .control-footer {
-    flex-direction: column;
-    align-items: stretch;
+  .live-info {
+    justify-items: start;
   }
 
   .editor-toolbar {

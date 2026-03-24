@@ -13,7 +13,10 @@
   <div class="app-shell">
     <header class="page-header page-header-live">
       <a class="back-link live-brand" href="/">DATAVIS.AU</a>
-      <div class="meta-strip" id="liveMeta">Waiting for data...</div>
+      <div class="live-info">
+        <div class="meta-strip" id="liveMeta">Waiting for data...</div>
+        <div class="status-line live-status" id="statusLine">Ready.</div>
+      </div>
     </header>
 
     <section class="panel control-panel live-control-panel">
@@ -41,13 +44,10 @@
         </div>
         <button class="primary-button compact-button" id="applyButton" type="button">Load</button>
       </div>
-      <div class="control-footer">
-        <button class="ghost-button" id="fullscreenButton" type="button">Fullscreen</button>
-        <div class="status-line" id="statusLine">Ready.</div>
-      </div>
     </section>
 
     <section class="panel chart-panel" id="chartPanel">
+      <button class="ghost-button chart-fullscreen-button" id="fullscreenButton" type="button">Fullscreen</button>
       <div id="liveChart" class="chart-host"></div>
     </section>
   </div>
