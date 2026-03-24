@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>datavis.au | Live</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body class="page-live">
+  <div class="app-shell">
+    <header class="page-header">
+      <div>
+        <a class="back-link" href="/">datavis.au</a>
+        <h1>XAUUSD Live Tick Chart</h1>
+      </div>
+      <div class="meta-strip" id="liveMeta">Waiting for data...</div>
+    </header>
+
+    <section class="panel control-panel">
+      <div class="toolbar">
+        <div class="segmented" id="modeToggle">
+          <button type="button" data-value="live">Live</button>
+          <button type="button" data-value="review">Review</button>
+        </div>
+        <div class="segmented" id="runToggle">
+          <button type="button" data-value="run">Run</button>
+          <button type="button" data-value="stop">Stop</button>
+        </div>
+        <label>
+          <span>id</span>
+          <input id="tickId" type="number" min="1" inputmode="numeric" placeholder="starting id">
+        </label>
+        <label>
+          <span>window</span>
+          <input id="windowSize" type="number" min="1" max="10000" inputmode="numeric" value="2000">
+        </label>
+        <button class="primary-button" id="applyButton" type="button">Load</button>
+      </div>
+      <div class="status-line" id="statusLine">Ready.</div>
+    </section>
+
+    <section class="panel chart-panel">
+      <div id="liveChart" class="chart-host"></div>
+    </section>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+  <script src="/assets/live.js"></script>
+</body>
+</html>

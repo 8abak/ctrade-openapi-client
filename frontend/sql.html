@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>datavis.au | SQL</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.18/codemirror.min.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.18/theme/material-darker.min.css">
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body class="page-sql">
+  <div class="sql-shell">
+    <aside class="panel sql-sidebar">
+      <div class="sidebar-header">
+        <a class="back-link" href="/">datavis.au</a>
+        <h1>SQL Explorer</h1>
+      </div>
+      <div class="schema-tree" id="schemaTree">Loading schema...</div>
+    </aside>
+
+    <main class="sql-main">
+      <section class="panel sql-editor-panel">
+        <div class="editor-toolbar">
+          <label class="snippet-picker">
+            <span>Snippet</span>
+            <select id="snippetSelect">
+              <option value="">Choose a SQL template</option>
+            </select>
+          </label>
+          <button class="primary-button" id="runQueryButton" type="button">Run Query</button>
+        </div>
+        <textarea id="sqlEditor">SELECT id, timestamp, mid
+FROM public.ticks
+ORDER BY id DESC
+LIMIT 100;</textarea>
+        <div class="status-line" id="queryStatus">Read-only queries only.</div>
+      </section>
+
+      <section class="panel sql-results-panel">
+        <div class="results-meta" id="resultsMeta">No query executed yet.</div>
+        <div class="results-host" id="resultsHost"></div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.18/codemirror.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.18/mode/sql/sql.min.js"></script>
+  <script src="/assets/sql.js"></script>
+</body>
+</html>
