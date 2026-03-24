@@ -11,16 +11,13 @@
 </head>
 <body class="page-live">
   <div class="app-shell">
-    <header class="page-header">
-      <div>
-        <a class="back-link" href="/">datavis.au</a>
-        <h1>XAUUSD Live Tick Chart</h1>
-      </div>
+    <header class="page-header page-header-live">
+      <a class="back-link live-brand" href="/">DATAVIS.AU</a>
       <div class="meta-strip" id="liveMeta">Waiting for data...</div>
     </header>
 
-    <section class="panel control-panel">
-      <div class="toolbar">
+    <section class="panel control-panel live-control-panel">
+      <div class="toolbar toolbar-live">
         <div class="segmented" id="modeToggle">
           <button type="button" data-value="live">Live</button>
           <button type="button" data-value="review">Review</button>
@@ -37,12 +34,20 @@
           <span>window</span>
           <input id="windowSize" type="number" min="1" max="10000" inputmode="numeric" value="2000">
         </label>
-        <button class="primary-button" id="applyButton" type="button">Load</button>
+        <div class="series-selector" id="seriesSelector" aria-label="Series selector">
+          <button type="button" data-series="ask">ask</button>
+          <button type="button" data-series="bid">bid</button>
+          <button type="button" data-series="mid">mid</button>
+        </div>
+        <button class="primary-button compact-button" id="applyButton" type="button">Load</button>
       </div>
-      <div class="status-line" id="statusLine">Ready.</div>
+      <div class="control-footer">
+        <button class="ghost-button" id="fullscreenButton" type="button">Fullscreen</button>
+        <div class="status-line" id="statusLine">Ready.</div>
+      </div>
     </section>
 
-    <section class="panel chart-panel">
+    <section class="panel chart-panel" id="chartPanel">
       <div id="liveChart" class="chart-host"></div>
     </section>
   </div>
