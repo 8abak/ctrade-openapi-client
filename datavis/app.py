@@ -3,19 +3,22 @@ from __future__ import annotations
 
 import json
 import os
-import re
+import secrets
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Generator, List, Optional
+from typing import Any, Dict, Generator, List, Optional, Tuple
 
 import psycopg2
 import psycopg2.extras
+from psycopg2 import extensions as pg_extensions
+from psycopg2 import sql as pg_sql
 import sqlparse
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -37,57 +40,34 @@ DEFAULT_WINDOW = 2000
 MAX_WINDOW = 10000
 MAX_STREAM_BATCH = 1000
 MAX_QUERY_ROWS = 1000
+DEFAULT_SQL_PREVIEW_LIMIT = 100
+MAX_SQL_PREVIEW_LIMIT = 500
 DEFAULT_REGRESSION_FAST_WINDOW = int(os.getenv("DATAVIS_REGRESSION_FAST_WINDOW", "240"))
 DEFAULT_REGRESSION_SLOW_WINDOW = int(os.getenv("DATAVIS_REGRESSION_SLOW_WINDOW", "1200"))
 DEFAULT_REGRESSION_STEP = int(os.getenv("DATAVIS_REGRESSION_STEP", "120"))
-STATEMENT_TIMEOUT_MS = int(os.getenv("DATAVIS_SQL_TIMEOUT_MS", "5000"))
+STATEMENT_TIMEOUT_MS = int(os.getenv("DATAVIS_SQL_TIMEOUT_MS", "15000"))
+LOCK_TIMEOUT_MS = int(os.getenv("DATAVIS_SQL_LOCK_TIMEOUT_MS", "3000"))
 STREAM_POLL_SECONDS = float(os.getenv("DATAVIS_STREAM_POLL_SECONDS", "1.0"))
 STREAM_KEEPALIVE_SECONDS = 15.0
-
-ALLOWED_HEADS = ("SELECT", "WITH", "EXPLAIN")
-BLOCKED_KEYWORDS = {
-    "ALTER",
-    "ANALYZE",
-    "ATTACH",
-    "CALL",
-    "CLUSTER",
-    "COMMENT",
+SQL_ADMIN_USER = os.getenv("DATAVIS_SQL_ADMIN_USER", "").strip()
+SQL_ADMIN_PASSWORD = os.getenv("DATAVIS_SQL_ADMIN_PASSWORD", "")
+SYSTEM_SCHEMAS = ("pg_catalog", "information_schema")
+SYSTEM_SCHEMA_PREFIXES = ("pg_toast", "pg_temp_")
+TRANSACTION_CONTROL_HEADS = {
+    "BEGIN",
+    "START",
     "COMMIT",
-    "COPY",
-    "CREATE",
-    "DEALLOCATE",
-    "DELETE",
-    "DETACH",
-    "DISCARD",
-    "DO",
-    "DROP",
-    "EXECUTE",
-    "GRANT",
-    "IMPORT",
-    "INSERT",
-    "LISTEN",
-    "LOAD",
-    "LOCK",
-    "MERGE",
-    "NOTIFY",
-    "PREPARE",
-    "REFRESH",
-    "REINDEX",
-    "RESET",
-    "REVOKE",
     "ROLLBACK",
-    "SECURITY",
-    "SET",
-    "SHOW",
-    "TRUNCATE",
-    "UNLISTEN",
-    "UPDATE",
-    "VACUUM",
+    "SAVEPOINT",
+    "RELEASE",
 }
 
 
 class QueryRequest(BaseModel):
     sql: str
+
+
+security = HTTPBasic(auto_error=False)
 
 
 app = FastAPI(title="datavis.au", version="1.0.0")
@@ -101,11 +81,11 @@ def ensure_database_url() -> str:
 
 
 @contextmanager
-def db_connection(readonly: bool = False):
+def db_connection(readonly: bool = False, autocommit: bool = False):
     conn = psycopg2.connect(ensure_database_url())
-    conn.autocommit = False
+    conn.autocommit = autocommit
     if readonly:
-        conn.set_session(readonly=True, autocommit=False)
+        conn.set_session(readonly=True, autocommit=autocommit)
     try:
         yield conn
     finally:
@@ -128,6 +108,32 @@ def serialize_value(value: Any) -> Any:
     if isinstance(value, datetime):
         return value.isoformat()
     return value
+
+
+def require_sql_admin(credentials: Optional[HTTPBasicCredentials] = Depends(security)) -> str:
+    if not SQL_ADMIN_USER or not SQL_ADMIN_PASSWORD:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="SQL admin credentials are not configured.",
+        )
+
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="SQL admin authentication is required.",
+            headers={"WWW-Authenticate": 'Basic realm="datavis SQL"'},
+        )
+
+    valid_user = secrets.compare_digest(credentials.username or "", SQL_ADMIN_USER)
+    valid_password = secrets.compare_digest(credentials.password or "", SQL_ADMIN_PASSWORD)
+    if not (valid_user and valid_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid SQL admin credentials.",
+            headers={"WWW-Authenticate": 'Basic realm="datavis SQL"'},
+        )
+
+    return credentials.username
 
 
 def serialize_tick_row(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -537,111 +543,680 @@ def persist_regression_snapshot(
         return {"requested": True, "stored": False, "snapshotId": None, "error": str(exc)}
 
 
-def clean_sql(sql_text: str) -> str:
+def is_system_schema(schema_name: str) -> bool:
+    return schema_name in SYSTEM_SCHEMAS or schema_name.startswith(SYSTEM_SCHEMA_PREFIXES)
+
+
+def quote_identifier(identifier: str) -> str:
+    return '"{0}"'.format(identifier.replace('"', '""'))
+
+
+def qualified_name(schema_name: str, object_name: str) -> str:
+    return "{0}.{1}".format(quote_identifier(schema_name), quote_identifier(object_name))
+
+
+def split_sql_script(sql_text: str) -> List[str]:
     text = (sql_text or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="SQL text is required.")
+    return [statement.strip() for statement in sqlparse.split(text) if statement.strip()]
 
-    statements = [statement.strip() for statement in sqlparse.split(text) if statement.strip()]
-    if len(statements) != 1:
-        raise HTTPException(status_code=400, detail="Only a single read-only statement is allowed.")
 
-    statement = statements[0].rstrip(";").strip()
-    normalized = sqlparse.format(statement, strip_comments=True)
-    head = normalized.lstrip().split(None, 1)
-    if not head or head[0].upper() not in ALLOWED_HEADS:
-        raise HTTPException(status_code=400, detail="Only SELECT, WITH, and EXPLAIN queries are allowed.")
+def statement_head(statement: str) -> str:
+    parsed = sqlparse.parse(statement)
+    if not parsed:
+        return ""
 
-    flattened_keywords = {
-        token.normalized.upper()
-        for token in sqlparse.parse(statement)[0].flatten()
-        if token.ttype in sqlparse.tokens.Keyword
-    }
-    blocked = sorted(keyword for keyword in flattened_keywords if keyword in BLOCKED_KEYWORDS)
-    if blocked:
-        raise HTTPException(
-            status_code=400,
-            detail="Blocked SQL keyword(s): {0}".format(", ".join(blocked)),
+    for token in parsed[0].tokens:
+        if token.is_whitespace or token.ttype in sqlparse.tokens.Comment:
+            continue
+        normalized = token.normalized.upper().strip()
+        if normalized:
+            return normalized.split(None, 1)[0]
+    return ""
+
+
+def has_explicit_transaction_control(statements: List[str]) -> bool:
+    return any(statement_head(statement) in TRANSACTION_CONTROL_HEADS for statement in statements)
+
+
+def describe_columns(description: Any) -> List[Dict[str, Any]]:
+    if not description:
+        return []
+    return [
+        {
+            "name": item.name,
+            "typeCode": item.type_code,
+        }
+        for item in description
+    ]
+
+
+def fetch_result_rows(cur: Any, max_rows: int = MAX_QUERY_ROWS) -> Tuple[List[List[Any]], bool]:
+    rows = cur.fetchmany(max_rows + 1)
+    truncated = len(rows) > max_rows
+    rows = rows[:max_rows]
+    return [[serialize_value(value) for value in row] for row in rows], truncated
+
+
+def line_column_from_position(statement: str, position: Optional[str]) -> Tuple[Optional[int], Optional[int]]:
+    if not position:
+        return None, None
+
+    try:
+        absolute_position = max(int(position) - 1, 0)
+    except (TypeError, ValueError):
+        return None, None
+
+    prefix = statement[:absolute_position]
+    line = prefix.count("\n") + 1
+    column = absolute_position - prefix.rfind("\n")
+    return line, column
+
+
+def fetch_sql_context(conn: Any) -> Dict[str, Any]:
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT
+                current_database() AS database_name,
+                current_schema() AS current_schema,
+                current_user AS current_user,
+                current_setting('server_version') AS server_version
+            """
         )
+        row = cur.fetchone() or {}
+    return {
+        "database": row.get("database_name"),
+        "currentSchema": row.get("current_schema"),
+        "currentUser": row.get("current_user"),
+        "serverVersion": row.get("server_version"),
+    }
 
-    if re.search(r"\bpg_(read|write|ls|stat|file|logdir|monitor|rotate)\b", statement, re.IGNORECASE):
-        raise HTTPException(status_code=400, detail="Server file/system helper functions are blocked.")
 
-    return statement
+def serialize_pg_error(exc: Exception, statement: Optional[str] = None, statement_index: Optional[int] = None) -> Dict[str, Any]:
+    diag = getattr(exc, "diag", None)
+    position = getattr(diag, "statement_position", None) if diag else None
+    line, column = line_column_from_position(statement or "", position)
+    return {
+        "message": getattr(diag, "message_primary", None) or str(exc),
+        "detail": getattr(diag, "message_detail", None) if diag else None,
+        "hint": getattr(diag, "message_hint", None) if diag else None,
+        "context": getattr(diag, "context", None) if diag else None,
+        "position": int(position) if position and str(position).isdigit() else None,
+        "line": line,
+        "column": column,
+        "sqlstate": getattr(exc, "pgcode", None),
+        "schema": getattr(diag, "schema_name", None) if diag else None,
+        "table": getattr(diag, "table_name", None) if diag else None,
+        "columnName": getattr(diag, "column_name", None) if diag else None,
+        "constraint": getattr(diag, "constraint_name", None) if diag else None,
+        "statementIndex": statement_index,
+        "statement": statement,
+    }
 
 
-def schema_payload() -> List[Dict[str, Any]]:
-    sql = """
-        SELECT
-            t.table_schema,
-            t.table_name,
-            c.column_name,
-            c.data_type,
-            c.udt_name,
-            c.ordinal_position,
-            COALESCE(s.n_live_tup, 0)::bigint AS row_estimate
-        FROM information_schema.tables t
-        JOIN information_schema.columns c
-          ON c.table_schema = t.table_schema
-         AND c.table_name = t.table_name
-        LEFT JOIN pg_stat_user_tables s
-          ON s.schemaname = t.table_schema
-         AND s.relname = t.table_name
-        WHERE t.table_type = 'BASE TABLE'
-          AND t.table_schema NOT IN ('pg_catalog', 'information_schema')
-        ORDER BY t.table_schema, t.table_name, c.ordinal_position
-    """
-    grouped: Dict[str, Dict[str, Any]] = {}
+def build_statement_result(conn: Any, cur: Any, statement: str, statement_index: int, started: float, notices_start: int) -> Dict[str, Any]:
+    columns = describe_columns(cur.description)
+    rows: List[List[Any]] = []
+    truncated = False
+    if columns:
+        rows, truncated = fetch_result_rows(cur, MAX_QUERY_ROWS)
+
+    elapsed_ms = round((time.perf_counter() - started) * 1000.0, 2)
+    command_tag = cur.statusmessage or statement_head(statement)
+    statement_type = command_tag.split()[0].upper() if command_tag else statement_head(statement)
+    return {
+        "index": statement_index,
+        "statement": statement,
+        "statementType": statement_type,
+        "commandTag": command_tag,
+        "rowCount": max(cur.rowcount, 0) if cur.rowcount is not None else None,
+        "elapsedMs": elapsed_ms,
+        "columns": columns,
+        "rows": rows,
+        "truncated": truncated,
+        "maxRows": MAX_QUERY_ROWS,
+        "hasResultSet": bool(columns),
+        "notices": conn.notices[notices_start:],
+    }
+
+
+def schema_payload() -> Dict[str, Any]:
+    schema_map: Dict[str, Dict[str, Any]] = {}
+    object_lookup: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+    kind_map = {
+        "r": ("tables", "table"),
+        "p": ("tables", "table"),
+        "v": ("views", "view"),
+        "m": ("materializedViews", "materialized_view"),
+        "S": ("sequences", "sequence"),
+    }
+
     with db_connection(readonly=True) as conn:
+        context = fetch_sql_context(conn)
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql)
+            cur.execute(
+                """
+                SELECT
+                    n.nspname AS schema_name,
+                    c.relname AS object_name,
+                    c.relkind,
+                    COALESCE(s.n_live_tup::bigint, c.reltuples::bigint, 0)::bigint AS row_estimate
+                FROM pg_class c
+                JOIN pg_namespace n
+                  ON n.oid = c.relnamespace
+                LEFT JOIN pg_stat_user_tables s
+                  ON s.relid = c.oid
+                WHERE c.relkind IN ('r', 'p', 'v', 'm', 'S')
+                  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+                  AND n.nspname NOT LIKE 'pg_toast%%'
+                  AND n.nspname NOT LIKE 'pg_temp_%%'
+                ORDER BY n.nspname, c.relkind, c.relname
+                """
+            )
             for row in cur.fetchall():
-                schema_name = row["table_schema"]
-                table_name = row["table_name"]
-                schema = grouped.setdefault(schema_name, {"schema": schema_name, "tables": []})
-                if not schema["tables"] or schema["tables"][-1]["name"] != table_name:
-                    schema["tables"].append(
-                        {
-                            "name": table_name,
-                            "schema": schema_name,
-                            "rowEstimate": row["row_estimate"],
-                            "columns": [],
-                        }
-                    )
-                schema["tables"][-1]["columns"].append(
+                schema_name = row["schema_name"]
+                schema_entry = schema_map.setdefault(
+                    schema_name,
+                    {
+                        "schema": schema_name,
+                        "counts": {
+                            "tables": 0,
+                            "views": 0,
+                            "materializedViews": 0,
+                            "sequences": 0,
+                            "functions": 0,
+                        },
+                        "objects": {
+                            "tables": [],
+                            "views": [],
+                            "materializedViews": [],
+                            "sequences": [],
+                            "functions": [],
+                        },
+                    },
+                )
+                list_name, object_kind = kind_map[row["relkind"]]
+                entry = {
+                    "name": row["object_name"],
+                    "schema": schema_name,
+                    "kind": object_kind,
+                    "rowEstimate": row["row_estimate"],
+                    "columns": [],
+                    "indexes": [],
+                }
+                schema_entry["objects"][list_name].append(entry)
+                schema_entry["counts"][list_name] += 1
+                object_lookup[(schema_name, row["object_name"], object_kind)] = entry
+
+            cur.execute(
+                """
+                SELECT
+                    n.nspname AS schema_name,
+                    c.relname AS object_name,
+                    c.relkind,
+                    a.attname AS column_name,
+                    pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type,
+                    a.attnotnull AS not_null,
+                    pg_get_expr(d.adbin, d.adrelid) AS default_value,
+                    a.attidentity <> '' AS is_identity,
+                    a.attgenerated <> '' AS is_generated,
+                    a.attnum AS ordinal_position
+                FROM pg_class c
+                JOIN pg_namespace n
+                  ON n.oid = c.relnamespace
+                JOIN pg_attribute a
+                  ON a.attrelid = c.oid
+                 AND a.attnum > 0
+                 AND NOT a.attisdropped
+                LEFT JOIN pg_attrdef d
+                  ON d.adrelid = a.attrelid
+                 AND d.adnum = a.attnum
+                WHERE c.relkind IN ('r', 'p', 'v', 'm')
+                  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+                  AND n.nspname NOT LIKE 'pg_toast%%'
+                  AND n.nspname NOT LIKE 'pg_temp_%%'
+                ORDER BY n.nspname, c.relname, a.attnum
+                """
+            )
+            for row in cur.fetchall():
+                object_kind = kind_map[row["relkind"]][1]
+                entry = object_lookup.get((row["schema_name"], row["object_name"], object_kind))
+                if entry is None:
+                    continue
+                entry["columns"].append(
                     {
                         "name": row["column_name"],
                         "dataType": row["data_type"],
-                        "udtName": row["udt_name"],
+                        "notNull": row["not_null"],
+                        "default": row["default_value"],
+                        "isIdentity": row["is_identity"],
+                        "isGenerated": row["is_generated"],
                     }
                 )
-    return list(grouped.values())
+
+            cur.execute(
+                """
+                SELECT
+                    schemaname AS schema_name,
+                    tablename AS object_name,
+                    indexname AS index_name,
+                    indexdef
+                FROM pg_indexes
+                WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
+                  AND schemaname NOT LIKE 'pg_toast%%'
+                  AND schemaname NOT LIKE 'pg_temp_%%'
+                ORDER BY schemaname, tablename, indexname
+                """
+            )
+            for row in cur.fetchall():
+                entry = object_lookup.get((row["schema_name"], row["object_name"], "table"))
+                if entry is None:
+                    entry = object_lookup.get((row["schema_name"], row["object_name"], "materialized_view"))
+                if entry is None:
+                    continue
+                entry["indexes"].append(
+                    {
+                        "name": row["index_name"],
+                        "definition": row["indexdef"],
+                    }
+                )
+
+            cur.execute(
+                """
+                SELECT
+                    n.nspname AS schema_name,
+                    p.proname AS function_name,
+                    pg_get_function_identity_arguments(p.oid) AS arguments,
+                    pg_get_function_result(p.oid) AS returns
+                FROM pg_proc p
+                JOIN pg_namespace n
+                  ON n.oid = p.pronamespace
+                WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+                  AND n.nspname NOT LIKE 'pg_toast%%'
+                  AND n.nspname NOT LIKE 'pg_temp_%%'
+                  AND p.prokind = 'f'
+                ORDER BY n.nspname, p.proname, 3
+                """
+            )
+            for row in cur.fetchall():
+                schema_entry = schema_map.setdefault(
+                    row["schema_name"],
+                    {
+                        "schema": row["schema_name"],
+                        "counts": {
+                            "tables": 0,
+                            "views": 0,
+                            "materializedViews": 0,
+                            "sequences": 0,
+                            "functions": 0,
+                        },
+                        "objects": {
+                            "tables": [],
+                            "views": [],
+                            "materializedViews": [],
+                            "sequences": [],
+                            "functions": [],
+                        },
+                    },
+                )
+                schema_entry["objects"]["functions"].append(
+                    {
+                        "name": row["function_name"],
+                        "schema": row["schema_name"],
+                        "kind": "function",
+                        "signature": row["arguments"],
+                        "returns": row["returns"],
+                    }
+                )
+                schema_entry["counts"]["functions"] += 1
+
+    schemas = list(schema_map.values())
+    total_objects = sum(
+        entry["counts"]["tables"]
+        + entry["counts"]["views"]
+        + entry["counts"]["materializedViews"]
+        + entry["counts"]["sequences"]
+        + entry["counts"]["functions"]
+        for entry in schemas
+    )
+    return {
+        "context": context,
+        "schemas": schemas,
+        "schemaCount": len(schemas),
+        "objectCount": total_objects,
+    }
+
+
+def relation_columns(conn: Any, schema_name: str, object_name: str) -> List[Dict[str, Any]]:
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT
+                a.attname AS column_name,
+                pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type,
+                a.attnotnull AS not_null,
+                pg_get_expr(d.adbin, d.adrelid) AS default_value,
+                a.attidentity <> '' AS is_identity,
+                a.attgenerated <> '' AS is_generated,
+                a.attnum AS ordinal_position
+            FROM pg_class c
+            JOIN pg_namespace n
+              ON n.oid = c.relnamespace
+            JOIN pg_attribute a
+              ON a.attrelid = c.oid
+             AND a.attnum > 0
+             AND NOT a.attisdropped
+            LEFT JOIN pg_attrdef d
+              ON d.adrelid = a.attrelid
+             AND d.adnum = a.attnum
+            WHERE n.nspname = %s
+              AND c.relname = %s
+            ORDER BY a.attnum
+            """,
+            (schema_name, object_name),
+        )
+        return [
+            {
+                "name": row["column_name"],
+                "dataType": row["data_type"],
+                "notNull": row["not_null"],
+                "default": row["default_value"],
+                "isIdentity": row["is_identity"],
+                "isGenerated": row["is_generated"],
+            }
+            for row in cur.fetchall()
+        ]
+
+
+def table_indexes(conn: Any, schema_name: str, object_name: str) -> List[Dict[str, Any]]:
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT
+                indexname AS index_name,
+                indexdef
+            FROM pg_indexes
+            WHERE schemaname = %s
+              AND tablename = %s
+            ORDER BY indexname
+            """,
+            (schema_name, object_name),
+        )
+        return [
+            {
+                "name": row["index_name"],
+                "definition": row["indexdef"],
+            }
+            for row in cur.fetchall()
+        ]
+
+
+def load_object_details(schema_name: str, object_name: str, object_kind: str) -> Dict[str, Any]:
+    if is_system_schema(schema_name):
+        raise HTTPException(status_code=404, detail="Object not found.")
+
+    with db_connection(readonly=True) as conn:
+        context = fetch_sql_context(conn)
+        if object_kind == "function":
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        p.oid,
+                        p.proname,
+                        pg_get_function_identity_arguments(p.oid) AS arguments,
+                        pg_get_function_result(p.oid) AS returns,
+                        pg_get_functiondef(p.oid) AS definition
+                    FROM pg_proc p
+                    JOIN pg_namespace n
+                      ON n.oid = p.pronamespace
+                    WHERE n.nspname = %s
+                      AND p.proname = %s
+                      AND p.prokind = 'f'
+                    ORDER BY 3
+                    """,
+                    (schema_name, object_name),
+                )
+                overloads = cur.fetchall()
+            if not overloads:
+                raise HTTPException(status_code=404, detail="Function not found.")
+            return {
+                "context": context,
+                "object": {
+                    "schema": schema_name,
+                    "name": object_name,
+                    "kind": "function",
+                    "overloads": [dict(row) for row in overloads],
+                },
+                "actions": {},
+            }
+
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                    c.oid,
+                    c.relkind,
+                    COALESCE(s.n_live_tup::bigint, c.reltuples::bigint, 0)::bigint AS row_estimate,
+                    pg_total_relation_size(c.oid) AS total_bytes,
+                    pg_size_pretty(pg_total_relation_size(c.oid)) AS total_size,
+                    obj_description(c.oid, 'pg_class') AS comment
+                FROM pg_class c
+                JOIN pg_namespace n
+                  ON n.oid = c.relnamespace
+                LEFT JOIN pg_stat_user_tables s
+                  ON s.relid = c.oid
+                WHERE n.nspname = %s
+                  AND c.relname = %s
+                  AND c.relkind IN ('r', 'p', 'v', 'm', 'S')
+                """,
+                (schema_name, object_name),
+            )
+            object_row = cur.fetchone()
+
+        if not object_row:
+            raise HTTPException(status_code=404, detail="Object not found.")
+
+        relkind = object_row["relkind"]
+        kind_map = {
+            "r": "table",
+            "p": "table",
+            "v": "view",
+            "m": "materialized_view",
+            "S": "sequence",
+        }
+        actual_kind = kind_map[relkind]
+        if object_kind != actual_kind:
+            raise HTTPException(status_code=404, detail="Object not found.")
+
+        columns = relation_columns(conn, schema_name, object_name) if actual_kind != "sequence" else []
+        indexes = table_indexes(conn, schema_name, object_name) if actual_kind in {"table", "materialized_view"} else []
+        definition = None
+        sequence_state = None
+
+        if actual_kind in {"view", "materialized_view"}:
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_get_viewdef(%s, true)", (object_row["oid"],))
+                row = cur.fetchone()
+                definition = row[0] if row else None
+        elif actual_kind == "sequence":
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        start_value,
+                        minimum_value,
+                        maximum_value,
+                        increment,
+                        cycle_option,
+                        cache_size,
+                        last_value
+                    FROM pg_sequences
+                    WHERE schemaname = %s
+                      AND sequencename = %s
+                    """,
+                    (schema_name, object_name),
+                )
+                sequence_state = cur.fetchone()
+
+        qualified = qualified_name(schema_name, object_name)
+        actions = {
+            "insertSelect": "SELECT *\nFROM {0}\nLIMIT 100;".format(qualified),
+            "insertPreview": "SELECT *\nFROM {0}\nORDER BY 1\nLIMIT 100;".format(qualified),
+            "insertExplain": "EXPLAIN ANALYZE\nSELECT *\nFROM {0}\nLIMIT 100;".format(qualified),
+        }
+
+        return {
+            "context": context,
+            "object": {
+                "schema": schema_name,
+                "name": object_name,
+                "kind": actual_kind,
+                "rowEstimate": object_row["row_estimate"],
+                "totalBytes": object_row["total_bytes"],
+                "totalSize": object_row["total_size"],
+                "comment": object_row["comment"],
+                "columns": columns,
+                "indexes": indexes,
+                "definition": definition,
+                "sequence": dict(sequence_state) if sequence_state else None,
+            },
+            "actions": actions,
+        }
+
+
+def preview_relation(
+    schema_name: str,
+    object_name: str,
+    limit: int,
+    offset: int,
+    order_by: Optional[str],
+    order_dir: str,
+) -> Dict[str, Any]:
+    if is_system_schema(schema_name):
+        raise HTTPException(status_code=404, detail="Relation not found.")
+
+    started = time.perf_counter()
+    with db_connection(readonly=True) as conn:
+        context = fetch_sql_context(conn)
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT c.relkind
+                FROM pg_class c
+                JOIN pg_namespace n
+                  ON n.oid = c.relnamespace
+                WHERE n.nspname = %s
+                  AND c.relname = %s
+                  AND c.relkind IN ('r', 'p', 'v', 'm')
+                """,
+                (schema_name, object_name),
+            )
+            relation_row = cur.fetchone()
+        if not relation_row:
+            raise HTTPException(status_code=404, detail="Preview is only available for tables and views.")
+
+        columns = relation_columns(conn, schema_name, object_name)
+        column_names = {column["name"] for column in columns}
+        if order_by and order_by not in column_names:
+            raise HTTPException(status_code=400, detail="Unknown sort column: {0}".format(order_by))
+
+        relation_sql = pg_sql.SQL(".").join([pg_sql.Identifier(schema_name), pg_sql.Identifier(object_name)])
+        query = pg_sql.SQL("SELECT * FROM {}").format(relation_sql)
+        if order_by:
+            direction_sql = pg_sql.SQL("DESC") if order_dir.lower() == "desc" else pg_sql.SQL("ASC")
+            query += pg_sql.SQL(" ORDER BY {} {}").format(pg_sql.Identifier(order_by), direction_sql)
+        query += pg_sql.SQL(" LIMIT %s OFFSET %s")
+
+        with conn.cursor() as cur:
+            cur.execute("SET statement_timeout = %s", (str(STATEMENT_TIMEOUT_MS),))
+            cur.execute(query, (limit + 1, offset))
+            result_columns = describe_columns(cur.description)
+            rows, truncated = fetch_result_rows(cur, limit)
+
+        elapsed_ms = round((time.perf_counter() - started) * 1000.0, 2)
+        return {
+            "context": context,
+            "result": {
+                "index": 1,
+                "title": "{0}.{1}".format(schema_name, object_name),
+                "statement": "preview",
+                "statementType": "SELECT",
+                "commandTag": "SELECT",
+                "rowCount": len(rows),
+                "elapsedMs": elapsed_ms,
+                "columns": result_columns,
+                "rows": rows,
+                "truncated": truncated,
+                "maxRows": limit,
+                "hasResultSet": True,
+                "source": {
+                    "schema": schema_name,
+                    "name": object_name,
+                    "kind": "preview",
+                    "orderBy": order_by,
+                    "orderDir": order_dir.lower(),
+                    "offset": offset,
+                    "limit": limit,
+                },
+            },
+        }
 
 
 def execute_query(sql_text: str) -> Dict[str, Any]:
-    statement = clean_sql(sql_text)
+    statements = split_sql_script(sql_text)
     started = time.perf_counter()
-    with db_connection(readonly=True) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SET LOCAL statement_timeout = %s", (str(STATEMENT_TIMEOUT_MS),))
-            cur.execute("SET LOCAL idle_in_transaction_session_timeout = '5000'")
-            cur.execute(statement)
+    explicit_transactions = has_explicit_transaction_control(statements)
+    results: List[Dict[str, Any]] = []
 
-            description = cur.description or []
-            columns = [item.name for item in description]
-            rows = cur.fetchmany(MAX_QUERY_ROWS + 1)
-            truncated = len(rows) > MAX_QUERY_ROWS
-            rows = rows[:MAX_QUERY_ROWS]
-            conn.rollback()
+    with db_connection(readonly=False, autocommit=explicit_transactions) as conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SET statement_timeout = %s", (str(STATEMENT_TIMEOUT_MS),))
+                cur.execute("SET lock_timeout = %s", (str(LOCK_TIMEOUT_MS),))
+                cur.execute("SET idle_in_transaction_session_timeout = '5000'")
+
+                for index, statement in enumerate(statements, start=1):
+                    notices_start = len(conn.notices)
+                    statement_started = time.perf_counter()
+                    cur.execute(statement)
+                    results.append(
+                        build_statement_result(
+                            conn=conn,
+                            cur=cur,
+                            statement=statement,
+                            statement_index=index,
+                            started=statement_started,
+                            notices_start=notices_start,
+                        )
+                    )
+
+            if not explicit_transactions:
+                conn.commit()
+
+            context = fetch_sql_context(conn)
+        except Exception as exc:
+            if conn.status != pg_extensions.STATUS_READY:
+                conn.rollback()
+            raise HTTPException(
+                status_code=400,
+                detail=serialize_pg_error(
+                    exc,
+                    statement=statements[len(results)] if len(results) < len(statements) else None,
+                    statement_index=len(results) + 1 if len(results) < len(statements) else None,
+                ),
+            ) from exc
 
     elapsed_ms = round((time.perf_counter() - started) * 1000.0, 2)
     return {
-        "columns": columns,
-        "rows": [[serialize_value(value) for value in row] for row in rows],
-        "rowCount": len(rows),
-        "truncated": truncated,
-        "maxRows": MAX_QUERY_ROWS,
+        "success": True,
+        "statementCount": len(statements),
+        "transactionMode": "explicit" if explicit_transactions else "script",
         "elapsedMs": elapsed_ms,
+        "context": context,
+        "results": results,
     }
 
 
@@ -692,7 +1267,7 @@ def regression_page() -> FileResponse:
 
 
 @app.get("/sql", include_in_schema=False)
-def sql_page() -> FileResponse:
+def sql_page(_: str = Depends(require_sql_admin)) -> FileResponse:
     return FileResponse(FRONTEND_DIR / "sql.html")
 
 
@@ -831,11 +1406,33 @@ def regression_next(
 
 
 @app.get("/api/sql/schema")
-def sql_schema() -> Dict[str, Any]:
-    schemas = schema_payload()
-    return {"schemas": schemas, "schemaCount": len(schemas)}
+def sql_schema(_: str = Depends(require_sql_admin)) -> Dict[str, Any]:
+    return schema_payload()
+
+
+@app.get("/api/sql/object")
+def sql_object(
+    schema: str = Query(..., min_length=1),
+    name: str = Query(..., min_length=1),
+    kind: str = Query(..., pattern="^(table|view|materialized_view|sequence|function)$"),
+    _: str = Depends(require_sql_admin),
+) -> Dict[str, Any]:
+    return load_object_details(schema, name, kind)
+
+
+@app.get("/api/sql/table-preview")
+def sql_table_preview(
+    schema: str = Query(..., min_length=1),
+    name: str = Query(..., min_length=1),
+    limit: int = Query(DEFAULT_SQL_PREVIEW_LIMIT, ge=1, le=MAX_SQL_PREVIEW_LIMIT),
+    offset: int = Query(0, ge=0),
+    orderBy: Optional[str] = Query(None, min_length=1),
+    orderDir: str = Query("asc", pattern="^(asc|desc)$"),
+    _: str = Depends(require_sql_admin),
+) -> Dict[str, Any]:
+    return preview_relation(schema, name, limit, offset, orderBy, orderDir)
 
 
 @app.post("/api/sql/query")
-def sql_query(payload: QueryRequest) -> Dict[str, Any]:
+def sql_query(payload: QueryRequest, _: str = Depends(require_sql_admin)) -> Dict[str, Any]:
     return execute_query(payload.sql)
