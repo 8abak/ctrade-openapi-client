@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>datavis.au | Regression</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body class="page-regression">
+  <div class="regression-shell">
+    <section class="panel regression-control-panel">
+      <div class="regression-heading">
+        <div>
+          <a class="back-link" href="/">datavis.au</a>
+          <h1>Regression Lens</h1>
+          <p class="regression-subcopy">Two simultaneous fits on the live XAUUSD tape: one structural, one reactive.</p>
+        </div>
+        <div class="regression-meta-panel">
+          <div class="meta-strip" id="regressionMeta">Waiting for data...</div>
+          <div class="status-line" id="regressionStatus">Ready.</div>
+        </div>
+      </div>
+
+      <div class="toolbar toolbar-regression">
+        <div class="segmented" id="modeToggle">
+          <button type="button" data-value="live">Live</button>
+          <button type="button" data-value="review">Review</button>
+        </div>
+        <div class="segmented" id="runToggle">
+          <button type="button" data-value="run">Run</button>
+          <button type="button" data-value="stop">Stop</button>
+        </div>
+        <label>
+          <span>id</span>
+          <input id="tickId" type="number" min="1" inputmode="numeric" placeholder="starting id">
+        </label>
+        <label>
+          <span>window</span>
+          <input id="windowSize" type="number" min="1" max="10000" inputmode="numeric" value="2000">
+        </label>
+        <label>
+          <span>fast ticks</span>
+          <input id="fastWindowSize" type="number" min="20" max="10000" inputmode="numeric" value="240">
+        </label>
+        <label>
+          <span>slow ticks</span>
+          <input id="slowWindowSize" type="number" min="20" max="10000" inputmode="numeric" value="1200">
+        </label>
+        <div class="series-selector single-select" id="seriesSelector" aria-label="Price series selector">
+          <button type="button" data-series="ask">ask</button>
+          <button type="button" data-series="bid">bid</button>
+          <button type="button" data-series="mid">mid</button>
+        </div>
+        <div class="series-selector single-select" id="viewSelector" aria-label="Regression view selector">
+          <button type="button" data-view="time">time view</button>
+          <button type="button" data-view="scatter">scatter view</button>
+        </div>
+        <button class="primary-button compact-button" id="applyButton" type="button">Load</button>
+      </div>
+    </section>
+
+    <section class="metric-grid">
+      <article class="panel metric-card">
+        <span class="metric-label">Fast Slope</span>
+        <strong class="metric-value" id="metricFastSlope">--</strong>
+        <span class="metric-detail" id="metricFastDetail">Awaiting bootstrap.</span>
+      </article>
+      <article class="panel metric-card">
+        <span class="metric-label">Slow Slope</span>
+        <strong class="metric-value" id="metricSlowSlope">--</strong>
+        <span class="metric-detail" id="metricSlowDetail">Awaiting bootstrap.</span>
+      </article>
+      <article class="panel metric-card">
+        <span class="metric-label">Alignment</span>
+        <strong class="metric-value" id="metricAlignment">--</strong>
+        <span class="metric-detail" id="metricAlignmentDetail">Fast vs slow relationship.</span>
+      </article>
+      <article class="panel metric-card">
+        <span class="metric-label">Fast Fit</span>
+        <strong class="metric-value" id="metricFastFit">--</strong>
+        <span class="metric-detail" id="metricFastFitDetail">R² and MAE.</span>
+      </article>
+      <article class="panel metric-card">
+        <span class="metric-label">Slow Fit</span>
+        <strong class="metric-value" id="metricSlowFit">--</strong>
+        <span class="metric-detail" id="metricSlowFitDetail">R² and MAE.</span>
+      </article>
+      <article class="panel metric-card">
+        <span class="metric-label">Break Pressure</span>
+        <strong class="metric-value" id="metricBreakPressure">--</strong>
+        <span class="metric-detail" id="metricBreakPressureDetail">Residual pressure and split probe.</span>
+      </article>
+      <article class="panel metric-card">
+        <span class="metric-label">Candidate Split</span>
+        <strong class="metric-value" id="metricSplit">--</strong>
+        <span class="metric-detail" id="metricSplitDetail">Best two-line improvement.</span>
+      </article>
+    </section>
+
+    <section class="panel regression-chart-panel">
+      <div class="chart-caption">
+        <div class="chart-caption-title">Structural lens</div>
+        <div class="chart-caption-copy" id="regressionNarrative">Waiting for the first regression snapshot.</div>
+      </div>
+      <div id="regressionChart" class="chart-host regression-chart-host"></div>
+    </section>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+  <script src="/assets/regression.js"></script>
+</body>
+</html>
