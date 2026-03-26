@@ -1,0 +1,66 @@
+name: Deploy datavis to EC2
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-datavis-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Deploy datavis
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Resolve SSH port
+        run: |
+          if [ -n "${{ secrets.EC2_PORT }}" ]; then
+            echo "EC2_PORT=${{ secrets.EC2_PORT }}" >> "$GITHUB_ENV"
+          else
+            echo "EC2_PORT=22" >> "$GITHUB_ENV"
+          fi
+
+      - name: Ensure remote deploy directory exists
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: ${{ env.EC2_PORT }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+            mkdir -p /home/ec2-user/bin
+
+      - name: Upload deploy script
+        uses: appleboy/scp-action@v1
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: ${{ env.EC2_PORT }}
+          source: deploy/scripts/deploy-datavis.sh
+          target: /home/ec2-user/bin/
+          overwrite: true
+          strip_components: 2
+
+      - name: Run remote deploy
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: ${{ env.EC2_PORT }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+            chmod 755 /home/ec2-user/bin/deploy-datavis.sh
+            /home/ec2-user/bin/deploy-datavis.sh
