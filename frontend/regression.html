@@ -16,7 +16,7 @@
         <div>
           <a class="back-link" href="/">datavis.au</a>
           <h1>Regression Lens</h1>
-          <p class="regression-subcopy">Two simultaneous fits on the live XAUUSD tape: one structural, one reactive.</p>
+          <p class="regression-subcopy">Fast and slow structural fits for live scalp flow detection, review, and adaptive study.</p>
         </div>
         <div class="regression-meta-panel">
           <div class="meta-strip" id="regressionMeta">Waiting for data...</div>
@@ -38,27 +38,41 @@
           <input id="tickId" type="number" min="1" inputmode="numeric" placeholder="starting id">
         </label>
         <label>
-          <span>window</span>
+          <span>Window</span>
           <input id="windowSize" type="number" min="1" max="10000" inputmode="numeric" value="2000">
         </label>
         <label>
-          <span>fast ticks</span>
+          <span>Fast Window</span>
           <input id="fastWindowSize" type="number" min="20" max="10000" inputmode="numeric" value="240">
         </label>
         <label>
-          <span>slow ticks</span>
+          <span>Slow Window</span>
           <input id="slowWindowSize" type="number" min="20" max="10000" inputmode="numeric" value="1200">
+        </label>
+        <label>
+          <span>Fast Order</span>
+          <input id="fastOrderSize" type="number" min="1" max="5" inputmode="numeric" value="2">
+        </label>
+        <label>
+          <span>Slow Order</span>
+          <input id="slowOrderSize" type="number" min="1" max="5" inputmode="numeric" value="3">
         </label>
         <div class="series-selector single-select" id="seriesSelector" aria-label="Price series selector">
           <button type="button" data-series="ask">ask</button>
           <button type="button" data-series="bid">bid</button>
           <button type="button" data-series="mid">mid</button>
         </div>
+        <div class="series-selector" id="polyOverlaySelector" aria-label="Polynomial overlay selector">
+          <button type="button" data-overlay="fastPoly">Fast Poly</button>
+          <button type="button" data-overlay="slowPoly">Slow Poly</button>
+        </div>
         <div class="series-selector single-select" id="viewSelector" aria-label="Regression view selector">
           <button type="button" data-view="time">time view</button>
           <button type="button" data-view="scatter">scatter view</button>
         </div>
         <button class="primary-button compact-button" id="applyButton" type="button">Load</button>
+        <button class="ghost-button compact-button" id="tuneButton" type="button">Tune Recent</button>
+        <button class="ghost-button compact-button" id="useTunedButton" type="button" disabled>Use Best</button>
       </div>
     </section>
 
@@ -76,17 +90,17 @@
       <article class="panel metric-card">
         <span class="metric-label">Alignment</span>
         <strong class="metric-value" id="metricAlignment">--</strong>
-        <span class="metric-detail" id="metricAlignmentDetail">Fast vs slow relationship.</span>
+        <span class="metric-detail" id="metricAlignmentDetail">Fast vs slow linear structure.</span>
       </article>
       <article class="panel metric-card">
         <span class="metric-label">Fast Fit</span>
         <strong class="metric-value" id="metricFastFit">--</strong>
-        <span class="metric-detail" id="metricFastFitDetail">R² and MAE.</span>
+        <span class="metric-detail" id="metricFastFitDetail">R2 and MAE.</span>
       </article>
       <article class="panel metric-card">
         <span class="metric-label">Slow Fit</span>
         <strong class="metric-value" id="metricSlowFit">--</strong>
-        <span class="metric-detail" id="metricSlowFitDetail">R² and MAE.</span>
+        <span class="metric-detail" id="metricSlowFitDetail">R2 and MAE.</span>
       </article>
       <article class="panel metric-card">
         <span class="metric-label">Break Pressure</span>
@@ -100,9 +114,37 @@
       </article>
     </section>
 
+    <section class="signal-grid">
+      <article class="panel signal-card">
+        <span class="metric-label">Fast Poly</span>
+        <strong class="metric-value" id="metricFastPoly">--</strong>
+        <span class="metric-detail" id="metricFastPolyDetail">Slope, curvature, and stretch.</span>
+      </article>
+      <article class="panel signal-card">
+        <span class="metric-label">Slow Poly</span>
+        <strong class="metric-value" id="metricSlowPoly">--</strong>
+        <span class="metric-detail" id="metricSlowPolyDetail">Slope, curvature, and stretch.</span>
+      </article>
+      <article class="panel signal-card">
+        <span class="metric-label">Poly Structure</span>
+        <strong class="metric-value" id="metricPolyStructure">--</strong>
+        <span class="metric-detail" id="metricPolyStructureDetail">Agreement, spread, and residual regime.</span>
+      </article>
+      <article class="panel signal-card">
+        <span class="metric-label">Move Quality</span>
+        <strong class="metric-value" id="metricMoveQuality">--</strong>
+        <span class="metric-detail" id="metricMoveQualityDetail">Score, state, and candidate flag.</span>
+      </article>
+      <article class="panel signal-card">
+        <span class="metric-label">Adaptive Best</span>
+        <strong class="metric-value" id="metricAdaptive">--</strong>
+        <span class="metric-detail" id="metricAdaptiveDetail">Run tuning to rank recent configs.</span>
+      </article>
+    </section>
+
     <section class="panel regression-chart-panel">
       <div class="chart-caption">
-        <div class="chart-caption-title">Structural lens</div>
+        <div class="chart-caption-title">Structural Lens</div>
         <div class="chart-caption-copy" id="regressionNarrative">Waiting for the first regression snapshot.</div>
       </div>
       <div id="regressionChart" class="chart-host regression-chart-host"></div>

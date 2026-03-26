@@ -22,7 +22,13 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from datavis.regression import MIN_ANALYSIS_WINDOW, build_regression_payload
+from datavis.regression import (
+    DEFAULT_FAST_POLY_ORDER,
+    DEFAULT_SLOW_POLY_ORDER,
+    MIN_ANALYSIS_WINDOW,
+    build_regression_payload,
+    evaluate_polynomial_tuning,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -44,7 +50,12 @@ DEFAULT_SQL_PREVIEW_LIMIT = 100
 MAX_SQL_PREVIEW_LIMIT = 500
 DEFAULT_REGRESSION_FAST_WINDOW = int(os.getenv("DATAVIS_REGRESSION_FAST_WINDOW", "240"))
 DEFAULT_REGRESSION_SLOW_WINDOW = int(os.getenv("DATAVIS_REGRESSION_SLOW_WINDOW", "1200"))
+DEFAULT_REGRESSION_FAST_POLY_ORDER = int(os.getenv("DATAVIS_REGRESSION_FAST_POLY_ORDER", str(DEFAULT_FAST_POLY_ORDER)))
+DEFAULT_REGRESSION_SLOW_POLY_ORDER = int(os.getenv("DATAVIS_REGRESSION_SLOW_POLY_ORDER", str(DEFAULT_SLOW_POLY_ORDER)))
 DEFAULT_REGRESSION_STEP = int(os.getenv("DATAVIS_REGRESSION_STEP", "120"))
+DEFAULT_TUNING_LOOKBACK_HOURS = int(os.getenv("DATAVIS_TUNING_LOOKBACK_HOURS", "72"))
+DEFAULT_TUNING_MAX_ROWS = int(os.getenv("DATAVIS_TUNING_MAX_ROWS", "12000"))
+MAX_TUNING_ROWS = int(os.getenv("DATAVIS_TUNING_MAX_ROWS_CAP", "50000"))
 STATEMENT_TIMEOUT_MS = int(os.getenv("DATAVIS_SQL_TIMEOUT_MS", "15000"))
 LOCK_TIMEOUT_MS = int(os.getenv("DATAVIS_SQL_LOCK_TIMEOUT_MS", "3000"))
 STREAM_POLL_SECONDS = float(os.getenv("DATAVIS_STREAM_POLL_SECONDS", "1.0"))
@@ -228,6 +239,30 @@ def fetch_window_ending_at(end_id: int, window: int) -> List[Dict[str, Any]]:
             return [dict(row) for row in cur.fetchall()]
 
 
+def fetch_recent_rows_for_tuning(lookback_hours: int, limit: int) -> List[Dict[str, Any]]:
+    limit = clamp_int(limit, MIN_ANALYSIS_WINDOW * 4, MAX_TUNING_ROWS)
+    lookback_hours = clamp_int(lookback_hours, 1, 24 * 14)
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, symbol, timestamp, bid, ask, mid, spread,
+                       COALESCE(mid, ROUND(((bid + ask) / 2.0)::numeric, 2)::double precision) AS price
+                FROM (
+                    SELECT id, symbol, timestamp, bid, ask, mid, spread
+                    FROM public.ticks
+                    WHERE symbol = %s
+                      AND timestamp >= (NOW() - (%s * INTERVAL '1 hour'))
+                    ORDER BY id DESC
+                    LIMIT %s
+                ) recent
+                ORDER BY id ASC
+                """,
+                (TICK_SYMBOL, lookback_hours, limit),
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+
 def build_regression_response(
     *,
     mode: str,
@@ -235,6 +270,8 @@ def build_regression_response(
     window: int,
     fast_window_ticks: int,
     slow_window_ticks: int,
+    fast_poly_order: int,
+    slow_poly_order: int,
     rows: List[Dict[str, Any]],
     requested_start_id: Optional[int] = None,
     new_rows: Optional[List[Dict[str, Any]]] = None,
@@ -249,9 +286,18 @@ def build_regression_response(
         visible_window=window,
         fast_window_ticks=fast_window_ticks,
         slow_window_ticks=slow_window_ticks,
+        fast_poly_order=fast_poly_order,
+        slow_poly_order=slow_poly_order,
     )
 
-    persistence = {"requested": persist, "stored": False, "snapshotId": None, "error": None}
+    persistence = {
+        "requested": persist,
+        "stored": False,
+        "snapshotId": None,
+        "signalStored": False,
+        "signalId": None,
+        "error": None,
+    }
     if persist and payload_rows:
         persistence = persist_regression_snapshot(
             mode=mode,
@@ -277,6 +323,8 @@ def build_regression_response(
         "series": series,
         "fastWindowTicks": analysis["fastWindowTicks"],
         "slowWindowTicks": analysis["slowWindowTicks"],
+        "fastPolyOrder": analysis["fastPolyOrder"],
+        "slowPolyOrder": analysis["slowPolyOrder"],
         "persistence": persistence,
         **analysis,
     }
@@ -299,6 +347,10 @@ def persist_regression_snapshot(
                 slow = analysis["regressions"]["slow"]
                 relationship = analysis["relationship"]
                 break_pressure = analysis["breakPressure"]
+                fast_poly = analysis["polynomials"]["fast"]
+                slow_poly = analysis["polynomials"]["slow"]
+                poly_relationship = analysis["polyRelationship"]
+                move_quality = analysis["moveQuality"]
 
                 cur.execute(
                     """
@@ -537,10 +589,245 @@ def persist_regression_snapshot(
                         break_pressure["splitProbeMinSegmentTicks"],
                     ),
                 )
+
+                cur.execute(
+                    """
+                    INSERT INTO public.regression_poly_metric (
+                        snapshot_id,
+                        fast_poly_order,
+                        slow_poly_order,
+                        fast_current_fitted_value,
+                        fast_end_slope,
+                        fast_end_curvature,
+                        fast_distance_norm,
+                        fast_r2,
+                        fast_mae,
+                        fast_residual_std,
+                        fast_sse,
+                        slow_current_fitted_value,
+                        slow_end_slope,
+                        slow_end_curvature,
+                        slow_distance_norm,
+                        slow_r2,
+                        slow_mae,
+                        slow_residual_std,
+                        slow_sse,
+                        slope_agreement_state,
+                        curvature_agreement_state,
+                        fast_slow_fit_spread,
+                        fast_slow_slope_spread,
+                        residual_compression_ratio,
+                        residual_regime_state,
+                        aligned_with_both,
+                        stretch_state,
+                        move_direction,
+                        move_quality_score,
+                        move_quality_state,
+                        signal_candidate,
+                        signal_threshold
+                    )
+                    VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    )
+                    ON CONFLICT (snapshot_id, fast_poly_order, slow_poly_order) DO UPDATE SET
+                        fast_current_fitted_value = EXCLUDED.fast_current_fitted_value,
+                        fast_end_slope = EXCLUDED.fast_end_slope,
+                        fast_end_curvature = EXCLUDED.fast_end_curvature,
+                        fast_distance_norm = EXCLUDED.fast_distance_norm,
+                        fast_r2 = EXCLUDED.fast_r2,
+                        fast_mae = EXCLUDED.fast_mae,
+                        fast_residual_std = EXCLUDED.fast_residual_std,
+                        fast_sse = EXCLUDED.fast_sse,
+                        slow_current_fitted_value = EXCLUDED.slow_current_fitted_value,
+                        slow_end_slope = EXCLUDED.slow_end_slope,
+                        slow_end_curvature = EXCLUDED.slow_end_curvature,
+                        slow_distance_norm = EXCLUDED.slow_distance_norm,
+                        slow_r2 = EXCLUDED.slow_r2,
+                        slow_mae = EXCLUDED.slow_mae,
+                        slow_residual_std = EXCLUDED.slow_residual_std,
+                        slow_sse = EXCLUDED.slow_sse,
+                        slope_agreement_state = EXCLUDED.slope_agreement_state,
+                        curvature_agreement_state = EXCLUDED.curvature_agreement_state,
+                        fast_slow_fit_spread = EXCLUDED.fast_slow_fit_spread,
+                        fast_slow_slope_spread = EXCLUDED.fast_slow_slope_spread,
+                        residual_compression_ratio = EXCLUDED.residual_compression_ratio,
+                        residual_regime_state = EXCLUDED.residual_regime_state,
+                        aligned_with_both = EXCLUDED.aligned_with_both,
+                        stretch_state = EXCLUDED.stretch_state,
+                        move_direction = EXCLUDED.move_direction,
+                        move_quality_score = EXCLUDED.move_quality_score,
+                        move_quality_state = EXCLUDED.move_quality_state,
+                        signal_candidate = EXCLUDED.signal_candidate,
+                        signal_threshold = EXCLUDED.signal_threshold,
+                        updated_at = NOW()
+                    """,
+                    (
+                        snapshot_id,
+                        fast_poly["order"],
+                        slow_poly["order"],
+                        fast_poly["currentFittedValue"],
+                        fast_poly["slope"],
+                        fast_poly["curvature"],
+                        fast_poly["normalizedDistance"],
+                        fast_poly["r2"],
+                        fast_poly["mae"],
+                        fast_poly["residualStd"],
+                        fast_poly["sse"],
+                        slow_poly["currentFittedValue"],
+                        slow_poly["slope"],
+                        slow_poly["curvature"],
+                        slow_poly["normalizedDistance"],
+                        slow_poly["r2"],
+                        slow_poly["mae"],
+                        slow_poly["residualStd"],
+                        slow_poly["sse"],
+                        poly_relationship["slopeAgreement"],
+                        poly_relationship["curvatureAgreement"],
+                        poly_relationship["fittedSpread"],
+                        poly_relationship["slopeSpread"],
+                        poly_relationship["residualCompressionRatio"],
+                        poly_relationship["residualRegime"],
+                        poly_relationship["alignedWithBoth"],
+                        poly_relationship["stretchState"],
+                        move_quality["direction"],
+                        move_quality["score"],
+                        move_quality["state"],
+                        move_quality["candidate"],
+                        move_quality["signalThreshold"],
+                    ),
+                )
+
+                signal_id = None
+                signal_stored = False
+                if move_quality["candidate"] and payload_rows:
+                    last_row = payload_rows[-1]
+                    last_price = last_row.get(series)
+                    if last_price is None:
+                        last_price = last_row.get("price")
+                    cur.execute(
+                        """
+                        INSERT INTO public.regression_poly_signal (
+                            snapshot_id,
+                            symbol,
+                            mode,
+                            series,
+                            signal_tick_id,
+                            signal_timestamp,
+                            signal_price,
+                            direction_guess,
+                            fast_window_ticks,
+                            slow_window_ticks,
+                            fast_poly_order,
+                            slow_poly_order,
+                            fast_slope,
+                            slow_slope,
+                            fast_curvature,
+                            slow_curvature,
+                            fast_distance_norm,
+                            slow_distance_norm,
+                            fit_spread,
+                            slope_spread,
+                            residual_regime_state,
+                            move_quality_score,
+                            move_quality_state,
+                            score_threshold,
+                            aligned_with_both,
+                            feature_payload
+                        )
+                        VALUES (
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                        )
+                        ON CONFLICT (snapshot_id, fast_poly_order, slow_poly_order, signal_tick_id, score_threshold)
+                        DO UPDATE SET
+                            signal_timestamp = EXCLUDED.signal_timestamp,
+                            signal_price = EXCLUDED.signal_price,
+                            direction_guess = EXCLUDED.direction_guess,
+                            fast_slope = EXCLUDED.fast_slope,
+                            slow_slope = EXCLUDED.slow_slope,
+                            fast_curvature = EXCLUDED.fast_curvature,
+                            slow_curvature = EXCLUDED.slow_curvature,
+                            fast_distance_norm = EXCLUDED.fast_distance_norm,
+                            slow_distance_norm = EXCLUDED.slow_distance_norm,
+                            fit_spread = EXCLUDED.fit_spread,
+                            slope_spread = EXCLUDED.slope_spread,
+                            residual_regime_state = EXCLUDED.residual_regime_state,
+                            move_quality_score = EXCLUDED.move_quality_score,
+                            move_quality_state = EXCLUDED.move_quality_state,
+                            aligned_with_both = EXCLUDED.aligned_with_both,
+                            feature_payload = EXCLUDED.feature_payload,
+                            updated_at = NOW()
+                        RETURNING id
+                        """,
+                        (
+                            snapshot_id,
+                            TICK_SYMBOL,
+                            mode,
+                            series,
+                            last_row["id"],
+                            last_row["timestamp"],
+                            last_price,
+                            move_quality["direction"],
+                            analysis["fastWindowTicks"],
+                            analysis["slowWindowTicks"],
+                            fast_poly["order"],
+                            slow_poly["order"],
+                            fast_poly["slope"],
+                            slow_poly["slope"],
+                            fast_poly["curvature"],
+                            slow_poly["curvature"],
+                            fast_poly["normalizedDistance"],
+                            slow_poly["normalizedDistance"],
+                            poly_relationship["fittedSpread"],
+                            poly_relationship["slopeSpread"],
+                            poly_relationship["residualRegime"],
+                            move_quality["score"],
+                            move_quality["state"],
+                            move_quality["signalThreshold"],
+                            poly_relationship["alignedWithBoth"],
+                            psycopg2.extras.Json(
+                                {
+                                    "moveQuality": move_quality,
+                                    "polyRelationship": poly_relationship,
+                                    "fastPolynomial": {
+                                        "order": fast_poly["order"],
+                                        "currentFittedValue": fast_poly["currentFittedValue"],
+                                        "slope": fast_poly["slope"],
+                                        "curvature": fast_poly["curvature"],
+                                        "normalizedDistance": fast_poly["normalizedDistance"],
+                                    },
+                                    "slowPolynomial": {
+                                        "order": slow_poly["order"],
+                                        "currentFittedValue": slow_poly["currentFittedValue"],
+                                        "slope": slow_poly["slope"],
+                                        "curvature": slow_poly["curvature"],
+                                        "normalizedDistance": slow_poly["normalizedDistance"],
+                                    },
+                                }
+                            ),
+                        ),
+                    )
+                    signal_id = cur.fetchone()[0]
+                    signal_stored = True
             conn.commit()
-        return {"requested": True, "stored": True, "snapshotId": snapshot_id, "error": None}
+        return {
+            "requested": True,
+            "stored": True,
+            "snapshotId": snapshot_id,
+            "signalStored": signal_stored,
+            "signalId": signal_id,
+            "error": None,
+        }
     except Exception as exc:
-        return {"requested": True, "stored": False, "snapshotId": None, "error": str(exc)}
+        return {
+            "requested": True,
+            "stored": False,
+            "snapshotId": None,
+            "signalStored": False,
+            "signalId": None,
+            "error": str(exc),
+        }
 
 
 def is_system_schema(schema_name: str) -> bool:
@@ -1348,6 +1635,8 @@ def regression_bootstrap(
     window: int = Query(DEFAULT_WINDOW, ge=1, le=MAX_WINDOW),
     fast: int = Query(DEFAULT_REGRESSION_FAST_WINDOW, ge=MIN_ANALYSIS_WINDOW, le=MAX_WINDOW),
     slow: int = Query(DEFAULT_REGRESSION_SLOW_WINDOW, ge=MIN_ANALYSIS_WINDOW, le=MAX_WINDOW),
+    fastOrder: int = Query(DEFAULT_REGRESSION_FAST_POLY_ORDER, ge=1, le=5),
+    slowOrder: int = Query(DEFAULT_REGRESSION_SLOW_POLY_ORDER, ge=1, le=5),
     series: str = Query("mid", pattern="^(ask|bid|mid)$"),
     persist: bool = Query(True),
 ) -> Dict[str, Any]:
@@ -1358,6 +1647,8 @@ def regression_bootstrap(
         window=window,
         fast_window_ticks=fast,
         slow_window_ticks=slow,
+        fast_poly_order=fastOrder,
+        slow_poly_order=slowOrder,
         rows=rows,
         requested_start_id=id,
         persist=persist,
@@ -1371,6 +1662,8 @@ def regression_next(
     window: int = Query(DEFAULT_WINDOW, ge=1, le=MAX_WINDOW),
     fast: int = Query(DEFAULT_REGRESSION_FAST_WINDOW, ge=MIN_ANALYSIS_WINDOW, le=MAX_WINDOW),
     slow: int = Query(DEFAULT_REGRESSION_SLOW_WINDOW, ge=MIN_ANALYSIS_WINDOW, le=MAX_WINDOW),
+    fastOrder: int = Query(DEFAULT_REGRESSION_FAST_POLY_ORDER, ge=1, le=5),
+    slowOrder: int = Query(DEFAULT_REGRESSION_SLOW_POLY_ORDER, ge=1, le=5),
     series: str = Query("mid", pattern="^(ask|bid|mid)$"),
     limit: int = Query(DEFAULT_REGRESSION_STEP, ge=1, le=MAX_STREAM_BATCH),
     persist: bool = Query(True),
@@ -1388,7 +1681,16 @@ def regression_next(
             "window": window,
             "symbol": TICK_SYMBOL,
             "series": series,
-            "persistence": {"requested": persist, "stored": False, "snapshotId": None, "error": None},
+            "fastPolyOrder": fastOrder,
+            "slowPolyOrder": slowOrder,
+            "persistence": {
+                "requested": persist,
+                "stored": False,
+                "snapshotId": None,
+                "signalStored": False,
+                "signalId": None,
+                "error": None,
+            },
         }
 
     rows = fetch_window_ending_at(new_rows[-1]["id"], window)
@@ -1398,10 +1700,33 @@ def regression_next(
         window=window,
         fast_window_ticks=fast,
         slow_window_ticks=slow,
+        fast_poly_order=fastOrder,
+        slow_poly_order=slowOrder,
         rows=rows,
         new_rows=new_rows,
         persist=persist,
         advanced_from_id=afterId,
+    )
+
+
+@app.get("/api/regression/polynomial/tune")
+def regression_polynomial_tune(
+    series: str = Query("mid", pattern="^(ask|bid|mid)$"),
+    lookbackHours: int = Query(DEFAULT_TUNING_LOOKBACK_HOURS, ge=1, le=24 * 14),
+    maxRows: int = Query(DEFAULT_TUNING_MAX_ROWS, ge=MIN_ANALYSIS_WINDOW * 4, le=MAX_TUNING_ROWS),
+    targetMove: float = Query(0.8, gt=0.0),
+    adverseMove: float = Query(0.6, gt=0.0),
+    horizonTicks: int = Query(120, ge=20, le=2000),
+    minSignals: int = Query(5, ge=1, le=250),
+) -> Dict[str, Any]:
+    rows = [serialize_tick_row(row) for row in fetch_recent_rows_for_tuning(lookbackHours, maxRows)]
+    return evaluate_polynomial_tuning(
+        rows,
+        series=series,
+        target_move=targetMove,
+        adverse_move=adverseMove,
+        horizon_ticks=horizonTicks,
+        min_signals=minSignals,
     )
 
 

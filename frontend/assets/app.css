@@ -84,6 +84,14 @@ input {
   filter: brightness(1.04);
 }
 
+.primary-button:disabled,
+.ghost-button:disabled {
+  opacity: 0.55;
+  cursor: default;
+  transform: none;
+  filter: none;
+}
+
 label span {
   display: block;
   margin-bottom: 0.4rem;
@@ -334,6 +342,10 @@ select {
   align-items: end;
 }
 
+.toolbar-regression label {
+  min-width: 112px;
+}
+
 .page-live label span {
   margin-bottom: 0.22rem;
   font-size: 0.67rem;
@@ -454,11 +466,24 @@ select {
   gap: 0.8rem;
 }
 
+.signal-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 0.8rem;
+}
+
 .metric-card {
   display: grid;
   gap: 0.35rem;
   padding: 0.95rem 1rem;
   min-height: 132px;
+}
+
+.signal-card {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.9rem 1rem;
+  min-height: 124px;
 }
 
 .metric-label {
@@ -642,6 +667,10 @@ select {
   .metric-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
+
+  .signal-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 760px) {
@@ -682,6 +711,10 @@ select {
   }
 
   .metric-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .signal-grid {
     grid-template-columns: 1fr;
   }
 
