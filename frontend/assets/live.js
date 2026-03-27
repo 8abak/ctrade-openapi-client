@@ -974,10 +974,11 @@
       const livePayload = await fetchJson("/api/live/bootstrap?" + params.toString());
       state.rows = livePayload.rows || [];
       let ottError = null;
+      let ottPayload = null;
 
       if (shouldLoadOtt(config)) {
         try {
-          await loadOttBootstrap(config);
+          ottPayload = await loadOttBootstrap(config);
         } catch (error) {
           ottError = error;
           clearOttState();
@@ -998,6 +999,10 @@
       const ottCount = shouldLoadOtt(config) ? state.ottRows.size : 0;
       if (ottError) {
         status("Loaded " + livePayload.rowCount + " row(s). OTT unavailable: " + ottError.message, true);
+      } else if (ottPayload && ottPayload.status === "empty") {
+        status("Loaded " + livePayload.rowCount + " row(s). " + (ottPayload.message || "OTT storage is empty."), true);
+      } else if (ottPayload && ottPayload.status === "partial") {
+        status("Loaded " + livePayload.rowCount + " row(s). " + (ottPayload.message || "OTT storage is partially populated."), true);
       } else {
         status("Loaded " + livePayload.rowCount + " row(s)" + (ottCount ? " with " + ottCount + " OTT row(s)." : "."), false);
       }

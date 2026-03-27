@@ -273,11 +273,25 @@ def build_ott_response(
     ott_rows = fetch_ott_rows_for_tick_ids(TICK_SYMBOL, tick_ids, config)
     rows = [serialize_ott_row(row, ott_rows.get(int(row["id"])), config) for row in tick_rows]
     available_count = sum(1 for row in rows if row["available"])
+    if not rows:
+        status_text = "no-ticks"
+        message = "No ticks matched the requested OTT window."
+    elif available_count == 0:
+        status_text = "empty"
+        message = "No stored OTT rows exist for the requested symbol/source/MA/length/percent. Run the OTT backfill or worker."
+    elif available_count < len(rows):
+        status_text = "partial"
+        message = "Some ticks in the requested window do not have stored OTT rows yet."
+    else:
+        status_text = "ok"
+        message = None
     return {
         "rows": rows,
         "rowCount": len(rows),
         "availableRowCount": available_count,
         "missingRowCount": len(rows) - available_count,
+        "status": status_text,
+        "message": message,
         "firstId": rows[0]["tickid"] if rows else None,
         "lastId": rows[-1]["tickid"] if rows else requested_start_id,
         "requestedId": requested_start_id,
