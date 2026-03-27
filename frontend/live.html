@@ -40,6 +40,72 @@
         </div>
         <button class="primary-button compact-button" id="applyButton" type="button">Load</button>
       </div>
+      <div class="toolbar toolbar-live ott-toolbar">
+        <div class="segmented single-select" id="ottToggle">
+          <button type="button" data-value="on">OTT On</button>
+          <button type="button" data-value="off">OTT Off</button>
+        </div>
+        <label class="compact-check">
+          <input id="ottSupportToggle" type="checkbox" checked>
+          <span>support line</span>
+        </label>
+        <label class="compact-check">
+          <input id="ottMarkersToggle" type="checkbox" checked>
+          <span>buy/sell markers</span>
+        </label>
+        <label class="compact-check">
+          <input id="ottTradesToggle" type="checkbox" checked>
+          <span>backtest trades</span>
+        </label>
+        <label class="compact-check">
+          <input id="ottHighlightToggle" type="checkbox" checked>
+          <span>highlight</span>
+        </label>
+        <label>
+          <span>OTT source</span>
+          <select id="ottSource">
+            <option value="mid">mid</option>
+            <option value="ask">ask</option>
+            <option value="bid">bid</option>
+          </select>
+        </label>
+        <label>
+          <span>signal mode</span>
+          <select id="ottSignalMode">
+            <option value="support">support</option>
+            <option value="price">price</option>
+            <option value="color">color</option>
+          </select>
+        </label>
+        <label>
+          <span>MA</span>
+          <select id="ottMaType">
+            <option value="VAR">VAR</option>
+            <option value="SMA">SMA</option>
+            <option value="EMA">EMA</option>
+            <option value="WMA">WMA</option>
+            <option value="TMA">TMA</option>
+            <option value="WWMA">WWMA</option>
+            <option value="ZLEMA">ZLEMA</option>
+            <option value="TSF">TSF</option>
+          </select>
+        </label>
+        <label>
+          <span>OTT length</span>
+          <input id="ottLength" type="number" min="1" inputmode="numeric" value="2">
+        </label>
+        <label>
+          <span>OTT percent</span>
+          <input id="ottPercent" type="number" min="0" step="0.1" inputmode="decimal" value="1.4">
+        </label>
+        <label>
+          <span>backtest range</span>
+          <select id="ottRangePreset">
+            <option value="lastweek">last week</option>
+          </select>
+        </label>
+        <button class="ghost-button compact-button" id="runOttBacktestButton" type="button">Run Backtest</button>
+      </div>
     </section>
 
     <section class="panel chart-panel" id="chartPanel">

@@ -22,6 +22,15 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from datavis.ott import (
+    DEFAULT_OTT_LENGTH,
+    DEFAULT_OTT_MA_TYPE,
+    DEFAULT_OTT_PERCENT,
+    DEFAULT_OTT_SIGNAL_MODE,
+    DEFAULT_OTT_SOURCE,
+    OttConfig,
+)
+from datavis.ott_storage import fetch_backtest_overlay, fetch_ott_rows_for_tick_ids, resolve_last_week_range, run_and_store_backtest
 from datavis.regression import MIN_ANALYSIS_WINDOW, build_regression_payload
 
 
@@ -65,6 +74,16 @@ TRANSACTION_CONTROL_HEADS = {
 
 class QueryRequest(BaseModel):
     sql: str
+
+
+class OttBacktestRunRequest(BaseModel):
+    source: str = DEFAULT_OTT_SOURCE
+    matype: str = DEFAULT_OTT_MA_TYPE
+    length: int = DEFAULT_OTT_LENGTH
+    percent: float = DEFAULT_OTT_PERCENT
+    signalmode: str = DEFAULT_OTT_SIGNAL_MODE
+    rangepreset: str = "lastweek"
+    force: bool = False
 
 
 security = HTTPBasic(auto_error=False)
@@ -148,6 +167,174 @@ def serialize_tick_row(row: Dict[str, Any]) -> Dict[str, Any]:
         "mid": row["mid"],
         "spread": row["spread"],
         "price": row["price"],
+    }
+
+
+def build_ott_config(source: str, matype: str, length: int, percent: float) -> OttConfig:
+    try:
+        return OttConfig(source=source, matype=matype, length=length, percent=percent).normalized()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def tick_source_price(row: Dict[str, Any], source: str) -> Optional[float]:
+    if source == "ask":
+        return row.get("ask")
+    if source == "bid":
+        return row.get("bid")
+    return row.get("mid") if row.get("mid") is not None else row.get("price")
+
+
+def serialize_ott_row(tick_row: Dict[str, Any], ott_row: Optional[Dict[str, Any]], config: OttConfig) -> Dict[str, Any]:
+    timestamp = tick_row["timestamp"]
+    base = {
+        "tickid": tick_row["id"],
+        "symbol": tick_row["symbol"],
+        "timestamp": timestamp.isoformat(),
+        "timestampMs": dt_to_ms(timestamp),
+        "bid": tick_row["bid"],
+        "ask": tick_row["ask"],
+        "mid": tick_row["mid"],
+        "spread": tick_row["spread"],
+        "price": tick_source_price(tick_row, config.source),
+        "available": ott_row is not None,
+        "source": config.source,
+        "matype": config.matype,
+        "length": config.length,
+        "percent": config.percent,
+        "mavg": None,
+        "fark": None,
+        "longstop": None,
+        "shortstop": None,
+        "dir": None,
+        "mt": None,
+        "ott": None,
+        "ott2": None,
+        "ott3": None,
+        "supportbuy": False,
+        "supportsell": False,
+        "pricebuy": False,
+        "pricesell": False,
+        "colorbuy": False,
+        "colorsell": False,
+        "ottcolor": None,
+        "highlightup": False,
+        "highlightdown": False,
+    }
+    if ott_row is None:
+        return base
+
+    ott2 = ott_row.get("ott2")
+    ott3 = ott_row.get("ott3")
+    mavg = ott_row.get("mavg")
+    ott = ott_row.get("ott")
+    base.update(
+        {
+            "price": ott_row.get("price", base["price"]),
+            "mavg": mavg,
+            "fark": ott_row.get("fark"),
+            "longstop": ott_row.get("longstop"),
+            "shortstop": ott_row.get("shortstop"),
+            "dir": ott_row.get("dir"),
+            "mt": ott_row.get("mt"),
+            "ott": ott,
+            "ott2": ott2,
+            "ott3": ott3,
+            "supportbuy": bool(ott_row.get("supportbuy")),
+            "supportsell": bool(ott_row.get("supportsell")),
+            "pricebuy": bool(ott_row.get("pricebuy")),
+            "pricesell": bool(ott_row.get("pricesell")),
+            "colorbuy": bool(ott_row.get("colorbuy")),
+            "colorsell": bool(ott_row.get("colorsell")),
+            "ottcolor": None if ott2 is None or ott3 is None else ("green" if ott2 > ott3 else "red"),
+            "highlightup": bool(mavg is not None and ott is not None and mavg > ott),
+            "highlightdown": bool(mavg is not None and ott is not None and mavg < ott),
+        }
+    )
+    return base
+
+
+def build_ott_response(
+    tick_rows: List[Dict[str, Any]],
+    config: OttConfig,
+    *,
+    mode: Optional[str] = None,
+    requested_start_id: Optional[int] = None,
+    advanced_from_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    tick_ids = [int(row["id"]) for row in tick_rows]
+    ott_rows = fetch_ott_rows_for_tick_ids(TICK_SYMBOL, tick_ids, config)
+    rows = [serialize_ott_row(row, ott_rows.get(int(row["id"])), config) for row in tick_rows]
+    available_count = sum(1 for row in rows if row["available"])
+    return {
+        "rows": rows,
+        "rowCount": len(rows),
+        "availableRowCount": available_count,
+        "missingRowCount": len(rows) - available_count,
+        "firstId": rows[0]["tickid"] if rows else None,
+        "lastId": rows[-1]["tickid"] if rows else requested_start_id,
+        "requestedId": requested_start_id,
+        "advancedFromId": advanced_from_id,
+        "mode": mode,
+        "symbol": TICK_SYMBOL,
+        "source": config.source,
+        "matype": config.matype,
+        "length": config.length,
+        "percent": config.percent,
+    }
+
+
+def resolve_range_preset(rangepreset: str) -> Dict[str, Any]:
+    if rangepreset != "lastweek":
+        raise HTTPException(status_code=400, detail="Unsupported OTT backtest range preset.")
+    try:
+        return resolve_last_week_range(TICK_SYMBOL)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def serialize_backtest_run(run: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if run is None:
+        return None
+    return {
+        "id": run["id"],
+        "symbol": run["symbol"],
+        "source": run["source"],
+        "matype": run["matype"],
+        "length": run["length"],
+        "percent": run["percent"],
+        "signalmode": run["signalmode"],
+        "starttickid": run["starttickid"],
+        "endtickid": run["endtickid"],
+        "startts": serialize_value(run["startts"]),
+        "endts": serialize_value(run["endts"]),
+        "tradecount": run["tradecount"],
+        "grosspnl": run["grosspnl"],
+        "netpnl": run["netpnl"],
+        "createdat": serialize_value(run["createdat"]),
+        "reused": bool(run.get("reused")),
+    }
+
+
+def serialize_backtest_trade(trade: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": trade["id"],
+        "runid": trade["runid"],
+        "entrytickid": trade["entrytickid"],
+        "exittickid": trade["exittickid"],
+        "entryts": serialize_value(trade["entryts"]),
+        "entryTsMs": dt_to_ms(trade["entryts"]),
+        "exitts": serialize_value(trade["exitts"]),
+        "exitTsMs": dt_to_ms(trade["exitts"]),
+        "direction": trade["direction"],
+        "entryprice": trade["entryprice"],
+        "exitprice": trade["exitprice"],
+        "pnl": trade["pnl"],
+        "pnlpoints": trade["pnlpoints"],
+        "barsorticksheld": trade["barsorticksheld"],
+        "signalentrytype": trade["signalentrytype"],
+        "signalexittype": trade["signalexittype"],
+        "createdat": serialize_value(trade["createdat"]),
     }
 
 
@@ -1339,6 +1526,92 @@ def live_stream(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.get("/api/ott/bootstrap")
+def ott_bootstrap(
+    mode: str = Query("live", pattern="^(live|review)$"),
+    id: Optional[int] = Query(None, ge=1),
+    window: int = Query(DEFAULT_WINDOW, ge=1, le=MAX_WINDOW),
+    source: str = Query(DEFAULT_OTT_SOURCE, pattern="^(ask|bid|mid)$"),
+    matype: str = Query(DEFAULT_OTT_MA_TYPE, pattern="^(SMA|EMA|WMA|TMA|VAR|WWMA|ZLEMA|TSF)$"),
+    length: int = Query(DEFAULT_OTT_LENGTH, ge=1, le=10000),
+    percent: float = Query(DEFAULT_OTT_PERCENT, ge=0),
+) -> Dict[str, Any]:
+    config = build_ott_config(source, matype, length, percent)
+    rows = fetch_bootstrap_rows(mode, id, window)
+    return build_ott_response(rows, config, mode=mode, requested_start_id=id)
+
+
+@app.get("/api/ott/next")
+def ott_next(
+    afterId: int = Query(..., ge=0),
+    limit: int = Query(250, ge=1, le=MAX_STREAM_BATCH),
+    source: str = Query(DEFAULT_OTT_SOURCE, pattern="^(ask|bid|mid)$"),
+    matype: str = Query(DEFAULT_OTT_MA_TYPE, pattern="^(SMA|EMA|WMA|TMA|VAR|WWMA|ZLEMA|TSF)$"),
+    length: int = Query(DEFAULT_OTT_LENGTH, ge=1, le=10000),
+    percent: float = Query(DEFAULT_OTT_PERCENT, ge=0),
+) -> Dict[str, Any]:
+    config = build_ott_config(source, matype, length, percent)
+    rows = fetch_rows_after(afterId, limit)
+    return build_ott_response(rows, config, advanced_from_id=afterId)
+
+
+@app.post("/api/ott/backtest/run")
+def ott_backtest_run(payload: OttBacktestRunRequest) -> Dict[str, Any]:
+    config = build_ott_config(payload.source, payload.matype, payload.length, payload.percent)
+    range_info = resolve_range_preset(payload.rangepreset)
+    try:
+        run = run_and_store_backtest(
+            symbol=TICK_SYMBOL,
+            config=config,
+            signalmode=payload.signalmode,
+            start_tick_id=range_info["starttickid"],
+            end_tick_id=range_info["endtickid"],
+            force=payload.force,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {
+        "run": serialize_backtest_run(run),
+        "rangePreset": payload.rangepreset,
+        "range": range_info,
+    }
+
+
+@app.get("/api/ott/backtest/overlay")
+def ott_backtest_overlay(
+    source: str = Query(DEFAULT_OTT_SOURCE, pattern="^(ask|bid|mid)$"),
+    matype: str = Query(DEFAULT_OTT_MA_TYPE, pattern="^(SMA|EMA|WMA|TMA|VAR|WWMA|ZLEMA|TSF)$"),
+    length: int = Query(DEFAULT_OTT_LENGTH, ge=1, le=10000),
+    percent: float = Query(DEFAULT_OTT_PERCENT, ge=0),
+    signalmode: str = Query(DEFAULT_OTT_SIGNAL_MODE, pattern="^(support|price|color)$"),
+    rangePreset: str = Query("lastweek", pattern="^(lastweek)$"),
+    startId: Optional[int] = Query(None, ge=1),
+    endId: Optional[int] = Query(None, ge=1),
+) -> Dict[str, Any]:
+    config = build_ott_config(source, matype, length, percent)
+    range_info = resolve_range_preset(rangePreset)
+    try:
+        overlay = fetch_backtest_overlay(
+            symbol=TICK_SYMBOL,
+            config=config,
+            signalmode=signalmode,
+            run_start_tick_id=range_info["starttickid"],
+            run_end_tick_id=range_info["endtickid"],
+            visible_start_tick_id=startId,
+            visible_end_tick_id=endId,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "run": serialize_backtest_run(overlay["run"]),
+        "trades": [serialize_backtest_trade(trade) for trade in overlay["trades"]],
+        "tradeCount": overlay["tradecount"],
+        "rangePreset": rangePreset,
+        "range": range_info,
+    }
 
 
 @app.get("/api/regression/bootstrap")
