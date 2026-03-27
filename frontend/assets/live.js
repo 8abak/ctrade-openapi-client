@@ -786,9 +786,23 @@
 
   async function fetchJson(url, options) {
     const response = await fetch(url, options);
-    const payload = await response.json();
+    const bodyText = await response.text();
+    let payload = null;
+    if (bodyText) {
+      try {
+        payload = JSON.parse(bodyText);
+      } catch (error) {
+        payload = null;
+      }
+    }
     if (!response.ok) {
-      throw new Error(payload.detail || "Request failed.");
+      const message = payload && typeof payload === "object"
+        ? (payload.detail || payload.message || response.statusText || "Request failed.")
+        : (bodyText || response.statusText || "Request failed.");
+      throw new Error(message);
+    }
+    if (payload === null) {
+      throw new Error(bodyText || "Expected JSON response.");
     }
     return payload;
   }
@@ -959,18 +973,34 @@
     try {
       const livePayload = await fetchJson("/api/live/bootstrap?" + params.toString());
       state.rows = livePayload.rows || [];
+      let ottError = null;
 
       if (shouldLoadOtt(config)) {
-        await loadOttBootstrap(config);
+        try {
+          await loadOttBootstrap(config);
+        } catch (error) {
+          ottError = error;
+          clearOttState();
+        }
       }
 
       if (config.mode === "review" && config.ottTrades && shouldLoadOtt(config)) {
-        await loadBacktestOverlay(config);
+        try {
+          await loadBacktestOverlay(config);
+        } catch (error) {
+          ottError = error;
+          state.ottTrades = [];
+          state.ottRun = null;
+        }
       }
 
       renderChart({ resetWindow: Boolean(resetWindow) });
       const ottCount = shouldLoadOtt(config) ? state.ottRows.size : 0;
-      status("Loaded " + livePayload.rowCount + " row(s)" + (ottCount ? " with " + ottCount + " OTT row(s)." : "."), false);
+      if (ottError) {
+        status("Loaded " + livePayload.rowCount + " row(s). OTT unavailable: " + ottError.message, true);
+      } else {
+        status("Loaded " + livePayload.rowCount + " row(s)" + (ottCount ? " with " + ottCount + " OTT row(s)." : "."), false);
+      }
       if (config.run === "run") {
         connectStream(livePayload.lastId || 0, config.window);
       }

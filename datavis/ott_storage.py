@@ -1,47 +1,18 @@
 from __future__ import annotations
 
 import json
-import os
-from contextlib import contextmanager
 from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Any, Dict, Generator, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 from zoneinfo import ZoneInfo
 
-import psycopg2
 import psycopg2.extras
-from dotenv import load_dotenv
 
+from datavis.db import db_connection
 from datavis.ott import DEFAULT_OTT_SIGNAL_MODE, OttConfig, run_ott_backtest, signal_columns
 
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-load_dotenv(BASE_DIR / ".env")
-
-DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
-if DATABASE_URL.startswith("postgresql+psycopg2://"):
-    DATABASE_URL = DATABASE_URL.replace("postgresql+psycopg2://", "postgresql://", 1)
-
-DEFAULT_SYMBOL = os.getenv("DATAVIS_SYMBOL", "XAUUSD")
+DEFAULT_SYMBOL = "XAUUSD"
 SYDNEY_TZ = ZoneInfo("Australia/Sydney")
-
-
-def ensure_database_url() -> str:
-    if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL is not configured")
-    return DATABASE_URL
-
-
-@contextmanager
-def db_connection(readonly: bool = False) -> Generator[Any, None, None]:
-    conn = psycopg2.connect(ensure_database_url())
-    conn.autocommit = False
-    if readonly:
-        conn.set_session(readonly=True)
-    try:
-        yield conn
-    finally:
-        conn.close()
 
 
 def select_tick_price_expr(source: str) -> str:
@@ -350,6 +321,46 @@ def fetch_backtest_rows(symbol: str, config: OttConfig, start_tick_id: int, end_
                 (symbol, config.source, config.matype, config.length, config.percent, start_tick_id, end_tick_id),
             )
             return [dict(row) for row in cur.fetchall()]
+
+
+def fetch_bootstrap_tick_rows(symbol: str, mode: str, start_id: Optional[int], window: int) -> List[Dict[str, Any]]:
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            if mode == "live":
+                cur.execute(
+                    """
+                    SELECT id, symbol, timestamp, bid, ask, mid, spread,
+                           COALESCE(mid, ROUND(((bid + ask) / 2.0)::numeric, 2)::double precision) AS price
+                    FROM (
+                        SELECT id, symbol, timestamp, bid, ask, mid, spread
+                        FROM public.ticks
+                        WHERE symbol = %s
+                        ORDER BY id DESC
+                        LIMIT %s
+                    ) recent
+                    ORDER BY id ASC
+                    """,
+                    (symbol, window),
+                )
+            else:
+                if start_id is None:
+                    raise RuntimeError("Review mode requires an id value.")
+                cur.execute(
+                    """
+                    SELECT id, symbol, timestamp, bid, ask, mid, spread,
+                           COALESCE(mid, ROUND(((bid + ask) / 2.0)::numeric, 2)::double precision) AS price
+                    FROM public.ticks
+                    WHERE symbol = %s AND id >= %s
+                    ORDER BY id ASC
+                    LIMIT %s
+                    """,
+                    (symbol, start_id, window),
+                )
+            return [dict(row) for row in cur.fetchall()]
+
+
+def fetch_next_tick_rows(symbol: str, after_id: int, limit: int) -> List[Dict[str, Any]]:
+    return fetch_tick_batch_after(symbol, after_id, limit, end_id=None)
 
 
 def find_existing_backtest_run(

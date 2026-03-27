@@ -30,7 +30,14 @@ from datavis.ott import (
     DEFAULT_OTT_SOURCE,
     OttConfig,
 )
-from datavis.ott_storage import fetch_backtest_overlay, fetch_ott_rows_for_tick_ids, resolve_last_week_range, run_and_store_backtest
+from datavis.ott_storage import (
+    fetch_backtest_overlay,
+    fetch_bootstrap_tick_rows,
+    fetch_next_tick_rows,
+    fetch_ott_rows_for_tick_ids,
+    resolve_last_week_range,
+    run_and_store_backtest,
+)
 from datavis.regression import MIN_ANALYSIS_WINDOW, build_regression_payload
 
 
@@ -1539,8 +1546,13 @@ def ott_bootstrap(
     percent: float = Query(DEFAULT_OTT_PERCENT, ge=0),
 ) -> Dict[str, Any]:
     config = build_ott_config(source, matype, length, percent)
-    rows = fetch_bootstrap_rows(mode, id, window)
-    return build_ott_response(rows, config, mode=mode, requested_start_id=id)
+    try:
+        rows = fetch_bootstrap_tick_rows(TICK_SYMBOL, mode, id, window)
+        return build_ott_response(rows, config, mode=mode, requested_start_id=id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="OTT bootstrap failed: {0}".format(exc)) from exc
 
 
 @app.get("/api/ott/next")
@@ -1553,8 +1565,11 @@ def ott_next(
     percent: float = Query(DEFAULT_OTT_PERCENT, ge=0),
 ) -> Dict[str, Any]:
     config = build_ott_config(source, matype, length, percent)
-    rows = fetch_rows_after(afterId, limit)
-    return build_ott_response(rows, config, advanced_from_id=afterId)
+    try:
+        rows = fetch_next_tick_rows(TICK_SYMBOL, afterId, limit)
+        return build_ott_response(rows, config, advanced_from_id=afterId)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="OTT incremental fetch failed: {0}".format(exc)) from exc
 
 
 @app.post("/api/ott/backtest/run")
@@ -1572,6 +1587,8 @@ def ott_backtest_run(payload: OttBacktestRunRequest) -> Dict[str, Any]:
         )
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="OTT backtest run failed: {0}".format(exc)) from exc
 
     return {
         "run": serialize_backtest_run(run),
@@ -1605,6 +1622,8 @@ def ott_backtest_overlay(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="OTT backtest overlay failed: {0}".format(exc)) from exc
     return {
         "run": serialize_backtest_run(overlay["run"]),
         "trades": [serialize_backtest_trade(trade) for trade in overlay["trades"]],
