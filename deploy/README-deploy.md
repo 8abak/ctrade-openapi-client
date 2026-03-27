@@ -3,12 +3,9 @@
 `Deploy datavis to EC2` runs on every push to `main` and on manual `workflow_dispatch`.
 
 The workflow:
-- uploads `deploy/scripts/deploy-datavis.sh` to `/home/ec2-user/bin/deploy-datavis.sh`
 - runs that script over SSH on the EC2 host
-- updates `/home/ec2-user/cTrade` to `origin/main`
-- recreates `/home/ec2-user/venvs/datavis` if it is missing or broken, then installs `requirements.txt`
-- restarts `datavis.service`
-- fails the Action if the service restart or `http://127.0.0.1:8000/api/health` check fails
+- relies on `/home/ec2-user/bin/deploy-datavis.sh` to update `/home/ec2-user/cTrade` to `origin/main`
+- relies on that script to repair `/home/ec2-user/venvs/datavis`, install `requirements.txt`, restart `datavis`, and fail on a bad health check
 
 Required GitHub repository secrets:
 - `EC2_HOST`
@@ -23,6 +20,10 @@ Runtime paths used by the deploy flow:
 - deploy script on EC2: `/home/ec2-user/bin/deploy-datavis.sh`
 - virtualenv: `/home/ec2-user/venvs/datavis`
 - env file: `/etc/datavis.env`
+
+Server setup note:
+- install or update the EC2 deploy script from `deploy/scripts/deploy-datavis.sh`
+- ensure it is executable at `/home/ec2-user/bin/deploy-datavis.sh`
 
 The deploy script runs `git reset --hard origin/main` and `git clean -fd`, so the EC2 checkout should not be used to store runtime-only files.
 
