@@ -3,12 +3,10 @@
 `Deploy datavis to EC2` runs on every push to `main` and on manual `workflow_dispatch`.
 
 The workflow:
-- uploads `deploy/scripts/deploy-datavis.sh` to `/home/ec2-user/bin/deploy-datavis.sh`
-- runs that script over SSH on the EC2 host
-- updates `/home/ec2-user/cTrade` to `origin/main`
-- recreates `/home/ec2-user/venvs/datavis` if it is missing or broken, then installs `requirements.txt`
-- restarts `datavis.service`
-- fails the Action if the service restart or `http://127.0.0.1:8000/api/health` check fails
+- opens an SSH session to the EC2 host with `appleboy/ssh-action`
+- changes to `/home/ec2-user/cTrade`
+- runs `git fetch origin`, `git reset --hard origin/main`, and `git clean -fd`
+- executes the repo-managed script at `deploy/scripts/deploy-datavis.sh`
 
 Required GitHub repository secrets:
 - `EC2_HOST`
@@ -20,10 +18,21 @@ Optional secret:
 
 Runtime paths used by the deploy flow:
 - repo checkout: `/home/ec2-user/cTrade`
-- deploy script on EC2: `/home/ec2-user/bin/deploy-datavis.sh`
+- repo-managed deploy script on EC2: `/home/ec2-user/cTrade/deploy/scripts/deploy-datavis.sh`
 - virtualenv: `/home/ec2-user/venvs/datavis`
 - env file: `/etc/datavis.env`
 
-The deploy script runs `git reset --hard origin/main` and `git clean -fd`, so the EC2 checkout should not be used to store runtime-only files.
+Server setup note:
+- ensure the repo is cloned at `/home/ec2-user/cTrade`
+- ensure `/home/ec2-user/venvs/datavis/bin/activate` exists
+- ensure the `datavis` systemd service uses `/etc/datavis.env`
 
-Later, service-specific restarts can be added by splitting deploy logic into separate scripts and using workflow path filters or conditional steps before the restart stage.
+The deploy workflow runs `git reset --hard origin/main` and `git clean -fd`, so the EC2 checkout should not be used to store runtime-only files.
+
+The deploy script:
+- activates `/home/ec2-user/venvs/datavis/bin/activate`
+- runs `pip install -r requirements.txt`
+- restarts `datavis`
+- verifies the service is active with `systemctl is-active --quiet`
+- prints `systemctl status datavis --no-pager -l` on failure
+- performs a local `curl` to `http://127.0.0.1:8000/api/health` when `curl` is available
