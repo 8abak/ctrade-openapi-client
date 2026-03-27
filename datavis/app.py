@@ -22,6 +22,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from datavis.db import db_connect as shared_db_connect
 from datavis.ott import (
     DEFAULT_OTT_LENGTH,
     DEFAULT_OTT_MA_TYPE,
@@ -35,6 +36,7 @@ from datavis.ott_storage import (
     fetch_bootstrap_tick_rows,
     fetch_next_tick_rows,
     fetch_ott_rows_for_tick_ids,
+    fetch_ott_sync_diagnostics,
     resolve_last_week_range,
     run_and_store_backtest,
 )
@@ -108,10 +110,13 @@ def ensure_database_url() -> str:
 
 @contextmanager
 def db_connection(readonly: bool = False, autocommit: bool = False):
-    conn = psycopg2.connect(ensure_database_url())
-    conn.autocommit = autocommit
-    if readonly:
-        conn.set_session(readonly=True, autocommit=autocommit)
+    if DATABASE_URL:
+        conn = psycopg2.connect(ensure_database_url())
+        conn.autocommit = autocommit
+        if readonly:
+            conn.set_session(readonly=True, autocommit=autocommit)
+    else:
+        conn = shared_db_connect(readonly=readonly, autocommit=autocommit)
     try:
         yield conn
     finally:
@@ -268,20 +273,50 @@ def build_ott_response(
     mode: Optional[str] = None,
     requested_start_id: Optional[int] = None,
     advanced_from_id: Optional[int] = None,
+    signalmode: str = DEFAULT_OTT_SIGNAL_MODE,
 ) -> Dict[str, Any]:
     tick_ids = [int(row["id"]) for row in tick_rows]
     ott_rows = fetch_ott_rows_for_tick_ids(TICK_SYMBOL, tick_ids, config)
     rows = [serialize_ott_row(row, ott_rows.get(int(row["id"])), config) for row in tick_rows]
     available_count = sum(1 for row in rows if row["available"])
+    requested_first_id = rows[0]["tickid"] if rows else requested_start_id
+    requested_last_id = rows[-1]["tickid"] if rows else requested_start_id
+    diagnostics = fetch_ott_sync_diagnostics(
+        TICK_SYMBOL,
+        config,
+        requested_start_tick_id=requested_first_id,
+        requested_end_tick_id=requested_last_id,
+        signalmode=signalmode if mode == "review" and requested_first_id is not None and requested_last_id is not None else None,
+    )
+    latest_stored_tick_id = diagnostics["latestStoredTickId"]
+    gap_ahead_of_storage = int(diagnostics["requested"]["gapCountAheadOfStorage"] or 0)
+    signal_counts = diagnostics.get("signalCounts")
     if not rows:
         status_text = "no-ticks"
         message = "No ticks matched the requested OTT window."
     elif available_count == 0:
-        status_text = "empty"
-        message = "No stored OTT rows exist for the requested symbol/source/MA/length/percent. Run the OTT backfill or worker."
+        if latest_stored_tick_id is None:
+            status_text = "empty"
+            message = "No stored OTT rows exist for the requested symbol/source/MA/length/percent. Run the OTT backfill or worker."
+        else:
+            status_text = "ahead"
+            message = (
+                "Stored OTT rows currently stop at tick {0}; requested ticks reach {1}. "
+                "Run the OTT worker to extend storage."
+            ).format(latest_stored_tick_id, requested_last_id)
     elif available_count < len(rows):
-        status_text = "partial"
-        message = "Some ticks in the requested window do not have stored OTT rows yet."
+        if gap_ahead_of_storage > 0 and latest_stored_tick_id is not None:
+            status_text = "ahead"
+            message = (
+                "Stored OTT rows currently stop at tick {0}; requested ticks reach {1}. "
+                "Missing {2} row(s) in this window."
+            ).format(latest_stored_tick_id, requested_last_id, len(rows) - available_count)
+        else:
+            status_text = "partial"
+            message = "Some ticks in the requested window do not have stored OTT rows yet."
+    elif mode == "review" and signal_counts and int(signal_counts.get("totalCount") or 0) == 0:
+        status_text = "no-signals"
+        message = "No {0} signals were found in the selected review range.".format(signalmode.lower())
     else:
         status_text = "ok"
         message = None
@@ -296,6 +331,14 @@ def build_ott_response(
         "lastId": rows[-1]["tickid"] if rows else requested_start_id,
         "requestedId": requested_start_id,
         "advancedFromId": advanced_from_id,
+        "latestStoredTickId": latest_stored_tick_id,
+        "storageFirstTickId": diagnostics["storage"]["firstTickId"],
+        "storageRowCount": diagnostics["storage"]["rowCount"],
+        "jobStateLastTickId": diagnostics["jobState"]["lastTickId"],
+        "gapAheadOfStorage": gap_ahead_of_storage,
+        "signalMode": signalmode,
+        "signalCounts": signal_counts,
+        "coverage": diagnostics,
         "mode": mode,
         "symbol": TICK_SYMBOL,
         "source": config.source,
@@ -357,6 +400,20 @@ def serialize_backtest_trade(trade: Dict[str, Any]) -> Dict[str, Any]:
         "signalexittype": trade["signalexittype"],
         "createdat": serialize_value(trade["createdat"]),
     }
+
+
+def summarize_range_status(
+    *,
+    signalmode: str,
+    signal_counts: Optional[Dict[str, Any]],
+    trade_count: Optional[int] = None,
+    scope_label: str,
+) -> Tuple[str, Optional[str]]:
+    if signal_counts and int(signal_counts.get("totalCount") or 0) == 0:
+        return ("no-signals", "No {0} signals were found in the {1}.".format(signalmode.lower(), scope_label))
+    if trade_count is not None and int(trade_count) == 0:
+        return ("no-trades", "No backtest trades were found in the {0}.".format(scope_label))
+    return ("ok", None)
 
 
 def fetch_bootstrap_rows(mode: str, start_id: Optional[int], window: int) -> List[Dict[str, Any]]:
@@ -1555,6 +1612,7 @@ def ott_bootstrap(
     id: Optional[int] = Query(None, ge=1),
     window: int = Query(DEFAULT_WINDOW, ge=1, le=MAX_WINDOW),
     source: str = Query(DEFAULT_OTT_SOURCE, pattern="^(ask|bid|mid)$"),
+    signalmode: str = Query(DEFAULT_OTT_SIGNAL_MODE, pattern="^(support|price|color)$"),
     matype: str = Query(DEFAULT_OTT_MA_TYPE, pattern="^(SMA|EMA|WMA|TMA|VAR|WWMA|ZLEMA|TSF)$"),
     length: int = Query(DEFAULT_OTT_LENGTH, ge=1, le=10000),
     percent: float = Query(DEFAULT_OTT_PERCENT, ge=0),
@@ -1562,7 +1620,7 @@ def ott_bootstrap(
     config = build_ott_config(source, matype, length, percent)
     try:
         rows = fetch_bootstrap_tick_rows(TICK_SYMBOL, mode, id, window)
-        return build_ott_response(rows, config, mode=mode, requested_start_id=id)
+        return build_ott_response(rows, config, mode=mode, requested_start_id=id, signalmode=signalmode)
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
@@ -1574,6 +1632,7 @@ def ott_next(
     afterId: int = Query(..., ge=0),
     limit: int = Query(250, ge=1, le=MAX_STREAM_BATCH),
     source: str = Query(DEFAULT_OTT_SOURCE, pattern="^(ask|bid|mid)$"),
+    signalmode: str = Query(DEFAULT_OTT_SIGNAL_MODE, pattern="^(support|price|color)$"),
     matype: str = Query(DEFAULT_OTT_MA_TYPE, pattern="^(SMA|EMA|WMA|TMA|VAR|WWMA|ZLEMA|TSF)$"),
     length: int = Query(DEFAULT_OTT_LENGTH, ge=1, le=10000),
     percent: float = Query(DEFAULT_OTT_PERCENT, ge=0),
@@ -1581,7 +1640,7 @@ def ott_next(
     config = build_ott_config(source, matype, length, percent)
     try:
         rows = fetch_next_tick_rows(TICK_SYMBOL, afterId, limit)
-        return build_ott_response(rows, config, advanced_from_id=afterId)
+        return build_ott_response(rows, config, advanced_from_id=afterId, signalmode=signalmode)
     except Exception as exc:
         raise HTTPException(status_code=500, detail="OTT incremental fetch failed: {0}".format(exc)) from exc
 
@@ -1604,10 +1663,28 @@ def ott_backtest_run(payload: OttBacktestRunRequest) -> Dict[str, Any]:
     except Exception as exc:
         raise HTTPException(status_code=500, detail="OTT backtest run failed: {0}".format(exc)) from exc
 
+    diagnostics = fetch_ott_sync_diagnostics(
+        TICK_SYMBOL,
+        config,
+        requested_start_tick_id=range_info["starttickid"],
+        requested_end_tick_id=range_info["endtickid"],
+        signalmode=payload.signalmode,
+    )
+    status_text, message = summarize_range_status(
+        signalmode=payload.signalmode,
+        signal_counts=diagnostics.get("signalCounts"),
+        trade_count=int(run["tradecount"]),
+        scope_label="selected backtest range",
+    )
+
     return {
         "run": serialize_backtest_run(run),
         "rangePreset": payload.rangepreset,
         "range": range_info,
+        "status": status_text,
+        "message": message,
+        "signalCounts": diagnostics.get("signalCounts"),
+        "coverage": diagnostics,
     }
 
 
@@ -1638,12 +1715,31 @@ def ott_backtest_overlay(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail="OTT backtest overlay failed: {0}".format(exc)) from exc
+    visible_start_tick_id = startId if startId is not None else range_info["starttickid"]
+    visible_end_tick_id = endId if endId is not None else range_info["endtickid"]
+    diagnostics = fetch_ott_sync_diagnostics(
+        TICK_SYMBOL,
+        config,
+        requested_start_tick_id=visible_start_tick_id,
+        requested_end_tick_id=visible_end_tick_id,
+        signalmode=signalmode,
+    )
+    status_text, message = summarize_range_status(
+        signalmode=signalmode,
+        signal_counts=diagnostics.get("signalCounts"),
+        trade_count=int(overlay["tradecount"]),
+        scope_label="selected review range",
+    )
     return {
         "run": serialize_backtest_run(overlay["run"]),
         "trades": [serialize_backtest_trade(trade) for trade in overlay["trades"]],
         "tradeCount": overlay["tradecount"],
         "rangePreset": rangePreset,
         "range": range_info,
+        "status": status_text,
+        "message": message,
+        "signalCounts": diagnostics.get("signalCounts"),
+        "coverage": diagnostics,
     }
 
 

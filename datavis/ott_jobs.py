@@ -17,6 +17,7 @@ from datavis.ott import (
 )
 from datavis.ott_storage import (
     DEFAULT_SYMBOL,
+    fetch_ott_storage_bounds,
     fetch_tick_batch_after,
     fetch_tick_id_bounds,
     load_job_state,
@@ -48,6 +49,48 @@ def log(message: str) -> None:
     print(message, flush=True)
 
 
+def initialize_processing_state(symbol: str, config: OttConfig) -> Dict[str, Any]:
+    state_row = load_job_state(symbol, config)
+    storage_bounds = fetch_ott_storage_bounds(symbol, config)
+    storage_first_id = storage_bounds.get("firsttickid")
+    storage_last_id = storage_bounds.get("lasttickid")
+
+    if state_row:
+        state_last_id = int(state_row.get("lasttickid") or 0)
+        storage_last_value = int(storage_last_id or 0)
+        if state_last_id > storage_last_value:
+            restart_after_id = max(0, int(storage_first_id or 1) - 1)
+            log(
+                "OTT state ahead of storage job={0} state_lasttickid={1} storage_lasttickid={2}; rebuilding from tickid>{3}".format(
+                    config.job_name(symbol),
+                    state_last_id,
+                    storage_last_id,
+                    restart_after_id,
+                )
+            )
+            return {"calculator": OttCalculator(config), "last_id": restart_after_id}
+
+        log("loaded OTT state job={0} lasttickid={1}".format(config.job_name(symbol), state_last_id))
+        return {
+            "calculator": OttCalculator(config, state=state_row.get("statejson") or {}),
+            "last_id": state_last_id,
+        }
+
+    if storage_first_id is not None:
+        restart_after_id = max(0, int(storage_first_id) - 1)
+        log(
+            "rebuilding OTT state from stored rows job={0} firsttickid={1} laststoredtickid={2}".format(
+                config.job_name(symbol),
+                storage_first_id,
+                storage_last_id,
+            )
+        )
+        return {"calculator": OttCalculator(config), "last_id": restart_after_id}
+
+    log("initializing OTT state job={0} from scratch".format(config.job_name(symbol)))
+    return {"calculator": OttCalculator(config), "last_id": 0}
+
+
 def process_range(
     *,
     symbol: str,
@@ -57,15 +100,9 @@ def process_range(
     batch_size: int,
     log_every: int,
 ) -> Dict[str, Any]:
-    state_row = load_job_state(symbol, config)
-    if state_row:
-        calculator = OttCalculator(config, state=state_row.get("statejson") or {})
-        last_id = int(state_row.get("lasttickid") or 0)
-        log("loaded OTT state job={0} lasttickid={1}".format(config.job_name(symbol), last_id))
-    else:
-        calculator = OttCalculator(config)
-        last_id = 0
-        log("initializing OTT state job={0} from scratch".format(config.job_name(symbol)))
+    initial_state = initialize_processing_state(symbol, config)
+    calculator = initial_state["calculator"]
+    last_id = int(initial_state["last_id"])
 
     processed = 0
     stored = 0

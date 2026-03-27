@@ -140,6 +140,37 @@ def fetch_ott_rows_for_tick_ids(symbol: str, tick_ids: Sequence[int], config: Ot
             return {int(row["tickid"]): dict(row) for row in cur.fetchall()}
 
 
+def fetch_ott_storage_bounds(symbol: str, config: OttConfig) -> Dict[str, Any]:
+    config = config.normalized()
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                    MIN(tickid) AS firsttickid,
+                    MAX(tickid) AS lasttickid,
+                    COUNT(*)::bigint AS rowcount,
+                    MIN(timestamp) AS firstts,
+                    MAX(timestamp) AS lastts
+                FROM public.otttick
+                WHERE symbol = %s
+                  AND source = %s
+                  AND matype = %s
+                  AND length = %s
+                  AND percent = %s
+                """,
+                (symbol, config.source, config.matype, config.length, config.percent),
+            )
+            row = dict(cur.fetchone() or {})
+    return {
+        "firsttickid": int(row["firsttickid"]) if row.get("firsttickid") is not None else None,
+        "lasttickid": int(row["lasttickid"]) if row.get("lasttickid") is not None else None,
+        "rowcount": int(row.get("rowcount") or 0),
+        "firstts": row.get("firstts"),
+        "lastts": row.get("lastts"),
+    }
+
+
 def save_ott_rows(rows: Sequence[Dict[str, Any]]) -> int:
     if not rows:
         return 0
@@ -361,6 +392,57 @@ def fetch_bootstrap_tick_rows(symbol: str, mode: str, start_id: Optional[int], w
 
 def fetch_next_tick_rows(symbol: str, after_id: int, limit: int) -> List[Dict[str, Any]]:
     return fetch_tick_batch_after(symbol, after_id, limit, end_id=None)
+
+
+def fetch_ott_sync_diagnostics(
+    symbol: str,
+    config: OttConfig,
+    *,
+    requested_start_tick_id: Optional[int] = None,
+    requested_end_tick_id: Optional[int] = None,
+    signalmode: Optional[str] = None,
+) -> Dict[str, Any]:
+    config = config.normalized()
+    storage = fetch_ott_storage_bounds(symbol, config)
+    job_state = load_job_state(symbol, config)
+
+    latest_stored_tick_id = storage.get("lasttickid")
+    requested_last_tick_id = requested_end_tick_id
+    requested_first_tick_id = requested_start_tick_id
+    requested_gap_count = 0
+    if latest_stored_tick_id is not None and requested_last_tick_id is not None:
+        requested_gap_count = max(0, int(requested_last_tick_id) - int(latest_stored_tick_id))
+
+    signal_counts = None
+    if signalmode and requested_first_tick_id is not None and requested_last_tick_id is not None:
+        counts = fetch_signal_counts(symbol, config, signalmode, requested_first_tick_id, requested_last_tick_id)
+        signal_counts = {
+            "buyCount": int(counts.get("buycount") or 0),
+            "sellCount": int(counts.get("sellcount") or 0),
+            "totalCount": int(counts.get("buycount") or 0) + int(counts.get("sellcount") or 0),
+            "signalMode": signalmode.lower(),
+        }
+
+    return {
+        "storage": {
+            "firstTickId": storage.get("firsttickid"),
+            "lastTickId": latest_stored_tick_id,
+            "rowCount": storage.get("rowcount"),
+            "firstTs": storage.get("firstts"),
+            "lastTs": storage.get("lastts"),
+        },
+        "jobState": {
+            "lastTickId": int(job_state["lasttickid"]) if job_state and job_state.get("lasttickid") is not None else None,
+            "lastTs": job_state.get("lastts") if job_state else None,
+        },
+        "requested": {
+            "firstTickId": requested_first_tick_id,
+            "lastTickId": requested_last_tick_id,
+            "gapCountAheadOfStorage": requested_gap_count,
+        },
+        "latestStoredTickId": latest_stored_tick_id,
+        "signalCounts": signal_counts,
+    }
 
 
 def find_existing_backtest_run(

@@ -37,6 +37,8 @@
     ottTrades: [],
     ottRun: null,
     ottLastId: 0,
+    ottStatusPayload: null,
+    ottOverlayPayload: null,
     lastBacktestKey: null,
   };
 
@@ -204,6 +206,38 @@
   function status(text, isError) {
     elements.statusLine.textContent = text;
     elements.statusLine.classList.toggle("error", Boolean(isError));
+  }
+
+  function isOttWarningStatus(statusValue) {
+    return ["empty", "partial", "ahead"].includes(statusValue);
+  }
+
+  function formatSignalCounts(signalCounts) {
+    if (!signalCounts) {
+      return null;
+    }
+    return "Signals " + Number(signalCounts.totalCount || 0) + " (" + Number(signalCounts.buyCount || 0) + " buy / " + Number(signalCounts.sellCount || 0) + " sell)";
+  }
+
+  function collectOttMessages(config) {
+    const messages = [];
+    const statuses = [];
+    if (shouldLoadOtt(config) && state.ottStatusPayload && state.ottStatusPayload.status && state.ottStatusPayload.status !== "ok") {
+      statuses.push(state.ottStatusPayload.status);
+      if (state.ottStatusPayload.message) {
+        messages.push(state.ottStatusPayload.message);
+      }
+    }
+    if (config.mode === "review" && state.ottOverlayPayload && state.ottOverlayPayload.status && state.ottOverlayPayload.status !== "ok") {
+      statuses.push(state.ottOverlayPayload.status);
+      if (state.ottOverlayPayload.message) {
+        messages.push(state.ottOverlayPayload.message);
+      }
+    }
+    return {
+      messages,
+      hasWarning: statuses.some((value) => isOttWarningStatus(value)),
+    };
   }
 
   function ensureChart() {
@@ -624,8 +658,17 @@
     if (lastOtt && lastOtt.ott2 != null && config.ottEnabled) {
       meta.push("OTT " + Number(lastOtt.ott2).toFixed(2));
     }
-    if (config.mode === "review" && state.ottRun) {
-      meta.push("Trades " + Number(state.ottRun.tradecount || 0));
+    if (state.ottStatusPayload && state.ottStatusPayload.latestStoredTickId != null) {
+      meta.push("OTT thru " + Number(state.ottStatusPayload.latestStoredTickId));
+    }
+    if (config.mode === "review" && state.ottStatusPayload && state.ottStatusPayload.signalCounts) {
+      meta.push(formatSignalCounts(state.ottStatusPayload.signalCounts));
+    }
+    if (config.mode === "review" && (state.ottOverlayPayload || state.ottRun)) {
+      const tradeCount = state.ottOverlayPayload && state.ottOverlayPayload.tradeCount != null
+        ? state.ottOverlayPayload.tradeCount
+        : (state.ottRun && state.ottRun.tradecount != null ? state.ottRun.tradecount : 0);
+      meta.push("Trades " + Number(tradeCount));
     }
     meta.push(new Date(lastRow.timestampMs).toLocaleString("en-AU", { hour12: false }));
     elements.liveMeta.textContent = meta.join(" | ");
@@ -771,6 +814,8 @@
     state.ottTrades = [];
     state.ottRun = null;
     state.ottLastId = 0;
+    state.ottStatusPayload = null;
+    state.ottOverlayPayload = null;
   }
 
   function applyOttPayload(payload, reset) {
@@ -782,6 +827,7 @@
       state.ottRows.set(row.tickid, row);
     });
     state.ottLastId = payload.lastId || payload.rows?.[payload.rows.length - 1]?.tickid || state.ottLastId;
+    state.ottStatusPayload = payload;
   }
 
   async function fetchJson(url, options) {
@@ -812,6 +858,7 @@
       mode: config.mode,
       window: String(config.window),
       source: config.ottSource,
+      signalmode: config.ottSignalMode,
       matype: config.ottMaType,
       length: String(config.ottLength),
       percent: String(config.ottPercent),
@@ -832,6 +879,7 @@
       afterId: String(afterId),
       limit: String(Math.max(50, Math.min(500, config.window))),
       source: config.ottSource,
+      signalmode: config.ottSignalMode,
       matype: config.ottMaType,
       length: String(config.ottLength),
       percent: String(config.ottPercent),
@@ -845,6 +893,7 @@
     if (config.mode !== "review" || !config.ottTrades) {
       state.ottRun = null;
       state.ottTrades = [];
+      state.ottOverlayPayload = null;
       return null;
     }
     const backtestKey = [
@@ -882,6 +931,7 @@
     if (config.mode !== "review" || !config.ottTrades || !state.rows.length) {
       state.ottTrades = [];
       state.ottRun = null;
+      state.ottOverlayPayload = null;
       return null;
     }
     await runBacktestIfNeeded(config, false);
@@ -902,6 +952,7 @@
       entryTsMs: trade.entryTsMs,
       exitTsMs: trade.exitTsMs,
     }));
+    state.ottOverlayPayload = overlayPayload;
     return overlayPayload;
   }
 
@@ -944,10 +995,16 @@
         })
         : Promise.resolve(null);
 
-      renderAfterOtt.finally(() => {
+      renderAfterOtt.then(() => {
+        const ottState = collectOttMessages(config);
+        if (ottState.messages.length) {
+          status("Streaming " + payload.rowCount + " new row(s). " + ottState.messages.join(" "), ottState.hasWarning);
+        } else {
+          status("Streaming " + payload.rowCount + " new row(s).", false);
+        }
+      }).finally(() => {
         renderChart({ preserveCurrentZoom: false });
       });
-      status("Streaming " + payload.rowCount + " new row(s).", false);
     };
 
     source.onerror = () => {
@@ -992,6 +1049,7 @@
           ottError = error;
           state.ottTrades = [];
           state.ottRun = null;
+          state.ottOverlayPayload = null;
         }
       }
 
@@ -999,12 +1057,13 @@
       const ottCount = shouldLoadOtt(config) ? state.ottRows.size : 0;
       if (ottError) {
         status("Loaded " + livePayload.rowCount + " row(s). OTT unavailable: " + ottError.message, true);
-      } else if (ottPayload && ottPayload.status === "empty") {
-        status("Loaded " + livePayload.rowCount + " row(s). " + (ottPayload.message || "OTT storage is empty."), true);
-      } else if (ottPayload && ottPayload.status === "partial") {
-        status("Loaded " + livePayload.rowCount + " row(s). " + (ottPayload.message || "OTT storage is partially populated."), true);
       } else {
-        status("Loaded " + livePayload.rowCount + " row(s)" + (ottCount ? " with " + ottCount + " OTT row(s)." : "."), false);
+        const ottState = collectOttMessages(config);
+        if (ottState.messages.length) {
+          status("Loaded " + livePayload.rowCount + " row(s). " + ottState.messages.join(" "), ottState.hasWarning);
+        } else {
+          status("Loaded " + livePayload.rowCount + " row(s)" + (ottCount ? " with " + ottCount + " OTT row(s)." : "."), false);
+        }
       }
       if (config.run === "run") {
         connectStream(livePayload.lastId || 0, config.window);
@@ -1076,7 +1135,10 @@
       writeQuery(currentConfig());
       if (control === elements.ottTradesToggle || control === elements.ottSignalMode) {
         try {
-          await loadBacktestOverlay(currentConfig());
+          const overlayPayload = await loadBacktestOverlay(currentConfig());
+          if (overlayPayload && overlayPayload.message) {
+            status(overlayPayload.message, isOttWarningStatus(overlayPayload.status));
+          }
         } catch (error) {
           status(error.message || "Failed to refresh OTT backtest overlay.", true);
         }
@@ -1105,9 +1167,13 @@
     try {
       status("Running OTT backtest...", false);
       await runBacktestIfNeeded(config, true);
-      await loadBacktestOverlay(config);
+      const overlayPayload = await loadBacktestOverlay(config);
       renderChart({ preserveCurrentZoom: true });
-      status("OTT backtest refreshed.", false);
+      if (overlayPayload && overlayPayload.message) {
+        status(overlayPayload.message, isOttWarningStatus(overlayPayload.status));
+      } else {
+        status("OTT backtest refreshed.", false);
+      }
     } catch (error) {
       status(error.message || "OTT backtest failed.", true);
     }
