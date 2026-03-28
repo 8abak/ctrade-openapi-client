@@ -3,7 +3,7 @@ set -euo pipefail
 
 APP_DIR="/home/ec2-user/cTrade"
 VENV_ACTIVATE="/home/ec2-user/venvs/datavis/bin/activate"
-SERVICE_NAME="datavis"
+SERVICES=("datavis" "ottprocessor" "envelopeprocessor")
 HEALTH_URL="http://127.0.0.1:8000/api/health"
 
 log() {
@@ -11,12 +11,23 @@ log() {
 }
 
 show_service_status() {
-  sudo systemctl status "$SERVICE_NAME" --no-pager -l || true
+  local service_name="$1"
+  sudo systemctl status "$service_name" --no-pager -l || true
+}
+
+install_systemd_units() {
+  log "Installing systemd units"
+  for service_name in "${SERVICES[@]}"; do
+    sudo install -m 0644 "deploy/systemd/${service_name}.service" "/etc/systemd/system/${service_name}.service"
+  done
+  sudo systemctl daemon-reload
 }
 
 on_error() {
   log "Deployment failed"
-  show_service_status
+  for service_name in "${SERVICES[@]}"; do
+    show_service_status "$service_name"
+  done
 }
 
 trap on_error ERR
@@ -34,14 +45,21 @@ source "$VENV_ACTIVATE"
 log "Installing Python dependencies"
 pip install -r requirements.txt
 
-log "Restarting ${SERVICE_NAME}"
-sudo systemctl restart "$SERVICE_NAME"
+install_systemd_units
 
-log "Verifying ${SERVICE_NAME} is active"
-if ! sudo systemctl is-active --quiet "$SERVICE_NAME"; then
-  show_service_status
-  exit 1
-fi
+for service_name in "${SERVICES[@]}"; do
+  log "Enabling ${service_name}"
+  sudo systemctl enable "${service_name}.service" >/dev/null 2>&1 || true
+
+  log "Restarting ${service_name}"
+  sudo systemctl restart "${service_name}.service"
+
+  log "Verifying ${service_name} is active"
+  if ! sudo systemctl is-active --quiet "${service_name}.service"; then
+    show_service_status "${service_name}.service"
+    exit 1
+  fi
+done
 
 if command -v curl >/dev/null 2>&1; then
   log "Running local health check"

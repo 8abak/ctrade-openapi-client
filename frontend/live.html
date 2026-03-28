@@ -133,6 +133,38 @@
           <button class="ghost-button compact-button" id="runOttBacktestButton" type="button">Run Backtest</button>
         </div>
       </div>
+      <div class="live-toolbar-section">
+        <div class="live-toolbar-header">
+          <div class="live-toolbar-title">Envelope Controls</div>
+          <button class="ghost-button compact-button toolbar-collapse-button" id="envelopeBarToggle" type="button" aria-expanded="false">Expand</button>
+        </div>
+        <div class="toolbar toolbar-live ott-toolbar is-collapsed" id="envelopeControls">
+          <div class="segmented single-select" id="envelopeToggle">
+            <button type="button" data-value="on">Envelope On</button>
+            <button type="button" data-value="off">Envelope Off</button>
+          </div>
+          <label>
+            <span>Env source</span>
+            <select id="envelopeSource">
+              <option value="mid">mid</option>
+              <option value="ask">ask</option>
+              <option value="bid">bid</option>
+            </select>
+          </label>
+          <label class="ott-length-field">
+            <span>lookback</span>
+            <input id="envelopeLength" type="number" min="1" inputmode="numeric" value="500">
+          </label>
+          <label>
+            <span>bandwidth h</span>
+            <input id="envelopeBandwidth" type="number" min="0.1" step="0.1" inputmode="decimal" value="8">
+          </label>
+          <label>
+            <span>mult</span>
+            <input id="envelopeMult" type="number" min="0" step="0.1" inputmode="decimal" value="3">
+          </label>
+        </div>
+      </div>
     </section>
 
     <section class="panel chart-panel" id="chartPanel">

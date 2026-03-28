@@ -24,6 +24,17 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from datavis.db import db_connect as shared_db_connect
+from datavis.envelope import (
+    DEFAULT_ENVELOPE_BANDWIDTH,
+    DEFAULT_ENVELOPE_LENGTH,
+    DEFAULT_ENVELOPE_MULT,
+    DEFAULT_ENVELOPE_SOURCE,
+    EnvelopeConfig,
+)
+from datavis.envelope_storage import (
+    fetch_envelope_rows_for_tick_ids,
+    fetch_envelope_sync_diagnostics,
+)
 from datavis.ott import (
     DEFAULT_OTT_LENGTH,
     DEFAULT_OTT_MA_TYPE,
@@ -191,6 +202,13 @@ def build_ott_config(source: str, matype: str, length: int, percent: float) -> O
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def build_envelope_config(source: str, length: int, bandwidth: float, mult: float) -> EnvelopeConfig:
+    try:
+        return EnvelopeConfig(source=source, length=length, bandwidth=bandwidth, mult=mult).normalized()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 def tick_source_price(row: Dict[str, Any], source: str) -> Optional[float]:
     if source == "ask":
         return row.get("ask")
@@ -347,6 +365,150 @@ def build_ott_response(
         "matype": config.matype,
         "length": config.length,
         "percent": config.percent,
+    }
+
+
+def serialize_envelope_row(
+    tick_row: Dict[str, Any],
+    envelope_row: Optional[Dict[str, Any]],
+    config: EnvelopeConfig,
+) -> Dict[str, Any]:
+    timestamp = tick_row["timestamp"]
+    basis_available = bool(envelope_row is not None and envelope_row.get("basis") is not None)
+    band_available = bool(
+        envelope_row is not None
+        and envelope_row.get("upper") is not None
+        and envelope_row.get("lower") is not None
+    )
+    base = {
+        "tickid": tick_row["id"],
+        "symbol": tick_row["symbol"],
+        "timestamp": timestamp.isoformat(),
+        "timestampMs": dt_to_ms(timestamp),
+        "bid": tick_row["bid"],
+        "ask": tick_row["ask"],
+        "mid": tick_row["mid"],
+        "spread": tick_row["spread"],
+        "price": tick_source_price(tick_row, config.source),
+        "stored": envelope_row is not None,
+        "available": band_available,
+        "basisAvailable": basis_available,
+        "bandAvailable": band_available,
+        "source": config.source,
+        "length": config.length,
+        "bandwidth": config.bandwidth,
+        "mult": config.mult,
+        "basis": None,
+        "mae": None,
+        "upper": None,
+        "lower": None,
+    }
+    if envelope_row is None:
+        return base
+
+    base.update(
+        {
+            "price": envelope_row.get("price", base["price"]),
+            "basis": envelope_row.get("basis"),
+            "mae": envelope_row.get("mae"),
+            "upper": envelope_row.get("upper"),
+            "lower": envelope_row.get("lower"),
+        }
+    )
+    return base
+
+
+def build_envelope_response(
+    tick_rows: List[Dict[str, Any]],
+    config: EnvelopeConfig,
+    *,
+    mode: Optional[str] = None,
+    requested_start_id: Optional[int] = None,
+    advanced_from_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    tick_ids = [int(row["id"]) for row in tick_rows]
+    envelope_rows = fetch_envelope_rows_for_tick_ids(TICK_SYMBOL, tick_ids, config)
+    rows = [serialize_envelope_row(row, envelope_rows.get(int(row["id"])), config) for row in tick_rows]
+    stored_count = sum(1 for row in rows if row["stored"])
+    basis_available_count = sum(1 for row in rows if row["basisAvailable"])
+    band_available_count = sum(1 for row in rows if row["bandAvailable"])
+    requested_first_id = rows[0]["tickid"] if rows else requested_start_id
+    requested_last_id = rows[-1]["tickid"] if rows else requested_start_id
+    diagnostics = fetch_envelope_sync_diagnostics(
+        TICK_SYMBOL,
+        config,
+        requested_start_tick_id=requested_first_id,
+        requested_end_tick_id=requested_last_id,
+    )
+    latest_stored_tick_id = diagnostics["latestStoredTickId"]
+    gap_ahead_of_storage = int(diagnostics["requested"]["gapCountAheadOfStorage"] or 0)
+
+    if not rows:
+        status_text = "no-ticks"
+        message = "No ticks matched the requested envelope window."
+    elif stored_count == 0:
+        if latest_stored_tick_id is None:
+            status_text = "empty"
+            message = "No stored envelope rows exist for the requested source/length/bandwidth/mult yet. Run the envelope worker or backfill."
+        else:
+            status_text = "ahead"
+            message = (
+                "Stored envelope rows currently stop at tick {0}; requested ticks reach {1}. "
+                "Run the envelope worker or backfill to extend storage."
+            ).format(latest_stored_tick_id, requested_last_id)
+    elif band_available_count == 0:
+        if gap_ahead_of_storage > 0 and latest_stored_tick_id is not None:
+            status_text = "ahead"
+            message = (
+                "Stored envelope rows currently stop at tick {0}; requested ticks reach {1}. "
+                "Missing {2} row(s) in this window."
+            ).format(latest_stored_tick_id, requested_last_id, len(rows) - stored_count)
+        elif basis_available_count > 0:
+            status_text = "warming"
+            message = "Envelope basis is available, but upper/lower bands are still warming up in this window."
+        else:
+            status_text = "warming"
+            message = "Envelope warmup is not complete in the requested window yet."
+    elif band_available_count < len(rows):
+        if gap_ahead_of_storage > 0 and latest_stored_tick_id is not None:
+            status_text = "ahead"
+            message = (
+                "Stored envelope rows currently stop at tick {0}; requested ticks reach {1}. "
+                "Missing {2} row(s) in this window."
+            ).format(latest_stored_tick_id, requested_last_id, len(rows) - stored_count)
+        else:
+            status_text = "partial"
+            message = "Envelope history is only partially available in the requested window."
+    else:
+        status_text = "ok"
+        message = None
+
+    return {
+        "rows": rows,
+        "rowCount": len(rows),
+        "storedRowCount": stored_count,
+        "basisAvailableRowCount": basis_available_count,
+        "availableRowCount": band_available_count,
+        "missingRowCount": len(rows) - band_available_count,
+        "status": status_text,
+        "message": message,
+        "firstId": rows[0]["tickid"] if rows else None,
+        "lastId": rows[-1]["tickid"] if rows else requested_start_id,
+        "requestedId": requested_start_id,
+        "advancedFromId": advanced_from_id,
+        "latestStoredTickId": latest_stored_tick_id,
+        "storageFirstTickId": diagnostics["storage"]["firstTickId"],
+        "storageRowCount": diagnostics["storage"]["rowCount"],
+        "storageBandRowCount": diagnostics["storage"]["bandRowCount"],
+        "jobStateLastTickId": diagnostics["jobState"]["lastTickId"],
+        "gapAheadOfStorage": gap_ahead_of_storage,
+        "coverage": diagnostics,
+        "mode": mode,
+        "symbol": TICK_SYMBOL,
+        "source": config.source,
+        "length": config.length,
+        "bandwidth": config.bandwidth,
+        "mult": config.mult,
     }
 
 
@@ -1793,6 +1955,45 @@ def ott_next(
         return build_ott_response(rows, config, advanced_from_id=afterId, signalmode=signalmode)
     except Exception as exc:
         raise HTTPException(status_code=500, detail="OTT incremental fetch failed: {0}".format(exc)) from exc
+
+
+@app.get("/api/envelope/bootstrap")
+def envelope_bootstrap(
+    mode: str = Query("live", pattern="^(live|review)$"),
+    id: Optional[int] = Query(None, ge=1),
+    window: int = Query(DEFAULT_WINDOW, ge=1, le=MAX_WINDOW),
+    endId: Optional[int] = Query(None, ge=1),
+    source: str = Query(DEFAULT_ENVELOPE_SOURCE, pattern="^(ask|bid|mid)$"),
+    length: int = Query(DEFAULT_ENVELOPE_LENGTH, ge=1, le=10000),
+    bandwidth: float = Query(DEFAULT_ENVELOPE_BANDWIDTH, gt=0),
+    mult: float = Query(DEFAULT_ENVELOPE_MULT, ge=0),
+) -> Dict[str, Any]:
+    config = build_envelope_config(source, length, bandwidth, mult)
+    try:
+        rows = fetch_bootstrap_tick_rows(TICK_SYMBOL, mode, id, window, end_id=endId)
+        return build_envelope_response(rows, config, mode=mode, requested_start_id=id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Envelope bootstrap failed: {0}".format(exc)) from exc
+
+
+@app.get("/api/envelope/next")
+def envelope_next(
+    afterId: int = Query(..., ge=0),
+    limit: int = Query(250, ge=1, le=MAX_STREAM_BATCH),
+    endId: Optional[int] = Query(None, ge=1),
+    source: str = Query(DEFAULT_ENVELOPE_SOURCE, pattern="^(ask|bid|mid)$"),
+    length: int = Query(DEFAULT_ENVELOPE_LENGTH, ge=1, le=10000),
+    bandwidth: float = Query(DEFAULT_ENVELOPE_BANDWIDTH, gt=0),
+    mult: float = Query(DEFAULT_ENVELOPE_MULT, ge=0),
+) -> Dict[str, Any]:
+    config = build_envelope_config(source, length, bandwidth, mult)
+    try:
+        rows = fetch_next_tick_rows(TICK_SYMBOL, afterId, limit, end_id=endId)
+        return build_envelope_response(rows, config, advanced_from_id=afterId)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Envelope incremental fetch failed: {0}".format(exc)) from exc
 
 
 @app.post("/api/ott/backtest/run")

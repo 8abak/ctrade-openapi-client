@@ -7,6 +7,7 @@
     reviewSpeed: 1,
     primaryBarCollapsed: false,
     ottBarCollapsed: true,
+    envelopeBarCollapsed: true,
     window: 2000,
     series: ["mid"],
     ottEnabled: true,
@@ -20,6 +21,11 @@
     ottLength: 2,
     ottPercent: 1.4,
     ottRangePreset: "lastweek",
+    envelopeEnabled: true,
+    envelopeSource: "mid",
+    envelopeLength: 500,
+    envelopeBandwidth: 8,
+    envelopeMult: 3,
   };
   const SYDNEY_TIMEZONE = "Australia/Sydney";
   const REVIEW_SPEEDS = [0.5, 1, 2, 3, 5];
@@ -29,6 +35,7 @@
   const REVIEW_PREFETCH_RATIO = 0.65;
   const REVIEW_PREFETCH_MIN_PLAYBACK_MS = 12000;
   const REVIEW_OTT_RETRY_DELAY_MS = 250;
+  const REVIEW_ENVELOPE_RETRY_DELAY_MS = 250;
   const BACKTEST_OVERLAY_TIMEOUT_MS = 8000;
   const BACKTEST_RUN_TIMEOUT_MS = 45000;
   const CHART_RESIZE_RETRY_LIMIT = 6;
@@ -64,6 +71,9 @@
     ottLastId: 0,
     ottStatusPayload: null,
     ottOverlayPayload: null,
+    envelopeRows: new Map(),
+    envelopeLastId: 0,
+    envelopeStatusPayload: null,
     backtest: {
       overlayRequestToken: 0,
       overlayController: null,
@@ -72,6 +82,7 @@
     loadStatus: {
       chart: { text: "Chart: waiting.", severity: "info" },
       ott: { text: "OTT: waiting.", severity: "info" },
+      envelope: { text: "Envelope: waiting.", severity: "info" },
       backtest: { text: "Backtest: idle.", severity: "info" },
     },
     review: {
@@ -82,6 +93,7 @@
       exhausted: false,
       fetchPromise: null,
       ottFetchPromise: null,
+      envelopeFetchPromise: null,
       rafId: 0,
       anchorVisibleCount: 0,
       anchorTimestampMs: 0,
@@ -93,15 +105,19 @@
       sessionEndTimestamp: null,
       fetchingTicks: false,
       fetchingOtt: false,
+      fetchingEnvelope: false,
       trueEndReached: false,
       requestedVisibleCount: 0,
       waitingFor: null,
       ottRequestedEndId: 0,
       lastOttRequestAt: 0,
+      envelopeRequestedEndId: 0,
+      lastEnvelopeRequestAt: 0,
     },
     ui: {
       primaryBarCollapsed: DEFAULTS.primaryBarCollapsed,
       ottBarCollapsed: DEFAULTS.ottBarCollapsed,
+      envelopeBarCollapsed: DEFAULTS.envelopeBarCollapsed,
     },
   };
 
@@ -132,10 +148,17 @@
     ottPercent: document.getElementById("ottPercent"),
     ottRangePreset: document.getElementById("ottRangePreset"),
     runOttBacktestButton: document.getElementById("runOttBacktestButton"),
+    envelopeToggle: document.getElementById("envelopeToggle"),
+    envelopeSource: document.getElementById("envelopeSource"),
+    envelopeLength: document.getElementById("envelopeLength"),
+    envelopeBandwidth: document.getElementById("envelopeBandwidth"),
+    envelopeMult: document.getElementById("envelopeMult"),
     primaryControls: document.getElementById("primaryControls"),
     ottControls: document.getElementById("ottControls"),
+    envelopeControls: document.getElementById("envelopeControls"),
     primaryBarToggle: document.getElementById("primaryBarToggle"),
     ottBarToggle: document.getElementById("ottBarToggle"),
+    envelopeBarToggle: document.getElementById("envelopeBarToggle"),
   };
 
   function currentChartHost() {
@@ -248,6 +271,9 @@
     const windowSize = Number.parseInt(params.get("window"), 10);
     const ottLength = Number.parseInt(params.get("ottLength"), 10);
     const ottPercent = Number.parseFloat(params.get("ottPercent"));
+    const envelopeLength = Number.parseInt(params.get("envelopeLength"), 10);
+    const envelopeBandwidth = Number.parseFloat(params.get("envelopeBandwidth"));
+    const envelopeMult = Number.parseFloat(params.get("envelopeMult"));
     return {
       mode,
       run,
@@ -256,6 +282,7 @@
       reviewSpeed: sanitizeReviewSpeed(params.get("reviewSpeed")),
       primaryBarCollapsed: parseCollapsed(params.get("primaryBar"), DEFAULTS.primaryBarCollapsed),
       ottBarCollapsed: parseCollapsed(params.get("ottBar"), DEFAULTS.ottBarCollapsed),
+      envelopeBarCollapsed: parseCollapsed(params.get("envelopeBar"), DEFAULTS.envelopeBarCollapsed),
       window: Number.isFinite(windowSize) && windowSize > 0 ? windowSize : DEFAULTS.window,
       series: parseSeries(params.get("series")),
       ottEnabled: parseBoolean(params.get("ott"), DEFAULTS.ottEnabled),
@@ -269,6 +296,11 @@
       ottLength: Number.isFinite(ottLength) && ottLength > 0 ? ottLength : DEFAULTS.ottLength,
       ottPercent: Number.isFinite(ottPercent) && ottPercent >= 0 ? ottPercent : DEFAULTS.ottPercent,
       ottRangePreset: params.get("ottRangePreset") === "lastweek" ? "lastweek" : DEFAULTS.ottRangePreset,
+      envelopeEnabled: parseBoolean(params.get("envelope"), DEFAULTS.envelopeEnabled),
+      envelopeSource: ["ask", "bid", "mid"].includes(params.get("envelopeSource")) ? params.get("envelopeSource") : DEFAULTS.envelopeSource,
+      envelopeLength: Number.isFinite(envelopeLength) && envelopeLength > 0 ? envelopeLength : DEFAULTS.envelopeLength,
+      envelopeBandwidth: Number.isFinite(envelopeBandwidth) && envelopeBandwidth > 0 ? envelopeBandwidth : DEFAULTS.envelopeBandwidth,
+      envelopeMult: Number.isFinite(envelopeMult) && envelopeMult >= 0 ? envelopeMult : DEFAULTS.envelopeMult,
     };
   }
 
@@ -308,10 +340,13 @@
   function syncToolbarState() {
     setToolbarCollapsed(elements.primaryControls, state.ui.primaryBarCollapsed);
     setToolbarCollapsed(elements.ottControls, state.ui.ottBarCollapsed);
+    setToolbarCollapsed(elements.envelopeControls, state.ui.envelopeBarCollapsed);
     elements.primaryBarToggle.textContent = state.ui.primaryBarCollapsed ? "Expand" : "Collapse";
     elements.primaryBarToggle.setAttribute("aria-expanded", String(!state.ui.primaryBarCollapsed));
     elements.ottBarToggle.textContent = state.ui.ottBarCollapsed ? "Expand" : "Collapse";
     elements.ottBarToggle.setAttribute("aria-expanded", String(!state.ui.ottBarCollapsed));
+    elements.envelopeBarToggle.textContent = state.ui.envelopeBarCollapsed ? "Expand" : "Collapse";
+    elements.envelopeBarToggle.setAttribute("aria-expanded", String(!state.ui.envelopeBarCollapsed));
   }
 
   function updateReviewControlState() {
@@ -329,6 +364,7 @@
     state.review.playbackSpeed = config.reviewSpeed;
     state.ui.primaryBarCollapsed = Boolean(config.primaryBarCollapsed);
     state.ui.ottBarCollapsed = Boolean(config.ottBarCollapsed);
+    state.ui.envelopeBarCollapsed = Boolean(config.envelopeBarCollapsed);
     state.activeSeries = { ask: false, bid: false, mid: false };
     config.series.forEach((seriesKey) => {
       state.activeSeries[seriesKey] = true;
@@ -346,9 +382,14 @@
     elements.ottLength.value = String(config.ottLength);
     elements.ottPercent.value = String(config.ottPercent);
     elements.ottRangePreset.value = config.ottRangePreset;
+    elements.envelopeSource.value = config.envelopeSource;
+    elements.envelopeLength.value = String(config.envelopeLength);
+    elements.envelopeBandwidth.value = String(config.envelopeBandwidth);
+    elements.envelopeMult.value = String(config.envelopeMult);
     setSegment(elements.modeToggle, config.mode);
     setSegment(elements.runToggle, config.run);
     setSegment(elements.ottToggle, config.ottEnabled ? "on" : "off");
+    setSegment(elements.envelopeToggle, config.envelopeEnabled ? "on" : "off");
     syncSeriesButtons();
     syncReviewSpeedButtons();
     syncToolbarState();
@@ -364,6 +405,7 @@
       reviewSpeed: state.review.playbackSpeed,
       primaryBarCollapsed: state.ui.primaryBarCollapsed,
       ottBarCollapsed: state.ui.ottBarCollapsed,
+      envelopeBarCollapsed: state.ui.envelopeBarCollapsed,
       window: Math.max(1, Math.min(10000, Number.parseInt(elements.windowSize.value, 10) || DEFAULTS.window)),
       series: getActiveSeriesKeys(),
       ottEnabled: elements.ottToggle.querySelector("button.active")?.dataset.value !== "off",
@@ -377,6 +419,11 @@
       ottLength: Math.max(1, Number.parseInt(elements.ottLength.value, 10) || DEFAULTS.ottLength),
       ottPercent: Math.max(0, Number.parseFloat(elements.ottPercent.value) || DEFAULTS.ottPercent),
       ottRangePreset: elements.ottRangePreset.value || DEFAULTS.ottRangePreset,
+      envelopeEnabled: elements.envelopeToggle.querySelector("button.active")?.dataset.value !== "off",
+      envelopeSource: elements.envelopeSource.value,
+      envelopeLength: Math.max(1, Number.parseInt(elements.envelopeLength.value, 10) || DEFAULTS.envelopeLength),
+      envelopeBandwidth: Math.max(0.1, Number.parseFloat(elements.envelopeBandwidth.value) || DEFAULTS.envelopeBandwidth),
+      envelopeMult: Math.max(0, Number.parseFloat(elements.envelopeMult.value) || DEFAULTS.envelopeMult),
     };
   }
 
@@ -388,6 +435,7 @@
     params.set("reviewSpeed", String(config.reviewSpeed));
     params.set("primaryBar", config.primaryBarCollapsed ? "1" : "0");
     params.set("ottBar", config.ottBarCollapsed ? "1" : "0");
+    params.set("envelopeBar", config.envelopeBarCollapsed ? "1" : "0");
     params.set("series", config.series.join(","));
     params.set("ott", config.ottEnabled ? "1" : "0");
     params.set("ottSupport", config.ottSupport ? "1" : "0");
@@ -400,6 +448,11 @@
     params.set("ottLength", String(config.ottLength));
     params.set("ottPercent", String(config.ottPercent));
     params.set("ottRangePreset", config.ottRangePreset);
+    params.set("envelope", config.envelopeEnabled ? "1" : "0");
+    params.set("envelopeSource", config.envelopeSource);
+    params.set("envelopeLength", String(config.envelopeLength));
+    params.set("envelopeBandwidth", String(config.envelopeBandwidth));
+    params.set("envelopeMult", String(config.envelopeMult));
     if (config.id) {
       params.set("id", config.id);
     }
@@ -425,7 +478,7 @@
   }
 
   function renderLoadStatus() {
-    const parts = ["chart", "ott", "backtest"]
+    const parts = ["chart", "ott", "envelope", "backtest"]
       .map((key) => state.loadStatus[key])
       .filter((entry) => entry && entry.text);
     elements.statusLine.textContent = parts.map((entry) => entry.text).join(" | ") || "Ready.";
@@ -435,6 +488,7 @@
   function initializeLoadStatus(config) {
     setLoadStatus("chart", "Chart: loading...", "info", { silent: true });
     setLoadStatus("ott", shouldLoadOtt(config) ? "OTT: loading..." : "OTT: off.", "info", { silent: true });
+    setLoadStatus("envelope", shouldLoadEnvelope(config) ? "Envelope: loading..." : "Envelope: off.", "info", { silent: true });
     if (config.mode === "review") {
       setLoadStatus(
         "backtest",
@@ -457,7 +511,7 @@
       setLoadStatus(
         "ott",
         "OTT: " + (payload.message || payload.status + "."),
-        isOttWarningStatus(payload.status) ? "warn" : "error"
+        isOverlayWarningStatus(payload.status) ? "warn" : "error"
       );
       return;
     }
@@ -476,6 +530,34 @@
     setLoadStatus("ott", "OTT: loaded " + Number(availableCount || 0) + " row(s).", "info");
   }
 
+  function updateEnvelopeLoadStatus(payload) {
+    if (!payload) {
+      setLoadStatus("envelope", "Envelope: off.", "info");
+      return;
+    }
+    if (payload.status && payload.status !== "ok") {
+      setLoadStatus(
+        "envelope",
+        "Envelope: " + (payload.message || payload.status + "."),
+        isOverlayWarningStatus(payload.status) ? "warn" : "error"
+      );
+      return;
+    }
+    const config = currentConfig();
+    if (config.mode === "review") {
+      const coverage = reviewEnvelopeCoverage();
+      setLoadStatus(
+        "envelope",
+        "Envelope: synced " + coverage.storedCount + "/" + state.review.bufferRows.length + " stored row(s), bands " + coverage.bandAvailableCount + ".",
+        coverage.storedCount < state.review.bufferRows.length ? "warn" : "info"
+      );
+      return;
+    }
+    const storedCount = payload.storedRowCount != null ? payload.storedRowCount : payload.rowCount;
+    const bandCount = payload.availableRowCount != null ? payload.availableRowCount : storedCount;
+    setLoadStatus("envelope", "Envelope: loaded " + Number(storedCount || 0) + " row(s), bands " + Number(bandCount || 0) + ".", "info");
+  }
+
   function updateBacktestLoadStatus(payload) {
     if (!payload || !payload.run) {
       setLoadStatus("backtest", "Backtest: no cached backtest yet. Click Run Backtest.", "info");
@@ -486,7 +568,7 @@
       setLoadStatus(
         "backtest",
         prefix + payload.message,
-        payload.status === "no-trades" ? "info" : (isOttWarningStatus(payload.status) ? "warn" : "error")
+        payload.status === "no-trades" ? "info" : (isOverlayWarningStatus(payload.status) ? "warn" : "error")
       );
       return;
     }
@@ -519,8 +601,8 @@
     state.backtest.runController = null;
   }
 
-  function isOttWarningStatus(statusValue) {
-    return ["empty", "partial", "ahead", "no-signals", "no-trades", "not-cached"].includes(statusValue);
+  function isOverlayWarningStatus(statusValue) {
+    return ["empty", "partial", "ahead", "warming", "no-signals", "no-trades", "not-cached"].includes(statusValue);
   }
 
   function formatSignalCounts(signalCounts) {
@@ -571,13 +653,57 @@
     };
   }
 
-  function collectOttMessages(config) {
+  function reviewEnvelopeCoverage() {
+    const firstBufferedId = state.review.bufferRows.length ? state.review.bufferRows[0].id : null;
+    const lastBufferedId = state.review.bufferRows.length
+      ? state.review.bufferRows[state.review.bufferRows.length - 1].id
+      : null;
+    let storedCount = 0;
+    let basisAvailableCount = 0;
+    let bandAvailableCount = 0;
+    let lastStoredId = null;
+    let lastBandId = null;
+
+    state.review.bufferRows.forEach((row) => {
+      const envelopeRow = state.envelopeRows.get(row.id);
+      if (!envelopeRow) {
+        return;
+      }
+      storedCount += 1;
+      lastStoredId = row.id;
+      if (envelopeRow.basisAvailable) {
+        basisAvailableCount += 1;
+      }
+      if (envelopeRow.bandAvailable) {
+        bandAvailableCount += 1;
+        lastBandId = row.id;
+      }
+    });
+
+    return {
+      firstBufferedId,
+      lastBufferedId,
+      storedCount,
+      basisAvailableCount,
+      bandAvailableCount,
+      lastStoredId,
+      lastBandId,
+    };
+  }
+
+  function collectOverlayMessages(config) {
     const messages = [];
     const statuses = [];
     if (shouldLoadOtt(config) && state.ottStatusPayload && state.ottStatusPayload.status && state.ottStatusPayload.status !== "ok") {
       statuses.push(state.ottStatusPayload.status);
       if (state.ottStatusPayload.message) {
         messages.push(state.ottStatusPayload.message);
+      }
+    }
+    if (shouldLoadEnvelope(config) && state.envelopeStatusPayload && state.envelopeStatusPayload.status && state.envelopeStatusPayload.status !== "ok") {
+      statuses.push(state.envelopeStatusPayload.status);
+      if (state.envelopeStatusPayload.message) {
+        messages.push(state.envelopeStatusPayload.message);
       }
     }
     if (config.mode === "review" && state.ottOverlayPayload && state.ottOverlayPayload.status && state.ottOverlayPayload.status !== "ok") {
@@ -588,7 +714,7 @@
     }
     return {
       messages,
-      hasWarning: statuses.some((value) => isOttWarningStatus(value)),
+      hasWarning: statuses.some((value) => isOverlayWarningStatus(value)),
     };
   }
 
@@ -855,6 +981,10 @@
     return config.ottEnabled || config.ottSupport || config.ottMarkers || (config.mode === "review" && config.ottTrades);
   }
 
+  function shouldLoadEnvelope(config) {
+    return config.envelopeEnabled;
+  }
+
   function signalMarkerOffset(row, ottRow) {
     const basePrice = typeof (ottRow && ottRow.price) === "number"
       ? ottRow.price
@@ -919,6 +1049,21 @@
             minPrice = Math.min(minPrice, markValue);
             maxPrice = Math.max(maxPrice, markValue);
           }
+        }
+      }
+      const envelopeRow = state.envelopeRows.get(row.id);
+      if (envelopeRow && config.envelopeEnabled) {
+        if (typeof envelopeRow.basis === "number") {
+          minPrice = Math.min(minPrice, envelopeRow.basis);
+          maxPrice = Math.max(maxPrice, envelopeRow.basis);
+        }
+        if (typeof envelopeRow.upper === "number") {
+          minPrice = Math.min(minPrice, envelopeRow.upper);
+          maxPrice = Math.max(maxPrice, envelopeRow.upper);
+        }
+        if (typeof envelopeRow.lower === "number") {
+          minPrice = Math.min(minPrice, envelopeRow.lower);
+          maxPrice = Math.max(maxPrice, envelopeRow.lower);
         }
       }
     });
@@ -1184,6 +1329,50 @@
     return overlaySeries.concat(buildSignalSeries(rows, config), buildTradeSeries(config));
   }
 
+  function buildEnvelopeSeries(rows, config) {
+    if (!shouldLoadEnvelope(config)) {
+      return [];
+    }
+    return [
+      {
+        name: "Envelope Basis",
+        type: "line",
+        showSymbol: false,
+        smooth: false,
+        connectNulls: false,
+        data: rows.map((row) => {
+          const envelopeRow = state.envelopeRows.get(row.id);
+          return [row.timestampMs, envelopeRow && envelopeRow.basisAvailable ? envelopeRow.basis : null];
+        }),
+        lineStyle: { width: 1.8, color: "#f8d36c", type: "dashed", opacity: 0.96 },
+      },
+      {
+        name: "Envelope Upper",
+        type: "line",
+        showSymbol: false,
+        smooth: false,
+        connectNulls: false,
+        data: rows.map((row) => {
+          const envelopeRow = state.envelopeRows.get(row.id);
+          return [row.timestampMs, envelopeRow && envelopeRow.bandAvailable ? envelopeRow.upper : null];
+        }),
+        lineStyle: { width: 1.45, color: "#5eead4", opacity: 0.9 },
+      },
+      {
+        name: "Envelope Lower",
+        type: "line",
+        showSymbol: false,
+        smooth: false,
+        connectNulls: false,
+        data: rows.map((row) => {
+          const envelopeRow = state.envelopeRows.get(row.id);
+          return [row.timestampMs, envelopeRow && envelopeRow.bandAvailable ? envelopeRow.lower : null];
+        }),
+        lineStyle: { width: 1.45, color: "#fda4af", opacity: 0.9 },
+      },
+    ];
+  }
+
   function canonicalTooltipSeriesName(seriesName) {
     if (seriesName === "OTT" || seriesName === "OTT Up" || seriesName === "OTT Down") {
       return "OTT";
@@ -1304,7 +1493,7 @@
         valueByLabel.set(label, Number(value).toFixed(2));
       });
 
-      ["Mid", "OTT", "OTT Support", "Ask", "Bid"].forEach((label) => {
+      ["Mid", "Envelope Basis", "Envelope Upper", "Envelope Lower", "OTT", "OTT Support", "Ask", "Bid"].forEach((label) => {
         if (valueByLabel.has(label)) {
           lines.push(label + ": " + valueByLabel.get(label));
           valueByLabel.delete(label);
@@ -1386,6 +1575,10 @@
     }
     if (lastOtt && lastOtt.ott2 != null && config.ottEnabled) {
       meta.push("OTT " + Number(lastOtt.ott2).toFixed(2));
+    }
+    const lastEnvelope = state.envelopeRows.get(lastRow.id);
+    if (lastEnvelope && lastEnvelope.basisAvailable && config.envelopeEnabled) {
+      meta.push("Env " + Number(lastEnvelope.basis).toFixed(2));
     }
     if (config.mode === "review" && state.ottStatusPayload && state.ottStatusPayload.signalCounts) {
       meta.push(formatSignalCounts(state.ottStatusPayload.signalCounts));
@@ -1546,7 +1739,9 @@
             },
           },
         ],
-        series: buildPriceSeries(state.rows, selected).concat(buildOttSeries(state.rows, config)),
+        series: buildPriceSeries(state.rows, selected)
+          .concat(buildEnvelopeSeries(state.rows, config))
+          .concat(buildOttSeries(state.rows, config)),
       }, true);
     } catch (error) {
       if (isOffsetWidthError(error)) {
@@ -1588,6 +1783,7 @@
     state.review.exhausted = false;
     state.review.fetchPromise = null;
     state.review.ottFetchPromise = null;
+    state.review.envelopeFetchPromise = null;
     state.review.anchorVisibleCount = 0;
     state.review.anchorTimestampMs = 0;
     state.review.anchorPerfMs = 0;
@@ -1598,10 +1794,13 @@
     state.review.sessionEndTimestamp = null;
     state.review.fetchingTicks = false;
     state.review.fetchingOtt = false;
+    state.review.fetchingEnvelope = false;
     state.review.trueEndReached = false;
     state.review.waitingFor = null;
     state.review.ottRequestedEndId = 0;
     state.review.lastOttRequestAt = 0;
+    state.review.envelopeRequestedEndId = 0;
+    state.review.lastEnvelopeRequestAt = 0;
   }
 
   function setReviewVisibleCount(nextCount, options) {
@@ -1702,6 +1901,16 @@
     state.review.lastOttRequestAt = 0;
   }
 
+  function clearEnvelopeState() {
+    state.envelopeRows = new Map();
+    state.envelopeLastId = 0;
+    state.envelopeStatusPayload = null;
+    state.review.envelopeFetchPromise = null;
+    state.review.fetchingEnvelope = false;
+    state.review.envelopeRequestedEndId = 0;
+    state.review.lastEnvelopeRequestAt = 0;
+  }
+
   function fetchReviewOttChunk(config, options) {
     if (config.mode !== "review" || !shouldLoadOtt(config)) {
       return Promise.resolve(null);
@@ -1764,6 +1973,67 @@
     return state.review.ottFetchPromise;
   }
 
+  function fetchReviewEnvelopeChunk(config, options) {
+    if (config.mode !== "review" || !shouldLoadEnvelope(config)) {
+      return Promise.resolve(null);
+    }
+    if (state.review.envelopeFetchPromise) {
+      return state.review.envelopeFetchPromise;
+    }
+    const requestedAfterId = options && options.afterId != null
+      ? options.afterId
+      : Math.max(0, state.review.envelopeRequestedEndId || reviewBufferStartAfterId());
+    const effectiveAfterId = Math.max(0, requestedAfterId || 0);
+    const targetEndId = options && options.endId != null ? options.endId : state.review.lastBufferedId;
+    if (targetEndId != null && effectiveAfterId >= targetEndId) {
+      return Promise.resolve(null);
+    }
+    const nowMs = performance.now();
+    if (
+      (!options || !options.force)
+      && targetEndId != null
+      && targetEndId <= state.review.envelopeRequestedEndId
+      && (nowMs - state.review.lastEnvelopeRequestAt) < REVIEW_ENVELOPE_RETRY_DELAY_MS
+    ) {
+      return Promise.resolve(null);
+    }
+    const limit = Math.max(
+      1,
+      Math.min(
+        REVIEW_PREFETCH_CEILING,
+        options && options.limitOverride != null
+          ? Math.max(options.limitOverride, targetEndId != null ? (targetEndId - effectiveAfterId) : 0)
+          : Math.max(reviewPrefetchLimit(config), targetEndId != null ? (targetEndId - effectiveAfterId) : 0)
+      )
+    );
+    state.review.envelopeRequestedEndId = Math.max(state.review.envelopeRequestedEndId, targetEndId || 0);
+    state.review.lastEnvelopeRequestAt = nowMs;
+    state.review.fetchingEnvelope = true;
+    setLoadStatus("envelope", "Envelope: syncing review chunk...", "info");
+    buildMetaText();
+    state.review.envelopeFetchPromise = loadEnvelopeNext(effectiveAfterId, config, {
+      limitOverride: limit,
+      endId: targetEndId,
+    })
+      .then((payload) => {
+        updateEnvelopeLoadStatus(payload || state.envelopeStatusPayload);
+        if (state.rows.length) {
+          renderChart({ preserveCurrentZoom: true });
+        }
+        return payload;
+      })
+      .catch((error) => {
+        setLoadStatus("envelope", "Envelope: " + (error.message || "matching review chunk failed."), "error");
+        throw error;
+      })
+      .finally(() => {
+        state.review.fetchingEnvelope = false;
+        state.review.envelopeFetchPromise = null;
+        buildMetaText();
+      });
+    return state.review.envelopeFetchPromise;
+  }
+
   function applyOttPayload(payload, reset) {
     if (reset) {
       state.ottRows = new Map();
@@ -1777,6 +2047,22 @@
     state.ottStatusPayload = payload;
     if (payload.lastId != null) {
       state.review.ottRequestedEndId = Math.max(state.review.ottRequestedEndId, payload.lastId);
+    }
+  }
+
+  function applyEnvelopePayload(payload, reset) {
+    if (reset) {
+      state.envelopeRows = new Map();
+      state.envelopeLastId = 0;
+      state.review.envelopeRequestedEndId = 0;
+    }
+    (payload.rows || []).forEach((row) => {
+      state.envelopeRows.set(row.tickid, row);
+    });
+    state.envelopeLastId = payload.lastId || payload.rows?.[payload.rows.length - 1]?.tickid || state.envelopeLastId;
+    state.envelopeStatusPayload = payload;
+    if (payload.lastId != null) {
+      state.review.envelopeRequestedEndId = Math.max(state.review.envelopeRequestedEndId, payload.lastId);
     }
   }
 
@@ -1863,6 +2149,26 @@
     return payload;
   }
 
+  async function loadEnvelopeBootstrap(config) {
+    const params = new URLSearchParams({
+      mode: config.mode,
+      window: String(config.window),
+      source: config.envelopeSource,
+      length: String(config.envelopeLength),
+      bandwidth: String(config.envelopeBandwidth),
+      mult: String(config.envelopeMult),
+    });
+    if (config.mode === "review" && config.id) {
+      params.set("id", config.id);
+      if (state.review.sessionEndId != null) {
+        params.set("endId", String(state.review.sessionEndId));
+      }
+    }
+    const payload = await fetchJson("/api/envelope/bootstrap?" + params.toString());
+    applyEnvelopePayload(payload, true);
+    return payload;
+  }
+
   async function loadOttNext(afterId, config, options) {
     if (!shouldLoadOtt(config)) {
       return null;
@@ -1884,6 +2190,29 @@
     }
     const payload = await fetchJson("/api/ott/next?" + params.toString());
     applyOttPayload(payload, false);
+    return payload;
+  }
+
+  async function loadEnvelopeNext(afterId, config, options) {
+    if (!shouldLoadEnvelope(config)) {
+      return null;
+    }
+    const requestOptions = typeof options === "number"
+      ? { limitOverride: options }
+      : (options || {});
+    const params = new URLSearchParams({
+      afterId: String(afterId),
+      limit: String(requestOptions.limitOverride || Math.max(50, Math.min(500, config.window))),
+      source: config.envelopeSource,
+      length: String(config.envelopeLength),
+      bandwidth: String(config.envelopeBandwidth),
+      mult: String(config.envelopeMult),
+    });
+    if (requestOptions.endId != null) {
+      params.set("endId", String(requestOptions.endId));
+    }
+    const payload = await fetchJson("/api/envelope/next?" + params.toString());
+    applyEnvelopePayload(payload, false);
     return payload;
   }
 
@@ -2085,6 +2414,10 @@
           fetchReviewOttChunk(config, { endId: state.review.lastBufferedId }).catch(() => null);
         }
 
+        if (shouldLoadEnvelope(config) && reviewEnvelopeCoverage().storedCount < state.review.bufferRows.length) {
+          fetchReviewEnvelopeChunk(config, { endId: state.review.lastBufferedId }).catch(() => null);
+        }
+
         if (config.ottTrades) {
           loadBacktestOverlay(config, state.review.bufferRows, { silentStatus: true })
             .then((overlayPayload) => {
@@ -2120,6 +2453,7 @@
     const ottCoverage = reviewOttCoverage();
     const remainingOtt = ottCoverage.contiguousAvailableCount - state.review.visibleCount;
     const remainingOttPlaybackMs = reviewRemainingPlaybackMsToCount(ottCoverage.contiguousAvailableCount);
+    const envelopeCoverage = reviewEnvelopeCoverage();
     if (
       !state.review.exhausted &&
       (
@@ -2144,6 +2478,21 @@
         limitOverride: reviewPrefetchLimit(config),
       }).catch((error) => {
         status(error.message || "OTT sync failed.", true);
+      });
+    }
+    if (
+      shouldLoadEnvelope(config)
+      && envelopeCoverage.storedCount < state.review.bufferRows.length
+      && (
+        remaining <= reviewPrefetchThreshold(config)
+        || (remainingPlaybackMs != null && remainingPlaybackMs <= REVIEW_PREFETCH_MIN_PLAYBACK_MS)
+      )
+    ) {
+      fetchReviewEnvelopeChunk(config, {
+        endId: state.review.lastBufferedId,
+        limitOverride: reviewPrefetchLimit(config),
+      }).catch((error) => {
+        status(error.message || "Envelope sync failed.", true);
       });
     }
   }
@@ -2261,17 +2610,28 @@
         state.rows = state.rows.slice(state.rows.length - maxBuffer);
       }
 
-      const renderAfterOtt = shouldLoadOtt(config)
-        ? loadOttNext(previousLastId, config).catch((error) => {
-          status(error.message || "OTT incremental update failed.", true);
-          return null;
-        })
-        : Promise.resolve(null);
+      const overlayRequests = [];
+      if (shouldLoadOtt(config)) {
+        overlayRequests.push(
+          loadOttNext(previousLastId, config).catch((error) => {
+            status(error.message || "OTT incremental update failed.", true);
+            return null;
+          })
+        );
+      }
+      if (shouldLoadEnvelope(config)) {
+        overlayRequests.push(
+          loadEnvelopeNext(previousLastId, config).catch((error) => {
+            status(error.message || "Envelope incremental update failed.", true);
+            return null;
+          })
+        );
+      }
 
-      renderAfterOtt.then(() => {
-        const ottState = collectOttMessages(config);
-        if (ottState.messages.length) {
-          status("Streaming " + payload.rowCount + " new row(s). " + ottState.messages.join(" "), ottState.hasWarning);
+      Promise.all(overlayRequests).then(() => {
+        const overlayState = collectOverlayMessages(config);
+        if (overlayState.messages.length) {
+          status("Streaming " + payload.rowCount + " new row(s). " + overlayState.messages.join(" "), overlayState.hasWarning);
         } else {
           status("Streaming " + payload.rowCount + " new row(s).", false);
         }
@@ -2290,6 +2650,7 @@
     stopReviewPlayback({ silent: true });
     resetReviewState();
     clearOttState();
+    clearEnvelopeState();
 
     try {
       const config = await resolveReviewStart(currentConfig());
@@ -2337,6 +2698,18 @@
         }
       } else {
         setLoadStatus("ott", "OTT: off.", "info", { silent: true });
+      }
+
+      if (shouldLoadEnvelope(config)) {
+        try {
+          const envelopePayload = await loadEnvelopeBootstrap(config);
+          updateEnvelopeLoadStatus(envelopePayload);
+        } catch (error) {
+          clearEnvelopeState();
+          setLoadStatus("envelope", "Envelope: " + (error.message || "bootstrap failed."), "error", { silent: true });
+        }
+      } else {
+        setLoadStatus("envelope", "Envelope: off.", "info", { silent: true });
       }
 
       if (config.mode !== "review") {
@@ -2488,6 +2861,20 @@
     renderChart({ preserveCurrentZoom: true });
   });
 
+  bindSegment(elements.envelopeToggle, (value) => {
+    setSegment(elements.envelopeToggle, value);
+    const config = currentConfig();
+    writeQuery(config);
+    if (!shouldLoadEnvelope(config)) {
+      setLoadStatus("envelope", "Envelope: off.", "info");
+    } else if (state.envelopeStatusPayload) {
+      updateEnvelopeLoadStatus(state.envelopeStatusPayload);
+    } else {
+      setLoadStatus("envelope", "Envelope: click Load to fetch.", "info");
+    }
+    renderChart({ preserveCurrentZoom: true });
+  });
+
   elements.seriesSelector.querySelectorAll("button").forEach((button) => {
     button.addEventListener("click", () => toggleSeries(button.dataset.series));
   });
@@ -2556,6 +2943,25 @@
     });
   });
 
+  [
+    elements.envelopeSource,
+    elements.envelopeLength,
+    elements.envelopeBandwidth,
+    elements.envelopeMult,
+  ].forEach((control) => {
+    control.addEventListener("change", () => {
+      const config = currentConfig();
+      writeQuery(config);
+      clearEnvelopeState();
+      setLoadStatus(
+        "envelope",
+        shouldLoadEnvelope(config) ? "Envelope: settings changed. Click Load." : "Envelope: off.",
+        "info"
+      );
+      renderChart({ preserveCurrentZoom: true });
+    });
+  });
+
   elements.reviewYesterdayButton.addEventListener("click", () => {
     state.currentMode = "review";
     setSegment(elements.modeToggle, "review");
@@ -2566,6 +2972,7 @@
 
   elements.primaryBarToggle.addEventListener("click", () => toggleToolbarRow("primaryBarCollapsed"));
   elements.ottBarToggle.addEventListener("click", () => toggleToolbarRow("ottBarCollapsed"));
+  elements.envelopeBarToggle.addEventListener("click", () => toggleToolbarRow("envelopeBarCollapsed"));
 
   elements.fullscreenButton.addEventListener("click", toggleFullscreen);
   elements.applyButton.addEventListener("click", () => loadData(true));
