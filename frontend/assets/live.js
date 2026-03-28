@@ -25,9 +25,10 @@
   const REVIEW_SPEEDS = [0.5, 1, 2, 3, 5];
   const REVIEW_PREFETCH_FLOOR = 250;
   const REVIEW_PREFETCH_CEILING = 1000;
-  const REVIEW_PREFETCH_THRESHOLD = 80;
-  const REVIEW_PREFETCH_RATIO = 0.4;
-  const REVIEW_PREFETCH_MIN_PLAYBACK_MS = 5000;
+  const REVIEW_PREFETCH_THRESHOLD = 120;
+  const REVIEW_PREFETCH_RATIO = 0.65;
+  const REVIEW_PREFETCH_MIN_PLAYBACK_MS = 12000;
+  const REVIEW_OTT_RETRY_DELAY_MS = 250;
   const BACKTEST_OVERLAY_TIMEOUT_MS = 8000;
   const BACKTEST_RUN_TIMEOUT_MS = 45000;
   const CHART_RESIZE_RETRY_LIMIT = 6;
@@ -55,6 +56,8 @@
     chartResizeTailFrame: 0,
     chartResizeTimer: 0,
     chartResizeObserver: null,
+    chartRenderFrame: 0,
+    pendingRenderOptions: null,
     ottRows: new Map(),
     ottTrades: [],
     ottRun: null,
@@ -91,6 +94,10 @@
       fetchingTicks: false,
       fetchingOtt: false,
       trueEndReached: false,
+      requestedVisibleCount: 0,
+      waitingFor: null,
+      ottRequestedEndId: 0,
+      lastOttRequestAt: 0,
     },
     ui: {
       primaryBarCollapsed: DEFAULTS.primaryBarCollapsed,
@@ -148,6 +155,30 @@
     return Boolean(host && host.isConnected && host.offsetWidth && host.offsetHeight);
   }
 
+  function mergeRenderOptions(base, extra) {
+    const merged = {
+      preserveCurrentZoom: Boolean(base && base.preserveCurrentZoom) || Boolean(extra && extra.preserveCurrentZoom),
+      resetWindow: Boolean(base && base.resetWindow) || Boolean(extra && extra.resetWindow),
+    };
+    if (merged.resetWindow) {
+      merged.preserveCurrentZoom = false;
+    }
+    return merged;
+  }
+
+  function scheduleChartRender(options) {
+    state.pendingRenderOptions = mergeRenderOptions(state.pendingRenderOptions, options);
+    if (state.chartRenderFrame) {
+      return;
+    }
+    state.chartRenderFrame = requestAnimationFrame(() => {
+      state.chartRenderFrame = 0;
+      const pendingOptions = state.pendingRenderOptions;
+      state.pendingRenderOptions = null;
+      renderChart(pendingOptions, { fromScheduler: true });
+    });
+  }
+
   function isOffsetWidthError(error) {
     return String(error && error.message || "").includes("offsetWidth");
   }
@@ -165,6 +196,11 @@
       window.clearTimeout(state.chartResizeTimer);
       state.chartResizeTimer = 0;
     }
+    if (state.chartRenderFrame) {
+      cancelAnimationFrame(state.chartRenderFrame);
+      state.chartRenderFrame = 0;
+    }
+    state.pendingRenderOptions = null;
     if (!state.chart) {
       return;
     }
@@ -428,10 +464,10 @@
     const config = currentConfig();
     if (config.mode === "review") {
       const coverage = reviewOttCoverage();
-      const suffix = coverage.lastAvailableId != null ? " thru tick " + coverage.lastAvailableId : "";
+      const suffix = coverage.contiguousEndId != null ? " thru tick " + coverage.contiguousEndId : "";
       setLoadStatus(
         "ott",
-        "OTT: synced " + coverage.availableCount + "/" + state.review.bufferRows.length + " buffered row(s)" + suffix + ".",
+        "OTT: synced " + coverage.contiguousAvailableCount + "/" + state.review.bufferRows.length + " buffered row(s)" + suffix + ".",
         coverage.missingCount ? "warn" : "info"
       );
       return;
@@ -495,19 +531,43 @@
   }
 
   function reviewOttCoverage() {
+    const firstBufferedId = state.review.bufferRows.length ? state.review.bufferRows[0].id : null;
+    const lastBufferedId = state.review.bufferRows.length
+      ? state.review.bufferRows[state.review.bufferRows.length - 1].id
+      : null;
     let availableCount = 0;
+    let contiguousAvailableCount = 0;
+    let firstAvailableId = null;
     let lastAvailableId = null;
+    let firstMissingSeen = false;
     state.review.bufferRows.forEach((row) => {
       const ottRow = state.ottRows.get(row.id);
       if (ottRow && ottRow.available) {
         availableCount += 1;
+        if (firstAvailableId == null) {
+          firstAvailableId = row.id;
+        }
         lastAvailableId = row.id;
+        if (!firstMissingSeen) {
+          contiguousAvailableCount += 1;
+        }
+      } else {
+        firstMissingSeen = true;
       }
     });
     return {
       availableCount,
+      contiguousAvailableCount,
       missingCount: Math.max(0, state.review.bufferRows.length - availableCount),
+      firstBufferedId,
+      lastBufferedId,
+      firstAvailableId,
       lastAvailableId,
+      contiguousEndId: state.review.bufferRows.length
+        ? (contiguousAvailableCount
+          ? state.review.bufferRows[contiguousAvailableCount - 1].id
+          : Math.max(0, firstBufferedId - 1))
+        : null,
     };
   }
 
@@ -530,6 +590,84 @@
       messages,
       hasWarning: statuses.some((value) => isOttWarningStatus(value)),
     };
+  }
+
+  function requiresReviewOttCoverage(config) {
+    return config.mode === "review" && Boolean(config.ottEnabled || config.ottSupport || config.ottMarkers);
+  }
+
+  function reviewPlaybackStateLabel() {
+    if (state.currentMode !== "review") {
+      return null;
+    }
+    if (state.review.trueEndReached) {
+      return "Ended";
+    }
+    if (state.currentRun !== "run") {
+      return "Paused";
+    }
+    if (state.review.waitingFor === "ott") {
+      return "Waiting OTT";
+    }
+    if (state.review.waitingFor === "ticks") {
+      return "Waiting ticks";
+    }
+    return "Playing";
+  }
+
+  function reviewBufferStartAfterId() {
+    const firstBufferedId = state.review.bufferRows.length ? state.review.bufferRows[0].id : null;
+    return Math.max(0, firstBufferedId != null ? (firstBufferedId - 1) : 0);
+  }
+
+  function reviewChunkTargetEnd(afterId, limit, endId) {
+    const boundedEnd = afterId + Math.max(1, limit);
+    return endId != null ? Math.min(endId, boundedEnd) : boundedEnd;
+  }
+
+  function reviewRemainingPlaybackMsToCount(targetCount) {
+    const visibleRow = reviewLastVisibleRow();
+    const safeCount = Math.max(0, Math.min(targetCount, state.review.bufferRows.length));
+    const targetRow = safeCount ? state.review.bufferRows[safeCount - 1] : null;
+    if (!visibleRow || !targetRow) {
+      return null;
+    }
+    return Math.max(
+      0,
+      (targetRow.timestampMs - visibleRow.timestampMs) / Math.max(0.25, state.review.playbackSpeed || 1)
+    );
+  }
+
+  function setReviewWaiting(reason, nowMs) {
+    const changed = state.review.waitingFor !== reason;
+    state.review.waitingFor = reason;
+    setReviewPlaybackAnchor(nowMs);
+    if (changed) {
+      buildMetaText();
+    }
+  }
+
+  function clearReviewWaiting(nowMs) {
+    if (!state.review.waitingFor) {
+      return;
+    }
+    state.review.waitingFor = null;
+    setReviewPlaybackAnchor(nowMs);
+    buildMetaText();
+  }
+
+  function syncReviewVisibleRange(config, options) {
+    if (config.mode !== "review") {
+      return false;
+    }
+    const maxVisibleCount = requiresReviewOttCoverage(config)
+      ? reviewOttCoverage().contiguousAvailableCount
+      : state.review.bufferRows.length;
+    if (state.review.visibleCount <= maxVisibleCount) {
+      return false;
+    }
+    setReviewVisibleCount(maxVisibleCount, options || { preserveCurrentZoom: true });
+    return true;
   }
 
   function safeResizeChart(options) {
@@ -556,6 +694,8 @@
       return true;
     } catch (error) {
       if (isOffsetWidthError(error)) {
+        disposeChart();
+        scheduleChartRender({ preserveCurrentZoom: true });
         return false;
       }
       throw error;
@@ -620,6 +760,9 @@
       disposeChart();
       return null;
     }
+    if (!chartHostHasSize(host)) {
+      return null;
+    }
     bindChartLifecycle();
     if (state.chart && !chartDomMatchesHost(host)) {
       disposeChart();
@@ -655,7 +798,17 @@
     if (!state.chart || !host || !chartDomMatchesHost(host) || !state.rows.length) {
       return null;
     }
-    const option = state.chart.getOption();
+    let option = null;
+    try {
+      option = state.chart.getOption();
+    } catch (error) {
+      if (isOffsetWidthError(error)) {
+        disposeChart();
+        scheduleChartRender({ preserveCurrentZoom: true });
+        return null;
+      }
+      throw error;
+    }
     const dataZoom = option.dataZoom && option.dataZoom[0];
     if (!dataZoom) {
       return null;
@@ -1170,6 +1323,28 @@
 
   function buildMetaText() {
     if (!state.rows.length) {
+      const config = currentConfig();
+      if (config.mode === "review" && state.review.bufferRows.length) {
+        const coverage = reviewOttCoverage();
+        const parts = ["Replay 0/" + state.review.bufferRows.length];
+        if (coverage.firstBufferedId != null && coverage.lastBufferedId != null) {
+          if (state.review.sessionEndId != null) {
+            parts.push("Ticks " + coverage.firstBufferedId + "-" + coverage.lastBufferedId + "/" + state.review.sessionEndId);
+          } else {
+            parts.push("Ticks " + coverage.firstBufferedId + "-" + coverage.lastBufferedId);
+          }
+        }
+        parts.push(state.review.fetchingTicks ? "Tick prefetch" : "Tick ready");
+        if (shouldLoadOtt(config) && coverage.firstBufferedId != null) {
+          parts.push("OTT " + coverage.firstBufferedId + "-" + Number(coverage.contiguousEndId || Math.max(0, coverage.firstBufferedId - 1)));
+          parts.push(state.review.fetchingOtt ? "OTT prefetch" : "OTT ready");
+          parts.push("OTT sync " + coverage.contiguousAvailableCount + "/" + state.review.bufferRows.length);
+        }
+        parts.push(reviewPlaybackStateLabel());
+        parts.push("Speed " + state.review.playbackSpeed + "x");
+        elements.liveMeta.textContent = parts.filter(Boolean).join(" | ");
+        return;
+      }
       elements.liveMeta.textContent = "No rows returned.";
       return;
     }
@@ -1180,8 +1355,8 @@
     const lastOtt = state.ottRows.get(lastRow.id);
     const meta = config.mode === "review"
       ? [
+        "Ptr " + lastRow.id,
         "Replay " + state.review.visibleCount + "/" + state.review.bufferRows.length,
-        "Last id " + lastRow.id,
         "Price " + Number(price).toFixed(2),
       ]
       : [
@@ -1190,29 +1365,23 @@
         "Price " + Number(price).toFixed(2),
       ];
     if (config.mode === "review") {
-      const lastBufferedId = state.review.bufferRows.length
-        ? state.review.bufferRows[state.review.bufferRows.length - 1].id
-        : null;
       const coverage = reviewOttCoverage();
-      meta.push("Buffer " + state.review.bufferRows.length);
-      if (state.review.sessionEndId != null) {
-        meta.push("Loaded thru " + Number(lastBufferedId || 0) + "/" + state.review.sessionEndId);
-      } else if (lastBufferedId != null) {
-        meta.push("Loaded thru " + Number(lastBufferedId));
+      if (coverage.firstBufferedId != null && coverage.lastBufferedId != null) {
+        if (state.review.sessionEndId != null) {
+          meta.push("Ticks " + coverage.firstBufferedId + "-" + coverage.lastBufferedId + "/" + state.review.sessionEndId);
+        } else {
+          meta.push("Ticks " + coverage.firstBufferedId + "-" + coverage.lastBufferedId);
+        }
       }
-      meta.push(state.review.fetchingTicks ? "Tick chunk fetching" : "Tick chunk idle");
+      meta.push(state.review.fetchingTicks ? "Tick prefetch" : "Tick ready");
       if (shouldLoadOtt(config)) {
-        meta.push(
-          state.review.fetchingOtt
-            ? "OTT chunk fetching"
-            : "OTT synced " + coverage.availableCount + "/" + state.review.bufferRows.length
-        );
+        if (coverage.firstBufferedId != null) {
+          meta.push("OTT " + coverage.firstBufferedId + "-" + Number(coverage.contiguousEndId || Math.max(0, coverage.firstBufferedId - 1)));
+        }
+        meta.push(state.review.fetchingOtt ? "OTT prefetch" : "OTT ready");
+        meta.push("OTT sync " + coverage.contiguousAvailableCount + "/" + state.review.bufferRows.length);
       }
-      meta.push(
-        state.review.trueEndReached
-          ? "Range end reached"
-          : (state.review.exhausted ? "Range fully loaded" : "Range open")
-      );
+      meta.push(reviewPlaybackStateLabel());
       meta.push("Speed " + state.review.playbackSpeed + "x");
     }
     if (lastOtt && lastOtt.ott2 != null && config.ottEnabled) {
@@ -1287,6 +1456,8 @@
       state.chart.setOption({ yAxis: buildYAxis(zoomWindow) }, false);
     } catch (error) {
       if (isOffsetWidthError(error)) {
+        disposeChart();
+        scheduleChartRender({ preserveCurrentZoom: true });
         requestChartResize({ applyYAxis: false, remainingAttempts: CHART_RESIZE_RETRY_LIMIT });
         return;
       }
@@ -1294,9 +1465,18 @@
     }
   }
 
-  function renderChart(options) {
+  function renderChart(options, renderOptions) {
+    const host = currentChartHost();
+    if (!host || !chartHostHasSize(host)) {
+      scheduleChartRender(options);
+      requestChartResize({ remainingAttempts: CHART_RESIZE_RETRY_LIMIT });
+      buildMetaText();
+      return;
+    }
     const chart = ensureChart();
     if (!chart) {
+      scheduleChartRender(options);
+      requestChartResize({ remainingAttempts: CHART_RESIZE_RETRY_LIMIT });
       return;
     }
     const selected = getActiveSeriesKeys();
@@ -1370,6 +1550,8 @@
       }, true);
     } catch (error) {
       if (isOffsetWidthError(error)) {
+        disposeChart();
+        scheduleChartRender(options);
         requestChartResize({ remainingAttempts: CHART_RESIZE_RETRY_LIMIT });
         return;
       }
@@ -1401,6 +1583,7 @@
     stopReviewPlayback({ silent: true });
     state.review.bufferRows = [];
     state.review.visibleCount = 0;
+    state.review.requestedVisibleCount = 0;
     state.review.lastBufferedId = 0;
     state.review.exhausted = false;
     state.review.fetchPromise = null;
@@ -1416,10 +1599,14 @@
     state.review.fetchingTicks = false;
     state.review.fetchingOtt = false;
     state.review.trueEndReached = false;
+    state.review.waitingFor = null;
+    state.review.ottRequestedEndId = 0;
+    state.review.lastOttRequestAt = 0;
   }
 
   function setReviewVisibleCount(nextCount, options) {
     const boundedCount = Math.max(0, Math.min(nextCount, state.review.bufferRows.length));
+    state.review.requestedVisibleCount = boundedCount;
     state.review.visibleCount = boundedCount;
     state.rows = state.review.bufferRows.slice(0, boundedCount);
     if (options && options.skipRender) {
@@ -1511,6 +1698,8 @@
     state.ottLastId = 0;
     state.ottStatusPayload = null;
     state.ottOverlayPayload = null;
+    state.review.ottRequestedEndId = 0;
+    state.review.lastOttRequestAt = 0;
   }
 
   function fetchReviewOttChunk(config, options) {
@@ -1520,23 +1709,37 @@
     if (state.review.ottFetchPromise) {
       return state.review.ottFetchPromise;
     }
-    const requestedAfterId = options && options.afterId != null ? options.afterId : state.ottLastId;
-    const effectiveAfterId = Math.max(0, state.ottLastId || 0, requestedAfterId || 0);
+    const coverage = reviewOttCoverage();
+    const requestedAfterId = options && options.afterId != null
+      ? options.afterId
+      : (coverage.contiguousEndId != null ? coverage.contiguousEndId : reviewBufferStartAfterId());
+    const effectiveAfterId = Math.max(0, requestedAfterId || 0);
     const targetEndId = options && options.endId != null ? options.endId : state.review.lastBufferedId;
     if (targetEndId != null && effectiveAfterId >= targetEndId) {
       return Promise.resolve(null);
     }
+    const nowMs = performance.now();
+    if (
+      (!options || !options.force)
+      && targetEndId != null
+      && targetEndId <= state.review.ottRequestedEndId
+      && (nowMs - state.review.lastOttRequestAt) < REVIEW_OTT_RETRY_DELAY_MS
+    ) {
+      return Promise.resolve(null);
+    }
     const limit = Math.max(
-      50,
+      1,
       Math.min(
         REVIEW_PREFETCH_CEILING,
         options && options.limitOverride != null
-          ? options.limitOverride
+          ? Math.max(options.limitOverride, targetEndId != null ? (targetEndId - effectiveAfterId) : 0)
           : Math.max(reviewPrefetchLimit(config), targetEndId != null ? (targetEndId - effectiveAfterId) : 0)
       )
     );
+    state.review.ottRequestedEndId = Math.max(state.review.ottRequestedEndId, targetEndId || 0);
+    state.review.lastOttRequestAt = nowMs;
     state.review.fetchingOtt = true;
-    setLoadStatus("ott", "OTT: syncing buffered review chunk...", "info");
+    setLoadStatus("ott", "OTT: prefetching synced review chunk...", "info");
     buildMetaText();
     state.review.ottFetchPromise = loadOttNext(effectiveAfterId, config, {
       limitOverride: limit,
@@ -1565,12 +1768,16 @@
     if (reset) {
       state.ottRows = new Map();
       state.ottLastId = 0;
+      state.review.ottRequestedEndId = 0;
     }
     (payload.rows || []).forEach((row) => {
       state.ottRows.set(row.tickid, row);
     });
     state.ottLastId = payload.lastId || payload.rows?.[payload.rows.length - 1]?.tickid || state.ottLastId;
     state.ottStatusPayload = payload;
+    if (payload.lastId != null) {
+      state.review.ottRequestedEndId = Math.max(state.review.ottRequestedEndId, payload.lastId);
+    }
   }
 
   async function fetchJson(url, options, requestOptions) {
@@ -1814,6 +2021,8 @@
     }
     const afterId = state.review.lastBufferedId;
     const endId = state.review.sessionEndId;
+    const nextChunkLimit = reviewPrefetchLimit(config);
+    const targetEndId = reviewChunkTargetEnd(afterId, nextChunkLimit, endId);
     if (endId != null && afterId >= endId) {
       state.review.exhausted = true;
       buildMetaText();
@@ -1821,19 +2030,17 @@
     }
     const params = new URLSearchParams({
       afterId: String(afterId),
-      limit: String(reviewPrefetchLimit(config)),
+      limit: String(Math.max(1, targetEndId - afterId)),
     });
-    const nextChunkLimit = reviewPrefetchLimit(config);
-    if (endId != null) {
-      params.set("endId", String(endId));
+    if (targetEndId != null) {
+      params.set("endId", String(targetEndId));
     }
     state.review.fetchingTicks = true;
-    setLoadStatus("chart", "Chart: fetching next review chunk...", "info");
+    setLoadStatus("chart", "Chart: prefetching next review chunk...", "info");
     buildMetaText();
     if (shouldLoadOtt(config)) {
       fetchReviewOttChunk(config, {
-        afterId,
-        endId,
+        endId: targetEndId,
         limitOverride: nextChunkLimit,
       }).catch(() => null);
     }
@@ -1850,8 +2057,8 @@
           if (state.review.visibleCount >= state.review.bufferRows.length) {
             announceReviewEnd();
           }
-          if (shouldLoadOtt(config) && state.ottLastId < state.review.lastBufferedId) {
-            fetchReviewOttChunk(config).catch(() => null);
+          if (shouldLoadOtt(config) && reviewOttCoverage().contiguousAvailableCount < state.review.bufferRows.length) {
+            fetchReviewOttChunk(config, { endId: state.review.lastBufferedId }).catch(() => null);
           }
           return payload;
         }
@@ -1874,8 +2081,8 @@
           "info"
         );
 
-        if (shouldLoadOtt(config) && state.ottLastId < state.review.lastBufferedId) {
-          fetchReviewOttChunk(config).catch(() => null);
+        if (shouldLoadOtt(config) && reviewOttCoverage().contiguousAvailableCount < state.review.bufferRows.length) {
+          fetchReviewOttChunk(config, { endId: state.review.lastBufferedId }).catch(() => null);
         }
 
         if (config.ottTrades) {
@@ -1891,6 +2098,7 @@
               }
             });
         }
+        maybePrefetchReview(config);
         buildMetaText();
         return payload;
       })
@@ -1909,6 +2117,9 @@
   function maybePrefetchReview(config) {
     const remaining = state.review.bufferRows.length - state.review.visibleCount;
     const remainingPlaybackMs = reviewRemainingPlaybackMs();
+    const ottCoverage = reviewOttCoverage();
+    const remainingOtt = ottCoverage.contiguousAvailableCount - state.review.visibleCount;
+    const remainingOttPlaybackMs = reviewRemainingPlaybackMsToCount(ottCoverage.contiguousAvailableCount);
     if (
       !state.review.exhausted &&
       (
@@ -1918,6 +2129,21 @@
     ) {
       fetchReviewNextChunk(config).catch((error) => {
         status(error.message || "Review fetch failed.", true);
+      });
+    }
+    if (
+      requiresReviewOttCoverage(config)
+      && ottCoverage.contiguousAvailableCount < state.review.bufferRows.length
+      && (
+        remainingOtt <= reviewPrefetchThreshold(config)
+        || (remainingOttPlaybackMs != null && remainingOttPlaybackMs <= REVIEW_PREFETCH_MIN_PLAYBACK_MS)
+      )
+    ) {
+      fetchReviewOttChunk(config, {
+        endId: state.review.lastBufferedId,
+        limitOverride: reviewPrefetchLimit(config),
+      }).catch((error) => {
+        status(error.message || "OTT sync failed.", true);
       });
     }
   }
@@ -1932,15 +2158,45 @@
       return;
     }
 
+    const config = currentConfig();
     const targetTimestampMs = state.review.anchorTimestampMs + ((nowMs - state.review.anchorPerfMs) * state.review.playbackSpeed);
-    const nextVisibleCount = reviewVisibleCountForTimestamp(targetTimestampMs);
+    const requestedVisibleCount = reviewVisibleCountForTimestamp(targetTimestampMs);
+    const ottCoverage = reviewOttCoverage();
+    const maxVisibleCount = requiresReviewOttCoverage(config)
+      ? ottCoverage.contiguousAvailableCount
+      : state.review.bufferRows.length;
+    const nextVisibleCount = Math.min(requestedVisibleCount, maxVisibleCount);
     if (nextVisibleCount !== state.review.visibleCount) {
       setReviewVisibleCount(nextVisibleCount, { preserveCurrentZoom: false });
-      maybePrefetchReview(currentConfig());
+      maybePrefetchReview(config);
+    }
+
+    const lastBufferedRow = state.review.bufferRows[state.review.bufferRows.length - 1] || null;
+    const waitingForOtt = requiresReviewOttCoverage(config) && requestedVisibleCount > maxVisibleCount;
+    const waitingForTicks = Boolean(
+      !waitingForOtt
+      && !state.review.exhausted
+      && lastBufferedRow
+      && targetTimestampMs >= lastBufferedRow.timestampMs
+      && state.review.visibleCount >= state.review.bufferRows.length
+    );
+
+    if (waitingForOtt) {
+      setReviewWaiting("ott", nowMs);
+      maybePrefetchReview(config);
+    } else if (waitingForTicks) {
+      setReviewWaiting("ticks", nowMs);
+      maybePrefetchReview(config);
+    } else {
+      clearReviewWaiting(nowMs);
     }
 
     if (state.review.visibleCount >= state.review.bufferRows.length && !state.review.exhausted) {
-      maybePrefetchReview(currentConfig());
+      maybePrefetchReview(config);
+    }
+
+    if (requiresReviewOttCoverage(config) && state.review.visibleCount >= ottCoverage.contiguousAvailableCount) {
+      maybePrefetchReview(config);
     }
 
     if (state.review.visibleCount >= state.review.bufferRows.length && state.review.exhausted) {
@@ -1960,7 +2216,11 @@
       return;
     }
     if (!state.review.visibleCount) {
-      setReviewVisibleCount(Math.min(state.review.bufferRows.length, 2), { resetWindow: true });
+      const config = currentConfig();
+      const initialVisibleCount = requiresReviewOttCoverage(config)
+        ? Math.min(reviewOttCoverage().contiguousAvailableCount, 2)
+        : Math.min(state.review.bufferRows.length, 2);
+      setReviewVisibleCount(initialVisibleCount, { resetWindow: true });
     }
     stopReviewPlayback({ silent: true });
     setReviewPlaybackAnchor(performance.now());
@@ -2047,6 +2307,7 @@
       if (config.mode === "review") {
         state.review.bufferRows = loadedRows.slice();
         state.review.visibleCount = Math.min(loadedRows.length, loadedRows.length > 1 ? 2 : loadedRows.length);
+        state.review.requestedVisibleCount = state.review.visibleCount;
         state.review.lastBufferedId = loadedRows.length ? loadedRows[loadedRows.length - 1].id : 0;
         state.review.sessionEndId = livePayload.reviewEndId != null ? livePayload.reviewEndId : state.review.lastBufferedId;
         state.review.sessionEndTimestamp = livePayload.reviewEndTimestamp || null;
@@ -2068,6 +2329,8 @@
         try {
           const ottPayload = await loadOttBootstrap(config);
           updateOttLoadStatus(ottPayload);
+          syncReviewVisibleRange(config, { skipRender: true });
+          state.rows = state.review.bufferRows.slice(0, state.review.visibleCount);
         } catch (error) {
           clearOttState();
           setLoadStatus("ott", "OTT: " + (error.message || "bootstrap failed."), "error", { silent: true });
@@ -2221,6 +2484,7 @@
     } else if (state.ottStatusPayload) {
       updateOttLoadStatus(state.ottStatusPayload);
     }
+    syncReviewVisibleRange(config, { preserveCurrentZoom: true, skipRender: true });
     renderChart({ preserveCurrentZoom: true });
   });
 
@@ -2238,6 +2502,7 @@
     control.addEventListener("change", () => {
       const config = currentConfig();
       writeQuery(config);
+      syncReviewVisibleRange(config, { preserveCurrentZoom: true, skipRender: true });
       renderChart({ preserveCurrentZoom: true });
       if (control === elements.ottTradesToggle || control === elements.ottSignalMode) {
         loadBacktestOverlay(
