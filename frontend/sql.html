@@ -18,12 +18,12 @@
         <a class="back-link" href="/">datavis.au</a>
         <div class="sql-admin-badge">admin-only</div>
         <h1>PostgreSQL Console</h1>
-        <div class="sql-sidebar-copy">Schema browser, object inspector, and full SQL execution on the live Postgres connection.</div>
+        <div class="sql-sidebar-copy">Compact SQL admin for public tables, quick inspection, and visible query results.</div>
       </div>
       <div class="sql-sidebar-tools">
         <label class="sql-inline-field">
-          <span>Filter Objects</span>
-          <input id="schemaSearch" type="search" autocomplete="off" placeholder="table, view, function">
+          <span>Filter Tables</span>
+          <input id="schemaSearch" type="search" autocomplete="off" placeholder="public table">
         </label>
         <button class="ghost-button compact-button" id="refreshSchemaButton" type="button">Refresh</button>
       </div>
@@ -31,78 +31,73 @@
         <div class="sql-connection-label">Connection</div>
         <div class="sql-connection-value" id="connectionMeta">Loading protected SQL metadata...</div>
       </div>
-      <div class="schema-tree" id="schemaTree">Loading schema browser...</div>
+      <div class="sql-sidebar-section">
+        <div class="sql-sidebar-section-header">
+          <div class="sql-toolbar-label">Public Tables</div>
+        </div>
+        <div class="schema-tree" id="schemaTree">Loading schema browser...</div>
+      </div>
+      <section class="sql-sidebar-inspector">
+        <div class="sql-inspector-header">
+          <div class="sql-toolbar-label">Object Inspector</div>
+          <button class="ghost-button compact-button" id="refreshObjectButton" type="button" disabled>Reload</button>
+        </div>
+        <div class="object-actions" id="objectActions"></div>
+        <div class="object-detail" id="objectDetail">
+          <div class="muted">Select a public table to inspect columns, indexes, definitions, and preview actions.</div>
+        </div>
+      </section>
     </aside>
 
-    <section class="panel sql-editor-panel">
-      <div class="sql-editor-header">
-        <div>
-          <div class="sql-toolbar-label">Query Editor</div>
-          <div class="sql-editor-copy">`Ctrl+Enter` runs selection or current script. `Ctrl+Shift+Enter` runs the full editor.</div>
+    <main class="sql-main-panel">
+      <section class="panel sql-editor-panel">
+        <div class="sql-editor-header">
+          <div class="sql-editor-heading">
+            <div class="sql-toolbar-label">Query Editor</div>
+            <div class="sql-editor-copy">`Ctrl+Enter` runs selection or current script. `Ctrl+Shift+Enter` runs the full editor.</div>
+          </div>
+          <div class="editor-toolbar">
+            <button class="ghost-button compact-button" id="clearEditorButton" type="button">Clear</button>
+            <button class="ghost-button compact-button" id="runAllButton" type="button">Run All</button>
+            <button class="primary-button compact-button" id="runQueryButton" type="button">Run</button>
+          </div>
         </div>
-        <div class="editor-toolbar">
-          <label class="snippet-picker">
-            <span>Snippet</span>
-            <select id="snippetSelect">
-              <option value="">Choose a SQL template</option>
-            </select>
-          </label>
-          <label class="snippet-picker">
-            <span>History</span>
-            <select id="historySelect">
-              <option value="">Recent queries</option>
-            </select>
-          </label>
-          <button class="ghost-button compact-button" id="clearEditorButton" type="button">Clear</button>
-          <button class="ghost-button compact-button" id="runAllButton" type="button">Run All</button>
-          <button class="primary-button compact-button" id="runQueryButton" type="button">Run</button>
+        <textarea id="sqlEditor">SELECT *
+FROM public.otttick
+LIMIT 10;</textarea>
+        <div class="sql-editor-footer">
+          <div class="status-line" id="queryStatus">Waiting for SQL execution.</div>
+          <div class="sql-editor-context" id="editorContext">Selection-aware execution is enabled.</div>
         </div>
-      </div>
-      <textarea id="sqlEditor">SELECT id, timestamp, mid
-FROM public.ticks
-ORDER BY id DESC
-LIMIT 100;</textarea>
-      <div class="sql-editor-footer">
-        <div class="status-line" id="queryStatus">Waiting for SQL execution.</div>
-        <div class="sql-editor-context" id="editorContext">Selection-aware execution is enabled.</div>
-      </div>
-    </section>
+      </section>
 
-    <aside class="panel sql-inspector-panel">
-      <div class="sql-inspector-header">
-        <div class="sql-toolbar-label">Object Inspector</div>
-        <button class="ghost-button compact-button" id="refreshObjectButton" type="button" disabled>Reload</button>
-      </div>
-      <div class="object-actions" id="objectActions"></div>
-      <div class="object-detail" id="objectDetail">
-        <div class="muted">Select a schema object to inspect columns, indexes, definitions, and preview actions.</div>
-      </div>
-    </aside>
-
-    <section class="panel sql-results-panel">
-      <div class="results-toolbar">
-        <div>
-          <div class="sql-toolbar-label">Execution Results</div>
-          <div class="results-meta" id="resultsMeta">No statements executed yet.</div>
+      <section class="panel sql-results-panel">
+        <div class="results-toolbar">
+          <div>
+            <div class="sql-toolbar-label">Execution Results</div>
+            <div class="results-meta" id="resultsMeta">No statements executed yet.</div>
+          </div>
+          <div class="results-actions">
+            <button class="ghost-button compact-button" id="copyTsvButton" type="button">Copy TSV</button>
+            <button class="ghost-button compact-button" id="copyCsvButton" type="button">Copy CSV</button>
+            <button class="ghost-button compact-button" id="clearResultsButton" type="button">Clear</button>
+          </div>
         </div>
-        <div class="results-actions">
-          <button class="ghost-button compact-button" id="copyTsvButton" type="button">Copy TSV</button>
-          <button class="ghost-button compact-button" id="copyCsvButton" type="button">Copy CSV</button>
-          <button class="ghost-button compact-button" id="clearResultsButton" type="button">Clear</button>
+        <div class="error-panel" id="resultsError" hidden></div>
+        <div class="results-strip">
+          <div class="result-tabs" id="resultTabs"></div>
+          <div class="statement-summary" id="statementSummary"></div>
         </div>
-      </div>
-      <div class="error-panel" id="resultsError" hidden></div>
-      <div class="result-tabs" id="resultTabs"></div>
-      <div class="statement-summary" id="statementSummary"></div>
-      <div class="preview-toolbar" id="previewToolbar" hidden>
-        <div class="preview-meta" id="previewMeta"></div>
-        <div class="preview-actions">
-          <button class="ghost-button compact-button" id="previewPrevButton" type="button">Prev</button>
-          <button class="ghost-button compact-button" id="previewNextButton" type="button">Next</button>
+        <div class="preview-toolbar" id="previewToolbar" hidden>
+          <div class="preview-meta" id="previewMeta"></div>
+          <div class="preview-actions">
+            <button class="ghost-button compact-button" id="previewPrevButton" type="button">Prev</button>
+            <button class="ghost-button compact-button" id="previewNextButton" type="button">Next</button>
+          </div>
         </div>
-      </div>
-      <div class="results-host" id="resultsHost"></div>
-    </section>
+        <div class="results-host" id="resultsHost"><div class="results-empty">Run a query to see rows here.</div></div>
+      </section>
+    </main>
   </div>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.18/codemirror.min.js"></script>

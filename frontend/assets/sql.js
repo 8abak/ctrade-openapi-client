@@ -4,20 +4,6 @@
     history: "datavis.sql.history",
   };
 
-  const snippets = [
-    { label: "Recent ticks", sql: "SELECT id, timestamp, bid, ask, mid\nFROM public.ticks\nORDER BY id DESC\nLIMIT 200;" },
-    { label: "Table preview", sql: "SELECT *\nFROM schema_name.table_name\nLIMIT 100;" },
-    { label: "Insert row", sql: "INSERT INTO schema_name.table_name (column_a, column_b)\nVALUES ('value_a', 'value_b')\nRETURNING *;" },
-    { label: "Update rows", sql: "UPDATE schema_name.table_name\nSET column_a = 'value'\nWHERE id = 1\nRETURNING *;" },
-    { label: "Delete rows", sql: "DELETE FROM schema_name.table_name\nWHERE id = 1\nRETURNING *;" },
-    { label: "Create table", sql: "CREATE TABLE schema_name.new_table (\n  id bigserial PRIMARY KEY,\n  created_at timestamptz NOT NULL DEFAULT now(),\n  note text\n);" },
-    { label: "Alter table", sql: "ALTER TABLE schema_name.table_name\nADD COLUMN status text;" },
-    { label: "Create index", sql: "CREATE INDEX IF NOT EXISTS idx_table_name_column_a\nON schema_name.table_name (column_a);" },
-    { label: "Create view", sql: "CREATE OR REPLACE VIEW schema_name.view_name AS\nSELECT *\nFROM schema_name.table_name\nLIMIT 100;" },
-    { label: "Transactional script", sql: "BEGIN;\nINSERT INTO schema_name.table_name (column_a)\nVALUES ('one');\nUPDATE schema_name.table_name\nSET column_a = 'two'\nWHERE id = 1;\nCOMMIT;" },
-    { label: "Explain analyze", sql: "EXPLAIN ANALYZE\nSELECT *\nFROM schema_name.table_name\nWHERE id = 1;" },
-  ];
-
   const state = {
     schemaPayload: null,
     schemaFilter: "",
@@ -58,8 +44,6 @@
     schemaSearch: document.getElementById("schemaSearch"),
     refreshSchemaButton: document.getElementById("refreshSchemaButton"),
     connectionMeta: document.getElementById("connectionMeta"),
-    snippetSelect: document.getElementById("snippetSelect"),
-    historySelect: document.getElementById("historySelect"),
     clearEditorButton: document.getElementById("clearEditorButton"),
     runAllButton: document.getElementById("runAllButton"),
     runQueryButton: document.getElementById("runQueryButton"),
@@ -83,8 +67,6 @@
   };
 
   applyStoredEditor();
-  populateSnippets();
-  renderHistory();
   updateEditorContext();
   bindEvents();
   loadSchema();
@@ -95,20 +77,6 @@
       updateEditorContext();
     }, 120));
     editor.on("cursorActivity", updateEditorContext);
-
-    elements.snippetSelect.addEventListener("change", function () {
-      if (elements.snippetSelect.value) {
-        editor.setValue(elements.snippetSelect.value);
-        editor.focus();
-      }
-    });
-
-    elements.historySelect.addEventListener("change", function () {
-      if (elements.historySelect.value) {
-        editor.setValue(elements.historySelect.value);
-        editor.focus();
-      }
-    });
 
     elements.schemaSearch.addEventListener("input", function () {
       state.schemaFilter = elements.schemaSearch.value.trim().toLowerCase();
@@ -162,26 +130,6 @@
     state.history.unshift(value);
     state.history = state.history.slice(0, 18);
     saveHistory();
-    renderHistory();
-  }
-
-  function populateSnippets() {
-    snippets.forEach(function (snippet) {
-      const option = document.createElement("option");
-      option.value = snippet.sql;
-      option.textContent = snippet.label;
-      elements.snippetSelect.appendChild(option);
-    });
-  }
-
-  function renderHistory() {
-    elements.historySelect.innerHTML = "<option value=\"\">Recent queries</option>";
-    state.history.forEach(function (sql, index) {
-      const option = document.createElement("option");
-      option.value = sql;
-      option.textContent = String(index + 1) + ". " + compactLabel(sql);
-      elements.historySelect.appendChild(option);
-    });
   }
 
   function compactLabel(sql) {
@@ -244,7 +192,7 @@
   }
 
   async function loadSchema() {
-    elements.schemaTree.innerHTML = "<div class=\"muted\">Loading schema browser...</div>";
+    elements.schemaTree.innerHTML = "<div class=\"muted\">Loading public tables...</div>";
     clearError();
     try {
       const payload = await fetchJson("/api/sql/schema");
@@ -275,78 +223,51 @@
   }
 
   function renderSchema() {
-    if (!state.schemaPayload || !(state.schemaPayload.schemas || []).length) {
-      elements.schemaTree.innerHTML = "<div class=\"muted\">No non-system schemas found.</div>";
+    const schema = publicSchema();
+    if (!schema) {
+      elements.schemaTree.innerHTML = "<div class=\"muted\">The public schema is not available.</div>";
       return;
     }
 
     const filter = state.schemaFilter;
     elements.schemaTree.innerHTML = "";
-    let rendered = 0;
-
-    state.schemaPayload.schemas.forEach(function (schema) {
-      const sections = filterSchemaSections(schema, filter);
-      const total = sections.tables.length + sections.views.length + sections.materializedViews.length + sections.sequences.length + sections.functions.length;
-      if (!total) {
-        return;
-      }
-      rendered += 1;
-
-      const wrapper = document.createElement("div");
-      wrapper.className = "schema-section";
-      wrapper.innerHTML = "<div class=\"schema-section-header\"><div class=\"schema-name\">" + escapeHtml(schema.schema) + "</div><div class=\"schema-counts\">" + total + " object(s)</div></div>";
-
-      Object.keys(sections).forEach(function (sectionName) {
-        const items = sections[sectionName];
-        if (!items.length) {
-          return;
-        }
-        const section = document.createElement("div");
-        section.className = "schema-group";
-        section.innerHTML = "<div class=\"schema-group-title\">" + escapeHtml(readableSectionName(sectionName) + " (" + items.length + ")") + "</div>";
-        items.forEach(function (item) {
-          section.appendChild(renderObjectButton(item));
-        });
-        wrapper.appendChild(section);
-      });
-
-      elements.schemaTree.appendChild(wrapper);
-    });
-
-    if (!rendered) {
-      elements.schemaTree.innerHTML = "<div class=\"muted\">No objects match the current filter.</div>";
+    const tables = filterPublicTables(schema, filter);
+    if (!tables.length) {
+      elements.schemaTree.innerHTML = "<div class=\"muted\">No public tables match the current filter.</div>";
+      return;
     }
+
+    const wrapper = document.createElement("div");
+    wrapper.className = "schema-section";
+    wrapper.innerHTML = "<div class=\"schema-section-header\"><div class=\"schema-name\">public</div><div class=\"schema-counts\">" + tables.length + " table(s)</div></div>";
+
+    const section = document.createElement("div");
+    section.className = "schema-group";
+    tables.forEach(function (item) {
+      section.appendChild(renderObjectButton(item));
+    });
+    wrapper.appendChild(section);
+    elements.schemaTree.appendChild(wrapper);
   }
 
-  function filterSchemaSections(schema, filter) {
-    const objects = schema.objects || {};
-    const sections = {
-      tables: objects.tables || [],
-      views: objects.views || [],
-      materializedViews: objects.materializedViews || [],
-      sequences: objects.sequences || [],
-      functions: objects.functions || [],
-    };
+  function publicSchema() {
+    const schemas = (state.schemaPayload && state.schemaPayload.schemas) || [];
+    return schemas.find(function (schema) { return schema.schema === "public"; }) || null;
+  }
+
+  function filterPublicTables(schema, filter) {
+    const tables = ((schema.objects || {}).tables || []).slice();
     if (!filter) {
-      return sections;
+      return tables;
     }
-
-    Object.keys(sections).forEach(function (key) {
-      sections[key] = sections[key].filter(function (item) {
-        const haystack = [
-          item.name || "",
-          item.kind || "",
-          item.signature || "",
-          (item.columns || []).map(function (column) { return column.name; }).join(" "),
-        ].join(" ").toLowerCase();
-        return haystack.indexOf(filter) >= 0;
-      });
+    return tables.filter(function (item) {
+      const haystack = [
+        item.name || "",
+        item.kind || "",
+        (item.columns || []).map(function (column) { return column.name; }).join(" "),
+      ].join(" ").toLowerCase();
+      return haystack.indexOf(filter) >= 0;
     });
-    return sections;
-  }
-
-  function readableSectionName(sectionName) {
-    return sectionName === "materializedViews" ? "Materialized Views" : sectionName.charAt(0).toUpperCase() + sectionName.slice(1);
   }
 
   function renderObjectButton(item) {
@@ -594,6 +515,9 @@
       const button = document.createElement("button");
       button.type = "button";
       button.className = "statement-pill";
+      if (index === state.activeResultIndex) {
+        button.classList.add("active");
+      }
       button.innerHTML = "<strong>" + escapeHtml(String(result.index || index + 1)) + "</strong><span>" + escapeHtml(result.commandTag || result.statementType || "statement") + "</span><span>" + escapeHtml(String(result.rowCount || 0)) + " rows</span><span>" + escapeHtml(String(result.elapsedMs || 0)) + " ms</span>";
       button.addEventListener("click", function () {
         state.activeResultIndex = index;

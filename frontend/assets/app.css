@@ -738,8 +738,7 @@ select {
 .sql-workbench {
   min-height: calc(100vh - 1.44rem);
   display: grid;
-  grid-template-columns: 280px minmax(0, 1.35fr) 340px;
-  grid-template-rows: minmax(320px, 44vh) minmax(300px, 1fr);
+  grid-template-columns: 300px minmax(0, 1fr);
   gap: 0.72rem;
 }
 
@@ -751,32 +750,36 @@ select {
 
 .sql-sidebar,
 .sql-editor-panel,
-.sql-inspector-panel,
 .sql-results-panel {
   padding: 0.82rem;
 }
 
 .sql-sidebar {
-  grid-row: 1 / 3;
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
+  display: grid;
+  grid-template-rows: auto auto auto minmax(0, 1fr) minmax(240px, 0.95fr);
+  gap: 0.68rem;
   min-height: 0;
 }
 
-.sql-editor-panel,
-.sql-inspector-panel {
+.sql-main-panel {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(220px, 28vh) minmax(0, 1fr);
+  gap: 0.72rem;
+}
+
+.sql-editor-panel {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.65rem;
+  gap: 0.55rem;
 }
 
 .sql-results-panel {
   min-height: 0;
-  display: grid;
-  grid-template-rows: auto auto auto auto minmax(0, 1fr);
-  gap: 0.6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
 }
 
 .sql-sidebar-header {
@@ -816,6 +819,32 @@ select {
   line-height: 1.4;
 }
 
+.sql-sidebar-section,
+.sql-sidebar-inspector {
+  min-height: 0;
+}
+
+.sql-sidebar-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.sql-sidebar-section-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  align-items: baseline;
+}
+
+.sql-sidebar-inspector {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding-top: 0.72rem;
+  border-top: 1px solid rgba(147, 181, 255, 0.12);
+}
+
 .sql-sidebar-tools,
 .results-toolbar,
 .results-actions,
@@ -836,8 +865,7 @@ select {
   flex: 1 1 auto;
 }
 
-.sql-inline-field span,
-.snippet-picker span {
+.sql-inline-field span {
   margin-bottom: 0.18rem;
   font-size: 0.64rem;
 }
@@ -947,23 +975,25 @@ select {
   display: flex;
   justify-content: space-between;
   gap: 0.75rem;
-  align-items: start;
+  align-items: center;
+}
+
+.sql-editor-heading {
+  min-width: 0;
 }
 
 .editor-toolbar {
   margin: 0;
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 0.5rem;
-  align-items: end;
-}
-
-.snippet-picker {
-  min-width: 176px;
+  align-items: center;
+  justify-content: flex-end;
 }
 
 .sql-editor-panel .CodeMirror {
-  height: 100%;
+  height: auto;
+  flex: 1 1 auto;
   min-height: 0;
   border: 1px solid rgba(147, 181, 255, 0.16);
   border-radius: 12px;
@@ -1084,6 +1114,11 @@ select {
   align-items: start;
 }
 
+.results-strip {
+  display: grid;
+  gap: 0.42rem;
+}
+
 .error-panel {
   display: grid;
   gap: 0.35rem;
@@ -1140,6 +1175,12 @@ select {
   background: rgba(16, 30, 46, 0.98);
 }
 
+.statement-pill.active {
+  color: var(--text);
+  border-color: rgba(109, 216, 255, 0.28);
+  background: rgba(15, 27, 42, 0.98);
+}
+
 .statement-pill strong {
   color: var(--text);
 }
@@ -1152,16 +1193,21 @@ select {
 }
 
 .results-host {
-  min-height: 0;
-  height: auto;
+  min-height: 220px;
+  flex: 1 1 auto;
   overflow: auto;
   border: 1px solid rgba(147, 181, 255, 0.12);
   border-radius: 12px;
   background: rgba(7, 11, 19, 0.96);
 }
 
+.results-host .results-empty {
+  padding: 0.82rem;
+}
+
 .result-grid-wrap {
   min-width: 100%;
+  min-height: 100%;
   overflow: auto;
 }
 
@@ -1199,22 +1245,21 @@ select {
 
 @media (max-width: 1320px) {
   .sql-workbench {
-    grid-template-columns: 250px minmax(0, 1fr) 300px;
+    grid-template-columns: 270px minmax(0, 1fr);
   }
 }
 
 @media (max-width: 1120px) {
   .sql-workbench {
     grid-template-columns: 1fr;
-    grid-template-rows: auto auto auto minmax(320px, 1fr);
   }
 
   .sql-sidebar {
-    grid-row: auto;
+    grid-template-rows: auto auto auto minmax(260px, 0.9fr) minmax(240px, 0.9fr);
   }
 
-  .sql-results-panel {
-    grid-template-rows: auto auto auto auto minmax(280px, 1fr);
+  .sql-main-panel {
+    grid-template-rows: minmax(220px, 24vh) minmax(320px, 1fr);
   }
 }
 
@@ -1243,8 +1288,12 @@ select {
     width: 100%;
   }
 
-  .snippet-picker {
-    min-width: 0;
-    flex: 1 1 100%;
+  .editor-toolbar {
+    flex-wrap: wrap;
+    justify-content: stretch;
+  }
+
+  .sql-sidebar {
+    grid-template-rows: auto auto auto minmax(220px, 0.9fr) minmax(220px, 0.9fr);
   }
 }
