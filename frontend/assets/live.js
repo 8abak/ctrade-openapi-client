@@ -5,9 +5,10 @@
     id: "",
     reviewStart: "",
     reviewSpeed: 1,
-    primaryBarCollapsed: false,
-    ottBarCollapsed: true,
-    envelopeBarCollapsed: true,
+    sidebarCollapsed: false,
+    controlSectionCollapsed: false,
+    ottSectionCollapsed: false,
+    envelopeSectionCollapsed: false,
     window: 2000,
     series: ["mid"],
     ottEnabled: true,
@@ -115,13 +116,19 @@
       lastEnvelopeRequestAt: 0,
     },
     ui: {
-      primaryBarCollapsed: DEFAULTS.primaryBarCollapsed,
-      ottBarCollapsed: DEFAULTS.ottBarCollapsed,
-      envelopeBarCollapsed: DEFAULTS.envelopeBarCollapsed,
+      sidebarCollapsed: DEFAULTS.sidebarCollapsed,
+      sections: {
+        control: DEFAULTS.controlSectionCollapsed,
+        ott: DEFAULTS.ottSectionCollapsed,
+        envelope: DEFAULTS.envelopeSectionCollapsed,
+      },
     },
   };
 
   const elements = {
+    liveWorkspace: document.getElementById("liveWorkspace"),
+    liveSidebar: document.getElementById("liveSidebar"),
+    sidebarToggle: document.getElementById("sidebarToggle"),
     modeToggle: document.getElementById("modeToggle"),
     runToggle: document.getElementById("runToggle"),
     tickId: document.getElementById("tickId"),
@@ -135,7 +142,6 @@
     chartHost: document.getElementById("liveChart"),
     chartPanel: document.getElementById("chartPanel"),
     seriesSelector: document.getElementById("seriesSelector"),
-    fullscreenButton: document.getElementById("fullscreenButton"),
     ottToggle: document.getElementById("ottToggle"),
     ottSupportToggle: document.getElementById("ottSupportToggle"),
     ottMarkersToggle: document.getElementById("ottMarkersToggle"),
@@ -153,12 +159,18 @@
     envelopeLength: document.getElementById("envelopeLength"),
     envelopeBandwidth: document.getElementById("envelopeBandwidth"),
     envelopeMult: document.getElementById("envelopeMult"),
-    primaryControls: document.getElementById("primaryControls"),
-    ottControls: document.getElementById("ottControls"),
-    envelopeControls: document.getElementById("envelopeControls"),
-    primaryBarToggle: document.getElementById("primaryBarToggle"),
-    ottBarToggle: document.getElementById("ottBarToggle"),
-    envelopeBarToggle: document.getElementById("envelopeBarToggle"),
+    controlSectionBody: document.getElementById("controlSectionBody"),
+    ottSectionBody: document.getElementById("ottSectionBody"),
+    envelopeSectionBody: document.getElementById("envelopeSectionBody"),
+    controlSectionToggle: document.getElementById("controlSectionToggle"),
+    ottSectionToggle: document.getElementById("ottSectionToggle"),
+    envelopeSectionToggle: document.getElementById("envelopeSectionToggle"),
+  };
+
+  const SIDEBAR_SECTIONS = {
+    control: { body: elements.controlSectionBody, toggle: elements.controlSectionToggle },
+    envelope: { body: elements.envelopeSectionBody, toggle: elements.envelopeSectionToggle },
+    ott: { body: elements.ottSectionBody, toggle: elements.ottSectionToggle },
   };
 
   function currentChartHost() {
@@ -274,15 +286,19 @@
     const envelopeLength = Number.parseInt(params.get("envelopeLength"), 10);
     const envelopeBandwidth = Number.parseFloat(params.get("envelopeBandwidth"));
     const envelopeMult = Number.parseFloat(params.get("envelopeMult"));
+    const controlSectionParam = params.has("controlSection") ? params.get("controlSection") : params.get("primaryBar");
+    const ottSectionParam = params.has("ottSection") ? params.get("ottSection") : params.get("ottBar");
+    const envelopeSectionParam = params.has("envelopeSection") ? params.get("envelopeSection") : params.get("envelopeBar");
     return {
       mode,
       run,
       id,
       reviewStart,
       reviewSpeed: sanitizeReviewSpeed(params.get("reviewSpeed")),
-      primaryBarCollapsed: parseCollapsed(params.get("primaryBar"), DEFAULTS.primaryBarCollapsed),
-      ottBarCollapsed: parseCollapsed(params.get("ottBar"), DEFAULTS.ottBarCollapsed),
-      envelopeBarCollapsed: parseCollapsed(params.get("envelopeBar"), DEFAULTS.envelopeBarCollapsed),
+      sidebarCollapsed: parseCollapsed(params.get("sidebar"), DEFAULTS.sidebarCollapsed),
+      controlSectionCollapsed: parseCollapsed(controlSectionParam, DEFAULTS.controlSectionCollapsed),
+      ottSectionCollapsed: parseCollapsed(ottSectionParam, DEFAULTS.ottSectionCollapsed),
+      envelopeSectionCollapsed: parseCollapsed(envelopeSectionParam, DEFAULTS.envelopeSectionCollapsed),
       window: Number.isFinite(windowSize) && windowSize > 0 ? windowSize : DEFAULTS.window,
       series: parseSeries(params.get("series")),
       ottEnabled: parseBoolean(params.get("ott"), DEFAULTS.ottEnabled),
@@ -333,20 +349,38 @@
     });
   }
 
-  function setToolbarCollapsed(target, collapsed) {
+  function setSectionCollapsed(target, collapsed) {
+    if (!target) {
+      return;
+    }
     target.classList.toggle("is-collapsed", collapsed);
   }
 
-  function syncToolbarState() {
-    setToolbarCollapsed(elements.primaryControls, state.ui.primaryBarCollapsed);
-    setToolbarCollapsed(elements.ottControls, state.ui.ottBarCollapsed);
-    setToolbarCollapsed(elements.envelopeControls, state.ui.envelopeBarCollapsed);
-    elements.primaryBarToggle.textContent = state.ui.primaryBarCollapsed ? "Expand" : "Collapse";
-    elements.primaryBarToggle.setAttribute("aria-expanded", String(!state.ui.primaryBarCollapsed));
-    elements.ottBarToggle.textContent = state.ui.ottBarCollapsed ? "Expand" : "Collapse";
-    elements.ottBarToggle.setAttribute("aria-expanded", String(!state.ui.ottBarCollapsed));
-    elements.envelopeBarToggle.textContent = state.ui.envelopeBarCollapsed ? "Expand" : "Collapse";
-    elements.envelopeBarToggle.setAttribute("aria-expanded", String(!state.ui.envelopeBarCollapsed));
+  function syncSidebarState() {
+    const sidebarCollapsed = Boolean(state.ui.sidebarCollapsed);
+    if (elements.liveWorkspace) {
+      elements.liveWorkspace.classList.toggle("is-sidebar-collapsed", sidebarCollapsed);
+    }
+    if (elements.liveSidebar) {
+      elements.liveSidebar.setAttribute("aria-hidden", String(sidebarCollapsed));
+    }
+    if (elements.sidebarToggle) {
+      elements.sidebarToggle.setAttribute("aria-expanded", String(!sidebarCollapsed));
+    }
+
+    Object.keys(SIDEBAR_SECTIONS).forEach((sectionKey) => {
+      const section = SIDEBAR_SECTIONS[sectionKey];
+      const collapsed = Boolean(state.ui.sections[sectionKey]);
+      setSectionCollapsed(section.body, collapsed);
+      if (!section.toggle) {
+        return;
+      }
+      section.toggle.setAttribute("aria-expanded", String(!collapsed));
+      const stateLabel = section.toggle.querySelector(".live-section-state");
+      if (stateLabel) {
+        stateLabel.textContent = collapsed ? "Expand" : "Collapse";
+      }
+    });
   }
 
   function updateReviewControlState() {
@@ -362,9 +396,10 @@
     state.currentMode = config.mode;
     state.currentRun = config.run;
     state.review.playbackSpeed = config.reviewSpeed;
-    state.ui.primaryBarCollapsed = Boolean(config.primaryBarCollapsed);
-    state.ui.ottBarCollapsed = Boolean(config.ottBarCollapsed);
-    state.ui.envelopeBarCollapsed = Boolean(config.envelopeBarCollapsed);
+    state.ui.sidebarCollapsed = Boolean(config.sidebarCollapsed);
+    state.ui.sections.control = Boolean(config.controlSectionCollapsed);
+    state.ui.sections.ott = Boolean(config.ottSectionCollapsed);
+    state.ui.sections.envelope = Boolean(config.envelopeSectionCollapsed);
     state.activeSeries = { ask: false, bid: false, mid: false };
     config.series.forEach((seriesKey) => {
       state.activeSeries[seriesKey] = true;
@@ -392,7 +427,7 @@
     setSegment(elements.envelopeToggle, config.envelopeEnabled ? "on" : "off");
     syncSeriesButtons();
     syncReviewSpeedButtons();
-    syncToolbarState();
+    syncSidebarState();
     updateReviewControlState();
   }
 
@@ -403,9 +438,10 @@
       id: elements.tickId.value.trim(),
       reviewStart: elements.reviewStart.value.trim(),
       reviewSpeed: state.review.playbackSpeed,
-      primaryBarCollapsed: state.ui.primaryBarCollapsed,
-      ottBarCollapsed: state.ui.ottBarCollapsed,
-      envelopeBarCollapsed: state.ui.envelopeBarCollapsed,
+      sidebarCollapsed: state.ui.sidebarCollapsed,
+      controlSectionCollapsed: state.ui.sections.control,
+      ottSectionCollapsed: state.ui.sections.ott,
+      envelopeSectionCollapsed: state.ui.sections.envelope,
       window: Math.max(1, Math.min(10000, Number.parseInt(elements.windowSize.value, 10) || DEFAULTS.window)),
       series: getActiveSeriesKeys(),
       ottEnabled: elements.ottToggle.querySelector("button.active")?.dataset.value !== "off",
@@ -433,9 +469,10 @@
     params.set("run", config.run);
     params.set("window", String(config.window));
     params.set("reviewSpeed", String(config.reviewSpeed));
-    params.set("primaryBar", config.primaryBarCollapsed ? "1" : "0");
-    params.set("ottBar", config.ottBarCollapsed ? "1" : "0");
-    params.set("envelopeBar", config.envelopeBarCollapsed ? "1" : "0");
+    params.set("sidebar", config.sidebarCollapsed ? "1" : "0");
+    params.set("controlSection", config.controlSectionCollapsed ? "1" : "0");
+    params.set("ottSection", config.ottSectionCollapsed ? "1" : "0");
+    params.set("envelopeSection", config.envelopeSectionCollapsed ? "1" : "0");
     params.set("series", config.series.join(","));
     params.set("ott", config.ottEnabled ? "1" : "0");
     params.set("ottSupport", config.ottSupport ? "1" : "0");
@@ -870,7 +907,6 @@
       return;
     }
     window.addEventListener("resize", requestChartResize);
-    document.addEventListener("fullscreenchange", handleFullscreenChange);
     if (typeof ResizeObserver === "function" && elements.chartPanel && !state.chartResizeObserver) {
       state.chartResizeObserver = new ResizeObserver(() => {
         requestChartResize();
@@ -911,12 +947,6 @@
       });
     }
     return state.chart;
-  }
-
-  function handleFullscreenChange() {
-    const isFullscreen = document.fullscreenElement === elements.chartPanel;
-    elements.fullscreenButton.textContent = isFullscreen ? "Exit Fullscreen" : "Fullscreen";
-    requestChartResize({ remainingAttempts: CHART_RESIZE_RETRY_LIMIT });
   }
 
   function readZoomWindowFromChart() {
@@ -2783,21 +2813,21 @@
     elements.reviewStart.value = parts.year + "-" + parts.month + "-" + parts.day + "T08:00:00";
   }
 
-  function toggleToolbarRow(key) {
-    state.ui[key] = !state.ui[key];
-    syncToolbarState();
+  function toggleSidebarSection(sectionKey) {
+    if (!Object.prototype.hasOwnProperty.call(state.ui.sections, sectionKey)) {
+      return;
+    }
+    state.ui.sections[sectionKey] = !state.ui.sections[sectionKey];
+    syncSidebarState();
     writeQuery(currentConfig());
     scheduleChartResize();
   }
 
-  async function toggleFullscreen() {
-    if (document.fullscreenElement === elements.chartPanel) {
-      await document.exitFullscreen();
-      return;
-    }
-    if (elements.chartPanel.requestFullscreen) {
-      await elements.chartPanel.requestFullscreen();
-    }
+  function toggleSidebar() {
+    state.ui.sidebarCollapsed = !state.ui.sidebarCollapsed;
+    syncSidebarState();
+    writeQuery(currentConfig());
+    scheduleChartResize();
   }
 
   bindSegment(elements.modeToggle, (value) => {
@@ -2970,11 +3000,11 @@
     writeQuery(currentConfig());
   });
 
-  elements.primaryBarToggle.addEventListener("click", () => toggleToolbarRow("primaryBarCollapsed"));
-  elements.ottBarToggle.addEventListener("click", () => toggleToolbarRow("ottBarCollapsed"));
-  elements.envelopeBarToggle.addEventListener("click", () => toggleToolbarRow("envelopeBarCollapsed"));
+  elements.sidebarToggle.addEventListener("click", toggleSidebar);
+  elements.controlSectionToggle.addEventListener("click", () => toggleSidebarSection("control"));
+  elements.envelopeSectionToggle.addEventListener("click", () => toggleSidebarSection("envelope"));
+  elements.ottSectionToggle.addEventListener("click", () => toggleSidebarSection("ott"));
 
-  elements.fullscreenButton.addEventListener("click", toggleFullscreen);
   elements.applyButton.addEventListener("click", () => loadData(true));
   elements.runOttBacktestButton.addEventListener("click", async () => {
     const config = currentConfig();
