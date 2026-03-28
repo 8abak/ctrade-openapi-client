@@ -26,6 +26,8 @@
   const REVIEW_PREFETCH_FLOOR = 250;
   const REVIEW_PREFETCH_CEILING = 1000;
   const REVIEW_PREFETCH_THRESHOLD = 80;
+  const BACKTEST_OVERLAY_TIMEOUT_MS = 8000;
+  const BACKTEST_RUN_TIMEOUT_MS = 45000;
 
   const SERIES_CONFIG = {
     ask: { label: "Ask", field: "ask", color: "#ffb35c", width: 1.35 },
@@ -48,7 +50,16 @@
     ottLastId: 0,
     ottStatusPayload: null,
     ottOverlayPayload: null,
-    lastBacktestKey: null,
+    backtest: {
+      overlayRequestToken: 0,
+      overlayController: null,
+      runController: null,
+    },
+    loadStatus: {
+      chart: { text: "Chart: waiting.", severity: "info" },
+      ott: { text: "OTT: waiting.", severity: "info" },
+      backtest: { text: "Backtest: idle.", severity: "info" },
+    },
     review: {
       bufferRows: [],
       visibleCount: 0,
@@ -305,8 +316,102 @@
     elements.statusLine.classList.toggle("error", Boolean(isError));
   }
 
+  function setLoadStatus(key, text, severity, options) {
+    state.loadStatus[key] = {
+      text,
+      severity: severity || "info",
+    };
+    if (!options || !options.silent) {
+      renderLoadStatus();
+    }
+  }
+
+  function renderLoadStatus() {
+    const parts = ["chart", "ott", "backtest"]
+      .map((key) => state.loadStatus[key])
+      .filter((entry) => entry && entry.text);
+    elements.statusLine.textContent = parts.map((entry) => entry.text).join(" | ") || "Ready.";
+    elements.statusLine.classList.toggle("error", parts.some((entry) => entry.severity === "error"));
+  }
+
+  function initializeLoadStatus(config) {
+    setLoadStatus("chart", "Chart: loading...", "info", { silent: true });
+    setLoadStatus("ott", shouldLoadOtt(config) ? "OTT: loading..." : "OTT: off.", "info", { silent: true });
+    if (config.mode === "review") {
+      setLoadStatus(
+        "backtest",
+        config.ottTrades ? "Backtest: checking cache..." : "Backtest: off.",
+        "info",
+        { silent: true }
+      );
+    } else {
+      setLoadStatus("backtest", "Backtest: n/a.", "info", { silent: true });
+    }
+    renderLoadStatus();
+  }
+
+  function updateOttLoadStatus(payload) {
+    if (!payload) {
+      setLoadStatus("ott", "OTT: off.", "info");
+      return;
+    }
+    if (payload.status && payload.status !== "ok") {
+      setLoadStatus(
+        "ott",
+        "OTT: " + (payload.message || payload.status + "."),
+        isOttWarningStatus(payload.status) ? "warn" : "error"
+      );
+      return;
+    }
+    const availableCount = payload.availableRowCount != null ? payload.availableRowCount : payload.rowCount;
+    setLoadStatus("ott", "OTT: loaded " + Number(availableCount || 0) + " row(s).", "info");
+  }
+
+  function updateBacktestLoadStatus(payload) {
+    if (!payload || !payload.run) {
+      setLoadStatus("backtest", "Backtest: no cached backtest yet. Click Run Backtest.", "info");
+      return;
+    }
+    if (payload.status && payload.status !== "ok" && payload.message) {
+      const prefix = payload.status === "no-trades" ? "Backtest: cached run loaded. " : "Backtest: ";
+      setLoadStatus(
+        "backtest",
+        prefix + payload.message,
+        payload.status === "no-trades" ? "info" : (isOttWarningStatus(payload.status) ? "warn" : "error")
+      );
+      return;
+    }
+    setLoadStatus("backtest", "Backtest: cached " + Number(payload.tradeCount || 0) + " trade(s).", "info");
+  }
+
+  function isAbortError(error) {
+    return error && (error.name === "AbortError" || String(error.message || "").toLowerCase().includes("aborted"));
+  }
+
+  function abortController(controller) {
+    if (!controller) {
+      return;
+    }
+    try {
+      controller.abort();
+    } catch (error) {
+      // Ignore abort failures while swapping requests.
+    }
+  }
+
+  function cancelBacktestOverlayRequest() {
+    abortController(state.backtest.overlayController);
+    state.backtest.overlayController = null;
+    state.backtest.overlayRequestToken += 1;
+  }
+
+  function cancelBacktestRunRequest() {
+    abortController(state.backtest.runController);
+    state.backtest.runController = null;
+  }
+
   function isOttWarningStatus(statusValue) {
-    return ["empty", "partial", "ahead"].includes(statusValue);
+    return ["empty", "partial", "ahead", "no-signals", "no-trades", "not-cached"].includes(statusValue);
   }
 
   function formatSignalCounts(signalCounts) {
@@ -996,6 +1101,8 @@
   }
 
   function clearOttState() {
+    cancelBacktestOverlayRequest();
+    cancelBacktestRunRequest();
     state.ottRows = new Map();
     state.ottTrades = [];
     state.ottRun = null;
@@ -1016,27 +1123,66 @@
     state.ottStatusPayload = payload;
   }
 
-  async function fetchJson(url, options) {
-    const response = await fetch(url, options);
-    const bodyText = await response.text();
-    let payload = null;
-    if (bodyText) {
-      try {
-        payload = JSON.parse(bodyText);
-      } catch (error) {
-        payload = null;
+  async function fetchJson(url, options, requestOptions) {
+    const fetchOptions = options ? { ...options } : {};
+    let timeoutId = 0;
+    let timedOut = false;
+    let timeoutController = null;
+    let abortListener = null;
+
+    if (requestOptions && requestOptions.timeoutMs) {
+      timeoutController = new AbortController();
+      if (requestOptions.signal) {
+        if (requestOptions.signal.aborted) {
+          timeoutController.abort();
+        } else {
+          abortListener = () => timeoutController.abort();
+          requestOptions.signal.addEventListener("abort", abortListener, { once: true });
+        }
+      }
+      fetchOptions.signal = timeoutController.signal;
+      timeoutId = window.setTimeout(() => {
+        timedOut = true;
+        timeoutController.abort();
+      }, requestOptions.timeoutMs);
+    } else if (requestOptions && requestOptions.signal) {
+      fetchOptions.signal = requestOptions.signal;
+    }
+
+    try {
+      const response = await fetch(url, fetchOptions);
+      const bodyText = await response.text();
+      let payload = null;
+      if (bodyText) {
+        try {
+          payload = JSON.parse(bodyText);
+        } catch (error) {
+          payload = null;
+        }
+      }
+      if (!response.ok) {
+        const message = payload && typeof payload === "object"
+          ? (payload.detail || payload.message || response.statusText || "Request failed.")
+          : (bodyText || response.statusText || "Request failed.");
+        throw new Error(message);
+      }
+      if (payload === null) {
+        throw new Error(bodyText || "Expected JSON response.");
+      }
+      return payload;
+    } catch (error) {
+      if (timedOut) {
+        throw new Error((requestOptions && requestOptions.timeoutMessage) || "Request timed out.");
+      }
+      throw error;
+    } finally {
+      if (timeoutId) {
+        window.clearTimeout(timeoutId);
+      }
+      if (requestOptions && requestOptions.signal && abortListener) {
+        requestOptions.signal.removeEventListener("abort", abortListener);
       }
     }
-    if (!response.ok) {
-      const message = payload && typeof payload === "object"
-        ? (payload.detail || payload.message || response.statusText || "Request failed.")
-        : (bodyText || response.statusText || "Request failed.");
-      throw new Error(message);
-    }
-    if (payload === null) {
-      throw new Error(bodyText || "Expected JSON response.");
-    }
-    return payload;
   }
 
   async function loadOttBootstrap(config) {
@@ -1075,53 +1221,59 @@
     return payload;
   }
 
-  async function runBacktestIfNeeded(config, force) {
+  async function runBacktest(config, force) {
     if (config.mode !== "review" || !config.ottTrades) {
       state.ottRun = null;
       state.ottTrades = [];
       state.ottOverlayPayload = null;
       return null;
     }
-    const backtestKey = [
-      config.ottSource,
-      config.ottMaType,
-      config.ottLength,
-      config.ottPercent,
-      config.ottSignalMode,
-      config.ottRangePreset,
-      force ? "force" : "reuse",
-    ].join(":");
-    if (!force && state.lastBacktestKey === backtestKey && state.ottRun) {
-      return state.ottRun;
+    cancelBacktestRunRequest();
+    const controller = new AbortController();
+    state.backtest.runController = controller;
+    try {
+      const runPayload = await fetchJson("/api/ott/backtest/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          source: config.ottSource,
+          matype: config.ottMaType,
+          length: config.ottLength,
+          percent: config.ottPercent,
+          signalmode: config.ottSignalMode,
+          rangepreset: config.ottRangePreset,
+          force: Boolean(force),
+        }),
+      }, {
+        signal: controller.signal,
+        timeoutMs: BACKTEST_RUN_TIMEOUT_MS,
+        timeoutMessage: "Backtest is taking too long. The chart stays usable; try loading the overlay again shortly.",
+      });
+      state.ottRun = runPayload.run;
+      return runPayload;
+    } finally {
+      if (state.backtest.runController === controller) {
+        state.backtest.runController = null;
+      }
     }
-
-    const runPayload = await fetchJson("/api/ott/backtest/run", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        source: config.ottSource,
-        matype: config.ottMaType,
-        length: config.ottLength,
-        percent: config.ottPercent,
-        signalmode: config.ottSignalMode,
-        rangepreset: config.ottRangePreset,
-        force: Boolean(force),
-      }),
-    });
-    state.lastBacktestKey = backtestKey;
-    state.ottRun = runPayload.run;
-    return runPayload.run;
   }
 
-  async function loadBacktestOverlay(config, rangeRows) {
+  async function loadBacktestOverlay(config, rangeRows, options) {
     const rows = rangeRows || state.rows;
     if (config.mode !== "review" || !config.ottTrades || !rows.length) {
       state.ottTrades = [];
       state.ottRun = null;
       state.ottOverlayPayload = null;
+      setLoadStatus("backtest", config.mode === "review" ? "Backtest: off." : "Backtest: n/a.", "info");
       return null;
     }
-    await runBacktestIfNeeded(config, false);
+    cancelBacktestOverlayRequest();
+    const controller = new AbortController();
+    const requestToken = state.backtest.overlayRequestToken;
+    state.backtest.overlayController = controller;
+    if (!options || !options.silentStatus) {
+      setLoadStatus("backtest", "Backtest: checking cache...", "info");
+    }
     const params = new URLSearchParams({
       source: config.ottSource,
       matype: config.ottMaType,
@@ -1132,15 +1284,40 @@
       startId: String(rows[0].id),
       endId: String(rows[rows.length - 1].id),
     });
-    const overlayPayload = await fetchJson("/api/ott/backtest/overlay?" + params.toString());
-    state.ottRun = overlayPayload.run;
-    state.ottTrades = (overlayPayload.trades || []).map((trade) => ({
-      ...trade,
-      entryTsMs: trade.entryTsMs,
-      exitTsMs: trade.exitTsMs,
-    }));
-    state.ottOverlayPayload = overlayPayload;
-    return overlayPayload;
+    try {
+      const overlayPayload = await fetchJson("/api/ott/backtest/overlay?" + params.toString(), null, {
+        signal: controller.signal,
+        timeoutMs: BACKTEST_OVERLAY_TIMEOUT_MS,
+        timeoutMessage: "Backtest cache lookup timed out. The chart stays usable.",
+      });
+      if (requestToken !== state.backtest.overlayRequestToken) {
+        return null;
+      }
+      if (state.backtest.overlayController === controller) {
+        state.backtest.overlayController = null;
+      }
+      state.ottRun = overlayPayload.run;
+      state.ottTrades = (overlayPayload.trades || []).map((trade) => ({
+        ...trade,
+        entryTsMs: trade.entryTsMs,
+        exitTsMs: trade.exitTsMs,
+      }));
+      state.ottOverlayPayload = overlayPayload;
+      updateBacktestLoadStatus(overlayPayload);
+      return overlayPayload;
+    } catch (error) {
+      if (state.backtest.overlayController === controller) {
+        state.backtest.overlayController = null;
+      }
+      if (requestToken !== state.backtest.overlayRequestToken || isAbortError(error)) {
+        return null;
+      }
+      state.ottTrades = [];
+      state.ottRun = null;
+      state.ottOverlayPayload = null;
+      setLoadStatus("backtest", "Backtest: " + (error.message || "overlay unavailable."), "warn");
+      throw error;
+    }
   }
 
   async function resolveReviewStart(config) {
@@ -1201,13 +1378,25 @@
 
         try {
           if (shouldLoadOtt(config)) {
-            await loadOttNext(afterId, config, newRows.length);
-          }
-          if (config.ottTrades) {
-            await loadBacktestOverlay(config, state.review.bufferRows);
+            const ottPayload = await loadOttNext(afterId, config, newRows.length);
+            updateOttLoadStatus(ottPayload || state.ottStatusPayload);
           }
         } catch (error) {
-          status(error.message || "Review overlay update failed.", true);
+          setLoadStatus("ott", "OTT: " + (error.message || "incremental update failed."), "error");
+        }
+
+        if (config.ottTrades) {
+          loadBacktestOverlay(config, state.review.bufferRows, { silentStatus: true })
+            .then((overlayPayload) => {
+              if (overlayPayload) {
+                renderChart({ preserveCurrentZoom: true });
+              }
+            })
+            .catch((error) => {
+              if (!isAbortError(error)) {
+                renderLoadStatus();
+              }
+            });
         }
         return payload;
       })
@@ -1331,10 +1520,10 @@
     resetReviewState();
     clearOttState();
 
-    status("Loading chart...", false);
     try {
       const config = await resolveReviewStart(currentConfig());
       writeQuery(config);
+      initializeLoadStatus(config);
       const params = new URLSearchParams({
         mode: config.mode,
         window: String(config.window),
@@ -1352,42 +1541,48 @@
       } else {
         state.rows = loadedRows;
       }
-      let ottError = null;
+      setLoadStatus(
+        "chart",
+        loadedRows.length ? "Chart: loaded " + Number(livePayload.rowCount || loadedRows.length) + " row(s)." : "Chart: no rows returned.",
+        loadedRows.length ? "info" : "warn",
+        { silent: true }
+      );
 
       if (shouldLoadOtt(config)) {
         try {
-          await loadOttBootstrap(config);
+          const ottPayload = await loadOttBootstrap(config);
+          updateOttLoadStatus(ottPayload);
         } catch (error) {
-          ottError = error;
           clearOttState();
+          setLoadStatus("ott", "OTT: " + (error.message || "bootstrap failed."), "error", { silent: true });
         }
+      } else {
+        setLoadStatus("ott", "OTT: off.", "info", { silent: true });
       }
 
-      if (config.mode === "review" && config.ottTrades && shouldLoadOtt(config)) {
-        try {
-          await loadBacktestOverlay(config, config.mode === "review" ? state.review.bufferRows : state.rows);
-        } catch (error) {
-          ottError = error;
-          state.ottTrades = [];
-          state.ottRun = null;
-          state.ottOverlayPayload = null;
-        }
+      if (config.mode !== "review") {
+        setLoadStatus("backtest", "Backtest: n/a.", "info", { silent: true });
+      } else if (!config.ottTrades) {
+        setLoadStatus("backtest", "Backtest: off.", "info", { silent: true });
       }
 
       renderChart({ resetWindow: Boolean(resetWindow) });
-      const ottCount = shouldLoadOtt(config) ? state.ottRows.size : 0;
-      const reviewPrefix = config.mode === "review"
-        ? "Loaded review from " + (state.review.resolvedStartTimestamp || config.reviewStart || ("id " + config.id)) + ". "
-        : "";
-      if (ottError) {
-        status(reviewPrefix + "Loaded " + livePayload.rowCount + " row(s). OTT unavailable: " + ottError.message, true);
-      } else {
-        const ottState = collectOttMessages(config);
-        if (ottState.messages.length) {
-          status(reviewPrefix + "Loaded " + livePayload.rowCount + " row(s). " + ottState.messages.join(" "), ottState.hasWarning);
-        } else {
-          status(reviewPrefix + "Loaded " + livePayload.rowCount + " row(s)" + (ottCount ? " with " + ottCount + " OTT row(s)." : "."), false);
-        }
+      renderLoadStatus();
+
+      if (config.mode === "review" && config.ottTrades) {
+        loadBacktestOverlay(config, state.review.bufferRows, { silentStatus: true })
+          .then((overlayPayload) => {
+            if (overlayPayload) {
+              renderChart({ preserveCurrentZoom: true });
+            }
+          })
+          .catch((error) => {
+            if (!isAbortError(error)) {
+              renderLoadStatus();
+            }
+          });
+      } else if (config.mode === "review") {
+        renderLoadStatus();
       }
       if (config.run === "run" && config.mode === "live") {
         connectStream(livePayload.lastId || 0, config.window);
@@ -1396,7 +1591,8 @@
         startReviewPlayback();
       }
     } catch (error) {
-      status(error.message || "Live bootstrap failed.", true);
+      setLoadStatus("chart", "Chart: " + (error.message || "bootstrap failed."), "error", { silent: true });
+      renderLoadStatus();
     }
   }
 
@@ -1508,7 +1704,13 @@
 
   bindSegment(elements.ottToggle, (value) => {
     setSegment(elements.ottToggle, value);
-    writeQuery(currentConfig());
+    const config = currentConfig();
+    writeQuery(config);
+    if (!shouldLoadOtt(config)) {
+      setLoadStatus("ott", "OTT: off.", "info");
+    } else if (state.ottStatusPayload) {
+      updateOttLoadStatus(state.ottStatusPayload);
+    }
     renderChart({ preserveCurrentZoom: true });
   });
 
@@ -1523,22 +1725,39 @@
     elements.ottHighlightToggle,
     elements.ottSignalMode,
   ].forEach((control) => {
-    control.addEventListener("change", async () => {
-      writeQuery(currentConfig());
+    control.addEventListener("change", () => {
+      const config = currentConfig();
+      writeQuery(config);
+      renderChart({ preserveCurrentZoom: true });
       if (control === elements.ottTradesToggle || control === elements.ottSignalMode) {
-        try {
-          const overlayPayload = await loadBacktestOverlay(
-            currentConfig(),
-            state.currentMode === "review" ? state.review.bufferRows : state.rows
-          );
-          if (overlayPayload && overlayPayload.message) {
-            status(overlayPayload.message, isOttWarningStatus(overlayPayload.status));
-          }
-        } catch (error) {
-          status(error.message || "Failed to refresh OTT backtest overlay.", true);
+        loadBacktestOverlay(
+          config,
+          state.currentMode === "review" ? state.review.bufferRows : state.rows
+        )
+          .then((overlayPayload) => {
+            if (overlayPayload) {
+              renderChart({ preserveCurrentZoom: true });
+            } else {
+              renderLoadStatus();
+            }
+          })
+          .catch((error) => {
+            if (!isAbortError(error)) {
+              renderLoadStatus();
+            }
+          });
+      } else {
+        if (!config.ottTrades && config.mode === "review") {
+          setLoadStatus("backtest", "Backtest: off.", "info");
+        }
+        if (!shouldLoadOtt(config)) {
+          setLoadStatus("ott", "OTT: off.", "info");
+        } else if (state.ottStatusPayload) {
+          updateOttLoadStatus(state.ottStatusPayload);
+        } else {
+          renderLoadStatus();
         }
       }
-      renderChart({ preserveCurrentZoom: true });
     });
   });
 
@@ -1578,21 +1797,41 @@
   elements.runOttBacktestButton.addEventListener("click", async () => {
     const config = currentConfig();
     writeQuery(config);
+    if (config.mode !== "review") {
+      setLoadStatus("backtest", "Backtest: switch to review mode to run it.", "info");
+      return;
+    }
+    if (!config.ottTrades) {
+      setLoadStatus("backtest", "Backtest: enable backtest trades first.", "info");
+      return;
+    }
+    elements.runOttBacktestButton.disabled = true;
     try {
-      status("Running OTT backtest...", false);
-      await runBacktestIfNeeded(config, true);
+      setLoadStatus("backtest", "Backtest: running...", "info");
+      const runPayload = await runBacktest(config, true);
+      setLoadStatus(
+        "backtest",
+        runPayload && runPayload.run && runPayload.run.reused
+          ? "Backtest: cached run reused. Loading overlay..."
+          : "Backtest: run complete. Loading overlay...",
+        "info"
+      );
       const overlayPayload = await loadBacktestOverlay(
         config,
-        state.currentMode === "review" ? state.review.bufferRows : state.rows
+        state.currentMode === "review" ? state.review.bufferRows : state.rows,
+        { silentStatus: true }
       );
-      renderChart({ preserveCurrentZoom: true });
-      if (overlayPayload && overlayPayload.message) {
-        status(overlayPayload.message, isOttWarningStatus(overlayPayload.status));
+      if (overlayPayload) {
+        renderChart({ preserveCurrentZoom: true });
       } else {
-        status("OTT backtest refreshed.", false);
+        renderLoadStatus();
       }
     } catch (error) {
-      status(error.message || "OTT backtest failed.", true);
+      if (!isAbortError(error)) {
+        setLoadStatus("backtest", "Backtest: " + (error.message || "run failed."), "error");
+      }
+    } finally {
+      elements.runOttBacktestButton.disabled = false;
     }
   });
 

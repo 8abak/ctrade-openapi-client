@@ -1761,6 +1761,7 @@ def ott_backtest_run(payload: OttBacktestRunRequest) -> Dict[str, Any]:
 
     return {
         "run": serialize_backtest_run(run),
+        "cached": bool(run.get("reused")),
         "rangePreset": payload.rangepreset,
         "range": range_info,
         "status": status_text,
@@ -1812,10 +1813,14 @@ def ott_backtest_overlay(
         trade_count=int(overlay["tradecount"]),
         scope_label="selected review range",
     )
+    if overlay["run"] is None:
+        status_text = "not-cached"
+        message = "No cached backtest yet. Click Run Backtest."
     return {
         "run": serialize_backtest_run(overlay["run"]),
         "trades": [serialize_backtest_trade(trade) for trade in overlay["trades"]],
         "tradeCount": overlay["tradecount"],
+        "cached": overlay["run"] is not None,
         "rangePreset": rangePreset,
         "range": range_info,
         "status": status_text,
