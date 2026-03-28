@@ -3,6 +3,10 @@
     mode: "live",
     run: "run",
     id: "",
+    reviewStart: "",
+    reviewSpeed: 1,
+    primaryBarCollapsed: false,
+    ottBarCollapsed: true,
     window: 2000,
     series: ["mid"],
     ottEnabled: true,
@@ -17,6 +21,11 @@
     ottPercent: 1.4,
     ottRangePreset: "lastweek",
   };
+  const SYDNEY_TIMEZONE = "Australia/Sydney";
+  const REVIEW_SPEEDS = [0.5, 1, 2, 3, 5];
+  const REVIEW_PREFETCH_FLOOR = 250;
+  const REVIEW_PREFETCH_CEILING = 1000;
+  const REVIEW_PREFETCH_THRESHOLD = 80;
 
   const SERIES_CONFIG = {
     ask: { label: "Ask", field: "ask", color: "#ffb35c", width: 1.35 },
@@ -40,12 +49,34 @@
     ottStatusPayload: null,
     ottOverlayPayload: null,
     lastBacktestKey: null,
+    review: {
+      bufferRows: [],
+      visibleCount: 0,
+      lastBufferedId: 0,
+      playbackSpeed: DEFAULTS.reviewSpeed,
+      exhausted: false,
+      fetchPromise: null,
+      rafId: 0,
+      anchorVisibleCount: 0,
+      anchorTimestampMs: 0,
+      anchorPerfMs: 0,
+      reachedEndAnnounced: false,
+      resolvedStartId: null,
+      resolvedStartTimestamp: null,
+    },
+    ui: {
+      primaryBarCollapsed: DEFAULTS.primaryBarCollapsed,
+      ottBarCollapsed: DEFAULTS.ottBarCollapsed,
+    },
   };
 
   const elements = {
     modeToggle: document.getElementById("modeToggle"),
     runToggle: document.getElementById("runToggle"),
     tickId: document.getElementById("tickId"),
+    reviewStart: document.getElementById("reviewStart"),
+    reviewYesterdayButton: document.getElementById("reviewYesterdayButton"),
+    reviewSpeedToggle: document.getElementById("reviewSpeedToggle"),
     windowSize: document.getElementById("windowSize"),
     applyButton: document.getElementById("applyButton"),
     statusLine: document.getElementById("statusLine"),
@@ -66,6 +97,10 @@
     ottPercent: document.getElementById("ottPercent"),
     ottRangePreset: document.getElementById("ottRangePreset"),
     runOttBacktestButton: document.getElementById("runOttBacktestButton"),
+    primaryControls: document.getElementById("primaryControls"),
+    ottControls: document.getElementById("ottControls"),
+    primaryBarToggle: document.getElementById("primaryBarToggle"),
+    ottBarToggle: document.getElementById("ottBarToggle"),
   };
 
   function parseSeries(rawValue) {
@@ -83,11 +118,24 @@
     return value !== "0" && value !== "false" && value !== "off";
   }
 
+  function parseCollapsed(value, fallback) {
+    if (value === null) {
+      return fallback;
+    }
+    return value === "1" || value === "true" || value === "collapsed";
+  }
+
+  function sanitizeReviewSpeed(rawValue) {
+    const value = Number.parseFloat(rawValue);
+    return REVIEW_SPEEDS.includes(value) ? value : DEFAULTS.reviewSpeed;
+  }
+
   function parseQuery() {
     const params = new URLSearchParams(window.location.search);
     const mode = params.get("mode") === "review" ? "review" : DEFAULTS.mode;
     const run = params.get("run") === "stop" ? "stop" : DEFAULTS.run;
     const id = params.get("id") || DEFAULTS.id;
+    const reviewStart = params.get("reviewStart") || DEFAULTS.reviewStart;
     const windowSize = Number.parseInt(params.get("window"), 10);
     const ottLength = Number.parseInt(params.get("ottLength"), 10);
     const ottPercent = Number.parseFloat(params.get("ottPercent"));
@@ -95,6 +143,10 @@
       mode,
       run,
       id,
+      reviewStart,
+      reviewSpeed: sanitizeReviewSpeed(params.get("reviewSpeed")),
+      primaryBarCollapsed: parseCollapsed(params.get("primaryBar"), DEFAULTS.primaryBarCollapsed),
+      ottBarCollapsed: parseCollapsed(params.get("ottBar"), DEFAULTS.ottBarCollapsed),
       window: Number.isFinite(windowSize) && windowSize > 0 ? windowSize : DEFAULTS.window,
       series: parseSeries(params.get("series")),
       ottEnabled: parseBoolean(params.get("ott"), DEFAULTS.ottEnabled),
@@ -134,14 +186,46 @@
     });
   }
 
+  function syncReviewSpeedButtons() {
+    elements.reviewSpeedToggle.querySelectorAll("button").forEach((button) => {
+      button.classList.toggle("active", Number.parseFloat(button.dataset.value) === state.review.playbackSpeed);
+    });
+  }
+
+  function setToolbarCollapsed(target, collapsed) {
+    target.classList.toggle("is-collapsed", collapsed);
+  }
+
+  function syncToolbarState() {
+    setToolbarCollapsed(elements.primaryControls, state.ui.primaryBarCollapsed);
+    setToolbarCollapsed(elements.ottControls, state.ui.ottBarCollapsed);
+    elements.primaryBarToggle.textContent = state.ui.primaryBarCollapsed ? "Expand" : "Collapse";
+    elements.primaryBarToggle.setAttribute("aria-expanded", String(!state.ui.primaryBarCollapsed));
+    elements.ottBarToggle.textContent = state.ui.ottBarCollapsed ? "Expand" : "Collapse";
+    elements.ottBarToggle.setAttribute("aria-expanded", String(!state.ui.ottBarCollapsed));
+  }
+
+  function updateReviewControlState() {
+    const inReview = state.currentMode === "review";
+    elements.reviewStart.disabled = !inReview;
+    elements.reviewYesterdayButton.disabled = !inReview;
+    elements.reviewSpeedToggle.querySelectorAll("button").forEach((button) => {
+      button.disabled = !inReview;
+    });
+  }
+
   function syncControls(config) {
     state.currentMode = config.mode;
     state.currentRun = config.run;
+    state.review.playbackSpeed = config.reviewSpeed;
+    state.ui.primaryBarCollapsed = Boolean(config.primaryBarCollapsed);
+    state.ui.ottBarCollapsed = Boolean(config.ottBarCollapsed);
     state.activeSeries = { ask: false, bid: false, mid: false };
     config.series.forEach((seriesKey) => {
       state.activeSeries[seriesKey] = true;
     });
     elements.tickId.value = config.id || "";
+    elements.reviewStart.value = config.reviewStart || "";
     elements.windowSize.value = String(config.window);
     elements.ottSupportToggle.checked = Boolean(config.ottSupport);
     elements.ottMarkersToggle.checked = Boolean(config.ottMarkers);
@@ -157,6 +241,9 @@
     setSegment(elements.runToggle, config.run);
     setSegment(elements.ottToggle, config.ottEnabled ? "on" : "off");
     syncSeriesButtons();
+    syncReviewSpeedButtons();
+    syncToolbarState();
+    updateReviewControlState();
   }
 
   function currentConfig() {
@@ -164,6 +251,10 @@
       mode: state.currentMode,
       run: state.currentRun,
       id: elements.tickId.value.trim(),
+      reviewStart: elements.reviewStart.value.trim(),
+      reviewSpeed: state.review.playbackSpeed,
+      primaryBarCollapsed: state.ui.primaryBarCollapsed,
+      ottBarCollapsed: state.ui.ottBarCollapsed,
       window: Math.max(1, Math.min(10000, Number.parseInt(elements.windowSize.value, 10) || DEFAULTS.window)),
       series: getActiveSeriesKeys(),
       ottEnabled: elements.ottToggle.querySelector("button.active")?.dataset.value !== "off",
@@ -185,6 +276,9 @@
     params.set("mode", config.mode);
     params.set("run", config.run);
     params.set("window", String(config.window));
+    params.set("reviewSpeed", String(config.reviewSpeed));
+    params.set("primaryBar", config.primaryBarCollapsed ? "1" : "0");
+    params.set("ottBar", config.ottBarCollapsed ? "1" : "0");
     params.set("series", config.series.join(","));
     params.set("ott", config.ottEnabled ? "1" : "0");
     params.set("ottSupport", config.ottSupport ? "1" : "0");
@@ -199,6 +293,9 @@
     params.set("ottRangePreset", config.ottRangePreset);
     if (config.id) {
       params.set("id", config.id);
+    }
+    if (config.reviewStart) {
+      params.set("reviewStart", config.reviewStart);
     }
     history.replaceState(null, "", "/live?" + params.toString());
   }
@@ -655,6 +752,10 @@
       "Last id " + lastRow.id,
       "Price " + Number(price).toFixed(2),
     ];
+    if (config.mode === "review") {
+      meta.unshift("Replay " + state.review.visibleCount + "/" + state.review.bufferRows.length);
+      meta.push("Speed " + state.review.playbackSpeed + "x");
+    }
     if (lastOtt && lastOtt.ott2 != null && config.ottEnabled) {
       meta.push("OTT " + Number(lastOtt.ott2).toFixed(2));
     }
@@ -809,6 +910,91 @@
     }
   }
 
+  function stopReviewPlayback(options) {
+    if (state.review.rafId) {
+      cancelAnimationFrame(state.review.rafId);
+      state.review.rafId = 0;
+    }
+    if (!options || !options.silent) {
+      status("Review playback paused.", false);
+    }
+  }
+
+  function resetReviewState() {
+    stopReviewPlayback({ silent: true });
+    state.review.bufferRows = [];
+    state.review.visibleCount = 0;
+    state.review.lastBufferedId = 0;
+    state.review.exhausted = false;
+    state.review.fetchPromise = null;
+    state.review.anchorVisibleCount = 0;
+    state.review.anchorTimestampMs = 0;
+    state.review.anchorPerfMs = 0;
+    state.review.reachedEndAnnounced = false;
+    state.review.resolvedStartId = null;
+    state.review.resolvedStartTimestamp = null;
+  }
+
+  function setReviewVisibleCount(nextCount, options) {
+    const boundedCount = Math.max(0, Math.min(nextCount, state.review.bufferRows.length));
+    state.review.visibleCount = boundedCount;
+    state.rows = state.review.bufferRows.slice(0, boundedCount);
+    if (options && options.skipRender) {
+      return;
+    }
+    renderChart({
+      preserveCurrentZoom: Boolean(options && options.preserveCurrentZoom),
+      resetWindow: Boolean(options && options.resetWindow),
+    });
+  }
+
+  function reviewPrefetchLimit(config) {
+    return Math.max(
+      REVIEW_PREFETCH_FLOOR,
+      Math.min(REVIEW_PREFETCH_CEILING, Math.max(120, Math.floor(config.window / 2)))
+    );
+  }
+
+  function reviewLastVisibleRow() {
+    if (!state.review.visibleCount) {
+      return null;
+    }
+    return state.review.bufferRows[state.review.visibleCount - 1] || null;
+  }
+
+  function setReviewPlaybackAnchor(nowMs) {
+    const anchorRow = reviewLastVisibleRow() || state.review.bufferRows[0] || null;
+    state.review.anchorVisibleCount = Math.max(1, state.review.visibleCount || (anchorRow ? 1 : 0));
+    state.review.anchorTimestampMs = anchorRow ? anchorRow.timestampMs : 0;
+    state.review.anchorPerfMs = nowMs;
+  }
+
+  function reviewVisibleCountForTimestamp(targetTimestampMs) {
+    let low = Math.max(0, state.review.anchorVisibleCount - 1);
+    let high = state.review.bufferRows.length;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (state.review.bufferRows[middle].timestampMs <= targetTimestampMs) {
+        low = middle + 1;
+      } else {
+        high = middle;
+      }
+    }
+    return Math.max(state.review.anchorVisibleCount, low);
+  }
+
+  function announceReviewEnd() {
+    if (state.review.reachedEndAnnounced) {
+      return;
+    }
+    state.review.reachedEndAnnounced = true;
+    stopReviewPlayback({ silent: true });
+    state.currentRun = "stop";
+    setSegment(elements.runToggle, "stop");
+    writeQuery(currentConfig());
+    status("Reached end of review range.", false);
+  }
+
   function clearOttState() {
     state.ottRows = new Map();
     state.ottTrades = [];
@@ -871,13 +1057,13 @@
     return payload;
   }
 
-  async function loadOttNext(afterId, config) {
+  async function loadOttNext(afterId, config, limitOverride) {
     if (!shouldLoadOtt(config)) {
       return null;
     }
     const params = new URLSearchParams({
       afterId: String(afterId),
-      limit: String(Math.max(50, Math.min(500, config.window))),
+      limit: String(limitOverride || Math.max(50, Math.min(500, config.window))),
       source: config.ottSource,
       signalmode: config.ottSignalMode,
       matype: config.ottMaType,
@@ -927,8 +1113,9 @@
     return runPayload.run;
   }
 
-  async function loadBacktestOverlay(config) {
-    if (config.mode !== "review" || !config.ottTrades || !state.rows.length) {
+  async function loadBacktestOverlay(config, rangeRows) {
+    const rows = rangeRows || state.rows;
+    if (config.mode !== "review" || !config.ottTrades || !rows.length) {
       state.ottTrades = [];
       state.ottRun = null;
       state.ottOverlayPayload = null;
@@ -942,8 +1129,8 @@
       percent: String(config.ottPercent),
       signalmode: config.ottSignalMode,
       rangePreset: config.ottRangePreset,
-      startId: String(state.rows[0].id),
-      endId: String(state.rows[state.rows.length - 1].id),
+      startId: String(rows[0].id),
+      endId: String(rows[rows.length - 1].id),
     });
     const overlayPayload = await fetchJson("/api/ott/backtest/overlay?" + params.toString());
     state.ottRun = overlayPayload.run;
@@ -954,6 +1141,132 @@
     }));
     state.ottOverlayPayload = overlayPayload;
     return overlayPayload;
+  }
+
+  async function resolveReviewStart(config) {
+    if (config.mode !== "review") {
+      return { ...config };
+    }
+    if (config.reviewStart) {
+      const params = new URLSearchParams({
+        timestamp: config.reviewStart,
+        timezoneName: SYDNEY_TIMEZONE,
+      });
+      const payload = await fetchJson("/api/live/review-start?" + params.toString());
+      elements.tickId.value = String(payload.resolvedId);
+      state.review.resolvedStartId = payload.resolvedId;
+      state.review.resolvedStartTimestamp = payload.resolvedTimestamp;
+      return {
+        ...config,
+        id: String(payload.resolvedId),
+      };
+    }
+    if (!config.id) {
+      throw new Error("Review mode requires a start id or Sydney review start time.");
+    }
+    state.review.resolvedStartId = Number.parseInt(config.id, 10) || null;
+    state.review.resolvedStartTimestamp = null;
+    return { ...config };
+  }
+
+  async function fetchReviewNextChunk(config) {
+    if (state.review.fetchPromise || state.review.exhausted) {
+      return state.review.fetchPromise;
+    }
+    const afterId = state.review.lastBufferedId;
+    const params = new URLSearchParams({
+      afterId: String(afterId),
+      limit: String(reviewPrefetchLimit(config)),
+    });
+    state.review.fetchPromise = fetchJson("/api/live/next?" + params.toString())
+      .then(async (payload) => {
+        const newRows = payload.rows || [];
+        if (!newRows.length) {
+          state.review.exhausted = true;
+          if (state.review.visibleCount >= state.review.bufferRows.length) {
+            announceReviewEnd();
+          }
+          return payload;
+        }
+
+        const seen = new Set(state.review.bufferRows.map((row) => row.id));
+        newRows.forEach((row) => {
+          if (!seen.has(row.id)) {
+            state.review.bufferRows.push(row);
+          }
+        });
+        state.review.lastBufferedId = state.review.bufferRows.length
+          ? state.review.bufferRows[state.review.bufferRows.length - 1].id
+          : afterId;
+
+        try {
+          if (shouldLoadOtt(config)) {
+            await loadOttNext(afterId, config, newRows.length);
+          }
+          if (config.ottTrades) {
+            await loadBacktestOverlay(config, state.review.bufferRows);
+          }
+        } catch (error) {
+          status(error.message || "Review overlay update failed.", true);
+        }
+        return payload;
+      })
+      .finally(() => {
+        state.review.fetchPromise = null;
+      });
+    return state.review.fetchPromise;
+  }
+
+  function maybePrefetchReview(config) {
+    const remaining = state.review.bufferRows.length - state.review.visibleCount;
+    if (remaining <= REVIEW_PREFETCH_THRESHOLD && !state.review.exhausted) {
+      fetchReviewNextChunk(config).catch((error) => {
+        status(error.message || "Review fetch failed.", true);
+      });
+    }
+  }
+
+  function reviewFrame(nowMs) {
+    if (state.currentMode !== "review" || state.currentRun !== "run") {
+      state.review.rafId = 0;
+      return;
+    }
+    if (!state.review.bufferRows.length) {
+      announceReviewEnd();
+      return;
+    }
+
+    const targetTimestampMs = state.review.anchorTimestampMs + ((nowMs - state.review.anchorPerfMs) * state.review.playbackSpeed);
+    const nextVisibleCount = reviewVisibleCountForTimestamp(targetTimestampMs);
+    if (nextVisibleCount !== state.review.visibleCount) {
+      setReviewVisibleCount(nextVisibleCount, { preserveCurrentZoom: false });
+      maybePrefetchReview(currentConfig());
+    }
+
+    if (state.review.visibleCount >= state.review.bufferRows.length && state.review.exhausted) {
+      announceReviewEnd();
+      return;
+    }
+
+    state.review.rafId = requestAnimationFrame(reviewFrame);
+  }
+
+  function startReviewPlayback() {
+    if (state.currentMode !== "review") {
+      return;
+    }
+    if (!state.review.bufferRows.length) {
+      status("No review ticks are available for playback.", true);
+      return;
+    }
+    if (!state.review.visibleCount) {
+      setReviewVisibleCount(Math.min(state.review.bufferRows.length, 2), { resetWindow: true });
+    }
+    stopReviewPlayback({ silent: true });
+    setReviewPlaybackAnchor(performance.now());
+    maybePrefetchReview(currentConfig());
+    state.review.rafId = requestAnimationFrame(reviewFrame);
+    status("Review playback running at " + state.review.playbackSpeed + "x.", false);
   }
 
   function connectStream(lastId, windowSize) {
@@ -1014,28 +1327,36 @@
 
   async function loadData(resetWindow) {
     closeStream();
-    const config = currentConfig();
-    writeQuery(config);
+    stopReviewPlayback({ silent: true });
+    resetReviewState();
     clearOttState();
-
-    const params = new URLSearchParams({
-      mode: config.mode,
-      window: String(config.window),
-    });
-    if (config.mode === "review" && config.id) {
-      params.set("id", config.id);
-    }
 
     status("Loading chart...", false);
     try {
+      const config = await resolveReviewStart(currentConfig());
+      writeQuery(config);
+      const params = new URLSearchParams({
+        mode: config.mode,
+        window: String(config.window),
+      });
+      if (config.mode === "review" && config.id) {
+        params.set("id", config.id);
+      }
       const livePayload = await fetchJson("/api/live/bootstrap?" + params.toString());
-      state.rows = livePayload.rows || [];
+      const loadedRows = livePayload.rows || [];
+      if (config.mode === "review") {
+        state.review.bufferRows = loadedRows.slice();
+        state.review.visibleCount = Math.min(loadedRows.length, loadedRows.length > 1 ? 2 : loadedRows.length);
+        state.review.lastBufferedId = loadedRows.length ? loadedRows[loadedRows.length - 1].id : 0;
+        state.rows = state.review.bufferRows.slice(0, state.review.visibleCount);
+      } else {
+        state.rows = loadedRows;
+      }
       let ottError = null;
-      let ottPayload = null;
 
       if (shouldLoadOtt(config)) {
         try {
-          ottPayload = await loadOttBootstrap(config);
+          await loadOttBootstrap(config);
         } catch (error) {
           ottError = error;
           clearOttState();
@@ -1044,7 +1365,7 @@
 
       if (config.mode === "review" && config.ottTrades && shouldLoadOtt(config)) {
         try {
-          await loadBacktestOverlay(config);
+          await loadBacktestOverlay(config, config.mode === "review" ? state.review.bufferRows : state.rows);
         } catch (error) {
           ottError = error;
           state.ottTrades = [];
@@ -1055,22 +1376,38 @@
 
       renderChart({ resetWindow: Boolean(resetWindow) });
       const ottCount = shouldLoadOtt(config) ? state.ottRows.size : 0;
+      const reviewPrefix = config.mode === "review"
+        ? "Loaded review from " + (state.review.resolvedStartTimestamp || config.reviewStart || ("id " + config.id)) + ". "
+        : "";
       if (ottError) {
-        status("Loaded " + livePayload.rowCount + " row(s). OTT unavailable: " + ottError.message, true);
+        status(reviewPrefix + "Loaded " + livePayload.rowCount + " row(s). OTT unavailable: " + ottError.message, true);
       } else {
         const ottState = collectOttMessages(config);
         if (ottState.messages.length) {
-          status("Loaded " + livePayload.rowCount + " row(s). " + ottState.messages.join(" "), ottState.hasWarning);
+          status(reviewPrefix + "Loaded " + livePayload.rowCount + " row(s). " + ottState.messages.join(" "), ottState.hasWarning);
         } else {
-          status("Loaded " + livePayload.rowCount + " row(s)" + (ottCount ? " with " + ottCount + " OTT row(s)." : "."), false);
+          status(reviewPrefix + "Loaded " + livePayload.rowCount + " row(s)" + (ottCount ? " with " + ottCount + " OTT row(s)." : "."), false);
         }
       }
-      if (config.run === "run") {
+      if (config.run === "run" && config.mode === "live") {
         connectStream(livePayload.lastId || 0, config.window);
+      }
+      if (config.run === "run" && config.mode === "review") {
+        startReviewPlayback();
       }
     } catch (error) {
       status(error.message || "Live bootstrap failed.", true);
     }
+  }
+
+  function scheduleChartResize() {
+    if (!state.chart) {
+      return;
+    }
+    window.setTimeout(() => {
+      state.chart.resize();
+      applyVisibleYAxis();
+    }, 90);
   }
 
   function bindSegment(container, handler) {
@@ -1090,6 +1427,27 @@
     renderChart({ preserveCurrentZoom: true });
   }
 
+  function setYesterdaySydneyMorning() {
+    const yesterday = new Date(Date.now() - (24 * 60 * 60 * 1000));
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: SYDNEY_TIMEZONE,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(yesterday).reduce((accumulator, part) => {
+      accumulator[part.type] = part.value;
+      return accumulator;
+    }, {});
+    elements.reviewStart.value = parts.year + "-" + parts.month + "-" + parts.day + "T08:00:00";
+  }
+
+  function toggleToolbarRow(key) {
+    state.ui[key] = !state.ui[key];
+    syncToolbarState();
+    writeQuery(currentConfig());
+    scheduleChartResize();
+  }
+
   async function toggleFullscreen() {
     if (document.fullscreenElement === elements.chartPanel) {
       await document.exitFullscreen();
@@ -1103,14 +1461,48 @@
   bindSegment(elements.modeToggle, (value) => {
     state.currentMode = value;
     setSegment(elements.modeToggle, value);
+    updateReviewControlState();
+    if (value !== "live") {
+      closeStream();
+    }
+    if (value !== "review") {
+      stopReviewPlayback({ silent: true });
+    }
+    writeQuery(currentConfig());
+    status("Mode updated. Load to refresh data.", false);
   });
 
   bindSegment(elements.runToggle, (value) => {
     state.currentRun = value;
     setSegment(elements.runToggle, value);
+    writeQuery(currentConfig());
     if (value === "stop") {
       closeStream();
-      status("Streaming stopped.", false);
+      if (state.currentMode === "review") {
+        stopReviewPlayback({ silent: true });
+        status("Review playback stopped.", false);
+      } else {
+        status("Streaming stopped.", false);
+      }
+      return;
+    }
+    if (state.currentMode === "review") {
+      startReviewPlayback();
+      return;
+    }
+    if (state.rows.length) {
+      connectStream(state.rows[state.rows.length - 1].id, currentConfig().window);
+      status("Streaming resumed.", false);
+    }
+  });
+
+  bindSegment(elements.reviewSpeedToggle, (value) => {
+    state.review.playbackSpeed = sanitizeReviewSpeed(value);
+    syncReviewSpeedButtons();
+    writeQuery(currentConfig());
+    if (state.currentMode === "review" && state.currentRun === "run" && state.review.visibleCount) {
+      setReviewPlaybackAnchor(performance.now());
+      status("Review playback running at " + state.review.playbackSpeed + "x.", false);
     }
   });
 
@@ -1135,7 +1527,10 @@
       writeQuery(currentConfig());
       if (control === elements.ottTradesToggle || control === elements.ottSignalMode) {
         try {
-          const overlayPayload = await loadBacktestOverlay(currentConfig());
+          const overlayPayload = await loadBacktestOverlay(
+            currentConfig(),
+            state.currentMode === "review" ? state.review.bufferRows : state.rows
+          );
           if (overlayPayload && overlayPayload.message) {
             status(overlayPayload.message, isOttWarningStatus(overlayPayload.status));
           }
@@ -1153,11 +1548,30 @@
     elements.ottLength,
     elements.ottPercent,
     elements.ottRangePreset,
+    elements.reviewStart,
+    elements.tickId,
+    elements.windowSize,
   ].forEach((control) => {
     control.addEventListener("change", () => {
+      if (control === elements.reviewStart && elements.reviewStart.value) {
+        state.currentMode = "review";
+        setSegment(elements.modeToggle, "review");
+        updateReviewControlState();
+      }
       writeQuery(currentConfig());
     });
   });
+
+  elements.reviewYesterdayButton.addEventListener("click", () => {
+    state.currentMode = "review";
+    setSegment(elements.modeToggle, "review");
+    updateReviewControlState();
+    setYesterdaySydneyMorning();
+    writeQuery(currentConfig());
+  });
+
+  elements.primaryBarToggle.addEventListener("click", () => toggleToolbarRow("primaryBarCollapsed"));
+  elements.ottBarToggle.addEventListener("click", () => toggleToolbarRow("ottBarCollapsed"));
 
   elements.fullscreenButton.addEventListener("click", toggleFullscreen);
   elements.applyButton.addEventListener("click", () => loadData(true));
@@ -1167,7 +1581,10 @@
     try {
       status("Running OTT backtest...", false);
       await runBacktestIfNeeded(config, true);
-      const overlayPayload = await loadBacktestOverlay(config);
+      const overlayPayload = await loadBacktestOverlay(
+        config,
+        state.currentMode === "review" ? state.review.bufferRows : state.rows
+      );
       renderChart({ preserveCurrentZoom: true });
       if (overlayPayload && overlayPayload.message) {
         status(overlayPayload.message, isOttWarningStatus(overlayPayload.status));
@@ -1181,5 +1598,9 @@
 
   const initial = parseQuery();
   syncControls(initial);
+  if (!initial.reviewStart && initial.mode === "review" && !initial.id) {
+    setYesterdaySydneyMorning();
+    writeQuery(currentConfig());
+  }
   loadData(true);
 }());

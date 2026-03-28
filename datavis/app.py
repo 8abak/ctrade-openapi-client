@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional, Tuple
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import psycopg2
 import psycopg2.extras
@@ -71,6 +72,7 @@ SQL_ADMIN_USER = os.getenv("DATAVIS_SQL_ADMIN_USER", "").strip()
 SQL_ADMIN_PASSWORD = os.getenv("DATAVIS_SQL_ADMIN_PASSWORD", "")
 SYSTEM_SCHEMAS = ("pg_catalog", "information_schema")
 SYSTEM_SCHEMA_PREFIXES = ("pg_toast", "pg_temp_")
+DEFAULT_REVIEW_TIMEZONE = "Australia/Sydney"
 TRANSACTION_CONTROL_HEADS = {
     "BEGIN",
     "START",
@@ -491,6 +493,66 @@ def fetch_window_ending_at(end_id: int, window: int) -> List[Dict[str, Any]]:
                 (TICK_SYMBOL, end_id, window),
             )
             return [dict(row) for row in cur.fetchall()]
+
+
+def parse_review_timestamp(raw_value: str, timezone_name: str) -> datetime:
+    try:
+        target_tz = ZoneInfo(timezone_name or DEFAULT_REVIEW_TIMEZONE)
+    except ZoneInfoNotFoundError as exc:
+        raise HTTPException(status_code=400, detail="Unsupported review timezone.") from exc
+
+    try:
+        parsed = datetime.fromisoformat(raw_value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid review timestamp.") from exc
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=target_tz)
+    else:
+        parsed = parsed.astimezone(target_tz)
+    return parsed.astimezone(timezone.utc)
+
+
+def resolve_tick_at_timestamp(timestamp_value: datetime) -> Dict[str, Any]:
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, timestamp
+                FROM public.ticks
+                WHERE symbol = %s AND timestamp >= %s
+                ORDER BY timestamp ASC, id ASC
+                LIMIT 1
+                """,
+                (TICK_SYMBOL, timestamp_value),
+            )
+            next_row = cur.fetchone()
+            cur.execute(
+                """
+                SELECT id, timestamp
+                FROM public.ticks
+                WHERE symbol = %s AND timestamp < %s
+                ORDER BY timestamp DESC, id DESC
+                LIMIT 1
+                """,
+                (TICK_SYMBOL, timestamp_value),
+            )
+            previous_row = cur.fetchone()
+
+    if not previous_row and not next_row:
+        raise HTTPException(status_code=404, detail="No ticks are available for review.")
+
+    if previous_row and next_row:
+        previous_delta = abs((timestamp_value - previous_row["timestamp"]).total_seconds())
+        next_delta = abs((next_row["timestamp"] - timestamp_value).total_seconds())
+        resolved = next_row if next_delta < previous_delta else previous_row
+    else:
+        resolved = next_row or previous_row
+
+    return {
+        "id": int(resolved["id"]),
+        "timestamp": resolved["timestamp"],
+    }
 
 
 def build_regression_response(
@@ -1555,6 +1617,26 @@ def api_health() -> Dict[str, Any]:
         "symbol": TICK_SYMBOL,
         "lastId": row.get("last_id"),
         "lastTimestamp": row.get("last_timestamp"),
+    }
+
+
+@app.get("/api/live/review-start")
+def live_review_start(
+    timestamp: str = Query(..., min_length=1),
+    timezoneName: str = Query(DEFAULT_REVIEW_TIMEZONE, min_length=1),
+) -> Dict[str, Any]:
+    requested_ts = parse_review_timestamp(timestamp, timezoneName)
+    resolved = resolve_tick_at_timestamp(requested_ts)
+    resolved_local = resolved["timestamp"].astimezone(ZoneInfo(timezoneName))
+    requested_local = requested_ts.astimezone(ZoneInfo(timezoneName))
+    return {
+        "symbol": TICK_SYMBOL,
+        "timezone": timezoneName,
+        "requestedTimestamp": requested_ts.isoformat(),
+        "requestedLocal": requested_local.isoformat(),
+        "resolvedId": resolved["id"],
+        "resolvedTimestamp": resolved["timestamp"].isoformat(),
+        "resolvedLocal": resolved_local.isoformat(),
     }
 
 

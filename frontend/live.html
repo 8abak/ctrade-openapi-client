@@ -16,95 +16,122 @@
         <div class="meta-strip" id="liveMeta">Waiting for data...</div>
         <div class="status-line live-status" id="statusLine">Ready.</div>
       </div>
-      <div class="toolbar toolbar-live">
-        <div class="segmented" id="modeToggle">
-          <button type="button" data-value="live">Live</button>
-          <button type="button" data-value="review">Review</button>
+      <div class="live-toolbar-section">
+        <div class="live-toolbar-header">
+          <div class="live-toolbar-title">Session Controls</div>
+          <button class="ghost-button compact-button toolbar-collapse-button" id="primaryBarToggle" type="button" aria-expanded="true">Collapse</button>
         </div>
-        <div class="segmented" id="runToggle">
-          <button type="button" data-value="run">Run</button>
-          <button type="button" data-value="stop">Stop</button>
+        <div class="toolbar toolbar-live" id="primaryControls">
+          <div class="segmented" id="modeToggle">
+            <button type="button" data-value="live">Live</button>
+            <button type="button" data-value="review">Review</button>
+          </div>
+          <div class="segmented" id="runToggle">
+            <button type="button" data-value="run">Run</button>
+            <button type="button" data-value="stop">Stop</button>
+          </div>
+          <label>
+            <span>id</span>
+            <input id="tickId" type="number" min="1" inputmode="numeric" placeholder="start id">
+          </label>
+          <label class="review-start-field">
+            <span>review start (Sydney)</span>
+            <input id="reviewStart" type="datetime-local" step="1">
+          </label>
+          <button class="ghost-button compact-button" id="reviewYesterdayButton" type="button">Yesterday 08:00</button>
+          <label>
+            <span>window</span>
+            <input id="windowSize" type="number" min="1" max="10000" inputmode="numeric" value="2000">
+          </label>
+          <div class="review-speed-control">
+            <span>speed</span>
+            <div class="segmented single-select" id="reviewSpeedToggle" aria-label="Review speed">
+              <button type="button" data-value="0.5">0.5x</button>
+              <button type="button" data-value="1">1x</button>
+              <button type="button" data-value="2">2x</button>
+              <button type="button" data-value="3">3x</button>
+              <button type="button" data-value="5">5x</button>
+            </div>
+          </div>
+          <div class="series-selector" id="seriesSelector" aria-label="Series selector">
+            <button type="button" data-series="ask">ask</button>
+            <button type="button" data-series="bid">bid</button>
+            <button type="button" data-series="mid">mid</button>
+          </div>
+          <button class="primary-button compact-button" id="applyButton" type="button">Load</button>
         </div>
-        <label>
-          <span>id</span>
-          <input id="tickId" type="number" min="1" inputmode="numeric" placeholder="starting id">
-        </label>
-        <label>
-          <span>window</span>
-          <input id="windowSize" type="number" min="1" max="10000" inputmode="numeric" value="2000">
-        </label>
-        <div class="series-selector" id="seriesSelector" aria-label="Series selector">
-          <button type="button" data-series="ask">ask</button>
-          <button type="button" data-series="bid">bid</button>
-          <button type="button" data-series="mid">mid</button>
-        </div>
-        <button class="primary-button compact-button" id="applyButton" type="button">Load</button>
       </div>
-      <div class="toolbar toolbar-live ott-toolbar">
-        <div class="segmented single-select" id="ottToggle">
-          <button type="button" data-value="on">OTT On</button>
-          <button type="button" data-value="off">OTT Off</button>
+      <div class="live-toolbar-section">
+        <div class="live-toolbar-header">
+          <div class="live-toolbar-title">OTT Controls</div>
+          <button class="ghost-button compact-button toolbar-collapse-button" id="ottBarToggle" type="button" aria-expanded="false">Expand</button>
         </div>
-        <label class="compact-check">
-          <input id="ottSupportToggle" type="checkbox" checked>
-          <span>support line</span>
-        </label>
-        <label class="compact-check">
-          <input id="ottMarkersToggle" type="checkbox" checked>
-          <span>buy/sell markers</span>
-        </label>
-        <label class="compact-check">
-          <input id="ottTradesToggle" type="checkbox" checked>
-          <span>backtest trades</span>
-        </label>
-        <label class="compact-check">
-          <input id="ottHighlightToggle" type="checkbox" checked>
-          <span>highlight</span>
-        </label>
-        <label>
-          <span>OTT source</span>
-          <select id="ottSource">
-            <option value="mid">mid</option>
-            <option value="ask">ask</option>
-            <option value="bid">bid</option>
-          </select>
-        </label>
-        <label>
-          <span>signal mode</span>
-          <select id="ottSignalMode">
-            <option value="support">support</option>
-            <option value="price">price</option>
-            <option value="color">color</option>
-          </select>
-        </label>
-        <label>
-          <span>MA</span>
-          <select id="ottMaType">
-            <option value="VAR">VAR</option>
-            <option value="SMA">SMA</option>
-            <option value="EMA">EMA</option>
-            <option value="WMA">WMA</option>
-            <option value="TMA">TMA</option>
-            <option value="WWMA">WWMA</option>
-            <option value="ZLEMA">ZLEMA</option>
-            <option value="TSF">TSF</option>
-          </select>
-        </label>
-        <label>
-          <span>OTT length</span>
-          <input id="ottLength" type="number" min="1" inputmode="numeric" value="2">
-        </label>
-        <label>
-          <span>OTT percent</span>
-          <input id="ottPercent" type="number" min="0" step="0.1" inputmode="decimal" value="1.4">
-        </label>
-        <label>
-          <span>backtest range</span>
-          <select id="ottRangePreset">
-            <option value="lastweek">last week</option>
-          </select>
-        </label>
-        <button class="ghost-button compact-button" id="runOttBacktestButton" type="button">Run Backtest</button>
+        <div class="toolbar toolbar-live ott-toolbar is-collapsed" id="ottControls">
+          <div class="segmented single-select" id="ottToggle">
+            <button type="button" data-value="on">OTT On</button>
+            <button type="button" data-value="off">OTT Off</button>
+          </div>
+          <label class="compact-check">
+            <input id="ottSupportToggle" type="checkbox" checked>
+            <span>support line</span>
+          </label>
+          <label class="compact-check">
+            <input id="ottMarkersToggle" type="checkbox" checked>
+            <span>buy/sell markers</span>
+          </label>
+          <label class="compact-check">
+            <input id="ottTradesToggle" type="checkbox" checked>
+            <span>backtest trades</span>
+          </label>
+          <label class="compact-check">
+            <input id="ottHighlightToggle" type="checkbox" checked>
+            <span>highlight</span>
+          </label>
+          <label>
+            <span>OTT source</span>
+            <select id="ottSource">
+              <option value="mid">mid</option>
+              <option value="ask">ask</option>
+              <option value="bid">bid</option>
+            </select>
+          </label>
+          <label>
+            <span>signal mode</span>
+            <select id="ottSignalMode">
+              <option value="support">support</option>
+              <option value="price">price</option>
+              <option value="color">color</option>
+            </select>
+          </label>
+          <label>
+            <span>MA</span>
+            <select id="ottMaType">
+              <option value="VAR">VAR</option>
+              <option value="SMA">SMA</option>
+              <option value="EMA">EMA</option>
+              <option value="WMA">WMA</option>
+              <option value="TMA">TMA</option>
+              <option value="WWMA">WWMA</option>
+              <option value="ZLEMA">ZLEMA</option>
+              <option value="TSF">TSF</option>
+            </select>
+          </label>
+          <label class="ott-length-field">
+            <span>OTT length</span>
+            <input id="ottLength" type="number" min="1" inputmode="numeric" value="2">
+          </label>
+          <label>
+            <span>OTT percent</span>
+            <input id="ottPercent" type="number" min="0" step="0.1" inputmode="decimal" value="1.4">
+          </label>
+          <label>
+            <span>backtest range</span>
+            <select id="ottRangePreset">
+              <option value="lastweek">last week</option>
+            </select>
+          </label>
+          <button class="ghost-button compact-button" id="runOttBacktestButton" type="button">Run Backtest</button>
+        </div>
       </div>
     </section>
 
