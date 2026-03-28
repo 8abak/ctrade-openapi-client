@@ -354,7 +354,13 @@ def fetch_backtest_rows(symbol: str, config: OttConfig, start_tick_id: int, end_
             return [dict(row) for row in cur.fetchall()]
 
 
-def fetch_bootstrap_tick_rows(symbol: str, mode: str, start_id: Optional[int], window: int) -> List[Dict[str, Any]]:
+def fetch_bootstrap_tick_rows(
+    symbol: str,
+    mode: str,
+    start_id: Optional[int],
+    window: int,
+    end_id: Optional[int] = None,
+) -> List[Dict[str, Any]]:
     with db_connection(readonly=True) as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             if mode == "live":
@@ -376,22 +382,40 @@ def fetch_bootstrap_tick_rows(symbol: str, mode: str, start_id: Optional[int], w
             else:
                 if start_id is None:
                     raise RuntimeError("Review mode requires an id value.")
-                cur.execute(
-                    """
-                    SELECT id, symbol, timestamp, bid, ask, mid, spread,
-                           COALESCE(mid, ROUND(((bid + ask) / 2.0)::numeric, 2)::double precision) AS price
-                    FROM public.ticks
-                    WHERE symbol = %s AND id >= %s
-                    ORDER BY id ASC
-                    LIMIT %s
-                    """,
-                    (symbol, start_id, window),
-                )
+                if end_id is None:
+                    cur.execute(
+                        """
+                        SELECT id, symbol, timestamp, bid, ask, mid, spread,
+                               COALESCE(mid, ROUND(((bid + ask) / 2.0)::numeric, 2)::double precision) AS price
+                        FROM public.ticks
+                        WHERE symbol = %s AND id >= %s
+                        ORDER BY id ASC
+                        LIMIT %s
+                        """,
+                        (symbol, start_id, window),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT id, symbol, timestamp, bid, ask, mid, spread,
+                               COALESCE(mid, ROUND(((bid + ask) / 2.0)::numeric, 2)::double precision) AS price
+                        FROM public.ticks
+                        WHERE symbol = %s AND id >= %s AND id <= %s
+                        ORDER BY id ASC
+                        LIMIT %s
+                        """,
+                        (symbol, start_id, end_id, window),
+                    )
             return [dict(row) for row in cur.fetchall()]
 
 
-def fetch_next_tick_rows(symbol: str, after_id: int, limit: int) -> List[Dict[str, Any]]:
-    return fetch_tick_batch_after(symbol, after_id, limit, end_id=None)
+def fetch_next_tick_rows(
+    symbol: str,
+    after_id: int,
+    limit: int,
+    end_id: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    return fetch_tick_batch_after(symbol, after_id, limit, end_id=end_id)
 
 
 def fetch_ott_sync_diagnostics(

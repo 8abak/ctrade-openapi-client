@@ -418,7 +418,36 @@ def summarize_range_status(
     return ("ok", None)
 
 
-def fetch_bootstrap_rows(mode: str, start_id: Optional[int], window: int) -> List[Dict[str, Any]]:
+def fetch_tick_bounds() -> Dict[str, Any]:
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                    MIN(id) AS first_id,
+                    MAX(id) AS last_id,
+                    MIN(timestamp) AS first_timestamp,
+                    MAX(timestamp) AS last_timestamp
+                FROM public.ticks
+                WHERE symbol = %s
+                """,
+                (TICK_SYMBOL,),
+            )
+            row = dict(cur.fetchone() or {})
+    return {
+        "firstId": row.get("first_id"),
+        "lastId": row.get("last_id"),
+        "firstTimestamp": row.get("first_timestamp"),
+        "lastTimestamp": row.get("last_timestamp"),
+    }
+
+
+def fetch_bootstrap_rows(
+    mode: str,
+    start_id: Optional[int],
+    window: int,
+    end_id: Optional[int] = None,
+) -> List[Dict[str, Any]]:
     window = clamp_int(window, 1, MAX_WINDOW)
     with db_connection(readonly=True) as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -441,35 +470,61 @@ def fetch_bootstrap_rows(mode: str, start_id: Optional[int], window: int) -> Lis
             else:
                 if start_id is None:
                     raise HTTPException(status_code=400, detail="Review mode requires an id value.")
+                if end_id is None:
+                    cur.execute(
+                        """
+                        SELECT id, symbol, timestamp, bid, ask, mid, spread,
+                               COALESCE(mid, ROUND(((bid + ask) / 2.0)::numeric, 2)::double precision) AS price
+                        FROM public.ticks
+                        WHERE symbol = %s AND id >= %s
+                        ORDER BY id ASC
+                        LIMIT %s
+                        """,
+                        (TICK_SYMBOL, start_id, window),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT id, symbol, timestamp, bid, ask, mid, spread,
+                               COALESCE(mid, ROUND(((bid + ask) / 2.0)::numeric, 2)::double precision) AS price
+                        FROM public.ticks
+                        WHERE symbol = %s AND id >= %s AND id <= %s
+                        ORDER BY id ASC
+                        LIMIT %s
+                        """,
+                        (TICK_SYMBOL, start_id, end_id, window),
+                    )
+            return [dict(row) for row in cur.fetchall()]
+
+
+def fetch_rows_after(after_id: int, limit: int, end_id: Optional[int] = None) -> List[Dict[str, Any]]:
+    limit = clamp_int(limit, 1, MAX_STREAM_BATCH)
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            if end_id is None:
                 cur.execute(
                     """
                     SELECT id, symbol, timestamp, bid, ask, mid, spread,
                            COALESCE(mid, ROUND(((bid + ask) / 2.0)::numeric, 2)::double precision) AS price
                     FROM public.ticks
-                    WHERE symbol = %s AND id >= %s
+                    WHERE symbol = %s AND id > %s
                     ORDER BY id ASC
                     LIMIT %s
                     """,
-                    (TICK_SYMBOL, start_id, window),
+                    (TICK_SYMBOL, after_id, limit),
                 )
-            return [dict(row) for row in cur.fetchall()]
-
-
-def fetch_rows_after(after_id: int, limit: int) -> List[Dict[str, Any]]:
-    limit = clamp_int(limit, 1, MAX_STREAM_BATCH)
-    with db_connection(readonly=True) as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT id, symbol, timestamp, bid, ask, mid, spread,
-                       COALESCE(mid, ROUND(((bid + ask) / 2.0)::numeric, 2)::double precision) AS price
-                FROM public.ticks
-                WHERE symbol = %s AND id > %s
-                ORDER BY id ASC
-                LIMIT %s
-                """,
-                (TICK_SYMBOL, after_id, limit),
-            )
+            else:
+                cur.execute(
+                    """
+                    SELECT id, symbol, timestamp, bid, ask, mid, spread,
+                           COALESCE(mid, ROUND(((bid + ask) / 2.0)::numeric, 2)::double precision) AS price
+                    FROM public.ticks
+                    WHERE symbol = %s AND id > %s AND id <= %s
+                    ORDER BY id ASC
+                    LIMIT %s
+                    """,
+                    (TICK_SYMBOL, after_id, end_id, limit),
+                )
             return [dict(row) for row in cur.fetchall()]
 
 
@@ -1646,16 +1701,23 @@ def live_bootstrap(
     id: Optional[int] = Query(None, ge=1),
     window: int = Query(DEFAULT_WINDOW, ge=1, le=MAX_WINDOW),
 ) -> Dict[str, Any]:
-    rows = [serialize_tick_row(row) for row in fetch_bootstrap_rows(mode, id, window)]
+    review_bounds = fetch_tick_bounds() if mode == "review" else None
+    review_end_id = review_bounds["lastId"] if review_bounds else None
+    review_end_timestamp = review_bounds["lastTimestamp"] if review_bounds else None
+    rows = [serialize_tick_row(row) for row in fetch_bootstrap_rows(mode, id, window, end_id=review_end_id)]
+    last_row_id = rows[-1]["id"] if rows else None
     return {
         "rows": rows,
         "rowCount": len(rows),
         "firstId": rows[0]["id"] if rows else None,
-        "lastId": rows[-1]["id"] if rows else None,
+        "lastId": last_row_id,
         "mode": mode,
         "window": window,
         "symbol": TICK_SYMBOL,
         "priceColumn": "mid",
+        "reviewEndId": review_end_id,
+        "reviewEndTimestamp": serialize_value(review_end_timestamp),
+        "endReached": bool(mode == "review" and review_end_id is not None and last_row_id is not None and last_row_id >= review_end_id),
     }
 
 
@@ -1663,12 +1725,16 @@ def live_bootstrap(
 def live_next(
     afterId: int = Query(..., ge=0),
     limit: int = Query(250, ge=1, le=MAX_STREAM_BATCH),
+    endId: Optional[int] = Query(None, ge=1),
 ) -> Dict[str, Any]:
-    rows = [serialize_tick_row(row) for row in fetch_rows_after(afterId, limit)]
+    rows = [serialize_tick_row(row) for row in fetch_rows_after(afterId, limit, end_id=endId)]
+    last_seen_id = rows[-1]["id"] if rows else afterId
     return {
         "rows": rows,
         "rowCount": len(rows),
-        "lastId": rows[-1]["id"] if rows else afterId,
+        "lastId": last_seen_id,
+        "endId": endId,
+        "endReached": bool(endId is not None and last_seen_id >= endId),
     }
 
 
@@ -1693,6 +1759,7 @@ def ott_bootstrap(
     mode: str = Query("live", pattern="^(live|review)$"),
     id: Optional[int] = Query(None, ge=1),
     window: int = Query(DEFAULT_WINDOW, ge=1, le=MAX_WINDOW),
+    endId: Optional[int] = Query(None, ge=1),
     source: str = Query(DEFAULT_OTT_SOURCE, pattern="^(ask|bid|mid)$"),
     signalmode: str = Query(DEFAULT_OTT_SIGNAL_MODE, pattern="^(support|price|color)$"),
     matype: str = Query(DEFAULT_OTT_MA_TYPE, pattern="^(SMA|EMA|WMA|TMA|VAR|WWMA|ZLEMA|TSF)$"),
@@ -1701,7 +1768,7 @@ def ott_bootstrap(
 ) -> Dict[str, Any]:
     config = build_ott_config(source, matype, length, percent)
     try:
-        rows = fetch_bootstrap_tick_rows(TICK_SYMBOL, mode, id, window)
+        rows = fetch_bootstrap_tick_rows(TICK_SYMBOL, mode, id, window, end_id=endId)
         return build_ott_response(rows, config, mode=mode, requested_start_id=id, signalmode=signalmode)
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1713,6 +1780,7 @@ def ott_bootstrap(
 def ott_next(
     afterId: int = Query(..., ge=0),
     limit: int = Query(250, ge=1, le=MAX_STREAM_BATCH),
+    endId: Optional[int] = Query(None, ge=1),
     source: str = Query(DEFAULT_OTT_SOURCE, pattern="^(ask|bid|mid)$"),
     signalmode: str = Query(DEFAULT_OTT_SIGNAL_MODE, pattern="^(support|price|color)$"),
     matype: str = Query(DEFAULT_OTT_MA_TYPE, pattern="^(SMA|EMA|WMA|TMA|VAR|WWMA|ZLEMA|TSF)$"),
@@ -1721,7 +1789,7 @@ def ott_next(
 ) -> Dict[str, Any]:
     config = build_ott_config(source, matype, length, percent)
     try:
-        rows = fetch_next_tick_rows(TICK_SYMBOL, afterId, limit)
+        rows = fetch_next_tick_rows(TICK_SYMBOL, afterId, limit, end_id=endId)
         return build_ott_response(rows, config, advanced_from_id=afterId, signalmode=signalmode)
     except Exception as exc:
         raise HTTPException(status_code=500, detail="OTT incremental fetch failed: {0}".format(exc)) from exc
