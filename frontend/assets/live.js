@@ -27,8 +27,13 @@
   const REVIEW_PREFETCH_CEILING = 1000;
   const REVIEW_PREFETCH_THRESHOLD = 80;
   const REVIEW_PREFETCH_RATIO = 0.4;
+  const REVIEW_PREFETCH_MIN_PLAYBACK_MS = 5000;
   const BACKTEST_OVERLAY_TIMEOUT_MS = 8000;
   const BACKTEST_RUN_TIMEOUT_MS = 45000;
+  const CHART_RESIZE_RETRY_LIMIT = 6;
+  const CHART_RESIZE_RETRY_DELAY_MS = 40;
+  const SIGNAL_MARKER_MIN_OFFSET = 0.18;
+  const SIGNAL_MARKER_MAX_OFFSET = 1.25;
 
   const SERIES_CONFIG = {
     ask: { label: "Ask", field: "ask", color: "#ffb35c", width: 1.35 },
@@ -48,6 +53,7 @@
     chartListenersBound: false,
     chartResizeFrame: 0,
     chartResizeTailFrame: 0,
+    chartResizeTimer: 0,
     chartResizeObserver: null,
     ottRows: new Map(),
     ottTrades: [],
@@ -72,6 +78,7 @@
       playbackSpeed: DEFAULTS.reviewSpeed,
       exhausted: false,
       fetchPromise: null,
+      ottFetchPromise: null,
       rafId: 0,
       anchorVisibleCount: 0,
       anchorTimestampMs: 0,
@@ -137,7 +144,27 @@
     return Boolean(host && dom && dom === host && dom.isConnected);
   }
 
+  function chartHostHasSize(host) {
+    return Boolean(host && host.isConnected && host.offsetWidth && host.offsetHeight);
+  }
+
+  function isOffsetWidthError(error) {
+    return String(error && error.message || "").includes("offsetWidth");
+  }
+
   function disposeChart() {
+    if (state.chartResizeFrame) {
+      cancelAnimationFrame(state.chartResizeFrame);
+      state.chartResizeFrame = 0;
+    }
+    if (state.chartResizeTailFrame) {
+      cancelAnimationFrame(state.chartResizeTailFrame);
+      state.chartResizeTailFrame = 0;
+    }
+    if (state.chartResizeTimer) {
+      window.clearTimeout(state.chartResizeTimer);
+      state.chartResizeTimer = 0;
+    }
     if (!state.chart) {
       return;
     }
@@ -509,32 +536,39 @@
     const host = currentChartHost();
     if (!host) {
       disposeChart();
-      return;
+      return false;
     }
     if (!state.chart) {
-      return;
+      return false;
     }
     if (!chartDomMatchesHost(host)) {
       disposeChart();
-      return;
+      return false;
     }
-    if (!host.offsetWidth || !host.offsetHeight) {
-      return;
+    if (!chartHostHasSize(host)) {
+      return false;
     }
     try {
       state.chart.resize();
       if (!options || options.applyYAxis !== false) {
         applyVisibleYAxis();
       }
+      return true;
     } catch (error) {
-      if (String(error && error.message || "").includes("offsetWidth")) {
-        return;
+      if (isOffsetWidthError(error)) {
+        return false;
       }
       throw error;
     }
   }
 
-  function requestChartResize() {
+  function requestChartResize(options) {
+    const requestOptions = {
+      applyYAxis: !options || options.applyYAxis !== false,
+      remainingAttempts: options && typeof options.remainingAttempts === "number"
+        ? options.remainingAttempts
+        : CHART_RESIZE_RETRY_LIMIT,
+    };
     if (state.chartResizeFrame) {
       cancelAnimationFrame(state.chartResizeFrame);
       state.chartResizeFrame = 0;
@@ -543,11 +577,24 @@
       cancelAnimationFrame(state.chartResizeTailFrame);
       state.chartResizeTailFrame = 0;
     }
+    if (state.chartResizeTimer) {
+      window.clearTimeout(state.chartResizeTimer);
+      state.chartResizeTimer = 0;
+    }
     state.chartResizeFrame = requestAnimationFrame(() => {
       state.chartResizeFrame = 0;
       state.chartResizeTailFrame = requestAnimationFrame(() => {
         state.chartResizeTailFrame = 0;
-        safeResizeChart();
+        const resized = safeResizeChart({ applyYAxis: requestOptions.applyYAxis });
+        if (!resized && state.chart && currentChartHost() && requestOptions.remainingAttempts > 0) {
+          state.chartResizeTimer = window.setTimeout(() => {
+            state.chartResizeTimer = 0;
+            requestChartResize({
+              applyYAxis: requestOptions.applyYAxis,
+              remainingAttempts: requestOptions.remainingAttempts - 1,
+            });
+          }, CHART_RESIZE_RETRY_DELAY_MS);
+        }
       });
     });
   }
@@ -578,6 +625,16 @@
       disposeChart();
     }
     if (!state.chart) {
+      const existingInstance = typeof echarts.getInstanceByDom === "function"
+        ? echarts.getInstanceByDom(host)
+        : null;
+      if (existingInstance) {
+        try {
+          existingInstance.dispose();
+        } catch (error) {
+          // Ignore stale instance disposal failures while taking ownership of the host.
+        }
+      }
       state.chart = echarts.init(host, null, { renderer: "canvas" });
       state.chart.on("datazoom", () => {
         updateVisibleZoomFromChart();
@@ -590,11 +647,12 @@
   function handleFullscreenChange() {
     const isFullscreen = document.fullscreenElement === elements.chartPanel;
     elements.fullscreenButton.textContent = isFullscreen ? "Exit Fullscreen" : "Fullscreen";
-    requestChartResize();
+    requestChartResize({ remainingAttempts: CHART_RESIZE_RETRY_LIMIT });
   }
 
   function readZoomWindowFromChart() {
-    if (!state.chart || !currentChartDom() || !state.rows.length) {
+    const host = currentChartHost();
+    if (!state.chart || !host || !chartDomMatchesHost(host) || !state.rows.length) {
       return null;
     }
     const option = state.chart.getOption();
@@ -644,17 +702,35 @@
     return config.ottEnabled || config.ottSupport || config.ottMarkers || (config.mode === "review" && config.ottTrades);
   }
 
+  function signalMarkerOffset(row, ottRow) {
+    const basePrice = typeof (ottRow && ottRow.price) === "number"
+      ? ottRow.price
+      : (typeof row.price === "number" ? row.price : row.mid);
+    const spread = Math.abs(Number((ottRow && ottRow.spread != null ? ottRow.spread : row.spread) || 0));
+    if (typeof basePrice !== "number") {
+      return SIGNAL_MARKER_MIN_OFFSET;
+    }
+    return Math.min(
+      SIGNAL_MARKER_MAX_OFFSET,
+      Math.max(SIGNAL_MARKER_MIN_OFFSET, spread * 2.25, Math.abs(basePrice) * 0.00012)
+    );
+  }
+
   function markerPrice(row, ottRow, buyField, sellField) {
+    const basePrice = typeof (ottRow && ottRow.price) === "number"
+      ? ottRow.price
+      : (typeof row.price === "number" ? row.price : row.mid);
     if (!ottRow) {
-      return row.price;
+      return basePrice;
     }
-    if (ottRow[buyField] && ottRow.ott != null) {
-      return ottRow.ott * 0.995;
+    const offset = signalMarkerOffset(row, ottRow);
+    if (ottRow[buyField] && typeof basePrice === "number") {
+      return basePrice - offset;
     }
-    if (ottRow[sellField] && ottRow.ott != null) {
-      return ottRow.ott * 1.005;
+    if (ottRow[sellField] && typeof basePrice === "number") {
+      return basePrice + offset;
     }
-    return ottRow.ott || ottRow.ott2 || ottRow.price || row.price;
+    return ottRow.ott2 || ottRow.ott || basePrice;
   }
 
   function visibleYExtent(windowRange) {
@@ -796,7 +872,7 @@
         name: "OTT Buy",
         type: "scatter",
         symbol: "triangle",
-        symbolSize: 13,
+        symbolSize: 11,
         itemStyle: { color: "#4ade80" },
         data: buyData,
       },
@@ -805,7 +881,7 @@
         type: "scatter",
         symbol: "triangle",
         symbolRotate: 180,
-        symbolSize: 13,
+        symbolSize: 11,
         itemStyle: { color: "#f87171" },
         data: sellData,
       },
@@ -955,19 +1031,139 @@
     return overlaySeries.concat(buildSignalSeries(rows, config), buildTradeSeries(config));
   }
 
+  function canonicalTooltipSeriesName(seriesName) {
+    if (seriesName === "OTT" || seriesName === "OTT Up" || seriesName === "OTT Down") {
+      return "OTT";
+    }
+    if (seriesName === "OTT Buy" || seriesName === "OTT Sell" || seriesName === "Long Entry" || seriesName === "Short Entry" || seriesName === "Exit") {
+      return null;
+    }
+    return seriesName;
+  }
+
+  function findRowsAtTimestamp(timestampMs) {
+    if (!state.rows.length || typeof timestampMs !== "number") {
+      return [];
+    }
+    let low = 0;
+    let high = state.rows.length - 1;
+    let matchIndex = -1;
+    while (low <= high) {
+      const middle = Math.floor((low + high) / 2);
+      const value = state.rows[middle].timestampMs;
+      if (value === timestampMs) {
+        matchIndex = middle;
+        break;
+      }
+      if (value < timestampMs) {
+        low = middle + 1;
+      } else {
+        high = middle - 1;
+      }
+    }
+    if (matchIndex < 0) {
+      return [];
+    }
+    let start = matchIndex;
+    let end = matchIndex;
+    while (start > 0 && state.rows[start - 1].timestampMs === timestampMs) {
+      start -= 1;
+    }
+    while ((end + 1) < state.rows.length && state.rows[end + 1].timestampMs === timestampMs) {
+      end += 1;
+    }
+    return state.rows.slice(start, end + 1);
+  }
+
+  function formatSignalModeLabel(signalMode) {
+    return signalMode ? signalMode.charAt(0).toUpperCase() + signalMode.slice(1) : "Signal";
+  }
+
+  function tooltipSignalLines(timestampMs, config) {
+    const [buyField, sellField] = getSignalFields(config.ottSignalMode);
+    const lines = [];
+    const seen = new Set();
+    findRowsAtTimestamp(timestampMs).forEach((row) => {
+      const ottRow = state.ottRows.get(row.id);
+      if (!ottRow) {
+        return;
+      }
+      if (ottRow[buyField]) {
+        const text = "Signal: Buy (" + formatSignalModeLabel(config.ottSignalMode) + ")";
+        if (!seen.has(text)) {
+          seen.add(text);
+          lines.push(text);
+        }
+      }
+      if (ottRow[sellField]) {
+        const text = "Signal: Sell (" + formatSignalModeLabel(config.ottSignalMode) + ")";
+        if (!seen.has(text)) {
+          seen.add(text);
+          lines.push(text);
+        }
+      }
+    });
+    return lines;
+  }
+
+  function tooltipTradeLines(timestampMs) {
+    const lines = [];
+    const seen = new Set();
+    state.ottTrades.forEach((trade) => {
+      if (trade.entryTsMs === timestampMs) {
+        const label = trade.direction === "long" ? "Trade: Long Entry" : "Trade: Short Entry";
+        const text = label + " @ " + Number(trade.entryprice).toFixed(2);
+        if (!seen.has(text)) {
+          seen.add(text);
+          lines.push(text);
+        }
+      }
+      if (trade.exitTsMs === timestampMs) {
+        const text = "Trade: Exit @ " + Number(trade.exitprice).toFixed(2);
+        if (!seen.has(text)) {
+          seen.add(text);
+          lines.push(text);
+        }
+      }
+    });
+    return lines;
+  }
+
   function buildTooltipFormatter() {
     return function formatter(params) {
-      if (!params.length) {
+      const items = Array.isArray(params) ? params : (params ? [params] : []);
+      if (!items.length) {
         return "";
       }
-      const date = new Date(params[0].value[0]);
-      const lines = [date.toLocaleString("en-AU", { hour12: false })];
-      params.forEach((item) => {
+      const axisValue = Number(
+        items[0].axisValue != null
+          ? items[0].axisValue
+          : (Array.isArray(items[0].value) ? items[0].value[0] : items[0].value)
+      );
+      const lines = [new Date(axisValue).toLocaleString("en-AU", { hour12: false })];
+      const valueByLabel = new Map();
+      items.forEach((item) => {
+        const label = canonicalTooltipSeriesName(item.seriesName);
         const value = Array.isArray(item.value) ? item.value[1] : item.value;
-        if (typeof value === "number") {
-          lines.push(item.seriesName + ": " + Number(value).toFixed(2));
+        if (!label || typeof value !== "number") {
+          return;
+        }
+        valueByLabel.set(label, Number(value).toFixed(2));
+      });
+
+      ["Mid", "OTT", "OTT Support", "Ask", "Bid"].forEach((label) => {
+        if (valueByLabel.has(label)) {
+          lines.push(label + ": " + valueByLabel.get(label));
+          valueByLabel.delete(label);
         }
       });
+      valueByLabel.forEach((value, label) => {
+        lines.push(label + ": " + value);
+      });
+
+      const config = currentConfig();
+      tooltipSignalLines(axisValue, config).forEach((line) => lines.push(line));
+      tooltipTradeLines(axisValue).forEach((line) => lines.push(line));
       return lines.join("<br>");
     };
   }
@@ -1079,14 +1275,23 @@
   }
 
   function applyVisibleYAxis() {
-    if (!state.chart || !currentChartDom() || !state.rows.length) {
+    const host = currentChartHost();
+    if (!state.chart || !host || !chartDomMatchesHost(host) || !state.rows.length) {
       return;
     }
     const zoomWindow = readZoomWindowFromChart() || state.visibleWindow;
     if (!zoomWindow) {
       return;
     }
-    state.chart.setOption({ yAxis: buildYAxis(zoomWindow) }, false);
+    try {
+      state.chart.setOption({ yAxis: buildYAxis(zoomWindow) }, false);
+    } catch (error) {
+      if (isOffsetWidthError(error)) {
+        requestChartResize({ applyYAxis: false, remainingAttempts: CHART_RESIZE_RETRY_LIMIT });
+        return;
+      }
+      throw error;
+    }
   }
 
   function renderChart(options) {
@@ -1103,67 +1308,75 @@
     state.visibleWindow = targetZoom;
     state.visibleSpanMs = Math.max(1000, targetZoom.endMs - targetZoom.startMs);
 
-    chart.setOption({
-      animation: false,
-      backgroundColor: "transparent",
-      grid: { left: 54, right: 18, top: 16, bottom: 84 },
-      tooltip: {
-        trigger: "axis",
-        backgroundColor: "rgba(6, 11, 20, 0.96)",
-        borderColor: "rgba(109, 216, 255, 0.24)",
-        textStyle: { color: "#f3f6fb" },
-        axisPointer: {
-          type: "cross",
-          lineStyle: { color: "rgba(109, 216, 255, 0.28)" },
-        },
-        formatter: buildTooltipFormatter(),
-      },
-      xAxis: {
-        type: "time",
-        min: firstTs,
-        max: lastTs,
-        axisLine: { lineStyle: { color: "rgba(147, 181, 255, 0.26)" } },
-        axisLabel: {
-          color: "#9eadc5",
-          formatter(value) {
-            return new Date(value).toLocaleTimeString("en-AU", {
-              hour12: false,
-              hour: "2-digit",
-              minute: "2-digit",
-              second: "2-digit",
-            });
+    try {
+      chart.setOption({
+        animation: false,
+        backgroundColor: "transparent",
+        grid: { left: 54, right: 18, top: 16, bottom: 84 },
+        tooltip: {
+          trigger: "axis",
+          backgroundColor: "rgba(6, 11, 20, 0.96)",
+          borderColor: "rgba(109, 216, 255, 0.24)",
+          textStyle: { color: "#f3f6fb" },
+          axisPointer: {
+            type: "cross",
+            lineStyle: { color: "rgba(109, 216, 255, 0.28)" },
           },
+          formatter: buildTooltipFormatter(),
         },
-        splitLine: { lineStyle: { color: "rgba(147, 181, 255, 0.08)" } },
-      },
-      yAxis: buildYAxis(targetZoom),
-      dataZoom: [
-        {
-          type: "inside",
-          filterMode: "none",
-          startValue: targetZoom.startMs,
-          endValue: targetZoom.endMs,
-        },
-        {
-          type: "slider",
-          height: 42,
-          bottom: 18,
-          filterMode: "none",
-          startValue: targetZoom.startMs,
-          endValue: targetZoom.endMs,
-          borderColor: "rgba(147, 181, 255, 0.16)",
-          backgroundColor: "rgba(8, 13, 23, 0.94)",
-          fillerColor: "rgba(109, 216, 255, 0.16)",
-          dataBackground: {
-            lineStyle: { color: "rgba(109, 216, 255, 0.48)" },
-            areaStyle: { color: "rgba(109, 216, 255, 0.1)" },
+        xAxis: {
+          type: "time",
+          min: firstTs,
+          max: lastTs,
+          axisLine: { lineStyle: { color: "rgba(147, 181, 255, 0.26)" } },
+          axisLabel: {
+            color: "#9eadc5",
+            formatter(value) {
+              return new Date(value).toLocaleTimeString("en-AU", {
+                hour12: false,
+                hour: "2-digit",
+                minute: "2-digit",
+                second: "2-digit",
+              });
+            },
           },
+          splitLine: { lineStyle: { color: "rgba(147, 181, 255, 0.08)" } },
         },
-      ],
-      series: buildPriceSeries(state.rows, selected).concat(buildOttSeries(state.rows, config)),
-    }, true);
+        yAxis: buildYAxis(targetZoom),
+        dataZoom: [
+          {
+            type: "inside",
+            filterMode: "none",
+            startValue: targetZoom.startMs,
+            endValue: targetZoom.endMs,
+          },
+          {
+            type: "slider",
+            height: 42,
+            bottom: 18,
+            filterMode: "none",
+            startValue: targetZoom.startMs,
+            endValue: targetZoom.endMs,
+            borderColor: "rgba(147, 181, 255, 0.16)",
+            backgroundColor: "rgba(8, 13, 23, 0.94)",
+            fillerColor: "rgba(109, 216, 255, 0.16)",
+            dataBackground: {
+              lineStyle: { color: "rgba(109, 216, 255, 0.48)" },
+              areaStyle: { color: "rgba(109, 216, 255, 0.1)" },
+            },
+          },
+        ],
+        series: buildPriceSeries(state.rows, selected).concat(buildOttSeries(state.rows, config)),
+      }, true);
+    } catch (error) {
+      if (isOffsetWidthError(error)) {
+        requestChartResize({ remainingAttempts: CHART_RESIZE_RETRY_LIMIT });
+        return;
+      }
+      throw error;
+    }
 
-    requestChartResize();
+    requestChartResize({ remainingAttempts: CHART_RESIZE_RETRY_LIMIT });
     buildMetaText();
   }
 
@@ -1191,6 +1404,7 @@
     state.review.lastBufferedId = 0;
     state.review.exhausted = false;
     state.review.fetchPromise = null;
+    state.review.ottFetchPromise = null;
     state.review.anchorVisibleCount = 0;
     state.review.anchorTimestampMs = 0;
     state.review.anchorPerfMs = 0;
@@ -1218,9 +1432,10 @@
   }
 
   function reviewPrefetchLimit(config) {
+    const speedMultiplier = 1 + (Math.max(0, state.review.playbackSpeed - 1) * 0.25);
     return Math.max(
       REVIEW_PREFETCH_FLOOR,
-      Math.min(REVIEW_PREFETCH_CEILING, Math.max(120, Math.floor(config.window / 2)))
+      Math.min(REVIEW_PREFETCH_CEILING, Math.floor(Math.max(120, Math.floor(config.window / 2)) * speedMultiplier))
     );
   }
 
@@ -1233,6 +1448,18 @@
       return null;
     }
     return state.review.bufferRows[state.review.visibleCount - 1] || null;
+  }
+
+  function reviewRemainingPlaybackMs() {
+    const visibleRow = reviewLastVisibleRow();
+    const bufferedRow = state.review.bufferRows[state.review.bufferRows.length - 1] || null;
+    if (!visibleRow || !bufferedRow) {
+      return null;
+    }
+    return Math.max(
+      0,
+      (bufferedRow.timestampMs - visibleRow.timestampMs) / Math.max(0.25, state.review.playbackSpeed || 1)
+    );
   }
 
   function setReviewPlaybackAnchor(nowMs) {
@@ -1284,6 +1511,54 @@
     state.ottLastId = 0;
     state.ottStatusPayload = null;
     state.ottOverlayPayload = null;
+  }
+
+  function fetchReviewOttChunk(config, options) {
+    if (config.mode !== "review" || !shouldLoadOtt(config)) {
+      return Promise.resolve(null);
+    }
+    if (state.review.ottFetchPromise) {
+      return state.review.ottFetchPromise;
+    }
+    const requestedAfterId = options && options.afterId != null ? options.afterId : state.ottLastId;
+    const effectiveAfterId = Math.max(0, state.ottLastId || 0, requestedAfterId || 0);
+    const targetEndId = options && options.endId != null ? options.endId : state.review.lastBufferedId;
+    if (targetEndId != null && effectiveAfterId >= targetEndId) {
+      return Promise.resolve(null);
+    }
+    const limit = Math.max(
+      50,
+      Math.min(
+        REVIEW_PREFETCH_CEILING,
+        options && options.limitOverride != null
+          ? options.limitOverride
+          : Math.max(reviewPrefetchLimit(config), targetEndId != null ? (targetEndId - effectiveAfterId) : 0)
+      )
+    );
+    state.review.fetchingOtt = true;
+    setLoadStatus("ott", "OTT: syncing buffered review chunk...", "info");
+    buildMetaText();
+    state.review.ottFetchPromise = loadOttNext(effectiveAfterId, config, {
+      limitOverride: limit,
+      endId: targetEndId,
+    })
+      .then((payload) => {
+        updateOttLoadStatus(payload || state.ottStatusPayload);
+        if (state.rows.length) {
+          renderChart({ preserveCurrentZoom: true });
+        }
+        return payload;
+      })
+      .catch((error) => {
+        setLoadStatus("ott", "OTT: " + (error.message || "matching review chunk failed."), "error");
+        throw error;
+      })
+      .finally(() => {
+        state.review.fetchingOtt = false;
+        state.review.ottFetchPromise = null;
+        buildMetaText();
+      });
+    return state.review.ottFetchPromise;
   }
 
   function applyOttPayload(payload, reset) {
@@ -1548,18 +1823,22 @@
       afterId: String(afterId),
       limit: String(reviewPrefetchLimit(config)),
     });
+    const nextChunkLimit = reviewPrefetchLimit(config);
     if (endId != null) {
       params.set("endId", String(endId));
     }
     state.review.fetchingTicks = true;
-    state.review.fetchingOtt = false;
     setLoadStatus("chart", "Chart: fetching next review chunk...", "info");
-    if (shouldLoadOtt(config)) {
-      setLoadStatus("ott", "OTT: waiting for matching review chunk...", "info");
-    }
     buildMetaText();
+    if (shouldLoadOtt(config)) {
+      fetchReviewOttChunk(config, {
+        afterId,
+        endId,
+        limitOverride: nextChunkLimit,
+      }).catch(() => null);
+    }
     state.review.fetchPromise = fetchJson("/api/live/next?" + params.toString())
-      .then(async (payload) => {
+      .then((payload) => {
         const newRows = payload.rows || [];
         if (!newRows.length) {
           state.review.exhausted = Boolean(payload.endReached || (endId != null && afterId >= endId));
@@ -1571,23 +1850,10 @@
           if (state.review.visibleCount >= state.review.bufferRows.length) {
             announceReviewEnd();
           }
-          return payload;
-        }
-
-        let ottPayload = null;
-        if (shouldLoadOtt(config)) {
-          state.review.fetchingOtt = true;
-          setLoadStatus("ott", "OTT: fetching matching review chunk...", "info");
-          buildMetaText();
-          try {
-            ottPayload = await loadOttNext(afterId, config, {
-              limitOverride: newRows.length,
-              endId,
-            });
-          } catch (error) {
-            setLoadStatus("ott", "OTT: " + (error.message || "matching review chunk failed."), "error");
-            throw error;
+          if (shouldLoadOtt(config) && state.ottLastId < state.review.lastBufferedId) {
+            fetchReviewOttChunk(config).catch(() => null);
           }
+          return payload;
         }
 
         const seen = new Set(state.review.bufferRows.map((row) => row.id));
@@ -1608,8 +1874,8 @@
           "info"
         );
 
-        if (shouldLoadOtt(config)) {
-          updateOttLoadStatus(ottPayload || state.ottStatusPayload);
+        if (shouldLoadOtt(config) && state.ottLastId < state.review.lastBufferedId) {
+          fetchReviewOttChunk(config).catch(() => null);
         }
 
         if (config.ottTrades) {
@@ -1629,14 +1895,11 @@
         return payload;
       })
       .catch((error) => {
-        if (!state.review.fetchingOtt) {
-          setLoadStatus("chart", "Chart: " + (error.message || "review chunk fetch failed."), "error");
-        }
+        setLoadStatus("chart", "Chart: " + (error.message || "review chunk fetch failed."), "error");
         throw error;
       })
       .finally(() => {
         state.review.fetchingTicks = false;
-        state.review.fetchingOtt = false;
         state.review.fetchPromise = null;
         buildMetaText();
       });
@@ -1645,7 +1908,14 @@
 
   function maybePrefetchReview(config) {
     const remaining = state.review.bufferRows.length - state.review.visibleCount;
-    if (remaining <= reviewPrefetchThreshold(config) && !state.review.exhausted) {
+    const remainingPlaybackMs = reviewRemainingPlaybackMs();
+    if (
+      !state.review.exhausted &&
+      (
+        remaining <= reviewPrefetchThreshold(config)
+        || (remainingPlaybackMs != null && remainingPlaybackMs <= REVIEW_PREFETCH_MIN_PLAYBACK_MS)
+      )
+    ) {
       fetchReviewNextChunk(config).catch((error) => {
         status(error.message || "Review fetch failed.", true);
       });
@@ -1843,7 +2113,7 @@
   }
 
   function scheduleChartResize() {
-    requestChartResize();
+    requestChartResize({ remainingAttempts: CHART_RESIZE_RETRY_LIMIT });
   }
 
   function bindSegment(container, handler) {
