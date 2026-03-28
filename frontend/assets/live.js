@@ -7,10 +7,15 @@
     reviewSpeed: 1,
     sidebarCollapsed: false,
     controlSectionCollapsed: false,
+    zigSectionCollapsed: false,
     ottSectionCollapsed: false,
     envelopeSectionCollapsed: false,
     window: 2000,
     series: ["mid"],
+    zigMicro: false,
+    zigMed: true,
+    zigMaxi: true,
+    zigMacro: true,
     ottEnabled: true,
     ottSupport: true,
     ottMarkers: true,
@@ -35,6 +40,7 @@
   const REVIEW_PREFETCH_THRESHOLD = 120;
   const REVIEW_PREFETCH_RATIO = 0.65;
   const REVIEW_PREFETCH_MIN_PLAYBACK_MS = 12000;
+  const REVIEW_ZIG_RETRY_DELAY_MS = 250;
   const REVIEW_OTT_RETRY_DELAY_MS = 250;
   const REVIEW_ENVELOPE_RETRY_DELAY_MS = 250;
   const BACKTEST_OVERLAY_TIMEOUT_MS = 8000;
@@ -48,6 +54,13 @@
     ask: { label: "Ask", field: "ask", color: "#ffb35c", width: 1.35 },
     bid: { label: "Bid", field: "bid", color: "#7ef0c7", width: 1.35 },
     mid: { label: "Mid", field: "mid", color: "#6dd8ff", width: 2.0 },
+  };
+
+  const ZIG_LEVEL_CONFIG = {
+    micro: { label: "Micro Zig", color: "#8fe6ff", width: 1.05, opacity: 0.4 },
+    med: { label: "Medium Zig", color: "#ffd166", width: 1.6, opacity: 0.72 },
+    maxi: { label: "Maxi Zig", color: "#ff8c69", width: 2.2, opacity: 0.84 },
+    macro: { label: "Macro Zig", color: "#f8fafc", width: 2.9, opacity: 0.96 },
   };
 
   const state = {
@@ -66,6 +79,14 @@
     chartResizeObserver: null,
     chartRenderFrame: 0,
     pendingRenderOptions: null,
+    zigRows: {
+      micro: new Map(),
+      med: new Map(),
+      maxi: new Map(),
+      macro: new Map(),
+    },
+    zigStatusPayload: null,
+    zigStatePayload: null,
     ottRows: new Map(),
     ottTrades: [],
     ottRun: null,
@@ -82,6 +103,7 @@
     },
     loadStatus: {
       chart: { text: "Chart: waiting.", severity: "info" },
+      zig: { text: "Zig: waiting.", severity: "info" },
       ott: { text: "OTT: waiting.", severity: "info" },
       envelope: { text: "Envelope: waiting.", severity: "info" },
       backtest: { text: "Backtest: idle.", severity: "info" },
@@ -93,6 +115,7 @@
       playbackSpeed: DEFAULTS.reviewSpeed,
       exhausted: false,
       fetchPromise: null,
+      zigFetchPromise: null,
       ottFetchPromise: null,
       envelopeFetchPromise: null,
       rafId: 0,
@@ -105,11 +128,14 @@
       sessionEndId: null,
       sessionEndTimestamp: null,
       fetchingTicks: false,
+      fetchingZig: false,
       fetchingOtt: false,
       fetchingEnvelope: false,
       trueEndReached: false,
       requestedVisibleCount: 0,
       waitingFor: null,
+      zigRequestedEndId: 0,
+      lastZigRequestAt: 0,
       ottRequestedEndId: 0,
       lastOttRequestAt: 0,
       envelopeRequestedEndId: 0,
@@ -119,6 +145,7 @@
       sidebarCollapsed: DEFAULTS.sidebarCollapsed,
       sections: {
         control: DEFAULTS.controlSectionCollapsed,
+        zig: DEFAULTS.zigSectionCollapsed,
         ott: DEFAULTS.ottSectionCollapsed,
         envelope: DEFAULTS.envelopeSectionCollapsed,
       },
@@ -142,6 +169,10 @@
     chartHost: document.getElementById("liveChart"),
     chartPanel: document.getElementById("chartPanel"),
     seriesSelector: document.getElementById("seriesSelector"),
+    zigMicroToggle: document.getElementById("zigMicroToggle"),
+    zigMedToggle: document.getElementById("zigMedToggle"),
+    zigMaxiToggle: document.getElementById("zigMaxiToggle"),
+    zigMacroToggle: document.getElementById("zigMacroToggle"),
     ottToggle: document.getElementById("ottToggle"),
     ottSupportToggle: document.getElementById("ottSupportToggle"),
     ottMarkersToggle: document.getElementById("ottMarkersToggle"),
@@ -160,15 +191,18 @@
     envelopeBandwidth: document.getElementById("envelopeBandwidth"),
     envelopeMult: document.getElementById("envelopeMult"),
     controlSectionBody: document.getElementById("controlSectionBody"),
+    zigSectionBody: document.getElementById("zigSectionBody"),
     ottSectionBody: document.getElementById("ottSectionBody"),
     envelopeSectionBody: document.getElementById("envelopeSectionBody"),
     controlSectionToggle: document.getElementById("controlSectionToggle"),
+    zigSectionToggle: document.getElementById("zigSectionToggle"),
     ottSectionToggle: document.getElementById("ottSectionToggle"),
     envelopeSectionToggle: document.getElementById("envelopeSectionToggle"),
   };
 
   const SIDEBAR_SECTIONS = {
     control: { body: elements.controlSectionBody, toggle: elements.controlSectionToggle },
+    zig: { body: elements.zigSectionBody, toggle: elements.zigSectionToggle },
     envelope: { body: elements.envelopeSectionBody, toggle: elements.envelopeSectionToggle },
     ott: { body: elements.ottSectionBody, toggle: elements.ottSectionToggle },
   };
@@ -287,6 +321,7 @@
     const envelopeBandwidth = Number.parseFloat(params.get("envelopeBandwidth"));
     const envelopeMult = Number.parseFloat(params.get("envelopeMult"));
     const controlSectionParam = params.has("controlSection") ? params.get("controlSection") : params.get("primaryBar");
+    const zigSectionParam = params.get("zigSection");
     const ottSectionParam = params.has("ottSection") ? params.get("ottSection") : params.get("ottBar");
     const envelopeSectionParam = params.has("envelopeSection") ? params.get("envelopeSection") : params.get("envelopeBar");
     return {
@@ -297,10 +332,15 @@
       reviewSpeed: sanitizeReviewSpeed(params.get("reviewSpeed")),
       sidebarCollapsed: parseCollapsed(params.get("sidebar"), DEFAULTS.sidebarCollapsed),
       controlSectionCollapsed: parseCollapsed(controlSectionParam, DEFAULTS.controlSectionCollapsed),
+      zigSectionCollapsed: parseCollapsed(zigSectionParam, DEFAULTS.zigSectionCollapsed),
       ottSectionCollapsed: parseCollapsed(ottSectionParam, DEFAULTS.ottSectionCollapsed),
       envelopeSectionCollapsed: parseCollapsed(envelopeSectionParam, DEFAULTS.envelopeSectionCollapsed),
       window: Number.isFinite(windowSize) && windowSize > 0 ? windowSize : DEFAULTS.window,
       series: parseSeries(params.get("series")),
+      zigMicro: parseBoolean(params.get("zigMicro"), DEFAULTS.zigMicro),
+      zigMed: parseBoolean(params.get("zigMed"), DEFAULTS.zigMed),
+      zigMaxi: parseBoolean(params.get("zigMaxi"), DEFAULTS.zigMaxi),
+      zigMacro: parseBoolean(params.get("zigMacro"), DEFAULTS.zigMacro),
       ottEnabled: parseBoolean(params.get("ott"), DEFAULTS.ottEnabled),
       ottSupport: parseBoolean(params.get("ottSupport"), DEFAULTS.ottSupport),
       ottMarkers: parseBoolean(params.get("ottMarkers"), DEFAULTS.ottMarkers),
@@ -398,6 +438,7 @@
     state.review.playbackSpeed = config.reviewSpeed;
     state.ui.sidebarCollapsed = Boolean(config.sidebarCollapsed);
     state.ui.sections.control = Boolean(config.controlSectionCollapsed);
+    state.ui.sections.zig = Boolean(config.zigSectionCollapsed);
     state.ui.sections.ott = Boolean(config.ottSectionCollapsed);
     state.ui.sections.envelope = Boolean(config.envelopeSectionCollapsed);
     state.activeSeries = { ask: false, bid: false, mid: false };
@@ -407,6 +448,10 @@
     elements.tickId.value = config.id || "";
     elements.reviewStart.value = config.reviewStart || "";
     elements.windowSize.value = String(config.window);
+    elements.zigMicroToggle.checked = Boolean(config.zigMicro);
+    elements.zigMedToggle.checked = Boolean(config.zigMed);
+    elements.zigMaxiToggle.checked = Boolean(config.zigMaxi);
+    elements.zigMacroToggle.checked = Boolean(config.zigMacro);
     elements.ottSupportToggle.checked = Boolean(config.ottSupport);
     elements.ottMarkersToggle.checked = Boolean(config.ottMarkers);
     elements.ottTradesToggle.checked = Boolean(config.ottTrades);
@@ -440,10 +485,15 @@
       reviewSpeed: state.review.playbackSpeed,
       sidebarCollapsed: state.ui.sidebarCollapsed,
       controlSectionCollapsed: state.ui.sections.control,
+      zigSectionCollapsed: state.ui.sections.zig,
       ottSectionCollapsed: state.ui.sections.ott,
       envelopeSectionCollapsed: state.ui.sections.envelope,
       window: Math.max(1, Math.min(10000, Number.parseInt(elements.windowSize.value, 10) || DEFAULTS.window)),
       series: getActiveSeriesKeys(),
+      zigMicro: elements.zigMicroToggle.checked,
+      zigMed: elements.zigMedToggle.checked,
+      zigMaxi: elements.zigMaxiToggle.checked,
+      zigMacro: elements.zigMacroToggle.checked,
       ottEnabled: elements.ottToggle.querySelector("button.active")?.dataset.value !== "off",
       ottSupport: elements.ottSupportToggle.checked,
       ottMarkers: elements.ottMarkersToggle.checked,
@@ -471,9 +521,14 @@
     params.set("reviewSpeed", String(config.reviewSpeed));
     params.set("sidebar", config.sidebarCollapsed ? "1" : "0");
     params.set("controlSection", config.controlSectionCollapsed ? "1" : "0");
+    params.set("zigSection", config.zigSectionCollapsed ? "1" : "0");
     params.set("ottSection", config.ottSectionCollapsed ? "1" : "0");
     params.set("envelopeSection", config.envelopeSectionCollapsed ? "1" : "0");
     params.set("series", config.series.join(","));
+    params.set("zigMicro", config.zigMicro ? "1" : "0");
+    params.set("zigMed", config.zigMed ? "1" : "0");
+    params.set("zigMaxi", config.zigMaxi ? "1" : "0");
+    params.set("zigMacro", config.zigMacro ? "1" : "0");
     params.set("ott", config.ottEnabled ? "1" : "0");
     params.set("ottSupport", config.ottSupport ? "1" : "0");
     params.set("ottMarkers", config.ottMarkers ? "1" : "0");
@@ -515,7 +570,7 @@
   }
 
   function renderLoadStatus() {
-    const parts = ["chart", "ott", "envelope", "backtest"]
+    const parts = ["chart", "zig", "ott", "envelope", "backtest"]
       .map((key) => state.loadStatus[key])
       .filter((entry) => entry && entry.text);
     elements.statusLine.textContent = parts.map((entry) => entry.text).join(" | ") || "Ready.";
@@ -524,6 +579,7 @@
 
   function initializeLoadStatus(config) {
     setLoadStatus("chart", "Chart: loading...", "info", { silent: true });
+    setLoadStatus("zig", shouldLoadZig(config) ? "Zig: loading..." : "Zig: off.", "info", { silent: true });
     setLoadStatus("ott", shouldLoadOtt(config) ? "OTT: loading..." : "OTT: off.", "info", { silent: true });
     setLoadStatus("envelope", shouldLoadEnvelope(config) ? "Envelope: loading..." : "Envelope: off.", "info", { silent: true });
     if (config.mode === "review") {
@@ -537,6 +593,31 @@
       setLoadStatus("backtest", "Backtest: n/a.", "info", { silent: true });
     }
     renderLoadStatus();
+  }
+
+  function updateZigLoadStatus(payload) {
+    if (!payload) {
+      setLoadStatus("zig", "Zig: off.", "info");
+      return;
+    }
+    if (payload.status && payload.status !== "ok") {
+      setLoadStatus(
+        "zig",
+        "Zig: " + (payload.message || payload.status + "."),
+        isOverlayWarningStatus(payload.status) ? "warn" : "error"
+      );
+      return;
+    }
+    const config = currentConfig();
+    const parts = enabledZigLevels(config).map((level) => {
+      const levelPayload = payload.levels && payload.levels[level] ? payload.levels[level] : null;
+      return ZIG_LEVEL_CONFIG[level].label.replace(" Zig", "") + " " + Number(levelPayload && levelPayload.rowCount || 0);
+    });
+    if (config.mode === "review" && payload.range && payload.range.endId != null) {
+      setLoadStatus("zig", "Zig: " + parts.join(" | ") + " thru tick " + payload.range.endId + ".", "info");
+      return;
+    }
+    setLoadStatus("zig", parts.length ? "Zig: " + parts.join(" | ") + "." : "Zig: off.", "info");
   }
 
   function updateOttLoadStatus(payload) {
@@ -731,6 +812,12 @@
   function collectOverlayMessages(config) {
     const messages = [];
     const statuses = [];
+    if (shouldLoadZig(config) && state.zigStatusPayload && state.zigStatusPayload.status && state.zigStatusPayload.status !== "ok") {
+      statuses.push(state.zigStatusPayload.status);
+      if (state.zigStatusPayload.message) {
+        messages.push(state.zigStatusPayload.message);
+      }
+    }
     if (shouldLoadOtt(config) && state.ottStatusPayload && state.ottStatusPayload.status && state.ottStatusPayload.status !== "ok") {
       statuses.push(state.ottStatusPayload.status);
       if (state.ottStatusPayload.message) {
@@ -1007,12 +1094,63 @@
     return state.rows.filter((row) => row.timestampMs >= windowRange.startMs && row.timestampMs <= windowRange.endMs);
   }
 
+  function enabledZigLevels(config) {
+    return Object.keys(ZIG_LEVEL_CONFIG).filter((level) => Boolean(config["zig" + level.charAt(0).toUpperCase() + level.slice(1)]));
+  }
+
+  function shouldLoadZig(config) {
+    return enabledZigLevels(config).length > 0;
+  }
+
   function shouldLoadOtt(config) {
     return config.ottEnabled || config.ottSupport || config.ottMarkers || (config.mode === "review" && config.ottTrades);
   }
 
   function shouldLoadEnvelope(config) {
     return config.envelopeEnabled;
+  }
+
+  function zigSegmentsForLevel(level, rows) {
+    if (!rows.length) {
+      return [];
+    }
+    const visibleLastId = rows[rows.length - 1].id;
+    const firstId = rows[0].id;
+    const lastId = rows[rows.length - 1].id;
+    return Array.from(state.zigRows[level].values())
+      .filter((segment) => (
+        segment.confirmtickid <= visibleLastId
+        && segment.starttickid <= lastId
+        && segment.endtickid >= firstId
+      ))
+      .sort((left, right) => (
+        (left.endtickid - right.endtickid)
+        || (left.confirmtickid - right.confirmtickid)
+        || (left.id - right.id)
+      ));
+  }
+
+  function zigPolylinePoints(segments) {
+    if (!segments.length) {
+      return [];
+    }
+    const points = [[segments[0].startTimeMs, segments[0].startprice]];
+    segments.forEach((segment) => {
+      const previous = points[points.length - 1];
+      if (!previous || previous[0] !== segment.startTimeMs || previous[1] !== segment.startprice) {
+        points.push([segment.startTimeMs, segment.startprice]);
+      }
+      points.push([segment.endTimeMs, segment.endprice]);
+    });
+    return points;
+  }
+
+  function zigSegmentsAtTimestamp(level, timestampMs, rows) {
+    return zigSegmentsForLevel(level, rows).filter((segment) => {
+      const startMs = Math.min(segment.startTimeMs, segment.endTimeMs);
+      const endMs = Math.max(segment.startTimeMs, segment.endTimeMs);
+      return timestampMs >= startMs && timestampMs <= endMs;
+    });
   }
 
   function signalMarkerOffset(row, ottRow) {
@@ -1097,6 +1235,15 @@
         }
       }
     });
+
+    if (shouldLoadZig(config) && searchRows.length) {
+      enabledZigLevels(config).forEach((level) => {
+        zigSegmentsForLevel(level, searchRows).forEach((segment) => {
+          minPrice = Math.min(minPrice, segment.startprice, segment.endprice);
+          maxPrice = Math.max(maxPrice, segment.startprice, segment.endprice);
+        });
+      });
+    }
 
     if (config.mode === "review" && config.ottTrades) {
       state.ottTrades.forEach((trade) => {
@@ -1403,6 +1550,36 @@
     ];
   }
 
+  function buildZigSeries(rows, config) {
+    if (!shouldLoadZig(config)) {
+      return [];
+    }
+    return enabledZigLevels(config)
+      .map((level) => {
+        const segments = zigSegmentsForLevel(level, rows);
+        const points = zigPolylinePoints(segments);
+        if (points.length < 2) {
+          return null;
+        }
+        const levelConfig = ZIG_LEVEL_CONFIG[level];
+        return {
+          name: levelConfig.label,
+          type: "line",
+          showSymbol: false,
+          smooth: false,
+          connectNulls: false,
+          data: points,
+          lineStyle: {
+            width: levelConfig.width,
+            color: levelConfig.color,
+            opacity: levelConfig.opacity,
+          },
+          z: 5,
+        };
+      })
+      .filter(Boolean);
+  }
+
   function canonicalTooltipSeriesName(seriesName) {
     if (seriesName === "OTT" || seriesName === "OTT Up" || seriesName === "OTT Down") {
       return "OTT";
@@ -1501,6 +1678,42 @@
     return lines;
   }
 
+  function formatZigTime(timestampMs) {
+    return new Date(timestampMs).toLocaleTimeString("en-AU", {
+      hour12: false,
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+  }
+
+  function tooltipZigLines(timestampMs, config) {
+    if (!shouldLoadZig(config) || !state.rows.length) {
+      return [];
+    }
+    const lines = [];
+    enabledZigLevels(config).forEach((level) => {
+      zigSegmentsAtTimestamp(level, timestampMs, state.rows).forEach((segment) => {
+        const direction = segment.dir === 1 ? "up" : "down";
+        lines.push(
+          "Zig " + ZIG_LEVEL_CONFIG[level].label.replace(" Zig", "") + " #" + segment.id
+            + " " + direction
+            + " | ticks " + segment.starttickid + "->" + segment.endtickid
+            + " | confirm " + segment.confirmtickid
+        );
+        lines.push(
+          "Times " + formatZigTime(segment.startTimeMs)
+            + " -> " + formatZigTime(segment.endTimeMs)
+            + " | confirm " + formatZigTime(segment.confirmTimeMs)
+            + " | amp " + Number(segment.amplitude).toFixed(2)
+            + " | dur " + Number(segment.dursec).toFixed(1) + "s"
+            + " | score " + Number(segment.score).toFixed(2)
+        );
+      });
+    });
+    return lines;
+  }
+
   function buildTooltipFormatter() {
     return function formatter(params) {
       const items = Array.isArray(params) ? params : (params ? [params] : []);
@@ -1523,7 +1736,7 @@
         valueByLabel.set(label, Number(value).toFixed(2));
       });
 
-      ["Mid", "Envelope Basis", "Envelope Upper", "Envelope Lower", "OTT", "OTT Support", "Ask", "Bid"].forEach((label) => {
+      ["Mid", "Envelope Basis", "Envelope Upper", "Envelope Lower", "Macro Zig", "Maxi Zig", "Medium Zig", "Micro Zig", "OTT", "OTT Support", "Ask", "Bid"].forEach((label) => {
         if (valueByLabel.has(label)) {
           lines.push(label + ": " + valueByLabel.get(label));
           valueByLabel.delete(label);
@@ -1534,6 +1747,7 @@
       });
 
       const config = currentConfig();
+      tooltipZigLines(axisValue, config).forEach((line) => lines.push(line));
       tooltipSignalLines(axisValue, config).forEach((line) => lines.push(line));
       tooltipTradeLines(axisValue).forEach((line) => lines.push(line));
       return lines.join("<br>");
@@ -1771,6 +1985,7 @@
         ],
         series: buildPriceSeries(state.rows, selected)
           .concat(buildEnvelopeSeries(state.rows, config))
+          .concat(buildZigSeries(state.rows, config))
           .concat(buildOttSeries(state.rows, config)),
       }, true);
     } catch (error) {
@@ -1812,6 +2027,7 @@
     state.review.lastBufferedId = 0;
     state.review.exhausted = false;
     state.review.fetchPromise = null;
+    state.review.zigFetchPromise = null;
     state.review.ottFetchPromise = null;
     state.review.envelopeFetchPromise = null;
     state.review.anchorVisibleCount = 0;
@@ -1823,10 +2039,13 @@
     state.review.sessionEndId = null;
     state.review.sessionEndTimestamp = null;
     state.review.fetchingTicks = false;
+    state.review.fetchingZig = false;
     state.review.fetchingOtt = false;
     state.review.fetchingEnvelope = false;
     state.review.trueEndReached = false;
     state.review.waitingFor = null;
+    state.review.zigRequestedEndId = 0;
+    state.review.lastZigRequestAt = 0;
     state.review.ottRequestedEndId = 0;
     state.review.lastOttRequestAt = 0;
     state.review.envelopeRequestedEndId = 0;
@@ -1918,6 +2137,21 @@
     buildMetaText();
   }
 
+  function clearZigState() {
+    state.zigRows = {
+      micro: new Map(),
+      med: new Map(),
+      maxi: new Map(),
+      macro: new Map(),
+    };
+    state.zigStatusPayload = null;
+    state.zigStatePayload = null;
+    state.review.zigFetchPromise = null;
+    state.review.fetchingZig = false;
+    state.review.zigRequestedEndId = 0;
+    state.review.lastZigRequestAt = 0;
+  }
+
   function clearOttState() {
     cancelBacktestOverlayRequest();
     cancelBacktestRunRequest();
@@ -1939,6 +2173,57 @@
     state.review.fetchingEnvelope = false;
     state.review.envelopeRequestedEndId = 0;
     state.review.lastEnvelopeRequestAt = 0;
+  }
+
+  function fetchReviewZigChunk(config, options) {
+    if (config.mode !== "review" || !shouldLoadZig(config)) {
+      return Promise.resolve(null);
+    }
+    if (state.review.zigFetchPromise) {
+      return state.review.zigFetchPromise;
+    }
+    const requestedAfterId = options && options.afterId != null
+      ? options.afterId
+      : Math.max(0, state.review.zigRequestedEndId || reviewBufferStartAfterId());
+    const effectiveAfterId = Math.max(0, requestedAfterId || 0);
+    const targetEndId = options && options.endId != null ? options.endId : state.review.lastBufferedId;
+    if (targetEndId != null && effectiveAfterId >= targetEndId) {
+      return Promise.resolve(null);
+    }
+    const nowMs = performance.now();
+    if (
+      (!options || !options.force)
+      && targetEndId != null
+      && targetEndId <= state.review.zigRequestedEndId
+      && (nowMs - state.review.lastZigRequestAt) < REVIEW_ZIG_RETRY_DELAY_MS
+    ) {
+      return Promise.resolve(null);
+    }
+    state.review.zigRequestedEndId = Math.max(state.review.zigRequestedEndId, targetEndId || 0);
+    state.review.lastZigRequestAt = nowMs;
+    state.review.fetchingZig = true;
+    setLoadStatus("zig", "Zig: syncing review chunk...", "info");
+    buildMetaText();
+    state.review.zigFetchPromise = loadZigNext(effectiveAfterId, config, {
+      endId: targetEndId,
+    })
+      .then((payload) => {
+        updateZigLoadStatus(payload || state.zigStatusPayload);
+        if (state.rows.length) {
+          renderChart({ preserveCurrentZoom: true });
+        }
+        return payload;
+      })
+      .catch((error) => {
+        setLoadStatus("zig", "Zig: " + (error.message || "matching review chunk failed."), "error");
+        throw error;
+      })
+      .finally(() => {
+        state.review.fetchingZig = false;
+        state.review.zigFetchPromise = null;
+        buildMetaText();
+      });
+    return state.review.zigFetchPromise;
   }
 
   function fetchReviewOttChunk(config, options) {
@@ -2064,6 +2349,33 @@
     return state.review.envelopeFetchPromise;
   }
 
+  function applyZigPayload(payload, reset) {
+    if (reset) {
+      state.zigRows = {
+        micro: new Map(),
+        med: new Map(),
+        maxi: new Map(),
+        macro: new Map(),
+      };
+      state.review.zigRequestedEndId = 0;
+    }
+    Object.keys(ZIG_LEVEL_CONFIG).forEach((level) => {
+      const levelPayload = payload.levels && payload.levels[level] ? payload.levels[level] : null;
+      const rows = levelPayload && Array.isArray(levelPayload.rows) ? levelPayload.rows : [];
+      rows.forEach((row) => {
+        state.zigRows[level].set(row.id, row);
+      });
+    });
+    state.zigStatusPayload = payload;
+    state.zigStatePayload = payload.state || state.zigStatePayload;
+    if (payload.range && payload.range.endId != null) {
+      state.review.zigRequestedEndId = Math.max(state.review.zigRequestedEndId, payload.range.endId);
+    }
+    if (payload.endId != null) {
+      state.review.zigRequestedEndId = Math.max(state.review.zigRequestedEndId, payload.endId);
+    }
+  }
+
   function applyOttPayload(payload, reset) {
     if (reset) {
       state.ottRows = new Map();
@@ -2156,6 +2468,37 @@
         requestOptions.signal.removeEventListener("abort", abortListener);
       }
     }
+  }
+
+  async function loadZigWindow(config, range) {
+    if (!shouldLoadZig(config) || !range || range.startId == null || range.endId == null) {
+      return null;
+    }
+    const params = new URLSearchParams({
+      startId: String(range.startId),
+      endId: String(range.endId),
+      levels: enabledZigLevels(config).join(","),
+    });
+    const payload = await fetchJson("/api/zig/window?" + params.toString());
+    applyZigPayload(payload, true);
+    return payload;
+  }
+
+  async function loadZigNext(afterId, config, options) {
+    if (!shouldLoadZig(config)) {
+      return null;
+    }
+    const requestOptions = options || {};
+    const params = new URLSearchParams({
+      afterId: String(afterId),
+      levels: enabledZigLevels(config).join(","),
+    });
+    if (requestOptions.endId != null) {
+      params.set("endId", String(requestOptions.endId));
+    }
+    const payload = await fetchJson("/api/zig/next?" + params.toString());
+    applyZigPayload(payload, false);
+    return payload;
   }
 
   async function loadOttBootstrap(config) {
@@ -2496,6 +2839,20 @@
       });
     }
     if (
+      shouldLoadZig(config)
+      && state.review.zigRequestedEndId < state.review.lastBufferedId
+      && (
+        remaining <= reviewPrefetchThreshold(config)
+        || (remainingPlaybackMs != null && remainingPlaybackMs <= REVIEW_PREFETCH_MIN_PLAYBACK_MS)
+      )
+    ) {
+      fetchReviewZigChunk(config, {
+        endId: state.review.lastBufferedId,
+      }).catch((error) => {
+        status(error.message || "Zig sync failed.", true);
+      });
+    }
+    if (
       requiresReviewOttCoverage(config)
       && ottCoverage.contiguousAvailableCount < state.review.bufferRows.length
       && (
@@ -2641,6 +2998,14 @@
       }
 
       const overlayRequests = [];
+      if (shouldLoadZig(config)) {
+        overlayRequests.push(
+          loadZigNext(previousLastId, config, { endId: payload.lastId }).catch((error) => {
+            status(error.message || "Zig incremental update failed.", true);
+            return null;
+          })
+        );
+      }
       if (shouldLoadOtt(config)) {
         overlayRequests.push(
           loadOttNext(previousLastId, config).catch((error) => {
@@ -2679,6 +3044,7 @@
     closeStream();
     stopReviewPlayback({ silent: true });
     resetReviewState();
+    clearZigState();
     clearOttState();
     clearEnvelopeState();
 
@@ -2715,6 +3081,22 @@
         loadedRows.length ? "info" : "warn",
         { silent: true }
       );
+
+      if (shouldLoadZig(config)) {
+        try {
+          const zigRange = loadedRows.length ? {
+            startId: loadedRows[0].id,
+            endId: loadedRows[loadedRows.length - 1].id,
+          } : null;
+          const zigPayload = await loadZigWindow(config, zigRange);
+          updateZigLoadStatus(zigPayload);
+        } catch (error) {
+          clearZigState();
+          setLoadStatus("zig", "Zig: " + (error.message || "window load failed."), "error", { silent: true });
+        }
+      } else {
+        setLoadStatus("zig", "Zig: off.", "info", { silent: true });
+      }
 
       if (shouldLoadOtt(config)) {
         try {
@@ -2878,6 +3260,25 @@
     }
   });
 
+  [
+    elements.zigMicroToggle,
+    elements.zigMedToggle,
+    elements.zigMaxiToggle,
+    elements.zigMacroToggle,
+  ].forEach((control) => {
+    control.addEventListener("change", () => {
+      const config = currentConfig();
+      writeQuery(config);
+      clearZigState();
+      setLoadStatus(
+        "zig",
+        shouldLoadZig(config) ? "Zig: settings changed. Click Load." : "Zig: off.",
+        "info"
+      );
+      renderChart({ preserveCurrentZoom: true });
+    });
+  });
+
   bindSegment(elements.ottToggle, (value) => {
     setSegment(elements.ottToggle, value);
     const config = currentConfig();
@@ -3002,6 +3403,7 @@
 
   elements.sidebarToggle.addEventListener("click", toggleSidebar);
   elements.controlSectionToggle.addEventListener("click", () => toggleSidebarSection("control"));
+  elements.zigSectionToggle.addEventListener("click", () => toggleSidebarSection("zig"));
   elements.envelopeSectionToggle.addEventListener("click", () => toggleSidebarSection("envelope"));
   elements.ottSectionToggle.addEventListener("click", () => toggleSidebarSection("ott"));
 

@@ -34,6 +34,7 @@ from datavis.envelope import (
 from datavis.envelope_storage import (
     fetch_envelope_rows_for_tick_ids,
     fetch_envelope_sync_diagnostics,
+    resolve_backfill_range,
 )
 from datavis.ott import (
     DEFAULT_OTT_LENGTH,
@@ -51,6 +52,13 @@ from datavis.ott_storage import (
     fetch_ott_sync_diagnostics,
     resolve_last_week_range,
     run_and_store_backtest,
+)
+from datavis.zigzag import ZIG_LEVELS, zig_worker_job_name
+from datavis.zigzag_storage import (
+    fetch_level_rows_after_confirm,
+    fetch_level_rows_for_window,
+    fetch_zig_sync_diagnostics,
+    load_zig_state,
 )
 BASE_DIR = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
@@ -503,6 +511,197 @@ def build_envelope_response(
         "length": config.length,
         "bandwidth": config.bandwidth,
         "mult": config.mult,
+    }
+
+
+def normalize_zig_levels(raw_levels: Optional[str]) -> List[str]:
+    if not raw_levels:
+        return list(ZIG_LEVELS)
+    selected: List[str] = []
+    for token in str(raw_levels).split(","):
+        level = token.strip().lower()
+        if level in ZIG_LEVELS and level not in selected:
+            selected.append(level)
+    if not selected:
+        raise HTTPException(status_code=400, detail="Unsupported Zig level selection.")
+    return selected
+
+
+def parse_optional_timestamp(raw_value: Optional[str], timezone_name: str = DEFAULT_REVIEW_TIMEZONE) -> Optional[datetime]:
+    if not raw_value:
+        return None
+    try:
+        target_tz = ZoneInfo(timezone_name or DEFAULT_REVIEW_TIMEZONE)
+    except ZoneInfoNotFoundError as exc:
+        raise HTTPException(status_code=400, detail="Unsupported timezone.") from exc
+    try:
+        parsed = datetime.fromisoformat(str(raw_value).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid timestamp.") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=target_tz)
+    else:
+        parsed = parsed.astimezone(target_tz)
+    return parsed.astimezone(timezone.utc)
+
+
+def serialize_zig_row(row: Dict[str, Any], level: str) -> Dict[str, Any]:
+    start_time = row["starttime"]
+    end_time = row["endtime"]
+    confirm_time = row["confirmtime"]
+    return {
+        "level": level,
+        "id": row["id"],
+        "symbol": row["symbol"],
+        "starttickid": row["starttickid"],
+        "endtickid": row["endtickid"],
+        "confirmtickid": row["confirmtickid"],
+        "starttime": start_time.isoformat(),
+        "endtime": end_time.isoformat(),
+        "confirmtime": confirm_time.isoformat(),
+        "startTimeMs": dt_to_ms(start_time),
+        "endTimeMs": dt_to_ms(end_time),
+        "confirmTimeMs": dt_to_ms(confirm_time),
+        "startprice": row["startprice"],
+        "endprice": row["endprice"],
+        "highprice": row["highprice"],
+        "lowprice": row["lowprice"],
+        "dir": row["dir"],
+        "tickcount": row["tickcount"],
+        "childcount": row.get("childcount"),
+        "dursec": row["dursec"],
+        "amplitude": row["amplitude"],
+        "score": row["score"],
+        "status": row["status"],
+        "childstartid": row.get("childstartid"),
+        "childendid": row.get("childendid"),
+        "parentid": row.get("parentid"),
+    }
+
+
+def serialize_zig_state_point(point: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not point:
+        return None
+    point_time = datetime.fromisoformat(point["timestamp"]) if point.get("timestamp") else None
+    confirm_time = datetime.fromisoformat(point["confirmtime"]) if point.get("confirmtime") else None
+    return {
+        "tickid": point.get("tickid"),
+        "timestamp": point.get("timestamp"),
+        "timestampMs": dt_to_ms(point_time),
+        "price": point.get("price"),
+        "kind": point.get("kind"),
+        "sourceid": point.get("sourceid"),
+        "confirmtickid": point.get("confirmtickid"),
+        "confirmtime": point.get("confirmtime"),
+        "confirmTimeMs": dt_to_ms(confirm_time),
+        "seq": point.get("seq"),
+    }
+
+
+def serialize_zig_state_payload(state_row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not state_row:
+        return None
+    statejson = state_row.get("statejson") or {}
+    return {
+        "jobName": state_row.get("jobname"),
+        "jobType": state_row.get("jobtype"),
+        "symbol": state_row.get("symbol"),
+        "lastTickId": state_row.get("lasttickid"),
+        "lastTime": serialize_value(state_row.get("lasttime")),
+        "levels": {
+            level: {
+                "direction": (statejson.get(level) or {}).get("direction"),
+                "lastConfirmed": serialize_zig_state_point((statejson.get(level) or {}).get("lastconfirmed")),
+                "candidate": serialize_zig_state_point((statejson.get(level) or {}).get("candidate")),
+                "counterEvent": serialize_zig_state_point((statejson.get(level) or {}).get("counterevent")),
+            }
+            for level in ZIG_LEVELS
+        },
+    }
+
+
+def summarize_zig_status(requested_end_id: Optional[int]) -> Tuple[str, Optional[str], Dict[str, Any], Optional[Dict[str, Any]]]:
+    job_name = zig_worker_job_name(TICK_SYMBOL)
+    diagnostics = fetch_zig_sync_diagnostics(TICK_SYMBOL, job_name)
+    state_row = load_zig_state(job_name)
+    last_tick_id = diagnostics["jobState"]["lastTickId"]
+    storage_last_tick_id = max(
+        int(details["lastTickId"])
+        for details in diagnostics["levels"].values()
+        if details.get("lastTickId") is not None
+    ) if diagnostics["levels"] else None
+    if last_tick_id is None:
+        if storage_last_tick_id is not None and (requested_end_id is None or int(storage_last_tick_id) >= int(requested_end_id)):
+            return ("ok", None, diagnostics, state_row)
+        return (
+            "empty",
+            "No stored Zig state exists yet. Run the Zig worker or backfill.",
+            diagnostics,
+            state_row,
+        )
+    if requested_end_id is not None and int(last_tick_id) < int(requested_end_id):
+        return (
+            "ahead",
+            "Zig worker currently processed tick {0}; requested ticks reach {1}.".format(last_tick_id, requested_end_id),
+            diagnostics,
+            state_row,
+        )
+    return ("ok", None, diagnostics, state_row)
+
+
+def build_zig_window_payload(start_id: int, end_id: int, selected_levels: List[str]) -> Dict[str, Any]:
+    status_text, message, diagnostics, state_row = summarize_zig_status(end_id)
+    levels_payload = {}
+    total_rows = 0
+    for level in selected_levels:
+        rows = fetch_level_rows_for_window(TICK_SYMBOL, level, start_id, end_id, end_id)
+        serialized_rows = [serialize_zig_row(row, level) for row in rows]
+        levels_payload[level] = {
+            "rows": serialized_rows,
+            "rowCount": len(serialized_rows),
+            "latestConfirmTickId": diagnostics["levels"][level]["lastConfirmTickId"],
+        }
+        total_rows += len(serialized_rows)
+    return {
+        "levels": levels_payload,
+        "selectedLevels": selected_levels,
+        "rowCount": total_rows,
+        "status": status_text,
+        "message": message,
+        "range": {
+            "startId": start_id,
+            "endId": end_id,
+        },
+        "jobStateLastTickId": diagnostics["jobState"]["lastTickId"],
+        "jobStateLastTime": serialize_value(diagnostics["jobState"]["lastTime"]),
+        "state": serialize_zig_state_payload(state_row),
+    }
+
+
+def build_zig_next_payload(after_id: int, end_id: Optional[int], selected_levels: List[str]) -> Dict[str, Any]:
+    status_text, message, diagnostics, state_row = summarize_zig_status(end_id)
+    levels_payload = {}
+    total_rows = 0
+    for level in selected_levels:
+        rows = fetch_level_rows_after_confirm(TICK_SYMBOL, level, after_id, end_id=end_id)
+        serialized_rows = [serialize_zig_row(row, level) for row in rows]
+        levels_payload[level] = {
+            "rows": serialized_rows,
+            "rowCount": len(serialized_rows),
+            "latestConfirmTickId": diagnostics["levels"][level]["lastConfirmTickId"],
+        }
+        total_rows += len(serialized_rows)
+    return {
+        "levels": levels_payload,
+        "selectedLevels": selected_levels,
+        "rowCount": total_rows,
+        "status": status_text,
+        "message": message,
+        "afterId": after_id,
+        "endId": end_id,
+        "jobStateLastTickId": diagnostics["jobState"]["lastTickId"],
+        "jobStateLastTime": serialize_value(diagnostics["jobState"]["lastTime"]),
+        "state": serialize_zig_state_payload(state_row),
     }
 
 
@@ -1668,6 +1867,65 @@ def envelope_next(
         return build_envelope_response(rows, config, advanced_from_id=afterId)
     except Exception as exc:
         raise HTTPException(status_code=500, detail="Envelope incremental fetch failed: {0}".format(exc)) from exc
+
+
+@app.get("/api/zig/window")
+def zig_window(
+    startId: Optional[int] = Query(None, ge=1),
+    endId: Optional[int] = Query(None, ge=1),
+    startTime: str = Query("", min_length=0),
+    endTime: str = Query("", min_length=0),
+    timezoneName: str = Query(DEFAULT_REVIEW_TIMEZONE, min_length=1),
+    window: int = Query(DEFAULT_WINDOW, ge=1, le=MAX_WINDOW),
+    levels: str = Query(",".join(ZIG_LEVELS), min_length=1),
+) -> Dict[str, Any]:
+    selected_levels = normalize_zig_levels(levels)
+    try:
+        if startId is not None or endId is not None:
+            range_info = resolve_backfill_range(
+                TICK_SYMBOL,
+                start_id=startId,
+                end_id=endId,
+                start_time=None,
+                end_time=None,
+            )
+            return build_zig_window_payload(int(range_info["starttickid"]), int(range_info["endtickid"]), selected_levels)
+
+        if startTime or endTime:
+            range_info = resolve_backfill_range(
+                TICK_SYMBOL,
+                start_id=None,
+                end_id=None,
+                start_time=parse_optional_timestamp(startTime, timezoneName),
+                end_time=parse_optional_timestamp(endTime, timezoneName),
+            )
+            return build_zig_window_payload(int(range_info["starttickid"]), int(range_info["endtickid"]), selected_levels)
+
+        rows = fetch_bootstrap_rows("live", None, window)
+        if not rows:
+            raise HTTPException(status_code=404, detail="No ticks are available for the requested Zig window.")
+        return build_zig_window_payload(int(rows[0]["id"]), int(rows[-1]["id"]), selected_levels)
+    except HTTPException:
+        raise
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Zig window fetch failed: {0}".format(exc)) from exc
+
+
+@app.get("/api/zig/next")
+def zig_next(
+    afterId: int = Query(..., ge=0),
+    endId: Optional[int] = Query(None, ge=1),
+    levels: str = Query(",".join(ZIG_LEVELS), min_length=1),
+) -> Dict[str, Any]:
+    selected_levels = normalize_zig_levels(levels)
+    try:
+        return build_zig_next_payload(afterId, endId, selected_levels)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Zig incremental fetch failed: {0}".format(exc)) from exc
 
 
 @app.post("/api/ott/backtest/run")
