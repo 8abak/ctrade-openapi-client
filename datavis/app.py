@@ -608,6 +608,8 @@ def serialize_zig_state_payload(state_row: Optional[Dict[str, Any]]) -> Optional
         "symbol": state_row.get("symbol"),
         "lastTickId": state_row.get("lasttickid"),
         "lastTime": serialize_value(state_row.get("lasttime")),
+        "version": statejson.get("version"),
+        "meta": statejson.get("meta") if isinstance(statejson.get("meta"), dict) else None,
         "levels": {
             level: {
                 "direction": (statejson.get(level) or {}).get("direction"),
@@ -625,11 +627,12 @@ def summarize_zig_status(requested_end_id: Optional[int]) -> Tuple[str, Optional
     diagnostics = fetch_zig_sync_diagnostics(TICK_SYMBOL, job_name)
     state_row = load_zig_state(job_name)
     last_tick_id = diagnostics["jobState"]["lastTickId"]
-    storage_last_tick_id = max(
+    storage_tick_ids = [
         int(details["lastTickId"])
         for details in diagnostics["levels"].values()
         if details.get("lastTickId") is not None
-    ) if diagnostics["levels"] else None
+    ]
+    storage_last_tick_id = max(storage_tick_ids) if storage_tick_ids else None
     if last_tick_id is None:
         if storage_last_tick_id is not None and (requested_end_id is None or int(storage_last_tick_id) >= int(requested_end_id)):
             return ("ok", None, diagnostics, state_row)

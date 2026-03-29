@@ -14,39 +14,41 @@
 <body class="page-sql">
   <div class="sql-workbench">
     <aside class="panel sql-sidebar">
-      <div class="sql-sidebar-header">
-        <a class="back-link" href="/">datavis.au</a>
-        <div class="sql-admin-badge">admin-only</div>
-        <h1>PostgreSQL Console</h1>
-        <div class="sql-sidebar-copy">Compact SQL admin for public tables, quick inspection, and visible query results.</div>
-      </div>
-      <div class="sql-sidebar-tools">
-        <label class="sql-inline-field">
-          <span>Filter Tables</span>
-          <input id="schemaSearch" type="search" autocomplete="off" placeholder="public table">
-        </label>
-        <button class="ghost-button compact-button" id="refreshSchemaButton" type="button">Refresh</button>
-      </div>
-      <div class="sql-connection-card">
-        <div class="sql-connection-label">Connection</div>
-        <div class="sql-connection-value" id="connectionMeta">Loading protected SQL metadata...</div>
-      </div>
-      <div class="sql-sidebar-section">
-        <div class="sql-sidebar-section-header">
-          <div class="sql-toolbar-label">Public Tables</div>
+      <div class="sql-sidebar-scroll">
+        <div class="sql-sidebar-header">
+          <a class="back-link" href="/">datavis.au</a>
+          <div class="sql-admin-badge">admin-only</div>
+          <h1>PostgreSQL Console</h1>
+          <div class="sql-sidebar-copy">Compact SQL admin for public tables, quick inspection, and visible query results.</div>
         </div>
-        <div class="schema-tree" id="schemaTree">Loading schema browser...</div>
+        <div class="sql-sidebar-tools">
+          <label class="sql-inline-field">
+            <span>Filter Tables</span>
+            <input id="schemaSearch" type="search" autocomplete="off" placeholder="public table">
+          </label>
+          <button class="ghost-button compact-button" id="refreshSchemaButton" type="button">Refresh</button>
+        </div>
+        <div class="sql-connection-card">
+          <div class="sql-connection-label">Connection</div>
+          <div class="sql-connection-value" id="connectionMeta">Loading protected SQL metadata...</div>
+        </div>
+        <div class="sql-sidebar-section">
+          <div class="sql-sidebar-section-header">
+            <div class="sql-toolbar-label">Public Tables</div>
+          </div>
+          <div class="schema-tree" id="schemaTree">Loading schema browser...</div>
+        </div>
+        <section class="sql-sidebar-inspector">
+          <div class="sql-inspector-header">
+            <div class="sql-toolbar-label">Object Inspector</div>
+            <button class="ghost-button compact-button" id="refreshObjectButton" type="button" disabled>Reload</button>
+          </div>
+          <div class="object-actions" id="objectActions"></div>
+          <div class="object-detail" id="objectDetail">
+            <div class="muted">Select a public table to inspect columns, indexes, definitions, and preview actions.</div>
+          </div>
+        </section>
       </div>
-      <section class="sql-sidebar-inspector">
-        <div class="sql-inspector-header">
-          <div class="sql-toolbar-label">Object Inspector</div>
-          <button class="ghost-button compact-button" id="refreshObjectButton" type="button" disabled>Reload</button>
-        </div>
-        <div class="object-actions" id="objectActions"></div>
-        <div class="object-detail" id="objectDetail">
-          <div class="muted">Select a public table to inspect columns, indexes, definitions, and preview actions.</div>
-        </div>
-      </section>
     </aside>
 
     <main class="sql-main-panel">

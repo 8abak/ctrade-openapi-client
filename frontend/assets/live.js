@@ -16,6 +16,7 @@
     zigMed: true,
     zigMaxi: true,
     zigMacro: true,
+    zigViewMode: "normal",
     ottEnabled: true,
     ottSupport: true,
     ottMarkers: true,
@@ -45,6 +46,7 @@
   const REVIEW_ENVELOPE_RETRY_DELAY_MS = 250;
   const BACKTEST_OVERLAY_TIMEOUT_MS = 8000;
   const BACKTEST_RUN_TIMEOUT_MS = 45000;
+  const STRUCTURE_VIEW_TARGET_POINTS = 360;
   const CHART_RESIZE_RETRY_LIMIT = 6;
   const CHART_RESIZE_RETRY_DELAY_MS = 40;
   const SIGNAL_MARKER_MIN_OFFSET = 0.18;
@@ -173,6 +175,7 @@
     zigMedToggle: document.getElementById("zigMedToggle"),
     zigMaxiToggle: document.getElementById("zigMaxiToggle"),
     zigMacroToggle: document.getElementById("zigMacroToggle"),
+    zigViewToggle: document.getElementById("zigViewToggle"),
     ottToggle: document.getElementById("ottToggle"),
     ottSupportToggle: document.getElementById("ottSupportToggle"),
     ottMarkersToggle: document.getElementById("ottMarkersToggle"),
@@ -341,6 +344,7 @@
       zigMed: parseBoolean(params.get("zigMed"), DEFAULTS.zigMed),
       zigMaxi: parseBoolean(params.get("zigMaxi"), DEFAULTS.zigMaxi),
       zigMacro: parseBoolean(params.get("zigMacro"), DEFAULTS.zigMacro),
+      zigViewMode: ["normal", "structure", "zigonly"].includes(params.get("zigView")) ? params.get("zigView") : DEFAULTS.zigViewMode,
       ottEnabled: parseBoolean(params.get("ott"), DEFAULTS.ottEnabled),
       ottSupport: parseBoolean(params.get("ottSupport"), DEFAULTS.ottSupport),
       ottMarkers: parseBoolean(params.get("ottMarkers"), DEFAULTS.ottMarkers),
@@ -452,6 +456,7 @@
     elements.zigMedToggle.checked = Boolean(config.zigMed);
     elements.zigMaxiToggle.checked = Boolean(config.zigMaxi);
     elements.zigMacroToggle.checked = Boolean(config.zigMacro);
+    setSegment(elements.zigViewToggle, config.zigViewMode);
     elements.ottSupportToggle.checked = Boolean(config.ottSupport);
     elements.ottMarkersToggle.checked = Boolean(config.ottMarkers);
     elements.ottTradesToggle.checked = Boolean(config.ottTrades);
@@ -494,6 +499,7 @@
       zigMed: elements.zigMedToggle.checked,
       zigMaxi: elements.zigMaxiToggle.checked,
       zigMacro: elements.zigMacroToggle.checked,
+      zigViewMode: elements.zigViewToggle.querySelector("button.active")?.dataset.value || DEFAULTS.zigViewMode,
       ottEnabled: elements.ottToggle.querySelector("button.active")?.dataset.value !== "off",
       ottSupport: elements.ottSupportToggle.checked,
       ottMarkers: elements.ottMarkersToggle.checked,
@@ -529,6 +535,7 @@
     params.set("zigMed", config.zigMed ? "1" : "0");
     params.set("zigMaxi", config.zigMaxi ? "1" : "0");
     params.set("zigMacro", config.zigMacro ? "1" : "0");
+    params.set("zigView", config.zigViewMode);
     params.set("ott", config.ottEnabled ? "1" : "0");
     params.set("ottSupport", config.ottSupport ? "1" : "0");
     params.set("ottMarkers", config.ottMarkers ? "1" : "0");
@@ -1094,6 +1101,71 @@
     return state.rows.filter((row) => row.timestampMs >= windowRange.startMs && row.timestampMs <= windowRange.endMs);
   }
 
+  function structureSeriesValue(row, seriesKey) {
+    const configuredSeries = SERIES_CONFIG[seriesKey];
+    if (configuredSeries && typeof row[configuredSeries.field] === "number") {
+      return row[configuredSeries.field];
+    }
+    if (typeof row.mid === "number") {
+      return row.mid;
+    }
+    if (typeof row.price === "number") {
+      return row.price;
+    }
+    if (typeof row.ask === "number") {
+      return row.ask;
+    }
+    if (typeof row.bid === "number") {
+      return row.bid;
+    }
+    return null;
+  }
+
+  function structureRows(rows, primarySeriesKey, targetPoints) {
+    if (!rows.length || rows.length <= targetPoints) {
+      return rows;
+    }
+    const bucketCount = Math.max(1, Math.floor(targetPoints / 4));
+    const bucketSize = Math.max(1, Math.ceil(rows.length / bucketCount));
+    const selected = new Map();
+    for (let start = 0; start < rows.length; start += bucketSize) {
+      const bucket = rows.slice(start, Math.min(rows.length, start + bucketSize));
+      if (!bucket.length) {
+        continue;
+      }
+      let highRow = bucket[0];
+      let lowRow = bucket[0];
+      bucket.forEach((row) => {
+        const value = structureSeriesValue(row, primarySeriesKey);
+        const highValue = structureSeriesValue(highRow, primarySeriesKey);
+        const lowValue = structureSeriesValue(lowRow, primarySeriesKey);
+        if (value != null && (highValue == null || value > highValue)) {
+          highRow = row;
+        }
+        if (value != null && (lowValue == null || value < lowValue)) {
+          lowRow = row;
+        }
+      });
+      [bucket[0], lowRow, highRow, bucket[bucket.length - 1]].forEach((row) => {
+        selected.set(row.id, row);
+      });
+    }
+    return Array.from(selected.values()).sort((left, right) => left.id - right.id);
+  }
+
+  function displayedRowsForView(rows, config) {
+    if (!rows.length) {
+      return rows;
+    }
+    if (config.zigViewMode === "zigonly") {
+      return [];
+    }
+    if (config.zigViewMode === "structure") {
+      return structureRows(rows, getPrimarySeriesKey(), STRUCTURE_VIEW_TARGET_POINTS);
+    }
+    return rows;
+  }
+
   function enabledZigLevels(config) {
     return Object.keys(ZIG_LEVEL_CONFIG).filter((level) => Boolean(config["zig" + level.charAt(0).toUpperCase() + level.slice(1)]));
   }
@@ -1284,6 +1356,9 @@
   }
 
   function buildPriceSeries(rows, selected) {
+    if (!rows.length || !selected.length) {
+      return [];
+    }
     const gaps = gapAreas(rows);
     const showFilledMid = selected.length === 1 && selected[0] === "mid";
     return selected.map((seriesKey, index) => {
@@ -1410,7 +1485,7 @@
   }
 
   function buildOttSeries(rows, config) {
-    if (!shouldLoadOtt(config)) {
+    if (!shouldLoadOtt(config) || !rows.length) {
       return [];
     }
     const overlaySeries = [];
@@ -1507,7 +1582,7 @@
   }
 
   function buildEnvelopeSeries(rows, config) {
-    if (!shouldLoadEnvelope(config)) {
+    if (!shouldLoadEnvelope(config) || !rows.length) {
       return [];
     }
     return [
@@ -1707,7 +1782,7 @@
             + " | confirm " + formatZigTime(segment.confirmTimeMs)
             + " | amp " + Number(segment.amplitude).toFixed(2)
             + " | dur " + Number(segment.dursec).toFixed(1) + "s"
-            + " | score " + Number(segment.score).toFixed(2)
+            + (segment.childcount ? " | child " + Number(segment.childcount) : "")
         );
       });
     });
@@ -1833,6 +1908,7 @@
         : (state.ottRun && state.ottRun.tradecount != null ? state.ottRun.tradecount : 0);
       meta.push("Trades " + Number(tradeCount));
     }
+    meta.push("View " + (config.zigViewMode === "zigonly" ? "ZigOnly" : config.zigViewMode.charAt(0).toUpperCase() + config.zigViewMode.slice(1)));
     meta.push(new Date(lastRow.timestampMs).toLocaleString("en-AU", { hour12: false }));
     elements.liveMeta.textContent = meta.join(" | ");
   }
@@ -1921,6 +1997,7 @@
     const firstTs = state.rows.length ? state.rows[0].timestampMs : Date.now() - 60000;
     const lastTs = state.rows.length ? state.rows[state.rows.length - 1].timestampMs : Date.now();
     const config = currentConfig();
+    const displayRows = displayedRowsForView(state.rows, config);
 
     state.visibleWindow = targetZoom;
     state.visibleSpanMs = Math.max(1000, targetZoom.endMs - targetZoom.startMs);
@@ -1983,10 +2060,10 @@
             },
           },
         ],
-        series: buildPriceSeries(state.rows, selected)
-          .concat(buildEnvelopeSeries(state.rows, config))
+        series: buildPriceSeries(displayRows, selected)
+          .concat(buildEnvelopeSeries(displayRows, config))
           .concat(buildZigSeries(state.rows, config))
-          .concat(buildOttSeries(state.rows, config)),
+          .concat(buildOttSeries(displayRows, config)),
       }, true);
     } catch (error) {
       if (isOffsetWidthError(error)) {
@@ -3277,6 +3354,13 @@
       );
       renderChart({ preserveCurrentZoom: true });
     });
+  });
+
+  bindSegment(elements.zigViewToggle, (value) => {
+    setSegment(elements.zigViewToggle, value);
+    const config = currentConfig();
+    writeQuery(config);
+    renderChart({ preserveCurrentZoom: true });
   });
 
   bindSegment(elements.ottToggle, (value) => {

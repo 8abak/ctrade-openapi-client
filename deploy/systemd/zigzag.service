@@ -1,5 +1,5 @@
 [Unit]
-Description=datavis structural Zig incremental processor
+Description=datavis deterministic centered-window Zig processor
 After=network-online.target
 Wants=network-online.target
 

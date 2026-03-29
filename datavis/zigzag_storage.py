@@ -295,3 +295,13 @@ def fetch_zig_sync_diagnostics(symbol: str, job_name: str) -> Dict[str, Any]:
         },
         "levels": levels,
     }
+
+
+def clear_zig_storage(*, restart_identity: bool = True) -> None:
+    reset_sql = "TRUNCATE public.zigmicro, public.zigmed, public.zigmaxi, public.zigmacro, public.zigstate"
+    if restart_identity:
+        reset_sql += " RESTART IDENTITY"
+    with db_connection(readonly=False) as conn:
+        with conn.cursor() as cur:
+            cur.execute(reset_sql)
+        conn.commit()
