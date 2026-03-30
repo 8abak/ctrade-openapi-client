@@ -17,7 +17,7 @@
     zigMaxi: true,
     zigMacro: true,
     zigViewMode: "normal",
-    ottEnabled: true,
+    ottEnabled: false,
     ottSupport: true,
     ottMarkers: true,
     ottTrades: true,
@@ -28,7 +28,7 @@
     ottLength: 2,
     ottPercent: 1.4,
     ottRangePreset: "lastweek",
-    envelopeEnabled: true,
+    envelopeEnabled: false,
     envelopeSource: "mid",
     envelopeLength: 500,
     envelopeBandwidth: 8,
@@ -71,6 +71,8 @@
     currentRun: DEFAULTS.run,
     visibleSpanMs: null,
     visibleWindow: null,
+    effectiveZigViewMode: DEFAULTS.zigViewMode,
+    zigOnlyFallbackActive: false,
     loadRequestId: 0,
     activeSeries: { ask: false, bid: false, mid: true },
     source: null,
@@ -110,11 +112,12 @@
       envelope: false,
     },
     loadStatus: {
-      chart: { text: "Chart: waiting.", severity: "info" },
+      chart: { text: "Window: waiting.", severity: "info" },
+      activity: { text: "", severity: "info" },
       zig: { text: "Zig: waiting.", severity: "info" },
-      ott: { text: "OTT: waiting.", severity: "info" },
-      envelope: { text: "Envelope: waiting.", severity: "info" },
-      backtest: { text: "Backtest: idle.", severity: "info" },
+      ott: { text: "OTT: off.", severity: "info" },
+      envelope: { text: "Envelope: off.", severity: "info" },
+      backtest: { text: "Backtest: n/a.", severity: "info" },
     },
     review: {
       bufferRows: [],
@@ -572,8 +575,7 @@
   }
 
   function status(text, isError) {
-    elements.statusLine.textContent = text;
-    elements.statusLine.classList.toggle("error", Boolean(isError));
+    setLoadStatus("activity", text || "", isError ? "error" : "info");
   }
 
   function setLoadStatus(key, text, severity, options) {
@@ -587,7 +589,7 @@
   }
 
   function renderLoadStatus() {
-    const parts = ["chart", "zig", "ott", "envelope", "backtest"]
+    const parts = ["chart", "activity", "zig", "ott", "envelope", "backtest"]
       .map((key) => state.loadStatus[key])
       .filter((entry) => entry && entry.text);
     elements.statusLine.textContent = parts.map((entry) => entry.text).join(" | ") || "Ready.";
@@ -595,14 +597,22 @@
   }
 
   function initializeLoadStatus(config) {
-    setLoadStatus("chart", "Chart: loading...", "info", { silent: true });
+    setLoadStatus("chart", "Window: loading...", "info", { silent: true });
+    setLoadStatus(
+      "activity",
+      config.mode === "live"
+        ? (config.run === "run" ? "Live: starting..." : "Live: stopped.")
+        : (config.run === "run" ? "Review: preparing playback..." : "Review: paused."),
+      "info",
+      { silent: true }
+    );
     setLoadStatus("zig", shouldLoadZig(config) ? "Zig: loading..." : "Zig: off.", "info", { silent: true });
     setLoadStatus("ott", shouldLoadOtt(config) ? "OTT: loading..." : "OTT: off.", "info", { silent: true });
     setLoadStatus("envelope", shouldLoadEnvelope(config) ? "Envelope: loading..." : "Envelope: off.", "info", { silent: true });
     if (config.mode === "review") {
       setLoadStatus(
         "backtest",
-        config.ottTrades ? "Backtest: checking cache..." : "Backtest: off.",
+        config.ottEnabled && config.ottTrades ? "Backtest: checking cache..." : "Backtest: off.",
         "info",
         { silent: true }
       );
@@ -862,7 +872,7 @@
   function requiresReviewOttCoverage(config) {
     return config.mode === "review"
       && !state.overlayDirty.ott
-      && Boolean(config.ottEnabled || config.ottSupport || config.ottMarkers);
+      && shouldLoadOtt(config);
   }
 
   function reviewPlaybackStateLabel() {
@@ -1250,7 +1260,7 @@
   }
 
   function shouldLoadOtt(config) {
-    return config.ottEnabled || config.ottSupport || config.ottMarkers || (config.mode === "review" && config.ottTrades);
+    return Boolean(config.ottEnabled);
   }
 
   function shouldLoadEnvelope(config) {
@@ -1572,7 +1582,7 @@
   }
 
   function buildOttSeries(rows, config) {
-    if (!shouldLoadOtt(config) || !rows.length) {
+    if (!shouldLoadOtt(config) || !rows.length || state.overlayDirty.ott || !state.ottRows.size) {
       return [];
     }
     const overlaySeries = [];
@@ -1669,7 +1679,7 @@
   }
 
   function buildEnvelopeSeries(rows, config) {
-    if (!shouldLoadEnvelope(config) || !rows.length) {
+    if (!shouldLoadEnvelope(config) || !rows.length || state.overlayDirty.envelope || !state.envelopeRows.size) {
       return [];
     }
     return [
@@ -1940,7 +1950,7 @@
         elements.liveMeta.textContent = parts.filter(Boolean).join(" | ");
         return;
       }
-      elements.liveMeta.textContent = "No rows returned.";
+      elements.liveMeta.textContent = config.mode === "review" ? "No review rows loaded." : "No base rows loaded.";
       return;
     }
     const config = currentConfig();
@@ -1995,7 +2005,15 @@
         : (state.ottRun && state.ottRun.tradecount != null ? state.ottRun.tradecount : 0);
       meta.push("Trades " + Number(tradeCount));
     }
-    meta.push("View " + (config.zigViewMode === "zigonly" ? "ZigOnly" : config.zigViewMode.charAt(0).toUpperCase() + config.zigViewMode.slice(1)));
+    const requestedViewLabel = config.zigViewMode === "zigonly"
+      ? "ZigOnly"
+      : config.zigViewMode.charAt(0).toUpperCase() + config.zigViewMode.slice(1);
+    if (state.zigOnlyFallbackActive && config.zigViewMode === "zigonly") {
+      meta.push("View " + requestedViewLabel + " (price fallback)");
+    } else {
+      const effectiveViewMode = state.effectiveZigViewMode || config.zigViewMode;
+      meta.push("View " + (effectiveViewMode === "zigonly" ? "ZigOnly" : effectiveViewMode.charAt(0).toUpperCase() + effectiveViewMode.slice(1)));
+    }
     meta.push(new Date(lastRow.timestampMs).toLocaleString("en-AU", { hour12: false }));
     elements.liveMeta.textContent = meta.join(" | ");
   }
@@ -2084,7 +2102,16 @@
     const firstTs = state.rows.length ? state.rows[0].timestampMs : Date.now() - 60000;
     const lastTs = state.rows.length ? state.rows[state.rows.length - 1].timestampMs : Date.now();
     const config = currentConfig();
-    const displayRows = displayedRowsForView(state.rows, config);
+    const zigSeries = buildZigSeries(state.rows, config);
+    const effectiveConfig = { ...config };
+    state.effectiveZigViewMode = config.zigViewMode;
+    state.zigOnlyFallbackActive = false;
+    if (config.zigViewMode === "zigonly" && !zigSeries.length && state.rows.length) {
+      effectiveConfig.zigViewMode = "normal";
+      state.effectiveZigViewMode = "normal";
+      state.zigOnlyFallbackActive = true;
+    }
+    const displayRows = displayedRowsForView(state.rows, effectiveConfig);
 
     state.visibleWindow = targetZoom;
     state.visibleSpanMs = Math.max(1000, targetZoom.endMs - targetZoom.startMs);
@@ -2149,7 +2176,7 @@
         ],
         series: buildPriceSeries(displayRows, selected)
           .concat(buildEnvelopeSeries(displayRows, config))
-          .concat(buildZigSeries(state.rows, config))
+          .concat(zigSeries)
           .concat(buildOttSeries(displayRows, config)),
       }, {
         notMerge: false,
@@ -2183,7 +2210,7 @@
       state.review.rafId = 0;
     }
     if (!options || !options.silent) {
-      status("Review playback paused.", false);
+      status("Review: playback paused.", false);
     }
   }
 
@@ -2833,7 +2860,7 @@
   }
 
   async function runBacktest(config, force) {
-    if (config.mode !== "review" || !config.ottTrades) {
+    if (config.mode !== "review" || !config.ottEnabled || !config.ottTrades) {
       state.ottRun = null;
       state.ottTrades = [];
       state.ottOverlayPayload = null;
@@ -2871,7 +2898,7 @@
 
   async function loadBacktestOverlay(config, rangeRows, options) {
     const rows = rangeRows || state.rows;
-    if (config.mode !== "review" || !config.ottTrades || !rows.length) {
+    if (config.mode !== "review" || !config.ottEnabled || !config.ottTrades || !rows.length) {
       state.ottTrades = [];
       state.ottRun = null;
       state.ottOverlayPayload = null;
@@ -2987,7 +3014,7 @@
       params.set("endId", String(targetEndId));
     }
     state.review.fetchingTicks = true;
-    setLoadStatus("chart", "Chart: prefetching next review chunk...", "info");
+    setLoadStatus("chart", "Window: prefetching next review chunk...", "info");
     buildMetaText();
     if (shouldIncrementallyLoadOtt(config)) {
       fetchReviewOttChunk(config, {
@@ -3005,7 +3032,7 @@
           state.review.exhausted = Boolean(payload.endReached || (endId != null && afterId >= endId));
           setLoadStatus(
             "chart",
-            state.review.exhausted ? "Chart: review range fully buffered." : "Chart: no additional review rows returned.",
+            state.review.exhausted ? "Window: review range fully buffered." : "Window: no additional review rows returned.",
             state.review.exhausted ? "info" : "warn"
           );
           if (state.review.visibleCount >= state.review.bufferRows.length) {
@@ -3030,8 +3057,8 @@
         setLoadStatus(
           "chart",
           state.review.exhausted
-            ? "Chart: review range fully buffered."
-            : "Chart: buffered " + state.review.bufferRows.length + " review row(s).",
+            ? "Window: review range fully buffered."
+            : "Window: buffered " + state.review.bufferRows.length + " review row(s).",
           "info"
         );
 
@@ -3064,7 +3091,7 @@
         if (isStaleLoadRequest(requestId)) {
           return null;
         }
-        setLoadStatus("chart", "Chart: " + (error.message || "review chunk fetch failed."), "error");
+        setLoadStatus("chart", "Window: " + (error.message || "review chunk fetch failed."), "error");
         throw error;
       })
       .finally(() => {
@@ -3205,7 +3232,7 @@
       return;
     }
     if (!state.review.bufferRows.length) {
-      status("No review ticks are available for playback.", true);
+      status("Review: no ticks are available for playback.", true);
       return;
     }
     if (!state.review.visibleCount) {
@@ -3219,7 +3246,7 @@
     setReviewPlaybackAnchor(performance.now());
     maybePrefetchReview(currentConfig());
     state.review.rafId = requestAnimationFrame(reviewFrame);
-    status("Review playback running at " + state.review.playbackSpeed + "x.", false);
+    status("Review: playback running at " + state.review.playbackSpeed + "x.", false);
   }
 
   function connectStream(lastId, windowSize) {
@@ -3258,7 +3285,7 @@
       if (shouldIncrementallyLoadZig(config)) {
         overlayRequests.push(
           loadZigNext(previousLastId, config, { endId: liveLastId, requestId }).catch((error) => {
-            status(error.message || "Zig incremental update failed.", true);
+            status("Live Zig: " + (error.message || "incremental update failed."), true);
             return null;
           })
         );
@@ -3266,7 +3293,7 @@
       if (shouldIncrementallyLoadOtt(config)) {
         overlayRequests.push(
           loadOttNext(previousLastId, config, { requestId }).catch((error) => {
-            status(error.message || "OTT incremental update failed.", true);
+            status("Live OTT: " + (error.message || "incremental update failed."), true);
             return null;
           })
         );
@@ -3274,7 +3301,7 @@
       if (shouldIncrementallyLoadEnvelope(config)) {
         overlayRequests.push(
           loadEnvelopeNext(previousLastId, config, { requestId }).catch((error) => {
-            status(error.message || "Envelope incremental update failed.", true);
+            status("Live Envelope: " + (error.message || "incremental update failed."), true);
             return null;
           })
         );
@@ -3286,9 +3313,9 @@
         }
         const overlayState = collectOverlayMessages(config);
         if (overlayState.messages.length) {
-          status("Streaming " + newRows.length + " new row(s). " + overlayState.messages.join(" "), overlayState.hasWarning);
+          status("Live: +" + newRows.length + " row(s). " + overlayState.messages.join(" "), overlayState.hasWarning);
         } else {
-          status("Streaming " + newRows.length + " new row(s).", false);
+          status("Live: +" + newRows.length + " row(s).", false);
         }
       }).finally(() => {
         if (state.source !== source || isStaleLoadRequest(requestId)) {
@@ -3302,7 +3329,7 @@
       if (state.source !== source || isStaleLoadRequest(requestId)) {
         return;
       }
-      status("Stream interrupted. Reconnecting...", true);
+      status("Live: stream interrupted. Reconnecting...", true);
     };
   }
 
@@ -3352,10 +3379,103 @@
       }
       setLoadStatus(
         "chart",
-        loadedRows.length ? "Chart: loaded " + Number(livePayload.rowCount || loadedRows.length) + " row(s)." : "Chart: no rows returned.",
+        loadedRows.length ? "Window: loaded " + Number(livePayload.rowCount || loadedRows.length) + " row(s)." : "Window: no rows returned.",
         loadedRows.length ? "info" : "warn",
         { silent: true }
       );
+
+      if (!shouldLoadOtt(config)) {
+        state.overlayDirty.ott = false;
+        setLoadStatus("ott", "OTT: off.", "info", { silent: true });
+      }
+
+      if (!shouldLoadEnvelope(config)) {
+        state.overlayDirty.envelope = false;
+        setLoadStatus("envelope", "Envelope: off.", "info", { silent: true });
+      }
+
+      if (config.mode !== "review") {
+        setLoadStatus("backtest", "Backtest: n/a.", "info", { silent: true });
+      } else if (!config.ottEnabled || !config.ottTrades) {
+        setLoadStatus("backtest", "Backtest: off.", "info", { silent: true });
+      }
+
+      renderChart({ resetWindow: Boolean(resetWindow) });
+      setLoadStatus(
+        "activity",
+        config.mode === "live"
+          ? (config.run === "run" ? "Live: waiting for new rows." : "Live: stopped.")
+          : (config.run === "run" ? "Review: ready to play." : "Review: paused."),
+        "info",
+        { silent: true }
+      );
+      renderLoadStatus();
+
+      if (config.mode === "live") {
+        if (shouldLoadZig(config)) {
+          try {
+            const zigRange = loadedRows.length ? {
+              startId: loadedRows[0].id,
+              endId: loadedRows[loadedRows.length - 1].id,
+            } : null;
+            const zigPayload = await loadZigWindow(config, zigRange, { requestId });
+            if (isStaleLoadRequest(requestId)) {
+              return;
+            }
+            updateZigLoadStatus(zigPayload);
+            renderChart({ preserveCurrentZoom: true });
+          } catch (error) {
+            if (isStaleLoadRequest(requestId)) {
+              return;
+            }
+            clearZigState();
+            setLoadStatus("zig", "Zig: " + (error.message || "window load failed."), "error", { silent: true });
+          }
+        } else {
+          state.overlayDirty.zig = false;
+          setLoadStatus("zig", "Zig: off.", "info", { silent: true });
+        }
+
+        if (shouldLoadOtt(config)) {
+          try {
+            const ottPayload = await loadOttBootstrap(config, { requestId });
+            if (isStaleLoadRequest(requestId)) {
+              return;
+            }
+            updateOttLoadStatus(ottPayload);
+            renderChart({ preserveCurrentZoom: true });
+          } catch (error) {
+            if (isStaleLoadRequest(requestId)) {
+              return;
+            }
+            clearOttState();
+            setLoadStatus("ott", "OTT: " + (error.message || "bootstrap failed."), "error", { silent: true });
+          }
+        }
+
+        if (shouldLoadEnvelope(config)) {
+          try {
+            const envelopePayload = await loadEnvelopeBootstrap(config, { requestId });
+            if (isStaleLoadRequest(requestId)) {
+              return;
+            }
+            updateEnvelopeLoadStatus(envelopePayload);
+            renderChart({ preserveCurrentZoom: true });
+          } catch (error) {
+            if (isStaleLoadRequest(requestId)) {
+              return;
+            }
+            clearEnvelopeState();
+            setLoadStatus("envelope", "Envelope: " + (error.message || "bootstrap failed."), "error", { silent: true });
+          }
+        }
+
+        renderLoadStatus();
+        if (config.run === "run") {
+          connectStream(livePayload.lastId || 0, config.window);
+        }
+        return;
+      }
 
       if (shouldLoadZig(config)) {
         try {
@@ -3396,9 +3516,6 @@
           clearOttState();
           setLoadStatus("ott", "OTT: " + (error.message || "bootstrap failed."), "error", { silent: true });
         }
-      } else {
-        state.overlayDirty.ott = false;
-        setLoadStatus("ott", "OTT: off.", "info", { silent: true });
       }
 
       if (shouldLoadEnvelope(config)) {
@@ -3415,21 +3532,12 @@
           clearEnvelopeState();
           setLoadStatus("envelope", "Envelope: " + (error.message || "bootstrap failed."), "error", { silent: true });
         }
-      } else {
-        state.overlayDirty.envelope = false;
-        setLoadStatus("envelope", "Envelope: off.", "info", { silent: true });
-      }
-
-      if (config.mode !== "review") {
-        setLoadStatus("backtest", "Backtest: n/a.", "info", { silent: true });
-      } else if (!config.ottTrades) {
-        setLoadStatus("backtest", "Backtest: off.", "info", { silent: true });
       }
 
       renderChart({ resetWindow: Boolean(resetWindow) });
       renderLoadStatus();
 
-      if (config.mode === "review" && config.ottTrades) {
+      if (config.mode === "review" && config.ottEnabled && config.ottTrades) {
         loadBacktestOverlay(config, state.review.bufferRows, { silentStatus: true })
           .then((overlayPayload) => {
             if (!isStaleLoadRequest(requestId) && overlayPayload) {
@@ -3444,9 +3552,6 @@
       } else if (config.mode === "review") {
         renderLoadStatus();
       }
-      if (config.run === "run" && config.mode === "live") {
-        connectStream(livePayload.lastId || 0, config.window);
-      }
       if (config.run === "run" && config.mode === "review") {
         startReviewPlayback();
       }
@@ -3454,7 +3559,7 @@
       if (isStaleLoadRequest(requestId)) {
         return;
       }
-      setLoadStatus("chart", "Chart: " + (error.message || "bootstrap failed."), "error", { silent: true });
+      setLoadStatus("chart", "Window: " + (error.message || "bootstrap failed."), "error", { silent: true });
       renderLoadStatus();
     }
   }
@@ -3522,7 +3627,7 @@
       stopReviewPlayback({ silent: true });
     }
     writeQuery(currentConfig());
-    status("Mode updated. Load to refresh data.", false);
+    status("Mode: updated. Click Load to refresh data.", false);
   });
 
   bindSegment(elements.runToggle, (value) => {
@@ -3533,9 +3638,9 @@
       closeStream();
       if (state.currentMode === "review") {
         stopReviewPlayback({ silent: true });
-        status("Review playback stopped.", false);
+        status("Review: playback stopped.", false);
       } else {
-        status("Streaming stopped.", false);
+        status("Live: stopped.", false);
       }
       return;
     }
@@ -3545,7 +3650,7 @@
     }
     if (state.rows.length) {
       connectStream(state.rows[state.rows.length - 1].id, currentConfig().window);
-      status("Streaming resumed.", false);
+      status("Live: resumed.", false);
     }
   });
 
@@ -3555,7 +3660,7 @@
     writeQuery(currentConfig());
     if (state.currentMode === "review" && state.currentRun === "run" && state.review.visibleCount) {
       setReviewPlaybackAnchor(performance.now());
-      status("Review playback running at " + state.review.playbackSpeed + "x.", false);
+      status("Review: playback running at " + state.review.playbackSpeed + "x.", false);
     }
   });
 
@@ -3591,12 +3696,23 @@
     const config = currentConfig();
     writeQuery(config);
     if (!shouldLoadOtt(config)) {
+      clearOttState();
+      cancelBacktestOverlayRequest();
+      cancelBacktestRunRequest();
       state.overlayDirty.ott = false;
       setLoadStatus("ott", "OTT: off.", "info");
+      setLoadStatus("backtest", config.mode === "review" ? "Backtest: off." : "Backtest: n/a.", "info");
     } else if (state.overlayDirty.ott) {
       setLoadStatus("ott", "OTT: settings changed. Click Load.", "info");
     } else if (state.ottStatusPayload) {
       updateOttLoadStatus(state.ottStatusPayload);
+    } else {
+      setLoadStatus("ott", "OTT: click Load to fetch.", "info");
+      setLoadStatus(
+        "backtest",
+        config.mode === "review" && config.ottTrades ? "Backtest: click Load or Run Backtest." : "Backtest: off.",
+        "info"
+      );
     }
     syncReviewVisibleRange(config, { preserveCurrentZoom: true, skipRender: true });
     renderChart({ preserveCurrentZoom: true });
@@ -3607,6 +3723,7 @@
     const config = currentConfig();
     writeQuery(config);
     if (!shouldLoadEnvelope(config)) {
+      clearEnvelopeState();
       state.overlayDirty.envelope = false;
       setLoadStatus("envelope", "Envelope: off.", "info");
     } else if (state.overlayDirty.envelope) {
@@ -3635,6 +3752,12 @@
       writeQuery(config);
       syncReviewVisibleRange(config, { preserveCurrentZoom: true, skipRender: true });
       renderChart({ preserveCurrentZoom: true });
+      if (!config.ottEnabled) {
+        setLoadStatus("ott", "OTT: off.", "info");
+        setLoadStatus("backtest", config.mode === "review" ? "Backtest: off." : "Backtest: n/a.", "info");
+        renderLoadStatus();
+        return;
+      }
       if (control === elements.ottTradesToggle || control === elements.ottSignalMode) {
         loadBacktestOverlay(
           config,
@@ -3683,8 +3806,10 @@
         shouldLoadOtt(config) ? "OTT: settings changed. Click Load." : "OTT: off.",
         "info"
       );
-      if (config.mode === "review" && config.ottTrades) {
+      if (config.mode === "review" && config.ottEnabled && config.ottTrades) {
         setLoadStatus("backtest", "Backtest: settings changed. Click Load or Run Backtest.", "info");
+      } else {
+        setLoadStatus("backtest", config.mode === "review" ? "Backtest: off." : "Backtest: n/a.", "info");
       }
       renderChart({ preserveCurrentZoom: true });
     });
@@ -3696,7 +3821,7 @@
     state.ottTrades = [];
     state.ottRun = null;
     state.ottOverlayPayload = null;
-    if (config.mode === "review" && config.ottTrades) {
+    if (config.mode === "review" && config.ottEnabled && config.ottTrades) {
       setLoadStatus("backtest", "Backtest: range changed. Click Load or Run Backtest.", "info");
     } else {
       setLoadStatus("backtest", config.mode === "review" ? "Backtest: off." : "Backtest: n/a.", "info");
@@ -3759,6 +3884,10 @@
     writeQuery(config);
     if (config.mode !== "review") {
       setLoadStatus("backtest", "Backtest: switch to review mode to run it.", "info");
+      return;
+    }
+    if (!config.ottEnabled) {
+      setLoadStatus("backtest", "Backtest: enable OTT first.", "info");
       return;
     }
     if (!config.ottTrades) {
