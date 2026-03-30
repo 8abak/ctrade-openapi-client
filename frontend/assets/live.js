@@ -71,6 +71,7 @@
     currentRun: DEFAULTS.run,
     visibleSpanMs: null,
     visibleWindow: null,
+    loadRequestId: 0,
     activeSeries: { ask: false, bid: false, mid: true },
     source: null,
     chart: null,
@@ -102,6 +103,11 @@
       overlayRequestToken: 0,
       overlayController: null,
       runController: null,
+    },
+    overlayDirty: {
+      zig: false,
+      ott: false,
+      envelope: false,
     },
     loadStatus: {
       chart: { text: "Chart: waiting.", severity: "info" },
@@ -282,6 +288,10 @@
       // Ignore disposal failures while recovering a stale chart instance.
     }
     state.chart = null;
+  }
+
+  function isStaleLoadRequest(requestId) {
+    return requestId != null && requestId !== state.loadRequestId;
   }
 
   function parseSeries(rawValue) {
@@ -850,7 +860,9 @@
   }
 
   function requiresReviewOttCoverage(config) {
-    return config.mode === "review" && Boolean(config.ottEnabled || config.ottSupport || config.ottMarkers);
+    return config.mode === "review"
+      && !state.overlayDirty.ott
+      && Boolean(config.ottEnabled || config.ottSupport || config.ottMarkers);
   }
 
   function reviewPlaybackStateLabel() {
@@ -1043,14 +1055,13 @@
     return state.chart;
   }
 
-  function readZoomWindowFromChart() {
-    const host = currentChartHost();
-    if (!state.chart || !host || !chartDomMatchesHost(host) || !state.rows.length) {
+  function readChartOption() {
+    if (!state.chart) {
       return null;
     }
-    let option = null;
     try {
-      option = state.chart.getOption();
+      const option = state.chart.getOption();
+      return option && typeof option === "object" ? option : null;
     } catch (error) {
       if (isOffsetWidthError(error)) {
         disposeChart();
@@ -1059,18 +1070,41 @@
       }
       throw error;
     }
-    const dataZoom = option.dataZoom && option.dataZoom[0];
+  }
+
+  function readPrimaryDataZoom(option) {
+    if (!option || typeof option !== "object") {
+      return null;
+    }
+    if (Array.isArray(option.dataZoom)) {
+      return option.dataZoom.find((entry) => entry && typeof entry === "object") || null;
+    }
+    return option.dataZoom && typeof option.dataZoom === "object" ? option.dataZoom : null;
+  }
+
+  function readZoomWindowFromChart() {
+    const host = currentChartHost();
+    if (!state.chart || !host || !chartDomMatchesHost(host) || !state.rows.length) {
+      return null;
+    }
+    const option = readChartOption();
+    if (!option) {
+      return null;
+    }
+    const dataZoom = readPrimaryDataZoom(option);
     if (!dataZoom) {
       return null;
     }
-    if (typeof dataZoom.startValue === "number" && typeof dataZoom.endValue === "number") {
-      return clampZoomWindow({ startMs: dataZoom.startValue, endMs: dataZoom.endValue });
+    const startValue = Number(dataZoom.startValue);
+    const endValue = Number(dataZoom.endValue);
+    if (Number.isFinite(startValue) && Number.isFinite(endValue)) {
+      return clampZoomWindow({ startMs: startValue, endMs: endValue });
     }
     const firstTs = state.rows[0].timestampMs;
     const lastTs = state.rows[state.rows.length - 1].timestampMs;
     return clampZoomWindow({
-      startMs: firstTs + (lastTs - firstTs) * ((dataZoom.start || 0) / 100),
-      endMs: firstTs + (lastTs - firstTs) * ((dataZoom.end || 100) / 100),
+      startMs: firstTs + (lastTs - firstTs) * (Number(dataZoom.start || 0) / 100),
+      endMs: firstTs + (lastTs - firstTs) * (Number(dataZoom.end || 100) / 100),
     });
   }
 
@@ -1095,10 +1129,51 @@
   }
 
   function visibleRows(windowRange) {
-    if (!state.rows.length) {
+    if (!state.rows.length || !windowRange) {
       return [];
     }
     return state.rows.filter((row) => row.timestampMs >= windowRange.startMs && row.timestampMs <= windowRange.endMs);
+  }
+
+  function trimNumericOverlayMap(map, minTickId, maxTickId) {
+    Array.from(map.keys()).forEach((tickId) => {
+      if (tickId < minTickId || tickId > maxTickId) {
+        map.delete(tickId);
+      }
+    });
+  }
+
+  function trimZigOverlayMap(map, minTickId, maxTickId) {
+    Array.from(map.entries()).forEach(([segmentId, segment]) => {
+      if (!segment || segment.endtickid < minTickId || segment.starttickid > maxTickId) {
+        map.delete(segmentId);
+      }
+    });
+  }
+
+  function trimLiveState(windowSize) {
+    if (state.currentMode !== "live") {
+      return;
+    }
+    const maxRows = Math.max(1, windowSize || DEFAULTS.window);
+    if (state.rows.length > maxRows) {
+      state.rows = state.rows.slice(state.rows.length - maxRows);
+    }
+    if (!state.rows.length) {
+      state.ottRows.clear();
+      state.envelopeRows.clear();
+      Object.keys(state.zigRows).forEach((level) => {
+        state.zigRows[level].clear();
+      });
+      return;
+    }
+    const firstId = state.rows[0].id;
+    const lastId = state.rows[state.rows.length - 1].id;
+    trimNumericOverlayMap(state.ottRows, firstId, lastId);
+    trimNumericOverlayMap(state.envelopeRows, firstId, lastId);
+    Object.keys(state.zigRows).forEach((level) => {
+      trimZigOverlayMap(state.zigRows[level], firstId, lastId);
+    });
   }
 
   function structureSeriesValue(row, seriesKey) {
@@ -1180,6 +1255,18 @@
 
   function shouldLoadEnvelope(config) {
     return config.envelopeEnabled;
+  }
+
+  function shouldIncrementallyLoadZig(config) {
+    return shouldLoadZig(config) && !state.overlayDirty.zig;
+  }
+
+  function shouldIncrementallyLoadOtt(config) {
+    return shouldLoadOtt(config) && !state.overlayDirty.ott;
+  }
+
+  function shouldIncrementallyLoadEnvelope(config) {
+    return shouldLoadEnvelope(config) && !state.overlayDirty.envelope;
   }
 
   function zigSegmentsForLevel(level, rows) {
@@ -2064,7 +2151,11 @@
           .concat(buildEnvelopeSeries(displayRows, config))
           .concat(buildZigSeries(state.rows, config))
           .concat(buildOttSeries(displayRows, config)),
-      }, true);
+      }, {
+        notMerge: false,
+        lazyUpdate: Boolean(renderOptions && renderOptions.fromScheduler),
+        replaceMerge: ["series", "dataZoom"],
+      });
     } catch (error) {
       if (isOffsetWidthError(error)) {
         disposeChart();
@@ -2252,8 +2343,20 @@
     state.review.lastEnvelopeRequestAt = 0;
   }
 
+  function markZigDirty(config) {
+    state.overlayDirty.zig = shouldLoadZig(config);
+  }
+
+  function markOttDirty(config) {
+    state.overlayDirty.ott = shouldLoadOtt(config);
+  }
+
+  function markEnvelopeDirty(config) {
+    state.overlayDirty.envelope = shouldLoadEnvelope(config);
+  }
+
   function fetchReviewZigChunk(config, options) {
-    if (config.mode !== "review" || !shouldLoadZig(config)) {
+    if (config.mode !== "review" || !shouldIncrementallyLoadZig(config)) {
       return Promise.resolve(null);
     }
     if (state.review.zigFetchPromise) {
@@ -2276,6 +2379,7 @@
     ) {
       return Promise.resolve(null);
     }
+    const requestId = state.loadRequestId;
     state.review.zigRequestedEndId = Math.max(state.review.zigRequestedEndId, targetEndId || 0);
     state.review.lastZigRequestAt = nowMs;
     state.review.fetchingZig = true;
@@ -2283,8 +2387,12 @@
     buildMetaText();
     state.review.zigFetchPromise = loadZigNext(effectiveAfterId, config, {
       endId: targetEndId,
+      requestId,
     })
       .then((payload) => {
+        if (isStaleLoadRequest(requestId)) {
+          return null;
+        }
         updateZigLoadStatus(payload || state.zigStatusPayload);
         if (state.rows.length) {
           renderChart({ preserveCurrentZoom: true });
@@ -2292,19 +2400,24 @@
         return payload;
       })
       .catch((error) => {
+        if (isStaleLoadRequest(requestId)) {
+          return null;
+        }
         setLoadStatus("zig", "Zig: " + (error.message || "matching review chunk failed."), "error");
         throw error;
       })
       .finally(() => {
-        state.review.fetchingZig = false;
-        state.review.zigFetchPromise = null;
-        buildMetaText();
+        if (!isStaleLoadRequest(requestId)) {
+          state.review.fetchingZig = false;
+          state.review.zigFetchPromise = null;
+          buildMetaText();
+        }
       });
     return state.review.zigFetchPromise;
   }
 
   function fetchReviewOttChunk(config, options) {
-    if (config.mode !== "review" || !shouldLoadOtt(config)) {
+    if (config.mode !== "review" || !shouldIncrementallyLoadOtt(config)) {
       return Promise.resolve(null);
     }
     if (state.review.ottFetchPromise) {
@@ -2337,6 +2450,7 @@
           : Math.max(reviewPrefetchLimit(config), targetEndId != null ? (targetEndId - effectiveAfterId) : 0)
       )
     );
+    const requestId = state.loadRequestId;
     state.review.ottRequestedEndId = Math.max(state.review.ottRequestedEndId, targetEndId || 0);
     state.review.lastOttRequestAt = nowMs;
     state.review.fetchingOtt = true;
@@ -2345,8 +2459,12 @@
     state.review.ottFetchPromise = loadOttNext(effectiveAfterId, config, {
       limitOverride: limit,
       endId: targetEndId,
+      requestId,
     })
       .then((payload) => {
+        if (isStaleLoadRequest(requestId)) {
+          return null;
+        }
         updateOttLoadStatus(payload || state.ottStatusPayload);
         if (state.rows.length) {
           renderChart({ preserveCurrentZoom: true });
@@ -2354,19 +2472,24 @@
         return payload;
       })
       .catch((error) => {
+        if (isStaleLoadRequest(requestId)) {
+          return null;
+        }
         setLoadStatus("ott", "OTT: " + (error.message || "matching review chunk failed."), "error");
         throw error;
       })
       .finally(() => {
-        state.review.fetchingOtt = false;
-        state.review.ottFetchPromise = null;
-        buildMetaText();
+        if (!isStaleLoadRequest(requestId)) {
+          state.review.fetchingOtt = false;
+          state.review.ottFetchPromise = null;
+          buildMetaText();
+        }
       });
     return state.review.ottFetchPromise;
   }
 
   function fetchReviewEnvelopeChunk(config, options) {
-    if (config.mode !== "review" || !shouldLoadEnvelope(config)) {
+    if (config.mode !== "review" || !shouldIncrementallyLoadEnvelope(config)) {
       return Promise.resolve(null);
     }
     if (state.review.envelopeFetchPromise) {
@@ -2398,6 +2521,7 @@
           : Math.max(reviewPrefetchLimit(config), targetEndId != null ? (targetEndId - effectiveAfterId) : 0)
       )
     );
+    const requestId = state.loadRequestId;
     state.review.envelopeRequestedEndId = Math.max(state.review.envelopeRequestedEndId, targetEndId || 0);
     state.review.lastEnvelopeRequestAt = nowMs;
     state.review.fetchingEnvelope = true;
@@ -2406,8 +2530,12 @@
     state.review.envelopeFetchPromise = loadEnvelopeNext(effectiveAfterId, config, {
       limitOverride: limit,
       endId: targetEndId,
+      requestId,
     })
       .then((payload) => {
+        if (isStaleLoadRequest(requestId)) {
+          return null;
+        }
         updateEnvelopeLoadStatus(payload || state.envelopeStatusPayload);
         if (state.rows.length) {
           renderChart({ preserveCurrentZoom: true });
@@ -2415,13 +2543,18 @@
         return payload;
       })
       .catch((error) => {
+        if (isStaleLoadRequest(requestId)) {
+          return null;
+        }
         setLoadStatus("envelope", "Envelope: " + (error.message || "matching review chunk failed."), "error");
         throw error;
       })
       .finally(() => {
-        state.review.fetchingEnvelope = false;
-        state.review.envelopeFetchPromise = null;
-        buildMetaText();
+        if (!isStaleLoadRequest(requestId)) {
+          state.review.fetchingEnvelope = false;
+          state.review.envelopeFetchPromise = null;
+          buildMetaText();
+        }
       });
     return state.review.envelopeFetchPromise;
   }
@@ -2435,6 +2568,7 @@
         macro: new Map(),
       };
       state.review.zigRequestedEndId = 0;
+      state.overlayDirty.zig = false;
     }
     Object.keys(ZIG_LEVEL_CONFIG).forEach((level) => {
       const levelPayload = payload.levels && payload.levels[level] ? payload.levels[level] : null;
@@ -2451,6 +2585,9 @@
     if (payload.endId != null) {
       state.review.zigRequestedEndId = Math.max(state.review.zigRequestedEndId, payload.endId);
     }
+    if (state.currentMode === "live") {
+      trimLiveState(currentConfig().window);
+    }
   }
 
   function applyOttPayload(payload, reset) {
@@ -2458,6 +2595,7 @@
       state.ottRows = new Map();
       state.ottLastId = 0;
       state.review.ottRequestedEndId = 0;
+      state.overlayDirty.ott = false;
     }
     (payload.rows || []).forEach((row) => {
       state.ottRows.set(row.tickid, row);
@@ -2467,6 +2605,9 @@
     if (payload.lastId != null) {
       state.review.ottRequestedEndId = Math.max(state.review.ottRequestedEndId, payload.lastId);
     }
+    if (state.currentMode === "live") {
+      trimLiveState(currentConfig().window);
+    }
   }
 
   function applyEnvelopePayload(payload, reset) {
@@ -2474,6 +2615,7 @@
       state.envelopeRows = new Map();
       state.envelopeLastId = 0;
       state.review.envelopeRequestedEndId = 0;
+      state.overlayDirty.envelope = false;
     }
     (payload.rows || []).forEach((row) => {
       state.envelopeRows.set(row.tickid, row);
@@ -2482,6 +2624,9 @@
     state.envelopeStatusPayload = payload;
     if (payload.lastId != null) {
       state.review.envelopeRequestedEndId = Math.max(state.review.envelopeRequestedEndId, payload.lastId);
+    }
+    if (state.currentMode === "live") {
+      trimLiveState(currentConfig().window);
     }
   }
 
@@ -2547,16 +2692,20 @@
     }
   }
 
-  async function loadZigWindow(config, range) {
+  async function loadZigWindow(config, range, options) {
     if (!shouldLoadZig(config) || !range || range.startId == null || range.endId == null) {
       return null;
     }
+    const requestOptions = options || {};
     const params = new URLSearchParams({
       startId: String(range.startId),
       endId: String(range.endId),
       levels: enabledZigLevels(config).join(","),
     });
     const payload = await fetchJson("/api/zig/window?" + params.toString());
+    if (isStaleLoadRequest(requestOptions.requestId)) {
+      return payload;
+    }
     applyZigPayload(payload, true);
     return payload;
   }
@@ -2574,11 +2723,15 @@
       params.set("endId", String(requestOptions.endId));
     }
     const payload = await fetchJson("/api/zig/next?" + params.toString());
+    if (isStaleLoadRequest(requestOptions.requestId)) {
+      return payload;
+    }
     applyZigPayload(payload, false);
     return payload;
   }
 
-  async function loadOttBootstrap(config) {
+  async function loadOttBootstrap(config, options) {
+    const requestOptions = options || {};
     const params = new URLSearchParams({
       mode: config.mode,
       window: String(config.window),
@@ -2595,11 +2748,15 @@
       }
     }
     const payload = await fetchJson("/api/ott/bootstrap?" + params.toString());
+    if (isStaleLoadRequest(requestOptions.requestId)) {
+      return payload;
+    }
     applyOttPayload(payload, true);
     return payload;
   }
 
-  async function loadEnvelopeBootstrap(config) {
+  async function loadEnvelopeBootstrap(config, options) {
+    const requestOptions = options || {};
     const params = new URLSearchParams({
       mode: config.mode,
       window: String(config.window),
@@ -2615,6 +2772,9 @@
       }
     }
     const payload = await fetchJson("/api/envelope/bootstrap?" + params.toString());
+    if (isStaleLoadRequest(requestOptions.requestId)) {
+      return payload;
+    }
     applyEnvelopePayload(payload, true);
     return payload;
   }
@@ -2639,6 +2799,9 @@
       params.set("endId", String(requestOptions.endId));
     }
     const payload = await fetchJson("/api/ott/next?" + params.toString());
+    if (isStaleLoadRequest(requestOptions.requestId)) {
+      return payload;
+    }
     applyOttPayload(payload, false);
     return payload;
   }
@@ -2662,6 +2825,9 @@
       params.set("endId", String(requestOptions.endId));
     }
     const payload = await fetchJson("/api/envelope/next?" + params.toString());
+    if (isStaleLoadRequest(requestOptions.requestId)) {
+      return payload;
+    }
     applyEnvelopePayload(payload, false);
     return payload;
   }
@@ -2765,7 +2931,8 @@
     }
   }
 
-  async function resolveReviewStart(config) {
+  async function resolveReviewStart(config, options) {
+    const requestId = options && options.requestId != null ? options.requestId : null;
     if (config.mode !== "review") {
       return { ...config };
     }
@@ -2775,9 +2942,11 @@
         timezoneName: SYDNEY_TIMEZONE,
       });
       const payload = await fetchJson("/api/live/review-start?" + params.toString());
-      elements.tickId.value = String(payload.resolvedId);
-      state.review.resolvedStartId = payload.resolvedId;
-      state.review.resolvedStartTimestamp = payload.resolvedTimestamp;
+      if (!isStaleLoadRequest(requestId)) {
+        elements.tickId.value = String(payload.resolvedId);
+        state.review.resolvedStartId = payload.resolvedId;
+        state.review.resolvedStartTimestamp = payload.resolvedTimestamp;
+      }
       return {
         ...config,
         id: String(payload.resolvedId),
@@ -2786,8 +2955,10 @@
     if (!config.id) {
       throw new Error("Review mode requires a start id or Sydney review start time.");
     }
-    state.review.resolvedStartId = Number.parseInt(config.id, 10) || null;
-    state.review.resolvedStartTimestamp = null;
+    if (!isStaleLoadRequest(requestId)) {
+      state.review.resolvedStartId = Number.parseInt(config.id, 10) || null;
+      state.review.resolvedStartTimestamp = null;
+    }
     return { ...config };
   }
 
@@ -2807,6 +2978,7 @@
       buildMetaText();
       return Promise.resolve(null);
     }
+    const requestId = state.loadRequestId;
     const params = new URLSearchParams({
       afterId: String(afterId),
       limit: String(Math.max(1, targetEndId - afterId)),
@@ -2817,7 +2989,7 @@
     state.review.fetchingTicks = true;
     setLoadStatus("chart", "Chart: prefetching next review chunk...", "info");
     buildMetaText();
-    if (shouldLoadOtt(config)) {
+    if (shouldIncrementallyLoadOtt(config)) {
       fetchReviewOttChunk(config, {
         endId: targetEndId,
         limitOverride: nextChunkLimit,
@@ -2825,6 +2997,9 @@
     }
     state.review.fetchPromise = fetchJson("/api/live/next?" + params.toString())
       .then((payload) => {
+        if (isStaleLoadRequest(requestId)) {
+          return null;
+        }
         const newRows = payload.rows || [];
         if (!newRows.length) {
           state.review.exhausted = Boolean(payload.endReached || (endId != null && afterId >= endId));
@@ -2836,7 +3011,7 @@
           if (state.review.visibleCount >= state.review.bufferRows.length) {
             announceReviewEnd();
           }
-          if (shouldLoadOtt(config) && reviewOttCoverage().contiguousAvailableCount < state.review.bufferRows.length) {
+          if (shouldIncrementallyLoadOtt(config) && reviewOttCoverage().contiguousAvailableCount < state.review.bufferRows.length) {
             fetchReviewOttChunk(config, { endId: state.review.lastBufferedId }).catch(() => null);
           }
           return payload;
@@ -2860,23 +3035,23 @@
           "info"
         );
 
-        if (shouldLoadOtt(config) && reviewOttCoverage().contiguousAvailableCount < state.review.bufferRows.length) {
+        if (shouldIncrementallyLoadOtt(config) && reviewOttCoverage().contiguousAvailableCount < state.review.bufferRows.length) {
           fetchReviewOttChunk(config, { endId: state.review.lastBufferedId }).catch(() => null);
         }
 
-        if (shouldLoadEnvelope(config) && reviewEnvelopeCoverage().storedCount < state.review.bufferRows.length) {
+        if (shouldIncrementallyLoadEnvelope(config) && reviewEnvelopeCoverage().storedCount < state.review.bufferRows.length) {
           fetchReviewEnvelopeChunk(config, { endId: state.review.lastBufferedId }).catch(() => null);
         }
 
         if (config.ottTrades) {
           loadBacktestOverlay(config, state.review.bufferRows, { silentStatus: true })
             .then((overlayPayload) => {
-              if (overlayPayload) {
+              if (!isStaleLoadRequest(requestId) && overlayPayload) {
                 renderChart({ preserveCurrentZoom: true });
               }
             })
             .catch((error) => {
-              if (!isAbortError(error)) {
+              if (!isAbortError(error) && !isStaleLoadRequest(requestId)) {
                 renderLoadStatus();
               }
             });
@@ -2886,13 +3061,18 @@
         return payload;
       })
       .catch((error) => {
+        if (isStaleLoadRequest(requestId)) {
+          return null;
+        }
         setLoadStatus("chart", "Chart: " + (error.message || "review chunk fetch failed."), "error");
         throw error;
       })
       .finally(() => {
-        state.review.fetchingTicks = false;
-        state.review.fetchPromise = null;
-        buildMetaText();
+        if (!isStaleLoadRequest(requestId)) {
+          state.review.fetchingTicks = false;
+          state.review.fetchPromise = null;
+          buildMetaText();
+        }
       });
     return state.review.fetchPromise;
   }
@@ -2916,7 +3096,7 @@
       });
     }
     if (
-      shouldLoadZig(config)
+      shouldIncrementallyLoadZig(config)
       && state.review.zigRequestedEndId < state.review.lastBufferedId
       && (
         remaining <= reviewPrefetchThreshold(config)
@@ -2945,7 +3125,7 @@
       });
     }
     if (
-      shouldLoadEnvelope(config)
+      shouldIncrementallyLoadEnvelope(config)
       && envelopeCoverage.storedCount < state.review.bufferRows.length
       && (
         remaining <= reviewPrefetchThreshold(config)
@@ -3047,6 +3227,7 @@
     if (state.currentRun !== "run" || state.currentMode !== "live") {
       return;
     }
+    const requestId = state.loadRequestId;
     const params = new URLSearchParams({
       afterId: String(lastId || 0),
       limit: String(Math.max(50, Math.min(500, windowSize))),
@@ -3055,45 +3236,44 @@
     state.source = source;
 
     source.onmessage = (event) => {
+      if (state.source !== source || isStaleLoadRequest(requestId)) {
+        return;
+      }
       const payload = JSON.parse(event.data);
       if (!payload.rows || !payload.rows.length) {
         return;
       }
 
       const config = currentConfig();
-      const seen = new Set(state.rows.map((row) => row.id));
       const previousLastId = state.rows.length ? state.rows[state.rows.length - 1].id : 0;
-      payload.rows.forEach((row) => {
-        if (!seen.has(row.id)) {
-          state.rows.push(row);
-        }
-      });
-
-      const maxBuffer = Math.max(windowSize * 5, 5000);
-      if (state.rows.length > maxBuffer) {
-        state.rows = state.rows.slice(state.rows.length - maxBuffer);
+      const newRows = payload.rows.filter((row) => row && typeof row.id === "number" && row.id > previousLastId);
+      if (!newRows.length) {
+        return;
       }
+      state.rows = state.rows.concat(newRows);
+      trimLiveState(config.window);
 
+      const liveLastId = state.rows.length ? state.rows[state.rows.length - 1].id : previousLastId;
       const overlayRequests = [];
-      if (shouldLoadZig(config)) {
+      if (shouldIncrementallyLoadZig(config)) {
         overlayRequests.push(
-          loadZigNext(previousLastId, config, { endId: payload.lastId }).catch((error) => {
+          loadZigNext(previousLastId, config, { endId: liveLastId, requestId }).catch((error) => {
             status(error.message || "Zig incremental update failed.", true);
             return null;
           })
         );
       }
-      if (shouldLoadOtt(config)) {
+      if (shouldIncrementallyLoadOtt(config)) {
         overlayRequests.push(
-          loadOttNext(previousLastId, config).catch((error) => {
+          loadOttNext(previousLastId, config, { requestId }).catch((error) => {
             status(error.message || "OTT incremental update failed.", true);
             return null;
           })
         );
       }
-      if (shouldLoadEnvelope(config)) {
+      if (shouldIncrementallyLoadEnvelope(config)) {
         overlayRequests.push(
-          loadEnvelopeNext(previousLastId, config).catch((error) => {
+          loadEnvelopeNext(previousLastId, config, { requestId }).catch((error) => {
             status(error.message || "Envelope incremental update failed.", true);
             return null;
           })
@@ -3101,23 +3281,34 @@
       }
 
       Promise.all(overlayRequests).then(() => {
+        if (state.source !== source || isStaleLoadRequest(requestId)) {
+          return;
+        }
         const overlayState = collectOverlayMessages(config);
         if (overlayState.messages.length) {
-          status("Streaming " + payload.rowCount + " new row(s). " + overlayState.messages.join(" "), overlayState.hasWarning);
+          status("Streaming " + newRows.length + " new row(s). " + overlayState.messages.join(" "), overlayState.hasWarning);
         } else {
-          status("Streaming " + payload.rowCount + " new row(s).", false);
+          status("Streaming " + newRows.length + " new row(s).", false);
         }
       }).finally(() => {
-        renderChart({ preserveCurrentZoom: false });
+        if (state.source !== source || isStaleLoadRequest(requestId)) {
+          return;
+        }
+        scheduleChartRender({ preserveCurrentZoom: false });
       });
     };
 
     source.onerror = () => {
+      if (state.source !== source || isStaleLoadRequest(requestId)) {
+        return;
+      }
       status("Stream interrupted. Reconnecting...", true);
     };
   }
 
   async function loadData(resetWindow) {
+    const requestId = state.loadRequestId + 1;
+    state.loadRequestId = requestId;
     closeStream();
     stopReviewPlayback({ silent: true });
     resetReviewState();
@@ -3126,7 +3317,10 @@
     clearEnvelopeState();
 
     try {
-      const config = await resolveReviewStart(currentConfig());
+      const config = await resolveReviewStart(currentConfig(), { requestId });
+      if (isStaleLoadRequest(requestId)) {
+        return;
+      }
       writeQuery(config);
       initializeLoadStatus(config);
       const params = new URLSearchParams({
@@ -3137,6 +3331,9 @@
         params.set("id", config.id);
       }
       const livePayload = await fetchJson("/api/live/bootstrap?" + params.toString());
+      if (isStaleLoadRequest(requestId)) {
+        return;
+      }
       const loadedRows = livePayload.rows || [];
       if (config.mode === "review") {
         state.review.bufferRows = loadedRows.slice();
@@ -3151,6 +3348,7 @@
         state.rows = state.review.bufferRows.slice(0, state.review.visibleCount);
       } else {
         state.rows = loadedRows;
+        trimLiveState(config.window);
       }
       setLoadStatus(
         "chart",
@@ -3165,39 +3363,60 @@
             startId: loadedRows[0].id,
             endId: loadedRows[loadedRows.length - 1].id,
           } : null;
-          const zigPayload = await loadZigWindow(config, zigRange);
+          const zigPayload = await loadZigWindow(config, zigRange, { requestId });
+          if (isStaleLoadRequest(requestId)) {
+            return;
+          }
           updateZigLoadStatus(zigPayload);
         } catch (error) {
+          if (isStaleLoadRequest(requestId)) {
+            return;
+          }
           clearZigState();
           setLoadStatus("zig", "Zig: " + (error.message || "window load failed."), "error", { silent: true });
         }
       } else {
+        state.overlayDirty.zig = false;
         setLoadStatus("zig", "Zig: off.", "info", { silent: true });
       }
 
       if (shouldLoadOtt(config)) {
         try {
-          const ottPayload = await loadOttBootstrap(config);
+          const ottPayload = await loadOttBootstrap(config, { requestId });
+          if (isStaleLoadRequest(requestId)) {
+            return;
+          }
           updateOttLoadStatus(ottPayload);
           syncReviewVisibleRange(config, { skipRender: true });
           state.rows = state.review.bufferRows.slice(0, state.review.visibleCount);
         } catch (error) {
+          if (isStaleLoadRequest(requestId)) {
+            return;
+          }
           clearOttState();
           setLoadStatus("ott", "OTT: " + (error.message || "bootstrap failed."), "error", { silent: true });
         }
       } else {
+        state.overlayDirty.ott = false;
         setLoadStatus("ott", "OTT: off.", "info", { silent: true });
       }
 
       if (shouldLoadEnvelope(config)) {
         try {
-          const envelopePayload = await loadEnvelopeBootstrap(config);
+          const envelopePayload = await loadEnvelopeBootstrap(config, { requestId });
+          if (isStaleLoadRequest(requestId)) {
+            return;
+          }
           updateEnvelopeLoadStatus(envelopePayload);
         } catch (error) {
+          if (isStaleLoadRequest(requestId)) {
+            return;
+          }
           clearEnvelopeState();
           setLoadStatus("envelope", "Envelope: " + (error.message || "bootstrap failed."), "error", { silent: true });
         }
       } else {
+        state.overlayDirty.envelope = false;
         setLoadStatus("envelope", "Envelope: off.", "info", { silent: true });
       }
 
@@ -3213,12 +3432,12 @@
       if (config.mode === "review" && config.ottTrades) {
         loadBacktestOverlay(config, state.review.bufferRows, { silentStatus: true })
           .then((overlayPayload) => {
-            if (overlayPayload) {
+            if (!isStaleLoadRequest(requestId) && overlayPayload) {
               renderChart({ preserveCurrentZoom: true });
             }
           })
           .catch((error) => {
-            if (!isAbortError(error)) {
+            if (!isAbortError(error) && !isStaleLoadRequest(requestId)) {
               renderLoadStatus();
             }
           });
@@ -3232,6 +3451,9 @@
         startReviewPlayback();
       }
     } catch (error) {
+      if (isStaleLoadRequest(requestId)) {
+        return;
+      }
       setLoadStatus("chart", "Chart: " + (error.message || "bootstrap failed."), "error", { silent: true });
       renderLoadStatus();
     }
@@ -3347,6 +3569,7 @@
       const config = currentConfig();
       writeQuery(config);
       clearZigState();
+      markZigDirty(config);
       setLoadStatus(
         "zig",
         shouldLoadZig(config) ? "Zig: settings changed. Click Load." : "Zig: off.",
@@ -3368,7 +3591,10 @@
     const config = currentConfig();
     writeQuery(config);
     if (!shouldLoadOtt(config)) {
+      state.overlayDirty.ott = false;
       setLoadStatus("ott", "OTT: off.", "info");
+    } else if (state.overlayDirty.ott) {
+      setLoadStatus("ott", "OTT: settings changed. Click Load.", "info");
     } else if (state.ottStatusPayload) {
       updateOttLoadStatus(state.ottStatusPayload);
     }
@@ -3381,7 +3607,10 @@
     const config = currentConfig();
     writeQuery(config);
     if (!shouldLoadEnvelope(config)) {
+      state.overlayDirty.envelope = false;
       setLoadStatus("envelope", "Envelope: off.", "info");
+    } else if (state.overlayDirty.envelope) {
+      setLoadStatus("envelope", "Envelope: settings changed. Click Load.", "info");
     } else if (state.envelopeStatusPayload) {
       updateEnvelopeLoadStatus(state.envelopeStatusPayload);
     } else {
@@ -3443,7 +3672,39 @@
     elements.ottMaType,
     elements.ottLength,
     elements.ottPercent,
-    elements.ottRangePreset,
+  ].forEach((control) => {
+    control.addEventListener("change", () => {
+      const config = currentConfig();
+      writeQuery(config);
+      clearOttState();
+      markOttDirty(config);
+      setLoadStatus(
+        "ott",
+        shouldLoadOtt(config) ? "OTT: settings changed. Click Load." : "OTT: off.",
+        "info"
+      );
+      if (config.mode === "review" && config.ottTrades) {
+        setLoadStatus("backtest", "Backtest: settings changed. Click Load or Run Backtest.", "info");
+      }
+      renderChart({ preserveCurrentZoom: true });
+    });
+  });
+
+  elements.ottRangePreset.addEventListener("change", () => {
+    const config = currentConfig();
+    writeQuery(config);
+    state.ottTrades = [];
+    state.ottRun = null;
+    state.ottOverlayPayload = null;
+    if (config.mode === "review" && config.ottTrades) {
+      setLoadStatus("backtest", "Backtest: range changed. Click Load or Run Backtest.", "info");
+    } else {
+      setLoadStatus("backtest", config.mode === "review" ? "Backtest: off." : "Backtest: n/a.", "info");
+    }
+    renderChart({ preserveCurrentZoom: true });
+  });
+
+  [
     elements.reviewStart,
     elements.tickId,
     elements.windowSize,
@@ -3468,6 +3729,7 @@
       const config = currentConfig();
       writeQuery(config);
       clearEnvelopeState();
+      markEnvelopeDirty(config);
       setLoadStatus(
         "envelope",
         shouldLoadEnvelope(config) ? "Envelope: settings changed. Click Load." : "Envelope: off.",
