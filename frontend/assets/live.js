@@ -1186,6 +1186,72 @@
     });
   }
 
+  function currentOverlayRows(config) {
+    if (config.mode === "review" && state.review.bufferRows.length) {
+      return state.review.bufferRows.slice();
+    }
+    return state.rows.slice();
+  }
+
+  function currentOverlayWindow(config) {
+    const rows = currentOverlayRows(config);
+    if (!rows.length) {
+      return null;
+    }
+    return {
+      rows,
+      startId: rows[0].id,
+      endId: rows[rows.length - 1].id,
+      window: rows.length,
+    };
+  }
+
+  function currentLiveLastRowId() {
+    return state.rows.length ? state.rows[state.rows.length - 1].id : 0;
+  }
+
+  function zigConfigSignature(config) {
+    return [
+      config.mode,
+      enabledZigLevels(config).join(","),
+    ].join("|");
+  }
+
+  function ottConfigSignature(config) {
+    return [
+      config.mode,
+      config.ottEnabled ? "on" : "off",
+      config.ottSource,
+      config.ottSignalMode,
+      config.ottMaType,
+      config.ottLength,
+      config.ottPercent,
+    ].join("|");
+  }
+
+  function envelopeConfigSignature(config) {
+    return [
+      config.mode,
+      config.envelopeEnabled ? "on" : "off",
+      config.envelopeSource,
+      config.envelopeLength,
+      config.envelopeBandwidth,
+      config.envelopeMult,
+    ].join("|");
+  }
+
+  function isCurrentZigConfig(config) {
+    return zigConfigSignature(currentConfig()) === zigConfigSignature(config);
+  }
+
+  function isCurrentOttConfig(config) {
+    return ottConfigSignature(currentConfig()) === ottConfigSignature(config);
+  }
+
+  function isCurrentEnvelopeConfig(config) {
+    return envelopeConfigSignature(currentConfig()) === envelopeConfigSignature(config);
+  }
+
   function structureSeriesValue(row, seriesKey) {
     const configuredSeries = SERIES_CONFIG[seriesKey];
     if (configuredSeries && typeof row[configuredSeries.field] === "number") {
@@ -1461,6 +1527,7 @@
     return selected.map((seriesKey, index) => {
       const config = SERIES_CONFIG[seriesKey];
       return {
+        id: "price-" + seriesKey,
         name: config.label,
         type: "line",
         showSymbol: false,
@@ -1516,6 +1583,7 @@
 
     return [
       {
+        id: "ott-buy",
         name: "OTT Buy",
         type: "scatter",
         symbol: "triangle",
@@ -1524,6 +1592,7 @@
         data: buyData,
       },
       {
+        id: "ott-sell",
         name: "OTT Sell",
         type: "scatter",
         symbol: "triangle",
@@ -1554,6 +1623,7 @@
 
     return [
       {
+        id: "trade-long-entry",
         name: "Long Entry",
         type: "scatter",
         symbol: "triangle",
@@ -1562,6 +1632,7 @@
         data: longEntries,
       },
       {
+        id: "trade-short-entry",
         name: "Short Entry",
         type: "scatter",
         symbol: "triangle",
@@ -1571,6 +1642,7 @@
         data: shortEntries,
       },
       {
+        id: "trade-exit",
         name: "Exit",
         type: "scatter",
         symbol: "circle",
@@ -1617,6 +1689,7 @@
         });
         overlaySeries.push(
           {
+            id: "ott-neutral",
             name: "OTT",
             type: "line",
             showSymbol: false,
@@ -1626,6 +1699,7 @@
             lineStyle: { width: 2.2, color: "#b800d9", opacity: 0.75 },
           },
           {
+            id: "ott-up",
             name: "OTT Up",
             type: "line",
             showSymbol: false,
@@ -1635,6 +1709,7 @@
             lineStyle: { width: 2.35, color: "#22c55e" },
           },
           {
+            id: "ott-down",
             name: "OTT Down",
             type: "line",
             showSymbol: false,
@@ -1646,6 +1721,7 @@
         );
       } else {
         overlaySeries.push({
+          id: "ott-line",
           name: "OTT",
           type: "line",
           showSymbol: false,
@@ -1662,6 +1738,7 @@
 
     if (config.ottSupport) {
       overlaySeries.push({
+        id: "ott-support",
         name: "OTT Support",
         type: "line",
         showSymbol: false,
@@ -1684,6 +1761,7 @@
     }
     return [
       {
+        id: "envelope-basis",
         name: "Envelope Basis",
         type: "line",
         showSymbol: false,
@@ -1696,6 +1774,7 @@
         lineStyle: { width: 1.8, color: "#f8d36c", type: "dashed", opacity: 0.96 },
       },
       {
+        id: "envelope-upper",
         name: "Envelope Upper",
         type: "line",
         showSymbol: false,
@@ -1708,6 +1787,7 @@
         lineStyle: { width: 1.45, color: "#5eead4", opacity: 0.9 },
       },
       {
+        id: "envelope-lower",
         name: "Envelope Lower",
         type: "line",
         showSymbol: false,
@@ -1735,6 +1815,7 @@
         }
         const levelConfig = ZIG_LEVEL_CONFIG[level];
         return {
+          id: "zig-" + level,
           name: levelConfig.label,
           type: "line",
           showSymbol: false,
@@ -2083,6 +2164,22 @@
     }
   }
 
+  function resetChartInteractionState(chart) {
+    if (!chart) {
+      return;
+    }
+    try {
+      chart.dispatchAction({ type: "hideTip" });
+    } catch (error) {
+      // Ignore stale tooltip state while rebuilding the chart model.
+    }
+    try {
+      chart.dispatchAction({ type: "updateAxisPointer", currTrigger: "leave" });
+    } catch (error) {
+      // Ignore unsupported axis-pointer resets while rebuilding the chart model.
+    }
+  }
+
   function renderChart(options, renderOptions) {
     const host = currentChartHost();
     if (!host || !chartHostHasSize(host)) {
@@ -2112,11 +2209,16 @@
       state.zigOnlyFallbackActive = true;
     }
     const displayRows = displayedRowsForView(state.rows, effectiveConfig);
+    const chartSeries = buildPriceSeries(displayRows, selected)
+      .concat(buildEnvelopeSeries(displayRows, config))
+      .concat(zigSeries)
+      .concat(buildOttSeries(displayRows, config));
 
     state.visibleWindow = targetZoom;
     state.visibleSpanMs = Math.max(1000, targetZoom.endMs - targetZoom.startMs);
 
     try {
+      resetChartInteractionState(chart);
       chart.setOption({
         animation: false,
         backgroundColor: "transparent",
@@ -2174,14 +2276,10 @@
             },
           },
         ],
-        series: buildPriceSeries(displayRows, selected)
-          .concat(buildEnvelopeSeries(displayRows, config))
-          .concat(zigSeries)
-          .concat(buildOttSeries(displayRows, config)),
+        series: chartSeries,
       }, {
-        notMerge: false,
+        notMerge: true,
         lazyUpdate: Boolean(renderOptions && renderOptions.fromScheduler),
-        replaceMerge: ["series", "dataZoom"],
       });
     } catch (error) {
       if (isOffsetWidthError(error)) {
@@ -2733,6 +2831,9 @@
     if (isStaleLoadRequest(requestOptions.requestId)) {
       return payload;
     }
+    if (requestOptions.validateConfig && !isCurrentZigConfig(requestOptions.validateConfig)) {
+      return payload;
+    }
     applyZigPayload(payload, true);
     return payload;
   }
@@ -2753,29 +2854,45 @@
     if (isStaleLoadRequest(requestOptions.requestId)) {
       return payload;
     }
+    if (requestOptions.validateConfig && !isCurrentZigConfig(requestOptions.validateConfig)) {
+      return payload;
+    }
     applyZigPayload(payload, false);
     return payload;
   }
 
   async function loadOttBootstrap(config, options) {
     const requestOptions = options || {};
+    const targetRows = Array.isArray(requestOptions.rows) && requestOptions.rows.length ? requestOptions.rows : null;
+    const bootstrapMode = targetRows && config.mode === "review" ? "review" : config.mode;
     const params = new URLSearchParams({
-      mode: config.mode,
-      window: String(config.window),
+      mode: bootstrapMode,
+      window: String(requestOptions.windowOverride || (targetRows ? targetRows.length : config.window)),
       source: config.ottSource,
       signalmode: config.ottSignalMode,
       matype: config.ottMaType,
       length: String(config.ottLength),
       percent: String(config.ottPercent),
     });
-    if (config.mode === "review" && config.id) {
-      params.set("id", config.id);
-      if (state.review.sessionEndId != null) {
-        params.set("endId", String(state.review.sessionEndId));
+    const reviewStartId = requestOptions.startId != null
+      ? requestOptions.startId
+      : (targetRows && targetRows.length ? targetRows[0].id : config.id);
+    const reviewEndId = requestOptions.endId != null
+      ? requestOptions.endId
+      : (targetRows && targetRows.length
+        ? targetRows[targetRows.length - 1].id
+        : state.review.sessionEndId);
+    if (bootstrapMode === "review" && reviewStartId) {
+      params.set("id", String(reviewStartId));
+      if (reviewEndId != null) {
+        params.set("endId", String(reviewEndId));
       }
     }
     const payload = await fetchJson("/api/ott/bootstrap?" + params.toString());
     if (isStaleLoadRequest(requestOptions.requestId)) {
+      return payload;
+    }
+    if (requestOptions.validateConfig && !isCurrentOttConfig(requestOptions.validateConfig)) {
       return payload;
     }
     applyOttPayload(payload, true);
@@ -2784,22 +2901,35 @@
 
   async function loadEnvelopeBootstrap(config, options) {
     const requestOptions = options || {};
+    const targetRows = Array.isArray(requestOptions.rows) && requestOptions.rows.length ? requestOptions.rows : null;
+    const bootstrapMode = targetRows && config.mode === "review" ? "review" : config.mode;
     const params = new URLSearchParams({
-      mode: config.mode,
-      window: String(config.window),
+      mode: bootstrapMode,
+      window: String(requestOptions.windowOverride || (targetRows ? targetRows.length : config.window)),
       source: config.envelopeSource,
       length: String(config.envelopeLength),
       bandwidth: String(config.envelopeBandwidth),
       mult: String(config.envelopeMult),
     });
-    if (config.mode === "review" && config.id) {
-      params.set("id", config.id);
-      if (state.review.sessionEndId != null) {
-        params.set("endId", String(state.review.sessionEndId));
+    const reviewStartId = requestOptions.startId != null
+      ? requestOptions.startId
+      : (targetRows && targetRows.length ? targetRows[0].id : config.id);
+    const reviewEndId = requestOptions.endId != null
+      ? requestOptions.endId
+      : (targetRows && targetRows.length
+        ? targetRows[targetRows.length - 1].id
+        : state.review.sessionEndId);
+    if (bootstrapMode === "review" && reviewStartId) {
+      params.set("id", String(reviewStartId));
+      if (reviewEndId != null) {
+        params.set("endId", String(reviewEndId));
       }
     }
     const payload = await fetchJson("/api/envelope/bootstrap?" + params.toString());
     if (isStaleLoadRequest(requestOptions.requestId)) {
+      return payload;
+    }
+    if (requestOptions.validateConfig && !isCurrentEnvelopeConfig(requestOptions.validateConfig)) {
       return payload;
     }
     applyEnvelopePayload(payload, true);
@@ -2829,6 +2959,9 @@
     if (isStaleLoadRequest(requestOptions.requestId)) {
       return payload;
     }
+    if (requestOptions.validateConfig && !isCurrentOttConfig(requestOptions.validateConfig)) {
+      return payload;
+    }
     applyOttPayload(payload, false);
     return payload;
   }
@@ -2855,8 +2988,165 @@
     if (isStaleLoadRequest(requestOptions.requestId)) {
       return payload;
     }
+    if (requestOptions.validateConfig && !isCurrentEnvelopeConfig(requestOptions.validateConfig)) {
+      return payload;
+    }
     applyEnvelopePayload(payload, false);
     return payload;
+  }
+
+  async function refreshZigOverlay(config, options) {
+    if (!shouldLoadZig(config)) {
+      clearZigState();
+      state.overlayDirty.zig = false;
+      setLoadStatus("zig", "Zig: off.", "info");
+      renderChart({ preserveCurrentZoom: true });
+      return null;
+    }
+    const overlayWindow = currentOverlayWindow(config);
+    if (!overlayWindow) {
+      setLoadStatus("zig", "Zig: waiting for base rows.", "info");
+      return null;
+    }
+    clearZigState();
+    markZigDirty(config);
+    setLoadStatus("zig", "Zig: loading current window...", "info");
+    renderChart({ preserveCurrentZoom: true });
+    const payload = await loadZigWindow(config, overlayWindow, {
+      requestId: options && options.requestId,
+      validateConfig: config,
+    });
+    if (!payload || !isCurrentZigConfig(config)) {
+      return payload;
+    }
+    if (config.mode === "live") {
+      const liveLastId = currentLiveLastRowId();
+      if (liveLastId > overlayWindow.endId) {
+        await loadZigNext(overlayWindow.endId, config, {
+          endId: liveLastId,
+          requestId: options && options.requestId,
+          validateConfig: config,
+        });
+        if (!isCurrentZigConfig(config)) {
+          return payload;
+        }
+      }
+    }
+    updateZigLoadStatus(state.zigStatusPayload || payload);
+    renderChart({ preserveCurrentZoom: !(options && options.resetWindow) });
+    return state.zigStatusPayload || payload;
+  }
+
+  async function refreshOttOverlay(config, options) {
+    if (!shouldLoadOtt(config)) {
+      clearOttState();
+      state.overlayDirty.ott = false;
+      setLoadStatus("ott", "OTT: off.", "info");
+      setLoadStatus("backtest", config.mode === "review" ? "Backtest: off." : "Backtest: n/a.", "info");
+      renderChart({ preserveCurrentZoom: true });
+      return null;
+    }
+    const overlayWindow = currentOverlayWindow(config);
+    if (!overlayWindow) {
+      setLoadStatus("ott", "OTT: waiting for base rows.", "info");
+      return null;
+    }
+    clearOttState();
+    markOttDirty(config);
+    setLoadStatus("ott", "OTT: loading current window...", "info");
+    if (config.mode === "review" && config.ottTrades) {
+      setLoadStatus("backtest", "Backtest: checking cache...", "info");
+    } else {
+      setLoadStatus("backtest", config.mode === "review" ? "Backtest: off." : "Backtest: n/a.", "info");
+    }
+    renderChart({ preserveCurrentZoom: true });
+    const payload = await loadOttBootstrap(config, {
+      rows: overlayWindow.rows,
+      startId: overlayWindow.startId,
+      endId: overlayWindow.endId,
+      windowOverride: overlayWindow.window,
+      requestId: options && options.requestId,
+      validateConfig: config,
+    });
+    if (!payload || !isCurrentOttConfig(config)) {
+      return payload;
+    }
+    if (config.mode === "live") {
+      const liveLastId = currentLiveLastRowId();
+      const payloadLastId = payload.lastId != null ? payload.lastId : overlayWindow.endId;
+      if (liveLastId > payloadLastId) {
+        await loadOttNext(payloadLastId, config, {
+          endId: liveLastId,
+          requestId: options && options.requestId,
+          validateConfig: config,
+        });
+        if (!isCurrentOttConfig(config)) {
+          return payload;
+        }
+      }
+    }
+    updateOttLoadStatus(state.ottStatusPayload || payload);
+    renderChart({ preserveCurrentZoom: !(options && options.resetWindow) });
+    if (config.mode === "review" && config.ottTrades) {
+      try {
+        const overlayPayload = await loadBacktestOverlay(config, overlayWindow.rows, { silentStatus: true });
+        if (overlayPayload && isCurrentOttConfig(config)) {
+          renderChart({ preserveCurrentZoom: true });
+        }
+      } catch (error) {
+        if (!isAbortError(error) && isCurrentOttConfig(config)) {
+          renderLoadStatus();
+        }
+      }
+    }
+    return state.ottStatusPayload || payload;
+  }
+
+  async function refreshEnvelopeOverlay(config, options) {
+    if (!shouldLoadEnvelope(config)) {
+      clearEnvelopeState();
+      state.overlayDirty.envelope = false;
+      setLoadStatus("envelope", "Envelope: off.", "info");
+      renderChart({ preserveCurrentZoom: true });
+      return null;
+    }
+    const overlayWindow = currentOverlayWindow(config);
+    if (!overlayWindow) {
+      setLoadStatus("envelope", "Envelope: waiting for base rows.", "info");
+      return null;
+    }
+    clearEnvelopeState();
+    markEnvelopeDirty(config);
+    setLoadStatus("envelope", "Envelope: loading current window...", "info");
+    renderChart({ preserveCurrentZoom: true });
+    const payload = await loadEnvelopeBootstrap(config, {
+      rows: overlayWindow.rows,
+      startId: overlayWindow.startId,
+      endId: overlayWindow.endId,
+      windowOverride: overlayWindow.window,
+      requestId: options && options.requestId,
+      validateConfig: config,
+    });
+    if (!payload || !isCurrentEnvelopeConfig(config)) {
+      return payload;
+    }
+    if (config.mode === "live") {
+      const liveLastId = currentLiveLastRowId();
+      const payloadLastId = payload.lastId != null ? payload.lastId : overlayWindow.endId;
+      if (liveLastId > payloadLastId) {
+        await loadEnvelopeNext(payloadLastId, config, {
+          endId: liveLastId,
+          requestId: options && options.requestId,
+          validateConfig: config,
+        });
+        if (!isCurrentEnvelopeConfig(config)) {
+          return payload;
+        }
+      }
+    }
+    updateEnvelopeLoadStatus(state.envelopeStatusPayload || payload);
+    renderChart({ preserveCurrentZoom: !(options && options.resetWindow) });
+    return state.envelopeStatusPayload || payload;
   }
 
   async function runBacktest(config, force) {
@@ -3292,7 +3582,7 @@
       }
       if (shouldIncrementallyLoadOtt(config)) {
         overlayRequests.push(
-          loadOttNext(previousLastId, config, { requestId }).catch((error) => {
+          loadOttNext(previousLastId, config, { endId: liveLastId, requestId }).catch((error) => {
             status("Live OTT: " + (error.message || "incremental update failed."), true);
             return null;
           })
@@ -3300,7 +3590,7 @@
       }
       if (shouldIncrementallyLoadEnvelope(config)) {
         overlayRequests.push(
-          loadEnvelopeNext(previousLastId, config, { requestId }).catch((error) => {
+          loadEnvelopeNext(previousLastId, config, { endId: liveLastId, requestId }).catch((error) => {
             status("Live Envelope: " + (error.message || "incremental update failed."), true);
             return null;
           })
@@ -3412,67 +3702,58 @@
       renderLoadStatus();
 
       if (config.mode === "live") {
-        if (shouldLoadZig(config)) {
-          try {
-            const zigRange = loadedRows.length ? {
-              startId: loadedRows[0].id,
-              endId: loadedRows[loadedRows.length - 1].id,
-            } : null;
-            const zigPayload = await loadZigWindow(config, zigRange, { requestId });
-            if (isStaleLoadRequest(requestId)) {
-              return;
-            }
-            updateZigLoadStatus(zigPayload);
-            renderChart({ preserveCurrentZoom: true });
-          } catch (error) {
-            if (isStaleLoadRequest(requestId)) {
-              return;
-            }
-            clearZigState();
-            setLoadStatus("zig", "Zig: " + (error.message || "window load failed."), "error", { silent: true });
-          }
-        } else {
+        if (!shouldLoadZig(config)) {
           state.overlayDirty.zig = false;
           setLoadStatus("zig", "Zig: off.", "info", { silent: true });
         }
-
-        if (shouldLoadOtt(config)) {
-          try {
-            const ottPayload = await loadOttBootstrap(config, { requestId });
-            if (isStaleLoadRequest(requestId)) {
-              return;
-            }
-            updateOttLoadStatus(ottPayload);
-            renderChart({ preserveCurrentZoom: true });
-          } catch (error) {
-            if (isStaleLoadRequest(requestId)) {
-              return;
-            }
-            clearOttState();
-            setLoadStatus("ott", "OTT: " + (error.message || "bootstrap failed."), "error", { silent: true });
-          }
-        }
-
-        if (shouldLoadEnvelope(config)) {
-          try {
-            const envelopePayload = await loadEnvelopeBootstrap(config, { requestId });
-            if (isStaleLoadRequest(requestId)) {
-              return;
-            }
-            updateEnvelopeLoadStatus(envelopePayload);
-            renderChart({ preserveCurrentZoom: true });
-          } catch (error) {
-            if (isStaleLoadRequest(requestId)) {
-              return;
-            }
-            clearEnvelopeState();
-            setLoadStatus("envelope", "Envelope: " + (error.message || "bootstrap failed."), "error", { silent: true });
-          }
-        }
-
-        renderLoadStatus();
         if (config.run === "run") {
           connectStream(livePayload.lastId || 0, config.window);
+        }
+        const overlayLoads = [];
+        if (shouldLoadZig(config)) {
+          overlayLoads.push(
+            refreshZigOverlay(config, { requestId }).catch((error) => {
+              if (isStaleLoadRequest(requestId)) {
+                return null;
+              }
+              clearZigState();
+              setLoadStatus("zig", "Zig: " + (error.message || "window load failed."), "error", { silent: true });
+              return null;
+            })
+          );
+        }
+        if (shouldLoadOtt(config)) {
+          overlayLoads.push(
+            refreshOttOverlay(config, { requestId }).catch((error) => {
+              if (isStaleLoadRequest(requestId)) {
+                return null;
+              }
+              clearOttState();
+              setLoadStatus("ott", "OTT: " + (error.message || "bootstrap failed."), "error", { silent: true });
+              return null;
+            })
+          );
+        }
+        if (shouldLoadEnvelope(config)) {
+          overlayLoads.push(
+            refreshEnvelopeOverlay(config, { requestId }).catch((error) => {
+              if (isStaleLoadRequest(requestId)) {
+                return null;
+              }
+              clearEnvelopeState();
+              setLoadStatus("envelope", "Envelope: " + (error.message || "bootstrap failed."), "error", { silent: true });
+              return null;
+            })
+          );
+        }
+        if (overlayLoads.length) {
+          Promise.allSettled(overlayLoads).finally(() => {
+            if (!isStaleLoadRequest(requestId)) {
+              renderLoadStatus();
+            }
+          });
+        } else {
+          renderLoadStatus();
         }
         return;
       }
@@ -3673,14 +3954,17 @@
     control.addEventListener("change", () => {
       const config = currentConfig();
       writeQuery(config);
-      clearZigState();
-      markZigDirty(config);
-      setLoadStatus(
-        "zig",
-        shouldLoadZig(config) ? "Zig: settings changed. Click Load." : "Zig: off.",
-        "info"
-      );
-      renderChart({ preserveCurrentZoom: true });
+      if (!shouldLoadZig(config)) {
+        clearZigState();
+        state.overlayDirty.zig = false;
+        setLoadStatus("zig", "Zig: off.", "info");
+        renderChart({ preserveCurrentZoom: true });
+        return;
+      }
+      refreshZigOverlay(config).catch((error) => {
+        clearZigState();
+        setLoadStatus("zig", "Zig: " + (error.message || "window load failed."), "error");
+      });
     });
   });
 
@@ -3702,20 +3986,15 @@
       state.overlayDirty.ott = false;
       setLoadStatus("ott", "OTT: off.", "info");
       setLoadStatus("backtest", config.mode === "review" ? "Backtest: off." : "Backtest: n/a.", "info");
-    } else if (state.overlayDirty.ott) {
-      setLoadStatus("ott", "OTT: settings changed. Click Load.", "info");
-    } else if (state.ottStatusPayload) {
-      updateOttLoadStatus(state.ottStatusPayload);
-    } else {
-      setLoadStatus("ott", "OTT: click Load to fetch.", "info");
-      setLoadStatus(
-        "backtest",
-        config.mode === "review" && config.ottTrades ? "Backtest: click Load or Run Backtest." : "Backtest: off.",
-        "info"
-      );
+      syncReviewVisibleRange(config, { preserveCurrentZoom: true, skipRender: true });
+      renderChart({ preserveCurrentZoom: true });
+      return;
     }
     syncReviewVisibleRange(config, { preserveCurrentZoom: true, skipRender: true });
-    renderChart({ preserveCurrentZoom: true });
+    refreshOttOverlay(config).catch((error) => {
+      clearOttState();
+      setLoadStatus("ott", "OTT: " + (error.message || "bootstrap failed."), "error");
+    });
   });
 
   bindSegment(elements.envelopeToggle, (value) => {
@@ -3726,14 +4005,13 @@
       clearEnvelopeState();
       state.overlayDirty.envelope = false;
       setLoadStatus("envelope", "Envelope: off.", "info");
-    } else if (state.overlayDirty.envelope) {
-      setLoadStatus("envelope", "Envelope: settings changed. Click Load.", "info");
-    } else if (state.envelopeStatusPayload) {
-      updateEnvelopeLoadStatus(state.envelopeStatusPayload);
-    } else {
-      setLoadStatus("envelope", "Envelope: click Load to fetch.", "info");
+      renderChart({ preserveCurrentZoom: true });
+      return;
     }
-    renderChart({ preserveCurrentZoom: true });
+    refreshEnvelopeOverlay(config).catch((error) => {
+      clearEnvelopeState();
+      setLoadStatus("envelope", "Envelope: " + (error.message || "bootstrap failed."), "error");
+    });
   });
 
   elements.seriesSelector.querySelectorAll("button").forEach((button) => {
@@ -3801,17 +4079,16 @@
       writeQuery(config);
       clearOttState();
       markOttDirty(config);
-      setLoadStatus(
-        "ott",
-        shouldLoadOtt(config) ? "OTT: settings changed. Click Load." : "OTT: off.",
-        "info"
-      );
-      if (config.mode === "review" && config.ottEnabled && config.ottTrades) {
-        setLoadStatus("backtest", "Backtest: settings changed. Click Load or Run Backtest.", "info");
-      } else {
+      if (!shouldLoadOtt(config)) {
+        setLoadStatus("ott", "OTT: off.", "info");
         setLoadStatus("backtest", config.mode === "review" ? "Backtest: off." : "Backtest: n/a.", "info");
+        renderChart({ preserveCurrentZoom: true });
+        return;
       }
-      renderChart({ preserveCurrentZoom: true });
+      refreshOttOverlay(config).catch((error) => {
+        clearOttState();
+        setLoadStatus("ott", "OTT: " + (error.message || "bootstrap failed."), "error");
+      });
     });
   });
 
@@ -3855,12 +4132,15 @@
       writeQuery(config);
       clearEnvelopeState();
       markEnvelopeDirty(config);
-      setLoadStatus(
-        "envelope",
-        shouldLoadEnvelope(config) ? "Envelope: settings changed. Click Load." : "Envelope: off.",
-        "info"
-      );
-      renderChart({ preserveCurrentZoom: true });
+      if (!shouldLoadEnvelope(config)) {
+        setLoadStatus("envelope", "Envelope: off.", "info");
+        renderChart({ preserveCurrentZoom: true });
+        return;
+      }
+      refreshEnvelopeOverlay(config).catch((error) => {
+        clearEnvelopeState();
+        setLoadStatus("envelope", "Envelope: " + (error.message || "bootstrap failed."), "error");
+      });
     });
   });
 
