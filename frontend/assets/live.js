@@ -51,6 +51,10 @@
   const CHART_RESIZE_RETRY_DELAY_MS = 40;
   const SIGNAL_MARKER_MIN_OFFSET = 0.18;
   const SIGNAL_MARKER_MAX_OFFSET = 1.25;
+  const STREAM_RECONNECT_BASE_DELAY_MS = 250;
+  const STREAM_RECONNECT_MAX_DELAY_MS = 3000;
+  const STREAM_STALL_THRESHOLD_MS = 12000;
+  const STREAM_MONITOR_INTERVAL_MS = 1000;
 
   const SERIES_CONFIG = {
     ask: { label: "Ask", field: "ask", color: "#ffb35c", width: 1.35 },
@@ -161,6 +165,39 @@
         envelope: DEFAULTS.envelopeSectionCollapsed,
       },
     },
+    live: {
+      reconnectTimer: 0,
+      monitorTimer: 0,
+      reconnectAttempts: 0,
+      reconnectCount: 0,
+      stallCount: 0,
+      lastActivityAtMs: 0,
+      lastHeartbeatAtMs: 0,
+      lastMessageAtMs: 0,
+      renderQueuedAtMs: 0,
+      renderCause: "",
+      connected: false,
+      lastGapCount: 0,
+      skippedCount: 0,
+      metrics: {
+        stage: "idle",
+        dbLatestId: null,
+        dbLatestTimestampMs: null,
+        fetchLatencyMs: null,
+        serializeLatencyMs: null,
+        receiveLatencyMs: null,
+        tickLagMs: null,
+        renderLatencyMs: null,
+        totalUpdateLatencyMs: null,
+        bootstrapLatencyMs: null,
+        batchSize: 0,
+      },
+      overlaySync: {
+        zig: { inFlight: false, pendingAfterId: null, pendingEndId: null },
+        ott: { inFlight: false, pendingAfterId: null, pendingEndId: null },
+        envelope: { inFlight: false, pendingAfterId: null, pendingEndId: null },
+      },
+    },
   };
 
   const elements = {
@@ -177,6 +214,7 @@
     applyButton: document.getElementById("applyButton"),
     statusLine: document.getElementById("statusLine"),
     liveMeta: document.getElementById("liveMeta"),
+    livePerf: document.getElementById("livePerf"),
     chartHost: document.getElementById("liveChart"),
     chartPanel: document.getElementById("chartPanel"),
     seriesSelector: document.getElementById("seriesSelector"),
@@ -218,6 +256,157 @@
     envelope: { body: elements.envelopeSectionBody, toggle: elements.envelopeSectionToggle },
     ott: { body: elements.ottSectionBody, toggle: elements.ottSectionToggle },
   };
+
+  function roundMetric(value) {
+    return typeof value === "number" && Number.isFinite(value) ? Math.round(value * 100) / 100 : null;
+  }
+
+  function resetLiveOverlaySync() {
+    Object.keys(state.live.overlaySync).forEach((key) => {
+      state.live.overlaySync[key].inFlight = false;
+      state.live.overlaySync[key].pendingAfterId = null;
+      state.live.overlaySync[key].pendingEndId = null;
+    });
+  }
+
+  function resetLiveMetrics() {
+    state.live.connected = false;
+    state.live.reconnectAttempts = 0;
+    state.live.reconnectCount = 0;
+    state.live.stallCount = 0;
+    state.live.lastActivityAtMs = 0;
+    state.live.lastHeartbeatAtMs = 0;
+    state.live.lastMessageAtMs = 0;
+    state.live.renderQueuedAtMs = 0;
+    state.live.renderCause = "";
+    state.live.lastGapCount = 0;
+    state.live.skippedCount = 0;
+    state.live.metrics = {
+      stage: "idle",
+      dbLatestId: null,
+      dbLatestTimestampMs: null,
+      fetchLatencyMs: null,
+      serializeLatencyMs: null,
+      receiveLatencyMs: null,
+      tickLagMs: null,
+      renderLatencyMs: null,
+      totalUpdateLatencyMs: null,
+      bootstrapLatencyMs: null,
+      batchSize: 0,
+    };
+    renderLivePerf();
+  }
+
+  function renderLivePerf() {
+    if (!elements.livePerf) {
+      return;
+    }
+    const metrics = state.live.metrics;
+    const parts = [
+      "Stream " + (state.live.connected ? "up" : "down"),
+    ];
+    if (metrics.dbLatestId != null) {
+      parts.push("DB " + metrics.dbLatestId);
+    }
+    if (metrics.tickLagMs != null) {
+      parts.push("Tick lag " + roundMetric(metrics.tickLagMs) + "ms");
+    }
+    if (metrics.bootstrapLatencyMs != null) {
+      parts.push("Load " + roundMetric(metrics.bootstrapLatencyMs) + "ms");
+    }
+    if (metrics.fetchLatencyMs != null) {
+      parts.push("Fetch " + roundMetric(metrics.fetchLatencyMs) + "ms");
+    }
+    if (metrics.serializeLatencyMs != null) {
+      parts.push("Serialize " + roundMetric(metrics.serializeLatencyMs) + "ms");
+    }
+    if (metrics.receiveLatencyMs != null) {
+      parts.push("Wire " + roundMetric(metrics.receiveLatencyMs) + "ms");
+    }
+    if (metrics.renderLatencyMs != null) {
+      parts.push("Render " + roundMetric(metrics.renderLatencyMs) + "ms");
+    }
+    if (metrics.totalUpdateLatencyMs != null) {
+      parts.push("Update " + roundMetric(metrics.totalUpdateLatencyMs) + "ms");
+    }
+    if (metrics.batchSize) {
+      parts.push("Batch " + metrics.batchSize);
+    }
+    if (state.live.reconnectCount) {
+      parts.push("Reconnects " + state.live.reconnectCount);
+    }
+    if (state.live.stallCount) {
+      parts.push("Stalls " + state.live.stallCount);
+    }
+    if (state.live.skippedCount) {
+      parts.push("Skipped " + state.live.skippedCount);
+    }
+    if (state.live.lastGapCount) {
+      parts.push("Gap " + state.live.lastGapCount);
+    }
+    elements.livePerf.textContent = parts.join(" | ");
+  }
+
+  function updateLiveMetricsFromPayload(payload, stage) {
+    const metrics = payload && payload.metrics ? payload.metrics : payload;
+    const receivedAtMs = Date.now();
+    state.live.metrics.stage = stage || state.live.metrics.stage;
+    state.live.metrics.fetchLatencyMs = roundMetric(metrics && metrics.fetchLatencyMs);
+    state.live.metrics.serializeLatencyMs = roundMetric(metrics && metrics.serializeLatencyMs);
+    state.live.metrics.dbLatestId = metrics && metrics.dbLatestId != null ? metrics.dbLatestId : state.live.metrics.dbLatestId;
+    state.live.metrics.dbLatestTimestampMs = metrics && metrics.dbLatestTimestampMs != null
+      ? metrics.dbLatestTimestampMs
+      : state.live.metrics.dbLatestTimestampMs;
+    state.live.metrics.batchSize = payload && payload.rowCount ? payload.rowCount : 0;
+    if (metrics && metrics.serverSentAtMs) {
+      state.live.metrics.receiveLatencyMs = roundMetric(receivedAtMs - metrics.serverSentAtMs);
+    }
+    if (state.live.metrics.dbLatestTimestampMs != null) {
+      state.live.metrics.tickLagMs = roundMetric(receivedAtMs - state.live.metrics.dbLatestTimestampMs);
+    }
+    renderLivePerf();
+  }
+
+  function markLiveRenderQueued(cause) {
+    state.live.renderQueuedAtMs = performance.now();
+    state.live.renderCause = cause || "update";
+  }
+
+  function clearReconnectTimer() {
+    if (state.live.reconnectTimer) {
+      window.clearTimeout(state.live.reconnectTimer);
+      state.live.reconnectTimer = 0;
+    }
+  }
+
+  function stopStreamMonitor() {
+    if (state.live.monitorTimer) {
+      window.clearInterval(state.live.monitorTimer);
+      state.live.monitorTimer = 0;
+    }
+  }
+
+  function startStreamMonitor() {
+    if (state.live.monitorTimer) {
+      return;
+    }
+    state.live.monitorTimer = window.setInterval(() => {
+      if (state.currentMode !== "live" || state.currentRun !== "run" || !state.source) {
+        return;
+      }
+      if (!state.live.lastActivityAtMs) {
+        return;
+      }
+      const idleMs = Date.now() - state.live.lastActivityAtMs;
+      if (idleMs < STREAM_STALL_THRESHOLD_MS) {
+        return;
+      }
+      state.live.stallCount += 1;
+      renderLivePerf();
+      status("Live: stream stalled. Reconnecting...", true);
+      reconnectStream(currentLiveLastRowId(), currentConfig().window);
+    }, STREAM_MONITOR_INTERVAL_MS);
+  }
 
   function currentChartHost() {
     return elements.chartHost && elements.chartHost.isConnected ? elements.chartHost : null;
@@ -1056,7 +1245,7 @@
           // Ignore stale instance disposal failures while taking ownership of the host.
         }
       }
-      state.chart = echarts.init(host, null, { renderer: "canvas" });
+      state.chart = echarts.init(host, null, { renderer: "canvas", useDirtyRect: true });
       state.chart.on("datazoom", () => {
         updateVisibleZoomFromChart();
         applyVisibleYAxis();
@@ -2181,6 +2370,7 @@
   }
 
   function renderChart(options, renderOptions) {
+    const renderStartedAt = performance.now();
     const host = currentChartHost();
     if (!host || !chartHostHasSize(host)) {
       scheduleChartRender(options);
@@ -2218,7 +2408,10 @@
     state.visibleSpanMs = Math.max(1000, targetZoom.endMs - targetZoom.startMs);
 
     try {
-      resetChartInteractionState(chart);
+      const shouldResetInteraction = Boolean(options && options.resetWindow) || state.currentMode !== "live";
+      if (shouldResetInteraction) {
+        resetChartInteractionState(chart);
+      }
       chart.setOption({
         animation: false,
         backgroundColor: "transparent",
@@ -2278,7 +2471,8 @@
         ],
         series: chartSeries,
       }, {
-        notMerge: true,
+        notMerge: false,
+        replaceMerge: ["series"],
         lazyUpdate: Boolean(renderOptions && renderOptions.fromScheduler),
       });
     } catch (error) {
@@ -2292,13 +2486,28 @@
     }
 
     requestChartResize({ remainingAttempts: CHART_RESIZE_RETRY_LIMIT });
+    state.live.metrics.renderLatencyMs = roundMetric(performance.now() - renderStartedAt);
+    if (state.live.renderQueuedAtMs) {
+      state.live.metrics.totalUpdateLatencyMs = roundMetric(performance.now() - state.live.renderQueuedAtMs);
+      state.live.renderQueuedAtMs = 0;
+      state.live.renderCause = "";
+    }
     buildMetaText();
+    renderLivePerf();
   }
 
-  function closeStream() {
+  function closeStream(options) {
     if (state.source) {
       state.source.close();
       state.source = null;
+    }
+    state.live.connected = false;
+    renderLivePerf();
+    if (!options || !options.keepReconnectTimer) {
+      clearReconnectTimer();
+    }
+    if (state.currentMode !== "live" || state.currentRun !== "run") {
+      stopStreamMonitor();
     }
   }
 
@@ -3539,8 +3748,94 @@
     status("Review: playback running at " + state.review.playbackSpeed + "x.", false);
   }
 
+  function queueLiveOverlaySync(kind, afterId, endId, config, requestId) {
+    const syncState = state.live.overlaySync[kind];
+    if (!syncState || afterId == null || endId == null || endId <= afterId) {
+      return;
+    }
+    syncState.pendingAfterId = syncState.pendingAfterId == null
+      ? afterId
+      : Math.min(syncState.pendingAfterId, afterId);
+    syncState.pendingEndId = syncState.pendingEndId == null
+      ? endId
+      : Math.max(syncState.pendingEndId, endId);
+    if (!syncState.inFlight) {
+      runLiveOverlaySync(kind, config, requestId);
+    }
+  }
+
+  async function runLiveOverlaySync(kind, config, requestId) {
+    const syncState = state.live.overlaySync[kind];
+    if (!syncState || syncState.inFlight) {
+      return;
+    }
+    syncState.inFlight = true;
+    try {
+      while (syncState.pendingAfterId != null && syncState.pendingEndId != null) {
+        const nextAfterId = syncState.pendingAfterId;
+        const nextEndId = syncState.pendingEndId;
+        syncState.pendingAfterId = null;
+        syncState.pendingEndId = null;
+
+        try {
+          let payload = null;
+          if (kind === "zig") {
+            payload = await loadZigNext(nextAfterId, config, { endId: nextEndId, requestId });
+            if (!isStaleLoadRequest(requestId) && isCurrentZigConfig(config)) {
+              updateZigLoadStatus(payload);
+            }
+          } else if (kind === "ott") {
+            payload = await loadOttNext(nextAfterId, config, { endId: nextEndId, requestId });
+            if (!isStaleLoadRequest(requestId) && isCurrentOttConfig(config)) {
+              updateOttLoadStatus(payload || state.ottStatusPayload);
+            }
+          } else if (kind === "envelope") {
+            payload = await loadEnvelopeNext(nextAfterId, config, { endId: nextEndId, requestId });
+            if (!isStaleLoadRequest(requestId) && isCurrentEnvelopeConfig(config)) {
+              updateEnvelopeLoadStatus(payload || state.envelopeStatusPayload);
+            }
+          }
+          if (!isStaleLoadRequest(requestId)) {
+            scheduleChartRender({ preserveCurrentZoom: true });
+          }
+        } catch (error) {
+          status(
+            "Live " + kind.charAt(0).toUpperCase() + kind.slice(1) + ": " + (error.message || "incremental update failed."),
+            true
+          );
+        }
+      }
+    } finally {
+      syncState.inFlight = false;
+    }
+  }
+
+  function scheduleStreamReconnect(afterId, windowSize) {
+    if (state.currentMode !== "live" || state.currentRun !== "run" || state.live.reconnectTimer) {
+      return;
+    }
+    const attempt = state.live.reconnectAttempts + 1;
+    state.live.reconnectAttempts = attempt;
+    state.live.reconnectCount += 1;
+    renderLivePerf();
+    const delayMs = Math.min(STREAM_RECONNECT_MAX_DELAY_MS, STREAM_RECONNECT_BASE_DELAY_MS * attempt);
+    state.live.reconnectTimer = window.setTimeout(() => {
+      state.live.reconnectTimer = 0;
+      if (state.currentMode !== "live" || state.currentRun !== "run") {
+        return;
+      }
+      connectStream(afterId, windowSize);
+    }, delayMs);
+  }
+
+  function reconnectStream(afterId, windowSize) {
+    closeStream({ keepReconnectTimer: true });
+    scheduleStreamReconnect(afterId, windowSize);
+  }
+
   function connectStream(lastId, windowSize) {
-    closeStream();
+    closeStream({ keepReconnectTimer: true });
+    clearReconnectTimer();
     if (state.currentRun !== "run" || state.currentMode !== "live") {
       return;
     }
@@ -3551,75 +3846,98 @@
     });
     const source = new EventSource("/api/live/stream?" + params.toString());
     state.source = source;
+    state.live.connected = false;
+    state.live.lastActivityAtMs = Date.now();
+    startStreamMonitor();
+
+    source.onopen = () => {
+      if (state.source !== source || isStaleLoadRequest(requestId)) {
+        return;
+      }
+      state.live.connected = true;
+      state.live.reconnectAttempts = 0;
+      state.live.lastActivityAtMs = Date.now();
+      renderLivePerf();
+    };
 
     source.onmessage = (event) => {
       if (state.source !== source || isStaleLoadRequest(requestId)) {
         return;
       }
-      const payload = JSON.parse(event.data);
+      let payload = null;
+      try {
+        payload = JSON.parse(event.data);
+      } catch (error) {
+        status("Live: invalid stream payload received.", true);
+        return;
+      }
       if (!payload.rows || !payload.rows.length) {
         return;
       }
+      state.live.connected = true;
+      state.live.lastActivityAtMs = Date.now();
+      state.live.lastMessageAtMs = state.live.lastActivityAtMs;
+      updateLiveMetricsFromPayload(payload, "stream");
 
       const config = currentConfig();
       const previousLastId = state.rows.length ? state.rows[state.rows.length - 1].id : 0;
       const newRows = payload.rows.filter((row) => row && typeof row.id === "number" && row.id > previousLastId);
+      state.live.skippedCount += Math.max(0, (payload.rowCount || 0) - newRows.length);
       if (!newRows.length) {
+        renderLivePerf();
         return;
       }
+      const gapCount = Math.max(0, (newRows[newRows.length - 1].id - previousLastId) - newRows.length);
+      state.live.lastGapCount = gapCount;
       state.rows = state.rows.concat(newRows);
       trimLiveState(config.window);
+      markLiveRenderQueued("ticks");
+      scheduleChartRender({ preserveCurrentZoom: false });
 
       const liveLastId = state.rows.length ? state.rows[state.rows.length - 1].id : previousLastId;
-      const overlayRequests = [];
       if (shouldIncrementallyLoadZig(config)) {
-        overlayRequests.push(
-          loadZigNext(previousLastId, config, { endId: liveLastId, requestId }).catch((error) => {
-            status("Live Zig: " + (error.message || "incremental update failed."), true);
-            return null;
-          })
-        );
+        queueLiveOverlaySync("zig", previousLastId, liveLastId, config, requestId);
       }
       if (shouldIncrementallyLoadOtt(config)) {
-        overlayRequests.push(
-          loadOttNext(previousLastId, config, { endId: liveLastId, requestId }).catch((error) => {
-            status("Live OTT: " + (error.message || "incremental update failed."), true);
-            return null;
-          })
-        );
+        queueLiveOverlaySync("ott", previousLastId, liveLastId, config, requestId);
       }
       if (shouldIncrementallyLoadEnvelope(config)) {
-        overlayRequests.push(
-          loadEnvelopeNext(previousLastId, config, { endId: liveLastId, requestId }).catch((error) => {
-            status("Live Envelope: " + (error.message || "incremental update failed."), true);
-            return null;
-          })
-        );
+        queueLiveOverlaySync("envelope", previousLastId, liveLastId, config, requestId);
       }
-
-      Promise.all(overlayRequests).then(() => {
-        if (state.source !== source || isStaleLoadRequest(requestId)) {
-          return;
-        }
-        const overlayState = collectOverlayMessages(config);
-        if (overlayState.messages.length) {
-          status("Live: +" + newRows.length + " row(s). " + overlayState.messages.join(" "), overlayState.hasWarning);
-        } else {
-          status("Live: +" + newRows.length + " row(s).", false);
-        }
-      }).finally(() => {
-        if (state.source !== source || isStaleLoadRequest(requestId)) {
-          return;
-        }
-        scheduleChartRender({ preserveCurrentZoom: false });
-      });
+      const overlayState = collectOverlayMessages(config);
+      if (overlayState.messages.length) {
+        status("Live: +" + newRows.length + " row(s). " + overlayState.messages.join(" "), overlayState.hasWarning);
+      } else {
+        status("Live: +" + newRows.length + " row(s).", false);
+      }
+      renderLivePerf();
     };
+
+    source.addEventListener("heartbeat", (event) => {
+      if (state.source !== source || isStaleLoadRequest(requestId)) {
+        return;
+      }
+      let payload = null;
+      try {
+        payload = JSON.parse(event.data);
+      } catch (error) {
+        status("Live: invalid heartbeat received.", true);
+        return;
+      }
+      state.live.connected = true;
+      state.live.lastActivityAtMs = Date.now();
+      state.live.lastHeartbeatAtMs = state.live.lastActivityAtMs;
+      updateLiveMetricsFromPayload(payload, "heartbeat");
+    });
 
     source.onerror = () => {
       if (state.source !== source || isStaleLoadRequest(requestId)) {
         return;
       }
+      state.live.connected = false;
+      renderLivePerf();
       status("Live: stream interrupted. Reconnecting...", true);
+      reconnectStream(currentLiveLastRowId(), currentConfig().window);
     };
   }
 
@@ -3627,6 +3945,8 @@
     const requestId = state.loadRequestId + 1;
     state.loadRequestId = requestId;
     closeStream();
+    resetLiveOverlaySync();
+    resetLiveMetrics();
     stopReviewPlayback({ silent: true });
     resetReviewState();
     clearZigState();
@@ -3647,10 +3967,13 @@
       if (config.mode === "review" && config.id) {
         params.set("id", config.id);
       }
+      const bootstrapStartedAt = performance.now();
       const livePayload = await fetchJson("/api/live/bootstrap?" + params.toString());
       if (isStaleLoadRequest(requestId)) {
         return;
       }
+      state.live.metrics.bootstrapLatencyMs = roundMetric(performance.now() - bootstrapStartedAt);
+      updateLiveMetricsFromPayload(livePayload, "bootstrap");
       const loadedRows = livePayload.rows || [];
       if (config.mode === "review") {
         state.review.bufferRows = loadedRows.slice();

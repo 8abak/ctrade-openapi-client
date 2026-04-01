@@ -79,8 +79,15 @@ DEFAULT_SQL_PREVIEW_LIMIT = 100
 MAX_SQL_PREVIEW_LIMIT = 500
 STATEMENT_TIMEOUT_MS = int(os.getenv("DATAVIS_SQL_TIMEOUT_MS", "15000"))
 LOCK_TIMEOUT_MS = int(os.getenv("DATAVIS_SQL_LOCK_TIMEOUT_MS", "3000"))
-STREAM_POLL_SECONDS = float(os.getenv("DATAVIS_STREAM_POLL_SECONDS", "1.0"))
-STREAM_KEEPALIVE_SECONDS = 15.0
+STREAM_POLL_SECONDS = max(0.02, float(os.getenv("DATAVIS_STREAM_POLL_SECONDS", "0.05")))
+STREAM_IDLE_POLL_SECONDS = max(
+    STREAM_POLL_SECONDS,
+    float(os.getenv("DATAVIS_STREAM_IDLE_POLL_SECONDS", "0.10")),
+)
+STREAM_HEARTBEAT_SECONDS = max(
+    STREAM_IDLE_POLL_SECONDS,
+    float(os.getenv("DATAVIS_STREAM_HEARTBEAT_SECONDS", "5.0")),
+)
 SQL_ADMIN_USER = os.getenv("DATAVIS_SQL_ADMIN_USER", "").strip()
 SQL_ADMIN_PASSWORD = os.getenv("DATAVIS_SQL_ADMIN_PASSWORD", "")
 SYSTEM_SCHEMAS = ("pg_catalog", "information_schema")
@@ -154,6 +161,31 @@ def serialize_value(value: Any) -> Any:
     if isinstance(value, datetime):
         return value.isoformat()
     return value
+
+
+def now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def elapsed_ms(started: float) -> float:
+    return round((time.perf_counter() - started) * 1000.0, 2)
+
+
+def serialize_metrics_payload(*, fetch_ms: float, serialize_ms: float, latest_row: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    return {
+        "serverSentAtMs": now_ms(),
+        "fetchLatencyMs": fetch_ms,
+        "serializeLatencyMs": serialize_ms,
+        "dbLatestId": latest_row.get("id") if latest_row else None,
+        "dbLatestTimestamp": serialize_value(latest_row.get("timestamp")) if latest_row else None,
+        "dbLatestTimestampMs": dt_to_ms(latest_row.get("timestamp")) if latest_row else None,
+    }
+
+
+def format_sse(payload: Dict[str, Any], *, event_name: Optional[str] = None) -> str:
+    if event_name:
+        return "event: {0}\ndata: {1}\n\n".format(event_name, json.dumps(payload))
+    return "data: {0}\n\n".format(json.dumps(payload))
 
 
 def require_sql_admin(credentials: Optional[HTTPBasicCredentials] = Depends(security)) -> str:
@@ -855,35 +887,60 @@ def fetch_bootstrap_rows(
             return [dict(row) for row in cur.fetchall()]
 
 
+def query_rows_after(
+    cur: Any,
+    after_id: int,
+    limit: int,
+    *,
+    end_id: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    if end_id is None:
+        cur.execute(
+            """
+            SELECT id, symbol, timestamp, bid, ask, mid, spread,
+                   COALESCE(mid, ROUND(((bid + ask) / 2.0)::numeric, 2)::double precision) AS price
+            FROM public.ticks
+            WHERE symbol = %s AND id > %s
+            ORDER BY id ASC
+            LIMIT %s
+            """,
+            (TICK_SYMBOL, after_id, limit),
+        )
+    else:
+        cur.execute(
+            """
+            SELECT id, symbol, timestamp, bid, ask, mid, spread,
+                   COALESCE(mid, ROUND(((bid + ask) / 2.0)::numeric, 2)::double precision) AS price
+            FROM public.ticks
+            WHERE symbol = %s AND id > %s AND id <= %s
+            ORDER BY id ASC
+            LIMIT %s
+            """,
+            (TICK_SYMBOL, after_id, end_id, limit),
+        )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def query_latest_tick(cur: Any) -> Optional[Dict[str, Any]]:
+    cur.execute(
+        """
+        SELECT id, timestamp
+        FROM public.ticks
+        WHERE symbol = %s
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (TICK_SYMBOL,),
+    )
+    row = cur.fetchone()
+    return dict(row) if row else None
+
+
 def fetch_rows_after(after_id: int, limit: int, end_id: Optional[int] = None) -> List[Dict[str, Any]]:
     limit = clamp_int(limit, 1, MAX_STREAM_BATCH)
     with db_connection(readonly=True) as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            if end_id is None:
-                cur.execute(
-                    """
-                    SELECT id, symbol, timestamp, bid, ask, mid, spread,
-                           COALESCE(mid, ROUND(((bid + ask) / 2.0)::numeric, 2)::double precision) AS price
-                    FROM public.ticks
-                    WHERE symbol = %s AND id > %s
-                    ORDER BY id ASC
-                    LIMIT %s
-                    """,
-                    (TICK_SYMBOL, after_id, limit),
-                )
-            else:
-                cur.execute(
-                    """
-                    SELECT id, symbol, timestamp, bid, ask, mid, spread,
-                           COALESCE(mid, ROUND(((bid + ask) / 2.0)::numeric, 2)::double precision) AS price
-                    FROM public.ticks
-                    WHERE symbol = %s AND id > %s AND id <= %s
-                    ORDER BY id ASC
-                    LIMIT %s
-                    """,
-                    (TICK_SYMBOL, after_id, end_id, limit),
-                )
-            return [dict(row) for row in cur.fetchall()]
+            return query_rows_after(cur, after_id, limit, end_id=end_id)
 
 
 def fetch_window_ending_at(end_id: int, window: int) -> List[Dict[str, Any]]:
@@ -1649,29 +1706,55 @@ def stream_events(after_id: int, limit: int) -> Generator[str, None, None]:
     last_id = max(0, after_id)
     limit = clamp_int(limit, 1, MAX_STREAM_BATCH)
     last_heartbeat = time.monotonic()
+    idle_sleep = STREAM_POLL_SECONDS
 
     try:
-        while True:
-            rows = fetch_rows_after(last_id, limit)
-            if rows:
-                payload_rows = [serialize_tick_row(row) for row in rows]
-                last_id = payload_rows[-1]["id"]
-                yield "data: {0}\n\n".format(
-                    json.dumps(
-                        {
+        with db_connection(readonly=True, autocommit=True) as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                while True:
+                    fetch_started = time.perf_counter()
+                    rows = query_rows_after(cur, last_id, limit)
+                    fetch_ms = elapsed_ms(fetch_started)
+                    if rows:
+                        serialize_started = time.perf_counter()
+                        payload_rows = [serialize_tick_row(row) for row in rows]
+                        serialize_ms = elapsed_ms(serialize_started)
+                        last_id = payload_rows[-1]["id"]
+                        payload = {
                             "rows": payload_rows,
                             "lastId": last_id,
                             "rowCount": len(payload_rows),
+                            "streamMode": "delta",
+                            **serialize_metrics_payload(
+                                fetch_ms=fetch_ms,
+                                serialize_ms=serialize_ms,
+                                latest_row=rows[-1],
+                            ),
                         }
-                    )
-                )
-                last_heartbeat = time.monotonic()
-            else:
-                now = time.monotonic()
-                if now - last_heartbeat >= STREAM_KEEPALIVE_SECONDS:
-                    yield ": keepalive\n\n"
-                    last_heartbeat = now
-                time.sleep(STREAM_POLL_SECONDS)
+                        yield format_sse(payload)
+                        last_heartbeat = time.monotonic()
+                        idle_sleep = STREAM_POLL_SECONDS
+                        continue
+
+                    now = time.monotonic()
+                    if now - last_heartbeat >= STREAM_HEARTBEAT_SECONDS:
+                        latest_row = query_latest_tick(cur)
+                        payload = {
+                            "rows": [],
+                            "lastId": last_id,
+                            "rowCount": 0,
+                            "streamMode": "heartbeat",
+                            "pollSleepMs": round(idle_sleep * 1000.0, 2),
+                            **serialize_metrics_payload(
+                                fetch_ms=fetch_ms,
+                                serialize_ms=0.0,
+                                latest_row=latest_row,
+                            ),
+                        }
+                        yield format_sse(payload, event_name="heartbeat")
+                        last_heartbeat = now
+                    time.sleep(idle_sleep)
+                    idle_sleep = STREAM_IDLE_POLL_SECONDS
     except GeneratorExit:
         return
 
@@ -1739,10 +1822,15 @@ def live_bootstrap(
     id: Optional[int] = Query(None, ge=1),
     window: int = Query(DEFAULT_WINDOW, ge=1, le=MAX_WINDOW),
 ) -> Dict[str, Any]:
+    fetch_started = time.perf_counter()
     review_bounds = fetch_tick_bounds() if mode == "review" else None
     review_end_id = review_bounds["lastId"] if review_bounds else None
     review_end_timestamp = review_bounds["lastTimestamp"] if review_bounds else None
-    rows = [serialize_tick_row(row) for row in fetch_bootstrap_rows(mode, id, window, end_id=review_end_id)]
+    raw_rows = fetch_bootstrap_rows(mode, id, window, end_id=review_end_id)
+    fetch_ms = elapsed_ms(fetch_started)
+    serialize_started = time.perf_counter()
+    rows = [serialize_tick_row(row) for row in raw_rows]
+    serialize_ms = elapsed_ms(serialize_started)
     last_row_id = rows[-1]["id"] if rows else None
     return {
         "rows": rows,
@@ -1756,6 +1844,11 @@ def live_bootstrap(
         "reviewEndId": review_end_id,
         "reviewEndTimestamp": serialize_value(review_end_timestamp),
         "endReached": bool(mode == "review" and review_end_id is not None and last_row_id is not None and last_row_id >= review_end_id),
+        "metrics": serialize_metrics_payload(
+            fetch_ms=fetch_ms,
+            serialize_ms=serialize_ms,
+            latest_row=raw_rows[-1] if raw_rows else None,
+        ),
     }
 
 
@@ -1765,7 +1858,12 @@ def live_next(
     limit: int = Query(250, ge=1, le=MAX_STREAM_BATCH),
     endId: Optional[int] = Query(None, ge=1),
 ) -> Dict[str, Any]:
-    rows = [serialize_tick_row(row) for row in fetch_rows_after(afterId, limit, end_id=endId)]
+    fetch_started = time.perf_counter()
+    raw_rows = fetch_rows_after(afterId, limit, end_id=endId)
+    fetch_ms = elapsed_ms(fetch_started)
+    serialize_started = time.perf_counter()
+    rows = [serialize_tick_row(row) for row in raw_rows]
+    serialize_ms = elapsed_ms(serialize_started)
     last_seen_id = rows[-1]["id"] if rows else afterId
     return {
         "rows": rows,
@@ -1773,6 +1871,11 @@ def live_next(
         "lastId": last_seen_id,
         "endId": endId,
         "endReached": bool(endId is not None and last_seen_id >= endId),
+        "metrics": serialize_metrics_payload(
+            fetch_ms=fetch_ms,
+            serialize_ms=serialize_ms,
+            latest_row=raw_rows[-1] if raw_rows else None,
+        ),
     }
 
 
