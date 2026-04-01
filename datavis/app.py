@@ -36,6 +36,23 @@ from datavis.envelope_storage import (
     fetch_envelope_sync_diagnostics,
     resolve_backfill_range,
 )
+from datavis.envelope_zig import DEFAULT_ENVELOPE_ZIG_LEVEL, EnvelopeZigConfig
+from datavis.envelope_zig_storage import (
+    fetch_envelope_zig_rows_after_confirm,
+    fetch_envelope_zig_rows_for_window,
+    fetch_envelope_zig_sync_diagnostics,
+)
+from datavis.market_profile import (
+    DEFAULT_PROFILE_BIN_SIZE,
+    DEFAULT_PROFILE_MAX_GAP_MS,
+    DEFAULT_PROFILE_SOURCE,
+    MarketProfileConfig,
+)
+from datavis.market_profile_storage import (
+    fetch_market_profile_rows_after_tick,
+    fetch_market_profile_rows_for_window,
+    fetch_market_profile_sync_diagnostics,
+)
 from datavis.ott import (
     DEFAULT_OTT_LENGTH,
     DEFAULT_OTT_MA_TYPE,
@@ -239,6 +256,24 @@ def build_ott_config(source: str, matype: str, length: int, percent: float) -> O
 def build_envelope_config(source: str, length: int, bandwidth: float, mult: float) -> EnvelopeConfig:
     try:
         return EnvelopeConfig(source=source, length=length, bandwidth=bandwidth, mult=mult).normalized()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def build_envelope_zig_config(level: str, length: int, bandwidth: float, mult: float) -> EnvelopeZigConfig:
+    try:
+        return EnvelopeZigConfig(level=level, length=length, bandwidth=bandwidth, mult=mult).normalized()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def build_market_profile_config(
+    source: str,
+    binsize: float,
+    maxgapms: int,
+) -> MarketProfileConfig:
+    try:
+        return MarketProfileConfig(source=source, binsize=binsize, maxgapms=maxgapms).normalized()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -546,6 +581,102 @@ def build_envelope_response(
     }
 
 
+def serialize_envelope_zig_row(row: Dict[str, Any], config: EnvelopeZigConfig) -> Dict[str, Any]:
+    timestamp = row["timestamp"]
+    confirm_time = row["confirmtime"]
+    basis_available = row.get("basis") is not None
+    band_available = row.get("upper") is not None and row.get("lower") is not None
+    return {
+        "tickid": row["tickid"],
+        "confirmtickid": row["confirmtickid"],
+        "sourceid": row.get("sourceid"),
+        "symbol": TICK_SYMBOL,
+        "timestamp": timestamp.isoformat(),
+        "timestampMs": dt_to_ms(timestamp),
+        "confirmtime": confirm_time.isoformat(),
+        "confirmTimeMs": dt_to_ms(confirm_time),
+        "price": row.get("price"),
+        "stored": True,
+        "available": band_available,
+        "basisAvailable": basis_available,
+        "bandAvailable": band_available,
+        "source": "zig{0}".format(config.level),
+        "level": config.level,
+        "length": config.length,
+        "bandwidth": config.bandwidth,
+        "mult": config.mult,
+        "basis": row.get("basis"),
+        "mae": row.get("mae"),
+        "upper": row.get("upper"),
+        "lower": row.get("lower"),
+    }
+
+
+def build_envelope_zig_response(
+    point_rows: List[Dict[str, Any]],
+    config: EnvelopeZigConfig,
+    *,
+    requested_end_id: Optional[int] = None,
+    after_id: Optional[int] = None,
+    range_payload: Optional[Dict[str, int]] = None,
+) -> Dict[str, Any]:
+    rows = [serialize_envelope_zig_row(row, config) for row in point_rows]
+    stored_count = len(rows)
+    basis_available_count = sum(1 for row in rows if row["basisAvailable"])
+    band_available_count = sum(1 for row in rows if row["bandAvailable"])
+    diagnostics = fetch_envelope_zig_sync_diagnostics(
+        TICK_SYMBOL,
+        config,
+        requested_end_tick_id=requested_end_id,
+    )
+    latest_stored_tick_id = diagnostics["latestStoredTickId"]
+    if not rows:
+        if latest_stored_tick_id is None:
+            status_text = "empty"
+            message = "No stored zig envelope rows exist for the requested level/length/bandwidth/mult yet. Run the zig envelope worker or backfill."
+        elif requested_end_id is not None and latest_stored_tick_id < requested_end_id:
+            status_text = "ahead"
+            message = "Stored zig envelope rows currently stop at tick {0}; requested ticks reach {1}.".format(
+                latest_stored_tick_id,
+                requested_end_id,
+            )
+        else:
+            status_text = "no-points"
+            message = "No confirmed zig envelope points matched the requested window."
+    elif band_available_count == 0:
+        status_text = "warming"
+        message = "Zig envelope basis is available, but upper/lower bands are still warming up in this window."
+    else:
+        status_text = "ok"
+        message = None
+    return {
+        "rows": rows,
+        "rowCount": len(rows),
+        "storedRowCount": stored_count,
+        "basisAvailableRowCount": basis_available_count,
+        "availableRowCount": band_available_count,
+        "missingRowCount": len(rows) - band_available_count,
+        "status": status_text,
+        "message": message,
+        "firstId": rows[0]["tickid"] if rows else None,
+        "lastId": rows[-1]["confirmtickid"] if rows else after_id,
+        "requestedEndId": requested_end_id,
+        "afterId": after_id,
+        "range": range_payload,
+        "latestStoredTickId": latest_stored_tick_id,
+        "storageFirstTickId": diagnostics["storage"]["firstTickId"],
+        "storageRowCount": diagnostics["storage"]["rowCount"],
+        "jobStateLastTickId": diagnostics["jobState"]["lastTickId"],
+        "jobStateLastConfirmTickId": diagnostics["jobState"]["lastConfirmTickId"],
+        "symbol": TICK_SYMBOL,
+        "source": "zig{0}".format(config.level),
+        "level": config.level,
+        "length": config.length,
+        "bandwidth": config.bandwidth,
+        "mult": config.mult,
+    }
+
+
 def normalize_zig_levels(raw_levels: Optional[str]) -> List[str]:
     if not raw_levels:
         return list(ZIG_LEVELS)
@@ -682,6 +813,84 @@ def summarize_zig_status(requested_end_id: Optional[int]) -> Tuple[str, Optional
             state_row,
         )
     return ("ok", None, diagnostics, state_row)
+
+
+def serialize_market_profile_row(row: Dict[str, Any], config: MarketProfileConfig) -> Dict[str, Any]:
+    session_start = row["sessionstart"]
+    session_end = row["sessionend"]
+    return {
+        "id": row["id"],
+        "symbol": row["symbol"],
+        "source": row["source"],
+        "binsize": row["binsize"],
+        "maxgapms": row["maxgapms"],
+        "sessionlabel": row["sessionlabel"],
+        "sessionstart": session_start.isoformat(),
+        "sessionend": session_end.isoformat(),
+        "sessionStartMs": dt_to_ms(session_start),
+        "sessionEndMs": dt_to_ms(session_end),
+        "status": row["status"],
+        "firsttickid": row.get("firsttickid"),
+        "lasttickid": row.get("lasttickid"),
+        "firstts": serialize_value(row.get("firstts")),
+        "lastts": serialize_value(row.get("lastts")),
+        "totalweightms": row.get("totalweightms"),
+        "totalticks": row.get("totalticks"),
+        "poc": row.get("poc"),
+        "vah": row.get("vah"),
+        "val": row.get("val"),
+        "hvns": row.get("hvns") or [],
+        "lvns": row.get("lvns") or [],
+        "configSource": config.source,
+    }
+
+
+def build_market_profile_response(
+    profile_rows: List[Dict[str, Any]],
+    config: MarketProfileConfig,
+    *,
+    requested_end_id: Optional[int] = None,
+    after_id: Optional[int] = None,
+    range_payload: Optional[Dict[str, int]] = None,
+) -> Dict[str, Any]:
+    rows = [serialize_market_profile_row(row, config) for row in profile_rows]
+    diagnostics = fetch_market_profile_sync_diagnostics(
+        TICK_SYMBOL,
+        config,
+        requested_end_tick_id=requested_end_id,
+    )
+    latest_stored_tick_id = diagnostics["latestStoredTickId"]
+    if not rows:
+        if latest_stored_tick_id is None:
+            status_text = "empty"
+            message = "No stored market profile sessions exist for the requested bin size/max gap yet. Run the market profile worker or backfill."
+        elif requested_end_id is not None and latest_stored_tick_id < requested_end_id:
+            status_text = "ahead"
+            message = "Stored market profile rows currently stop at tick {0}; requested ticks reach {1}.".format(
+                latest_stored_tick_id,
+                requested_end_id,
+            )
+        else:
+            status_text = "no-sessions"
+            message = "No market profile sessions matched the requested window."
+    else:
+        status_text = "ok"
+        message = None
+    return {
+        "rows": rows,
+        "rowCount": len(rows),
+        "status": status_text,
+        "message": message,
+        "latestStoredTickId": latest_stored_tick_id,
+        "jobStateLastTickId": diagnostics["jobState"]["lastTickId"],
+        "range": range_payload,
+        "afterId": after_id,
+        "requestedEndId": requested_end_id,
+        "symbol": TICK_SYMBOL,
+        "source": config.source,
+        "binsize": config.binsize,
+        "maxgapms": config.maxgapms,
+    }
 
 
 def build_zig_window_payload(start_id: int, end_id: int, selected_levels: List[str]) -> Dict[str, Any]:
@@ -1975,6 +2184,92 @@ def envelope_next(
         raise HTTPException(status_code=500, detail="Envelope incremental fetch failed: {0}".format(exc)) from exc
 
 
+@app.get("/api/envelopezig/window")
+def envelope_zig_window(
+    startId: Optional[int] = Query(None, ge=1),
+    endId: Optional[int] = Query(None, ge=1),
+    startTime: str = Query("", min_length=0),
+    endTime: str = Query("", min_length=0),
+    timezoneName: str = Query(DEFAULT_REVIEW_TIMEZONE, min_length=1),
+    window: int = Query(DEFAULT_WINDOW, ge=1, le=MAX_WINDOW),
+    level: str = Query(DEFAULT_ENVELOPE_ZIG_LEVEL, pattern="^(micro|med|maxi|macro)$"),
+    length: int = Query(DEFAULT_ENVELOPE_LENGTH, ge=1, le=10000),
+    bandwidth: float = Query(DEFAULT_ENVELOPE_BANDWIDTH, gt=0),
+    mult: float = Query(DEFAULT_ENVELOPE_MULT, ge=0),
+) -> Dict[str, Any]:
+    config = build_envelope_zig_config(level, length, bandwidth, mult)
+    try:
+        if startId is not None or endId is not None:
+            range_info = resolve_backfill_range(
+                TICK_SYMBOL,
+                start_id=startId,
+                end_id=endId,
+                start_time=None,
+                end_time=None,
+            )
+        elif startTime or endTime:
+            range_info = resolve_backfill_range(
+                TICK_SYMBOL,
+                start_id=None,
+                end_id=None,
+                start_time=parse_optional_timestamp(startTime, timezoneName),
+                end_time=parse_optional_timestamp(endTime, timezoneName),
+            )
+        else:
+            rows = fetch_bootstrap_rows("live", None, window)
+            if not rows:
+                raise HTTPException(status_code=404, detail="No ticks are available for the requested zig envelope window.")
+            range_info = {"starttickid": int(rows[0]["id"]), "endtickid": int(rows[-1]["id"])}
+        point_rows = fetch_envelope_zig_rows_for_window(
+            TICK_SYMBOL,
+            config,
+            start_id=int(range_info["starttickid"]),
+            end_id=int(range_info["endtickid"]),
+        )
+        return build_envelope_zig_response(
+            point_rows,
+            config,
+            requested_end_id=int(range_info["endtickid"]),
+            range_payload={
+                "startId": int(range_info["starttickid"]),
+                "endId": int(range_info["endtickid"]),
+            },
+        )
+    except HTTPException:
+        raise
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Zig envelope window fetch failed: {0}".format(exc)) from exc
+
+
+@app.get("/api/envelopezig/next")
+def envelope_zig_next(
+    afterId: int = Query(..., ge=0),
+    endId: Optional[int] = Query(None, ge=1),
+    level: str = Query(DEFAULT_ENVELOPE_ZIG_LEVEL, pattern="^(micro|med|maxi|macro)$"),
+    length: int = Query(DEFAULT_ENVELOPE_LENGTH, ge=1, le=10000),
+    bandwidth: float = Query(DEFAULT_ENVELOPE_BANDWIDTH, gt=0),
+    mult: float = Query(DEFAULT_ENVELOPE_MULT, ge=0),
+) -> Dict[str, Any]:
+    config = build_envelope_zig_config(level, length, bandwidth, mult)
+    try:
+        point_rows = fetch_envelope_zig_rows_after_confirm(
+            TICK_SYMBOL,
+            config,
+            after_confirm_tick_id=afterId,
+            end_id=endId,
+        )
+        return build_envelope_zig_response(
+            point_rows,
+            config,
+            requested_end_id=endId,
+            after_id=afterId,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Zig envelope incremental fetch failed: {0}".format(exc)) from exc
+
+
 @app.get("/api/zig/window")
 def zig_window(
     startId: Optional[int] = Query(None, ge=1),
@@ -2032,6 +2327,90 @@ def zig_next(
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail="Zig incremental fetch failed: {0}".format(exc)) from exc
+
+
+@app.get("/api/marketprofile/window")
+def market_profile_window(
+    startId: Optional[int] = Query(None, ge=1),
+    endId: Optional[int] = Query(None, ge=1),
+    startTime: str = Query("", min_length=0),
+    endTime: str = Query("", min_length=0),
+    timezoneName: str = Query(DEFAULT_REVIEW_TIMEZONE, min_length=1),
+    window: int = Query(DEFAULT_WINDOW, ge=1, le=MAX_WINDOW),
+    source: str = Query(DEFAULT_PROFILE_SOURCE, pattern="^(ask|bid|mid)$"),
+    binsize: float = Query(DEFAULT_PROFILE_BIN_SIZE, gt=0),
+    maxgapms: int = Query(DEFAULT_PROFILE_MAX_GAP_MS, ge=1),
+) -> Dict[str, Any]:
+    config = build_market_profile_config(source, binsize, maxgapms)
+    try:
+        if startId is not None or endId is not None:
+            range_info = resolve_backfill_range(
+                TICK_SYMBOL,
+                start_id=startId,
+                end_id=endId,
+                start_time=None,
+                end_time=None,
+            )
+        elif startTime or endTime:
+            range_info = resolve_backfill_range(
+                TICK_SYMBOL,
+                start_id=None,
+                end_id=None,
+                start_time=parse_optional_timestamp(startTime, timezoneName),
+                end_time=parse_optional_timestamp(endTime, timezoneName),
+            )
+        else:
+            rows = fetch_bootstrap_rows("live", None, window)
+            if not rows:
+                raise HTTPException(status_code=404, detail="No ticks are available for the requested market profile window.")
+            range_info = {"starttickid": int(rows[0]["id"]), "endtickid": int(rows[-1]["id"])}
+        profile_rows = fetch_market_profile_rows_for_window(
+            TICK_SYMBOL,
+            config,
+            start_id=int(range_info["starttickid"]),
+            end_id=int(range_info["endtickid"]),
+        )
+        return build_market_profile_response(
+            profile_rows,
+            config,
+            requested_end_id=int(range_info["endtickid"]),
+            range_payload={
+                "startId": int(range_info["starttickid"]),
+                "endId": int(range_info["endtickid"]),
+            },
+        )
+    except HTTPException:
+        raise
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Market profile window fetch failed: {0}".format(exc)) from exc
+
+
+@app.get("/api/marketprofile/next")
+def market_profile_next(
+    afterId: int = Query(..., ge=0),
+    endId: Optional[int] = Query(None, ge=1),
+    source: str = Query(DEFAULT_PROFILE_SOURCE, pattern="^(ask|bid|mid)$"),
+    binsize: float = Query(DEFAULT_PROFILE_BIN_SIZE, gt=0),
+    maxgapms: int = Query(DEFAULT_PROFILE_MAX_GAP_MS, ge=1),
+) -> Dict[str, Any]:
+    config = build_market_profile_config(source, binsize, maxgapms)
+    try:
+        profile_rows = fetch_market_profile_rows_after_tick(
+            TICK_SYMBOL,
+            config,
+            after_id=afterId,
+            end_id=endId,
+        )
+        return build_market_profile_response(
+            profile_rows,
+            config,
+            requested_end_id=endId,
+            after_id=afterId,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Market profile incremental fetch failed: {0}".format(exc)) from exc
 
 
 @app.post("/api/ott/backtest/run")

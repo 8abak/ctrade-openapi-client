@@ -10,6 +10,7 @@
     zigSectionCollapsed: false,
     ottSectionCollapsed: false,
     envelopeSectionCollapsed: false,
+    marketProfileSectionCollapsed: false,
     window: 2000,
     series: ["mid"],
     zigMicro: false,
@@ -29,10 +30,12 @@
     ottPercent: 1.4,
     ottRangePreset: "lastweek",
     envelopeEnabled: false,
+    envelopeSeries: "ticks",
     envelopeSource: "mid",
     envelopeLength: 500,
     envelopeBandwidth: 8,
     envelopeMult: 3,
+    marketProfileEnabled: false,
   };
   const SYDNEY_TIMEZONE = "Australia/Sydney";
   const REVIEW_SPEEDS = [0.5, 1, 2, 3, 5];
@@ -44,6 +47,7 @@
   const REVIEW_ZIG_RETRY_DELAY_MS = 250;
   const REVIEW_OTT_RETRY_DELAY_MS = 250;
   const REVIEW_ENVELOPE_RETRY_DELAY_MS = 250;
+  const REVIEW_MARKET_PROFILE_RETRY_DELAY_MS = 250;
   const BACKTEST_OVERLAY_TIMEOUT_MS = 8000;
   const BACKTEST_RUN_TIMEOUT_MS = 45000;
   const STRUCTURE_VIEW_TARGET_POINTS = 360;
@@ -105,6 +109,9 @@
     envelopeRows: new Map(),
     envelopeLastId: 0,
     envelopeStatusPayload: null,
+    marketProfileRows: new Map(),
+    marketProfileLastId: 0,
+    marketProfileStatusPayload: null,
     backtest: {
       overlayRequestToken: 0,
       overlayController: null,
@@ -114,6 +121,7 @@
       zig: false,
       ott: false,
       envelope: false,
+      marketProfile: false,
     },
     loadStatus: {
       chart: { text: "Window: waiting.", severity: "info" },
@@ -121,6 +129,7 @@
       zig: { text: "Zig: waiting.", severity: "info" },
       ott: { text: "OTT: off.", severity: "info" },
       envelope: { text: "Envelope: off.", severity: "info" },
+      marketProfile: { text: "Profile: off.", severity: "info" },
       backtest: { text: "Backtest: n/a.", severity: "info" },
     },
     review: {
@@ -133,6 +142,7 @@
       zigFetchPromise: null,
       ottFetchPromise: null,
       envelopeFetchPromise: null,
+      marketProfileFetchPromise: null,
       rafId: 0,
       anchorVisibleCount: 0,
       anchorTimestampMs: 0,
@@ -155,6 +165,8 @@
       lastOttRequestAt: 0,
       envelopeRequestedEndId: 0,
       lastEnvelopeRequestAt: 0,
+      marketProfileRequestedEndId: 0,
+      lastMarketProfileRequestAt: 0,
     },
     ui: {
       sidebarCollapsed: DEFAULTS.sidebarCollapsed,
@@ -163,6 +175,7 @@
         zig: DEFAULTS.zigSectionCollapsed,
         ott: DEFAULTS.ottSectionCollapsed,
         envelope: DEFAULTS.envelopeSectionCollapsed,
+        marketprofile: DEFAULTS.marketProfileSectionCollapsed,
       },
     },
     live: {
@@ -196,6 +209,7 @@
         zig: { inFlight: false, pendingAfterId: null, pendingEndId: null },
         ott: { inFlight: false, pendingAfterId: null, pendingEndId: null },
         envelope: { inFlight: false, pendingAfterId: null, pendingEndId: null },
+        marketProfile: { inFlight: false, pendingAfterId: null, pendingEndId: null },
       },
     },
   };
@@ -236,24 +250,29 @@
     ottRangePreset: document.getElementById("ottRangePreset"),
     runOttBacktestButton: document.getElementById("runOttBacktestButton"),
     envelopeToggle: document.getElementById("envelopeToggle"),
+    envelopeSeries: document.getElementById("envelopeSeries"),
     envelopeSource: document.getElementById("envelopeSource"),
     envelopeLength: document.getElementById("envelopeLength"),
     envelopeBandwidth: document.getElementById("envelopeBandwidth"),
     envelopeMult: document.getElementById("envelopeMult"),
+    marketProfileToggle: document.getElementById("marketProfileToggle"),
     controlSectionBody: document.getElementById("controlSectionBody"),
     zigSectionBody: document.getElementById("zigSectionBody"),
     ottSectionBody: document.getElementById("ottSectionBody"),
     envelopeSectionBody: document.getElementById("envelopeSectionBody"),
+    marketProfileSectionBody: document.getElementById("marketProfileSectionBody"),
     controlSectionToggle: document.getElementById("controlSectionToggle"),
     zigSectionToggle: document.getElementById("zigSectionToggle"),
     ottSectionToggle: document.getElementById("ottSectionToggle"),
     envelopeSectionToggle: document.getElementById("envelopeSectionToggle"),
+    marketProfileSectionToggle: document.getElementById("marketProfileSectionToggle"),
   };
 
   const SIDEBAR_SECTIONS = {
     control: { body: elements.controlSectionBody, toggle: elements.controlSectionToggle },
     zig: { body: elements.zigSectionBody, toggle: elements.zigSectionToggle },
     envelope: { body: elements.envelopeSectionBody, toggle: elements.envelopeSectionToggle },
+    marketprofile: { body: elements.marketProfileSectionBody, toggle: elements.marketProfileSectionToggle },
     ott: { body: elements.ottSectionBody, toggle: elements.ottSectionToggle },
   };
 
@@ -525,6 +544,7 @@
     const envelopeLength = Number.parseInt(params.get("envelopeLength"), 10);
     const envelopeBandwidth = Number.parseFloat(params.get("envelopeBandwidth"));
     const envelopeMult = Number.parseFloat(params.get("envelopeMult"));
+    const marketProfileSectionParam = params.get("marketProfileSection");
     const controlSectionParam = params.has("controlSection") ? params.get("controlSection") : params.get("primaryBar");
     const zigSectionParam = params.get("zigSection");
     const ottSectionParam = params.has("ottSection") ? params.get("ottSection") : params.get("ottBar");
@@ -540,6 +560,7 @@
       zigSectionCollapsed: parseCollapsed(zigSectionParam, DEFAULTS.zigSectionCollapsed),
       ottSectionCollapsed: parseCollapsed(ottSectionParam, DEFAULTS.ottSectionCollapsed),
       envelopeSectionCollapsed: parseCollapsed(envelopeSectionParam, DEFAULTS.envelopeSectionCollapsed),
+      marketProfileSectionCollapsed: parseCollapsed(marketProfileSectionParam, DEFAULTS.marketProfileSectionCollapsed),
       window: Number.isFinite(windowSize) && windowSize > 0 ? windowSize : DEFAULTS.window,
       series: parseSeries(params.get("series")),
       zigMicro: parseBoolean(params.get("zigMicro"), DEFAULTS.zigMicro),
@@ -559,10 +580,12 @@
       ottPercent: Number.isFinite(ottPercent) && ottPercent >= 0 ? ottPercent : DEFAULTS.ottPercent,
       ottRangePreset: params.get("ottRangePreset") === "lastweek" ? "lastweek" : DEFAULTS.ottRangePreset,
       envelopeEnabled: parseBoolean(params.get("envelope"), DEFAULTS.envelopeEnabled),
+      envelopeSeries: ["ticks", "zigmicro", "zigmed", "zigmaxi", "zigmacro"].includes(params.get("envelopeSeries")) ? params.get("envelopeSeries") : DEFAULTS.envelopeSeries,
       envelopeSource: ["ask", "bid", "mid"].includes(params.get("envelopeSource")) ? params.get("envelopeSource") : DEFAULTS.envelopeSource,
       envelopeLength: Number.isFinite(envelopeLength) && envelopeLength > 0 ? envelopeLength : DEFAULTS.envelopeLength,
       envelopeBandwidth: Number.isFinite(envelopeBandwidth) && envelopeBandwidth > 0 ? envelopeBandwidth : DEFAULTS.envelopeBandwidth,
       envelopeMult: Number.isFinite(envelopeMult) && envelopeMult >= 0 ? envelopeMult : DEFAULTS.envelopeMult,
+      marketProfileEnabled: parseBoolean(params.get("marketProfile"), DEFAULTS.marketProfileEnabled),
     };
   }
 
@@ -593,6 +616,16 @@
     elements.reviewSpeedToggle.querySelectorAll("button").forEach((button) => {
       button.classList.toggle("active", Number.parseFloat(button.dataset.value) === state.review.playbackSpeed);
     });
+  }
+
+  function syncEnvelopeSourceControl() {
+    if (!elements.envelopeSource) {
+      return;
+    }
+    const config = currentConfig();
+    const disabled = isZigEnvelopeSource(config);
+    elements.envelopeSource.disabled = disabled;
+    elements.envelopeSource.title = disabled ? "Tick price source is only used when envelope series source is ticks." : "";
   }
 
   function setSectionCollapsed(target, collapsed) {
@@ -647,6 +680,7 @@
     state.ui.sections.zig = Boolean(config.zigSectionCollapsed);
     state.ui.sections.ott = Boolean(config.ottSectionCollapsed);
     state.ui.sections.envelope = Boolean(config.envelopeSectionCollapsed);
+    state.ui.sections.marketprofile = Boolean(config.marketProfileSectionCollapsed);
     state.activeSeries = { ask: false, bid: false, mid: false };
     config.series.forEach((seriesKey) => {
       state.activeSeries[seriesKey] = true;
@@ -669,6 +703,7 @@
     elements.ottLength.value = String(config.ottLength);
     elements.ottPercent.value = String(config.ottPercent);
     elements.ottRangePreset.value = config.ottRangePreset;
+    elements.envelopeSeries.value = config.envelopeSeries;
     elements.envelopeSource.value = config.envelopeSource;
     elements.envelopeLength.value = String(config.envelopeLength);
     elements.envelopeBandwidth.value = String(config.envelopeBandwidth);
@@ -677,8 +712,10 @@
     setSegment(elements.runToggle, config.run);
     setSegment(elements.ottToggle, config.ottEnabled ? "on" : "off");
     setSegment(elements.envelopeToggle, config.envelopeEnabled ? "on" : "off");
+    setSegment(elements.marketProfileToggle, config.marketProfileEnabled ? "on" : "off");
     syncSeriesButtons();
     syncReviewSpeedButtons();
+    syncEnvelopeSourceControl();
     syncSidebarState();
     updateReviewControlState();
   }
@@ -695,6 +732,7 @@
       zigSectionCollapsed: state.ui.sections.zig,
       ottSectionCollapsed: state.ui.sections.ott,
       envelopeSectionCollapsed: state.ui.sections.envelope,
+      marketProfileSectionCollapsed: state.ui.sections.marketprofile,
       window: Math.max(1, Math.min(10000, Number.parseInt(elements.windowSize.value, 10) || DEFAULTS.window)),
       series: getActiveSeriesKeys(),
       zigMicro: elements.zigMicroToggle.checked,
@@ -714,10 +752,12 @@
       ottPercent: Math.max(0, Number.parseFloat(elements.ottPercent.value) || DEFAULTS.ottPercent),
       ottRangePreset: elements.ottRangePreset.value || DEFAULTS.ottRangePreset,
       envelopeEnabled: elements.envelopeToggle.querySelector("button.active")?.dataset.value !== "off",
+      envelopeSeries: elements.envelopeSeries.value || DEFAULTS.envelopeSeries,
       envelopeSource: elements.envelopeSource.value,
       envelopeLength: Math.max(1, Number.parseInt(elements.envelopeLength.value, 10) || DEFAULTS.envelopeLength),
       envelopeBandwidth: Math.max(0.1, Number.parseFloat(elements.envelopeBandwidth.value) || DEFAULTS.envelopeBandwidth),
       envelopeMult: Math.max(0, Number.parseFloat(elements.envelopeMult.value) || DEFAULTS.envelopeMult),
+      marketProfileEnabled: elements.marketProfileToggle.querySelector("button.active")?.dataset.value !== "off",
     };
   }
 
@@ -732,6 +772,7 @@
     params.set("zigSection", config.zigSectionCollapsed ? "1" : "0");
     params.set("ottSection", config.ottSectionCollapsed ? "1" : "0");
     params.set("envelopeSection", config.envelopeSectionCollapsed ? "1" : "0");
+    params.set("marketProfileSection", config.marketProfileSectionCollapsed ? "1" : "0");
     params.set("series", config.series.join(","));
     params.set("zigMicro", config.zigMicro ? "1" : "0");
     params.set("zigMed", config.zigMed ? "1" : "0");
@@ -750,10 +791,12 @@
     params.set("ottPercent", String(config.ottPercent));
     params.set("ottRangePreset", config.ottRangePreset);
     params.set("envelope", config.envelopeEnabled ? "1" : "0");
+    params.set("envelopeSeries", config.envelopeSeries);
     params.set("envelopeSource", config.envelopeSource);
     params.set("envelopeLength", String(config.envelopeLength));
     params.set("envelopeBandwidth", String(config.envelopeBandwidth));
     params.set("envelopeMult", String(config.envelopeMult));
+    params.set("marketProfile", config.marketProfileEnabled ? "1" : "0");
     if (config.id) {
       params.set("id", config.id);
     }
@@ -778,7 +821,7 @@
   }
 
   function renderLoadStatus() {
-    const parts = ["chart", "activity", "zig", "ott", "envelope", "backtest"]
+    const parts = ["chart", "activity", "zig", "ott", "envelope", "marketProfile", "backtest"]
       .map((key) => state.loadStatus[key])
       .filter((entry) => entry && entry.text);
     elements.statusLine.textContent = parts.map((entry) => entry.text).join(" | ") || "Ready.";
@@ -798,6 +841,7 @@
     setLoadStatus("zig", shouldLoadZig(config) ? "Zig: loading..." : "Zig: off.", "info", { silent: true });
     setLoadStatus("ott", shouldLoadOtt(config) ? "OTT: loading..." : "OTT: off.", "info", { silent: true });
     setLoadStatus("envelope", shouldLoadEnvelope(config) ? "Envelope: loading..." : "Envelope: off.", "info", { silent: true });
+    setLoadStatus("marketProfile", shouldLoadMarketProfile(config) ? "Profile: loading..." : "Profile: off.", "info", { silent: true });
     if (config.mode === "review") {
       setLoadStatus(
         "backtest",
@@ -878,6 +922,23 @@
       return;
     }
     const config = currentConfig();
+    if (isZigEnvelopeSource(config)) {
+      if (config.mode === "review") {
+        const coverage = reviewEnvelopeCoverage();
+        setLoadStatus(
+          "envelope",
+          "Envelope: zig points " + coverage.storedCount + ", bands " + coverage.bandAvailableCount + ".",
+          coverage.bandAvailableCount < coverage.storedCount ? "warn" : "info"
+        );
+        return;
+      }
+      setLoadStatus(
+        "envelope",
+        "Envelope: zig points " + Number(payload.storedRowCount || payload.rowCount || 0) + ", bands " + Number(payload.availableRowCount || 0) + ".",
+        "info"
+      );
+      return;
+    }
     if (config.mode === "review") {
       const coverage = reviewEnvelopeCoverage();
       setLoadStatus(
@@ -890,6 +951,23 @@
     const storedCount = payload.storedRowCount != null ? payload.storedRowCount : payload.rowCount;
     const bandCount = payload.availableRowCount != null ? payload.availableRowCount : storedCount;
     setLoadStatus("envelope", "Envelope: loaded " + Number(storedCount || 0) + " row(s), bands " + Number(bandCount || 0) + ".", "info");
+  }
+
+  function updateMarketProfileLoadStatus(payload) {
+    if (!payload) {
+      setLoadStatus("marketProfile", "Profile: off.", "info");
+      return;
+    }
+    if (payload.status && payload.status !== "ok") {
+      setLoadStatus(
+        "marketProfile",
+        "Profile: " + (payload.message || payload.status + "."),
+        isOverlayWarningStatus(payload.status) ? "warn" : "error"
+      );
+      return;
+    }
+    const rowCount = payload.rowCount != null ? payload.rowCount : (payload.rows || []).length;
+    setLoadStatus("marketProfile", "Profile: loaded " + Number(rowCount || 0) + " session(s).", "info");
   }
 
   function updateBacktestLoadStatus(payload) {
@@ -988,10 +1066,24 @@
   }
 
   function reviewEnvelopeCoverage() {
+    const config = currentConfig();
     const firstBufferedId = state.review.bufferRows.length ? state.review.bufferRows[0].id : null;
     const lastBufferedId = state.review.bufferRows.length
       ? state.review.bufferRows[state.review.bufferRows.length - 1].id
       : null;
+    if (isZigEnvelopeSource(config)) {
+      const zigRows = Array.from(state.envelopeRows.values())
+        .filter((row) => firstBufferedId != null && lastBufferedId != null && row.tickid >= firstBufferedId && row.tickid <= lastBufferedId);
+      return {
+        firstBufferedId,
+        lastBufferedId,
+        storedCount: zigRows.length,
+        basisAvailableCount: zigRows.filter((row) => row.basisAvailable).length,
+        bandAvailableCount: zigRows.filter((row) => row.bandAvailable).length,
+        lastStoredId: zigRows.length ? zigRows[zigRows.length - 1].tickid : null,
+        lastBandId: zigRows.filter((row) => row.bandAvailable).slice(-1)[0]?.tickid || null,
+      };
+    }
     let storedCount = 0;
     let basisAvailableCount = 0;
     let bandAvailableCount = 0;
@@ -1044,6 +1136,12 @@
       statuses.push(state.envelopeStatusPayload.status);
       if (state.envelopeStatusPayload.message) {
         messages.push(state.envelopeStatusPayload.message);
+      }
+    }
+    if (shouldLoadMarketProfile(config) && state.marketProfileStatusPayload && state.marketProfileStatusPayload.status && state.marketProfileStatusPayload.status !== "ok") {
+      statuses.push(state.marketProfileStatusPayload.status);
+      if (state.marketProfileStatusPayload.message) {
+        messages.push(state.marketProfileStatusPayload.message);
       }
     }
     if (config.mode === "review" && state.ottOverlayPayload && state.ottOverlayPayload.status && state.ottOverlayPayload.status !== "ok") {
@@ -1361,6 +1459,7 @@
     if (!state.rows.length) {
       state.ottRows.clear();
       state.envelopeRows.clear();
+      state.marketProfileRows.clear();
       Object.keys(state.zigRows).forEach((level) => {
         state.zigRows[level].clear();
       });
@@ -1370,6 +1469,11 @@
     const lastId = state.rows[state.rows.length - 1].id;
     trimNumericOverlayMap(state.ottRows, firstId, lastId);
     trimNumericOverlayMap(state.envelopeRows, firstId, lastId);
+    Array.from(state.marketProfileRows.entries()).forEach(([profileId, profile]) => {
+      if (!profile || profile.lasttickid < firstId || profile.firsttickid > lastId) {
+        state.marketProfileRows.delete(profileId);
+      }
+    });
     Object.keys(state.zigRows).forEach((level) => {
       trimZigOverlayMap(state.zigRows[level], firstId, lastId);
     });
@@ -1422,10 +1526,18 @@
     return [
       config.mode,
       config.envelopeEnabled ? "on" : "off",
+      config.envelopeSeries,
       config.envelopeSource,
       config.envelopeLength,
       config.envelopeBandwidth,
       config.envelopeMult,
+    ].join("|");
+  }
+
+  function marketProfileConfigSignature(config) {
+    return [
+      config.mode,
+      config.marketProfileEnabled ? "on" : "off",
     ].join("|");
   }
 
@@ -1439,6 +1551,18 @@
 
   function isCurrentEnvelopeConfig(config) {
     return envelopeConfigSignature(currentConfig()) === envelopeConfigSignature(config);
+  }
+
+  function isCurrentMarketProfileConfig(config) {
+    return marketProfileConfigSignature(currentConfig()) === marketProfileConfigSignature(config);
+  }
+
+  function isZigEnvelopeSource(config) {
+    return Boolean(config.envelopeSeries && config.envelopeSeries.startsWith("zig"));
+  }
+
+  function zigEnvelopeLevel(config) {
+    return isZigEnvelopeSource(config) ? config.envelopeSeries.replace("zig", "") : null;
   }
 
   function structureSeriesValue(row, seriesKey) {
@@ -1522,6 +1646,10 @@
     return config.envelopeEnabled;
   }
 
+  function shouldLoadMarketProfile(config) {
+    return Boolean(config.marketProfileEnabled);
+  }
+
   function shouldIncrementallyLoadZig(config) {
     return shouldLoadZig(config) && !state.overlayDirty.zig;
   }
@@ -1532,6 +1660,10 @@
 
   function shouldIncrementallyLoadEnvelope(config) {
     return shouldLoadEnvelope(config) && !state.overlayDirty.envelope;
+  }
+
+  function shouldIncrementallyLoadMarketProfile(config) {
+    return shouldLoadMarketProfile(config) && !state.overlayDirty.marketProfile;
   }
 
   function zigSegmentsForLevel(level, rows) {
@@ -1665,6 +1797,25 @@
         zigSegmentsForLevel(level, searchRows).forEach((segment) => {
           minPrice = Math.min(minPrice, segment.startprice, segment.endprice);
           maxPrice = Math.max(maxPrice, segment.startprice, segment.endprice);
+        });
+      });
+    }
+
+    if (shouldLoadMarketProfile(config) && searchRows.length) {
+      visibleMarketProfiles(searchRows).forEach((profile) => {
+        ["poc", "vah", "val"].forEach((field) => {
+          if (typeof profile[field] === "number") {
+            minPrice = Math.min(minPrice, profile[field]);
+            maxPrice = Math.max(maxPrice, profile[field]);
+          }
+        });
+        (profile.hvns || []).forEach((zone) => {
+          minPrice = Math.min(minPrice, zone.low, zone.high);
+          maxPrice = Math.max(maxPrice, zone.low, zone.high);
+        });
+        (profile.lvns || []).forEach((zone) => {
+          minPrice = Math.min(minPrice, zone.low, zone.high);
+          maxPrice = Math.max(maxPrice, zone.low, zone.high);
         });
       });
     }
@@ -1948,6 +2099,45 @@
     if (!shouldLoadEnvelope(config) || !rows.length || state.overlayDirty.envelope || !state.envelopeRows.size) {
       return [];
     }
+    if (isZigEnvelopeSource(config)) {
+      const firstId = rows[0].id;
+      const lastId = rows[rows.length - 1].id;
+      const zigRows = Array.from(state.envelopeRows.values())
+        .filter((row) => row.tickid >= firstId && row.tickid <= lastId)
+        .sort((left, right) => (left.confirmtickid - right.confirmtickid) || (left.tickid - right.tickid));
+      return [
+        {
+          id: "envelope-basis",
+          name: "Envelope Basis",
+          type: "line",
+          showSymbol: false,
+          smooth: false,
+          connectNulls: false,
+          data: zigRows.map((row) => [row.timestampMs, row.basisAvailable ? row.basis : null]),
+          lineStyle: { width: 1.8, color: "#f8d36c", type: "dashed", opacity: 0.96 },
+        },
+        {
+          id: "envelope-upper",
+          name: "Envelope Upper",
+          type: "line",
+          showSymbol: false,
+          smooth: false,
+          connectNulls: false,
+          data: zigRows.map((row) => [row.timestampMs, row.bandAvailable ? row.upper : null]),
+          lineStyle: { width: 1.45, color: "#5eead4", opacity: 0.9 },
+        },
+        {
+          id: "envelope-lower",
+          name: "Envelope Lower",
+          type: "line",
+          showSymbol: false,
+          smooth: false,
+          connectNulls: false,
+          data: zigRows.map((row) => [row.timestampMs, row.bandAvailable ? row.lower : null]),
+          lineStyle: { width: 1.45, color: "#fda4af", opacity: 0.9 },
+        },
+      ];
+    }
     return [
       {
         id: "envelope-basis",
@@ -1987,6 +2177,113 @@
           return [row.timestampMs, envelopeRow && envelopeRow.bandAvailable ? envelopeRow.lower : null];
         }),
         lineStyle: { width: 1.45, color: "#fda4af", opacity: 0.9 },
+      },
+    ];
+  }
+
+  function visibleMarketProfiles(rows) {
+    if (!rows.length || !state.marketProfileRows.size) {
+      return [];
+    }
+    const startMs = rows[0].timestampMs;
+    const endMs = rows[rows.length - 1].timestampMs;
+    return Array.from(state.marketProfileRows.values())
+      .filter((row) => row.sessionStartMs <= endMs && row.sessionEndMs >= startMs)
+      .sort((left, right) => (left.sessionStartMs - right.sessionStartMs) || (left.id - right.id));
+  }
+
+  function profileLineData(profiles, field) {
+    const points = [];
+    profiles.forEach((profile) => {
+      if (typeof profile[field] !== "number") {
+        return;
+      }
+      points.push([profile.sessionStartMs, profile[field]]);
+      points.push([profile.sessionEndMs, profile[field]]);
+      points.push([null, null]);
+    });
+    return points;
+  }
+
+  function profileZoneData(profiles, zoneField) {
+    const areas = [];
+    profiles.forEach((profile) => {
+      (profile[zoneField] || []).forEach((zone) => {
+        areas.push([
+          { xAxis: profile.sessionStartMs, yAxis: zone.low },
+          { xAxis: profile.sessionEndMs, yAxis: zone.high },
+        ]);
+      });
+    });
+    return areas;
+  }
+
+  function buildMarketProfileSeries(rows, config) {
+    if (!shouldLoadMarketProfile(config) || !rows.length || state.overlayDirty.marketProfile || !state.marketProfileRows.size) {
+      return [];
+    }
+    const profiles = visibleMarketProfiles(rows);
+    if (!profiles.length) {
+      return [];
+    }
+    return [
+      {
+        id: "profile-hvn-zones",
+        name: "HVN Zones",
+        type: "line",
+        data: [],
+        showSymbol: false,
+        lineStyle: { opacity: 0 },
+        emphasis: { disabled: true },
+        markArea: {
+          silent: true,
+          itemStyle: { color: "rgba(94, 234, 212, 0.08)" },
+          data: profileZoneData(profiles, "hvns"),
+        },
+      },
+      {
+        id: "profile-lvn-zones",
+        name: "LVN Zones",
+        type: "line",
+        data: [],
+        showSymbol: false,
+        lineStyle: { opacity: 0 },
+        emphasis: { disabled: true },
+        markArea: {
+          silent: true,
+          itemStyle: { color: "rgba(253, 164, 175, 0.06)" },
+          data: profileZoneData(profiles, "lvns"),
+        },
+      },
+      {
+        id: "profile-poc",
+        name: "Profile POC",
+        type: "line",
+        showSymbol: false,
+        smooth: false,
+        connectNulls: false,
+        data: profileLineData(profiles, "poc"),
+        lineStyle: { width: 2.2, color: "#f97316", opacity: 0.95 },
+      },
+      {
+        id: "profile-vah",
+        name: "Profile VAH",
+        type: "line",
+        showSymbol: false,
+        smooth: false,
+        connectNulls: false,
+        data: profileLineData(profiles, "vah"),
+        lineStyle: { width: 1.4, color: "#34d399", type: "dashed", opacity: 0.9 },
+      },
+      {
+        id: "profile-val",
+        name: "Profile VAL",
+        type: "line",
+        showSymbol: false,
+        smooth: false,
+        connectNulls: false,
+        data: profileLineData(profiles, "val"),
+        lineStyle: { width: 1.4, color: "#fb7185", type: "dashed", opacity: 0.9 },
       },
     ];
   }
@@ -2178,7 +2475,7 @@
         valueByLabel.set(label, Number(value).toFixed(2));
       });
 
-      ["Mid", "Envelope Basis", "Envelope Upper", "Envelope Lower", "Macro Zig", "Maxi Zig", "Medium Zig", "Micro Zig", "OTT", "OTT Support", "Ask", "Bid"].forEach((label) => {
+      ["Mid", "Envelope Basis", "Envelope Upper", "Envelope Lower", "Profile POC", "Profile VAH", "Profile VAL", "Macro Zig", "Maxi Zig", "Medium Zig", "Micro Zig", "OTT", "OTT Support", "Ask", "Bid"].forEach((label) => {
         if (valueByLabel.has(label)) {
           lines.push(label + ": " + valueByLabel.get(label));
           valueByLabel.delete(label);
@@ -2265,6 +2562,14 @@
     const lastEnvelope = state.envelopeRows.get(lastRow.id);
     if (lastEnvelope && lastEnvelope.basisAvailable && config.envelopeEnabled) {
       meta.push("Env " + Number(lastEnvelope.basis).toFixed(2));
+    }
+    if (config.marketProfileEnabled) {
+      const activeProfile = visibleMarketProfiles(state.rows).find((profile) => (
+        lastRow.timestampMs >= profile.sessionStartMs && lastRow.timestampMs <= profile.sessionEndMs
+      ));
+      if (activeProfile && typeof activeProfile.poc === "number") {
+        meta.push("POC " + Number(activeProfile.poc).toFixed(2));
+      }
     }
     if (config.mode === "review" && state.ottStatusPayload && state.ottStatusPayload.signalCounts) {
       meta.push(formatSignalCounts(state.ottStatusPayload.signalCounts));
@@ -2401,6 +2706,7 @@
     const displayRows = displayedRowsForView(state.rows, effectiveConfig);
     const chartSeries = buildPriceSeries(displayRows, selected)
       .concat(buildEnvelopeSeries(displayRows, config))
+      .concat(buildMarketProfileSeries(displayRows, config))
       .concat(zigSeries)
       .concat(buildOttSeries(displayRows, config));
 
@@ -2532,6 +2838,7 @@
     state.review.zigFetchPromise = null;
     state.review.ottFetchPromise = null;
     state.review.envelopeFetchPromise = null;
+    state.review.marketProfileFetchPromise = null;
     state.review.anchorVisibleCount = 0;
     state.review.anchorTimestampMs = 0;
     state.review.anchorPerfMs = 0;
@@ -2552,6 +2859,8 @@
     state.review.lastOttRequestAt = 0;
     state.review.envelopeRequestedEndId = 0;
     state.review.lastEnvelopeRequestAt = 0;
+    state.review.marketProfileRequestedEndId = 0;
+    state.review.lastMarketProfileRequestAt = 0;
   }
 
   function setReviewVisibleCount(nextCount, options) {
@@ -2677,6 +2986,15 @@
     state.review.lastEnvelopeRequestAt = 0;
   }
 
+  function clearMarketProfileState() {
+    state.marketProfileRows = new Map();
+    state.marketProfileLastId = 0;
+    state.marketProfileStatusPayload = null;
+    state.review.marketProfileFetchPromise = null;
+    state.review.marketProfileRequestedEndId = 0;
+    state.review.lastMarketProfileRequestAt = 0;
+  }
+
   function markZigDirty(config) {
     state.overlayDirty.zig = shouldLoadZig(config);
   }
@@ -2687,6 +3005,10 @@
 
   function markEnvelopeDirty(config) {
     state.overlayDirty.envelope = shouldLoadEnvelope(config);
+  }
+
+  function markMarketProfileDirty(config) {
+    state.overlayDirty.marketProfile = shouldLoadMarketProfile(config);
   }
 
   function fetchReviewZigChunk(config, options) {
@@ -2893,6 +3215,65 @@
     return state.review.envelopeFetchPromise;
   }
 
+  function fetchReviewMarketProfileChunk(config, options) {
+    if (config.mode !== "review" || !shouldIncrementallyLoadMarketProfile(config)) {
+      return Promise.resolve(null);
+    }
+    if (state.review.marketProfileFetchPromise) {
+      return state.review.marketProfileFetchPromise;
+    }
+    const requestedAfterId = options && options.afterId != null
+      ? options.afterId
+      : Math.max(0, state.review.marketProfileRequestedEndId || reviewBufferStartAfterId());
+    const effectiveAfterId = Math.max(0, requestedAfterId || 0);
+    const targetEndId = options && options.endId != null ? options.endId : state.review.lastBufferedId;
+    if (targetEndId != null && effectiveAfterId >= targetEndId) {
+      return Promise.resolve(null);
+    }
+    const nowMs = performance.now();
+    if (
+      (!options || !options.force)
+      && targetEndId != null
+      && targetEndId <= state.review.marketProfileRequestedEndId
+      && (nowMs - state.review.lastMarketProfileRequestAt) < REVIEW_MARKET_PROFILE_RETRY_DELAY_MS
+    ) {
+      return Promise.resolve(null);
+    }
+    const requestId = state.loadRequestId;
+    state.review.marketProfileRequestedEndId = Math.max(state.review.marketProfileRequestedEndId, targetEndId || 0);
+    state.review.lastMarketProfileRequestAt = nowMs;
+    setLoadStatus("marketProfile", "Profile: syncing review window...", "info");
+    buildMetaText();
+    state.review.marketProfileFetchPromise = loadMarketProfileNext(effectiveAfterId, config, {
+      endId: targetEndId,
+      requestId,
+    })
+      .then((payload) => {
+        if (isStaleLoadRequest(requestId)) {
+          return null;
+        }
+        updateMarketProfileLoadStatus(payload || state.marketProfileStatusPayload);
+        if (state.rows.length) {
+          renderChart({ preserveCurrentZoom: true });
+        }
+        return payload;
+      })
+      .catch((error) => {
+        if (isStaleLoadRequest(requestId)) {
+          return null;
+        }
+        setLoadStatus("marketProfile", "Profile: " + (error.message || "matching review chunk failed."), "error");
+        throw error;
+      })
+      .finally(() => {
+        if (!isStaleLoadRequest(requestId)) {
+          state.review.marketProfileFetchPromise = null;
+          buildMetaText();
+        }
+      });
+    return state.review.marketProfileFetchPromise;
+  }
+
   function applyZigPayload(payload, reset) {
     if (reset) {
       state.zigRows = {
@@ -2958,6 +3339,28 @@
     state.envelopeStatusPayload = payload;
     if (payload.lastId != null) {
       state.review.envelopeRequestedEndId = Math.max(state.review.envelopeRequestedEndId, payload.lastId);
+    }
+    if (state.currentMode === "live") {
+      trimLiveState(currentConfig().window);
+    }
+  }
+
+  function applyMarketProfilePayload(payload, reset) {
+    if (reset) {
+      state.marketProfileRows = new Map();
+      state.marketProfileLastId = 0;
+      state.review.marketProfileRequestedEndId = 0;
+      state.overlayDirty.marketProfile = false;
+    }
+    (payload.rows || []).forEach((row) => {
+      state.marketProfileRows.set(row.id, row);
+    });
+    state.marketProfileLastId = payload.rows && payload.rows.length
+      ? Math.max(...payload.rows.map((row) => Number(row.lasttickid || 0)))
+      : state.marketProfileLastId;
+    state.marketProfileStatusPayload = payload;
+    if (payload.requestedEndId != null) {
+      state.review.marketProfileRequestedEndId = Math.max(state.review.marketProfileRequestedEndId, payload.requestedEndId);
     }
     if (state.currentMode === "live") {
       trimLiveState(currentConfig().window);
@@ -3111,15 +3514,6 @@
   async function loadEnvelopeBootstrap(config, options) {
     const requestOptions = options || {};
     const targetRows = Array.isArray(requestOptions.rows) && requestOptions.rows.length ? requestOptions.rows : null;
-    const bootstrapMode = targetRows && config.mode === "review" ? "review" : config.mode;
-    const params = new URLSearchParams({
-      mode: bootstrapMode,
-      window: String(requestOptions.windowOverride || (targetRows ? targetRows.length : config.window)),
-      source: config.envelopeSource,
-      length: String(config.envelopeLength),
-      bandwidth: String(config.envelopeBandwidth),
-      mult: String(config.envelopeMult),
-    });
     const reviewStartId = requestOptions.startId != null
       ? requestOptions.startId
       : (targetRows && targetRows.length ? targetRows[0].id : config.id);
@@ -3128,13 +3522,42 @@
       : (targetRows && targetRows.length
         ? targetRows[targetRows.length - 1].id
         : state.review.sessionEndId);
-    if (bootstrapMode === "review" && reviewStartId) {
-      params.set("id", String(reviewStartId));
+    let payload = null;
+    if (isZigEnvelopeSource(config)) {
+      const params = new URLSearchParams({
+        level: zigEnvelopeLevel(config),
+        length: String(config.envelopeLength),
+        bandwidth: String(config.envelopeBandwidth),
+        mult: String(config.envelopeMult),
+      });
+      if (reviewStartId) {
+        params.set("startId", String(reviewStartId));
+      }
       if (reviewEndId != null) {
         params.set("endId", String(reviewEndId));
       }
+      if (!reviewStartId && !reviewEndId && !targetRows) {
+        params.set("window", String(requestOptions.windowOverride || config.window));
+      }
+      payload = await fetchJson("/api/envelopezig/window?" + params.toString());
+    } else {
+      const bootstrapMode = targetRows && config.mode === "review" ? "review" : config.mode;
+      const params = new URLSearchParams({
+        mode: bootstrapMode,
+        window: String(requestOptions.windowOverride || (targetRows ? targetRows.length : config.window)),
+        source: config.envelopeSource,
+        length: String(config.envelopeLength),
+        bandwidth: String(config.envelopeBandwidth),
+        mult: String(config.envelopeMult),
+      });
+      if (bootstrapMode === "review" && reviewStartId) {
+        params.set("id", String(reviewStartId));
+        if (reviewEndId != null) {
+          params.set("endId", String(reviewEndId));
+        }
+      }
+      payload = await fetchJson("/api/envelope/bootstrap?" + params.toString());
     }
-    const payload = await fetchJson("/api/envelope/bootstrap?" + params.toString());
     if (isStaleLoadRequest(requestOptions.requestId)) {
       return payload;
     }
@@ -3182,18 +3605,33 @@
     const requestOptions = typeof options === "number"
       ? { limitOverride: options }
       : (options || {});
-    const params = new URLSearchParams({
-      afterId: String(afterId),
-      limit: String(requestOptions.limitOverride || Math.max(50, Math.min(500, config.window))),
-      source: config.envelopeSource,
-      length: String(config.envelopeLength),
-      bandwidth: String(config.envelopeBandwidth),
-      mult: String(config.envelopeMult),
-    });
-    if (requestOptions.endId != null) {
-      params.set("endId", String(requestOptions.endId));
+    let payload = null;
+    if (isZigEnvelopeSource(config)) {
+      const params = new URLSearchParams({
+        afterId: String(afterId),
+        level: zigEnvelopeLevel(config),
+        length: String(config.envelopeLength),
+        bandwidth: String(config.envelopeBandwidth),
+        mult: String(config.envelopeMult),
+      });
+      if (requestOptions.endId != null) {
+        params.set("endId", String(requestOptions.endId));
+      }
+      payload = await fetchJson("/api/envelopezig/next?" + params.toString());
+    } else {
+      const params = new URLSearchParams({
+        afterId: String(afterId),
+        limit: String(requestOptions.limitOverride || Math.max(50, Math.min(500, config.window))),
+        source: config.envelopeSource,
+        length: String(config.envelopeLength),
+        bandwidth: String(config.envelopeBandwidth),
+        mult: String(config.envelopeMult),
+      });
+      if (requestOptions.endId != null) {
+        params.set("endId", String(requestOptions.endId));
+      }
+      payload = await fetchJson("/api/envelope/next?" + params.toString());
     }
-    const payload = await fetchJson("/api/envelope/next?" + params.toString());
     if (isStaleLoadRequest(requestOptions.requestId)) {
       return payload;
     }
@@ -3201,6 +3639,48 @@
       return payload;
     }
     applyEnvelopePayload(payload, false);
+    return payload;
+  }
+
+  async function loadMarketProfileWindow(config, range, options) {
+    if (!shouldLoadMarketProfile(config) || !range || range.startId == null || range.endId == null) {
+      return null;
+    }
+    const requestOptions = options || {};
+    const params = new URLSearchParams({
+      startId: String(range.startId),
+      endId: String(range.endId),
+    });
+    const payload = await fetchJson("/api/marketprofile/window?" + params.toString());
+    if (isStaleLoadRequest(requestOptions.requestId)) {
+      return payload;
+    }
+    if (requestOptions.validateConfig && !isCurrentMarketProfileConfig(requestOptions.validateConfig)) {
+      return payload;
+    }
+    applyMarketProfilePayload(payload, true);
+    return payload;
+  }
+
+  async function loadMarketProfileNext(afterId, config, options) {
+    if (!shouldLoadMarketProfile(config)) {
+      return null;
+    }
+    const requestOptions = options || {};
+    const params = new URLSearchParams({
+      afterId: String(afterId),
+    });
+    if (requestOptions.endId != null) {
+      params.set("endId", String(requestOptions.endId));
+    }
+    const payload = await fetchJson("/api/marketprofile/next?" + params.toString());
+    if (isStaleLoadRequest(requestOptions.requestId)) {
+      return payload;
+    }
+    if (requestOptions.validateConfig && !isCurrentMarketProfileConfig(requestOptions.validateConfig)) {
+      return payload;
+    }
+    applyMarketProfilePayload(payload, false);
     return payload;
   }
 
@@ -3356,6 +3836,48 @@
     updateEnvelopeLoadStatus(state.envelopeStatusPayload || payload);
     renderChart({ preserveCurrentZoom: !(options && options.resetWindow) });
     return state.envelopeStatusPayload || payload;
+  }
+
+  async function refreshMarketProfileOverlay(config, options) {
+    if (!shouldLoadMarketProfile(config)) {
+      clearMarketProfileState();
+      state.overlayDirty.marketProfile = false;
+      setLoadStatus("marketProfile", "Profile: off.", "info");
+      renderChart({ preserveCurrentZoom: true });
+      return null;
+    }
+    const overlayWindow = currentOverlayWindow(config);
+    if (!overlayWindow) {
+      setLoadStatus("marketProfile", "Profile: waiting for base rows.", "info");
+      return null;
+    }
+    clearMarketProfileState();
+    markMarketProfileDirty(config);
+    setLoadStatus("marketProfile", "Profile: loading current window...", "info");
+    renderChart({ preserveCurrentZoom: true });
+    const payload = await loadMarketProfileWindow(config, overlayWindow, {
+      requestId: options && options.requestId,
+      validateConfig: config,
+    });
+    if (!payload || !isCurrentMarketProfileConfig(config)) {
+      return payload;
+    }
+    if (config.mode === "live") {
+      const liveLastId = currentLiveLastRowId();
+      if (liveLastId > state.marketProfileLastId) {
+        await loadMarketProfileNext(state.marketProfileLastId, config, {
+          endId: liveLastId,
+          requestId: options && options.requestId,
+          validateConfig: config,
+        });
+        if (!isCurrentMarketProfileConfig(config)) {
+          return payload;
+        }
+      }
+    }
+    updateMarketProfileLoadStatus(state.marketProfileStatusPayload || payload);
+    renderChart({ preserveCurrentZoom: !(options && options.resetWindow) });
+    return state.marketProfileStatusPayload || payload;
   }
 
   async function runBacktest(config, force) {
@@ -3540,6 +4062,9 @@
           if (shouldIncrementallyLoadOtt(config) && reviewOttCoverage().contiguousAvailableCount < state.review.bufferRows.length) {
             fetchReviewOttChunk(config, { endId: state.review.lastBufferedId }).catch(() => null);
           }
+          if (shouldIncrementallyLoadMarketProfile(config) && state.review.marketProfileRequestedEndId < state.review.lastBufferedId) {
+            fetchReviewMarketProfileChunk(config, { endId: state.review.lastBufferedId }).catch(() => null);
+          }
           return payload;
         }
 
@@ -3567,6 +4092,9 @@
 
         if (shouldIncrementallyLoadEnvelope(config) && reviewEnvelopeCoverage().storedCount < state.review.bufferRows.length) {
           fetchReviewEnvelopeChunk(config, { endId: state.review.lastBufferedId }).catch(() => null);
+        }
+        if (shouldIncrementallyLoadMarketProfile(config) && state.review.marketProfileRequestedEndId < state.review.lastBufferedId) {
+          fetchReviewMarketProfileChunk(config, { endId: state.review.lastBufferedId }).catch(() => null);
         }
 
         if (config.ottTrades) {
@@ -3663,6 +4191,20 @@
         limitOverride: reviewPrefetchLimit(config),
       }).catch((error) => {
         status(error.message || "Envelope sync failed.", true);
+      });
+    }
+    if (
+      shouldIncrementallyLoadMarketProfile(config)
+      && state.review.marketProfileRequestedEndId < state.review.lastBufferedId
+      && (
+        remaining <= reviewPrefetchThreshold(config)
+        || (remainingPlaybackMs != null && remainingPlaybackMs <= REVIEW_PREFETCH_MIN_PLAYBACK_MS)
+      )
+    ) {
+      fetchReviewMarketProfileChunk(config, {
+        endId: state.review.lastBufferedId,
+      }).catch((error) => {
+        status(error.message || "Market profile sync failed.", true);
       });
     }
   }
@@ -3794,6 +4336,11 @@
             if (!isStaleLoadRequest(requestId) && isCurrentEnvelopeConfig(config)) {
               updateEnvelopeLoadStatus(payload || state.envelopeStatusPayload);
             }
+          } else if (kind === "marketProfile") {
+            payload = await loadMarketProfileNext(nextAfterId, config, { endId: nextEndId, requestId });
+            if (!isStaleLoadRequest(requestId) && isCurrentMarketProfileConfig(config)) {
+              updateMarketProfileLoadStatus(payload || state.marketProfileStatusPayload);
+            }
           }
           if (!isStaleLoadRequest(requestId)) {
             scheduleChartRender({ preserveCurrentZoom: true });
@@ -3902,7 +4449,10 @@
         queueLiveOverlaySync("ott", previousLastId, liveLastId, config, requestId);
       }
       if (shouldIncrementallyLoadEnvelope(config)) {
-        queueLiveOverlaySync("envelope", previousLastId, liveLastId, config, requestId);
+        queueLiveOverlaySync("envelope", isZigEnvelopeSource(config) ? state.envelopeLastId : previousLastId, liveLastId, config, requestId);
+      }
+      if (shouldIncrementallyLoadMarketProfile(config)) {
+        queueLiveOverlaySync("marketProfile", state.marketProfileLastId, liveLastId, config, requestId);
       }
       const overlayState = collectOverlayMessages(config);
       if (overlayState.messages.length) {
@@ -3952,6 +4502,7 @@
     clearZigState();
     clearOttState();
     clearEnvelopeState();
+    clearMarketProfileState();
 
     try {
       const config = await resolveReviewStart(currentConfig(), { requestId });
@@ -4005,6 +4556,10 @@
       if (!shouldLoadEnvelope(config)) {
         state.overlayDirty.envelope = false;
         setLoadStatus("envelope", "Envelope: off.", "info", { silent: true });
+      }
+      if (!shouldLoadMarketProfile(config)) {
+        state.overlayDirty.marketProfile = false;
+        setLoadStatus("marketProfile", "Profile: off.", "info", { silent: true });
       }
 
       if (config.mode !== "review") {
@@ -4065,6 +4620,18 @@
               }
               clearEnvelopeState();
               setLoadStatus("envelope", "Envelope: " + (error.message || "bootstrap failed."), "error", { silent: true });
+              return null;
+            })
+          );
+        }
+        if (shouldLoadMarketProfile(config)) {
+          overlayLoads.push(
+            refreshMarketProfileOverlay(config, { requestId }).catch((error) => {
+              if (isStaleLoadRequest(requestId)) {
+                return null;
+              }
+              clearMarketProfileState();
+              setLoadStatus("marketProfile", "Profile: " + (error.message || "window load failed."), "error", { silent: true });
               return null;
             })
           );
@@ -4135,6 +4702,22 @@
           }
           clearEnvelopeState();
           setLoadStatus("envelope", "Envelope: " + (error.message || "bootstrap failed."), "error", { silent: true });
+        }
+      }
+
+      if (shouldLoadMarketProfile(config)) {
+        try {
+          const marketProfilePayload = await loadMarketProfileWindow(config, currentOverlayWindow(config), { requestId });
+          if (isStaleLoadRequest(requestId)) {
+            return;
+          }
+          updateMarketProfileLoadStatus(marketProfilePayload);
+        } catch (error) {
+          if (isStaleLoadRequest(requestId)) {
+            return;
+          }
+          clearMarketProfileState();
+          setLoadStatus("marketProfile", "Profile: " + (error.message || "window load failed."), "error", { silent: true });
         }
       }
 
@@ -4323,6 +4906,7 @@
   bindSegment(elements.envelopeToggle, (value) => {
     setSegment(elements.envelopeToggle, value);
     const config = currentConfig();
+    syncEnvelopeSourceControl();
     writeQuery(config);
     if (!shouldLoadEnvelope(config)) {
       clearEnvelopeState();
@@ -4334,6 +4918,23 @@
     refreshEnvelopeOverlay(config).catch((error) => {
       clearEnvelopeState();
       setLoadStatus("envelope", "Envelope: " + (error.message || "bootstrap failed."), "error");
+    });
+  });
+
+  bindSegment(elements.marketProfileToggle, (value) => {
+    setSegment(elements.marketProfileToggle, value);
+    const config = currentConfig();
+    writeQuery(config);
+    if (!shouldLoadMarketProfile(config)) {
+      clearMarketProfileState();
+      state.overlayDirty.marketProfile = false;
+      setLoadStatus("marketProfile", "Profile: off.", "info");
+      renderChart({ preserveCurrentZoom: true });
+      return;
+    }
+    refreshMarketProfileOverlay(config).catch((error) => {
+      clearMarketProfileState();
+      setLoadStatus("marketProfile", "Profile: " + (error.message || "window load failed."), "error");
     });
   });
 
@@ -4445,6 +5046,7 @@
   });
 
   [
+    elements.envelopeSeries,
     elements.envelopeSource,
     elements.envelopeLength,
     elements.envelopeBandwidth,
@@ -4452,6 +5054,7 @@
   ].forEach((control) => {
     control.addEventListener("change", () => {
       const config = currentConfig();
+      syncEnvelopeSourceControl();
       writeQuery(config);
       clearEnvelopeState();
       markEnvelopeDirty(config);
@@ -4479,6 +5082,7 @@
   elements.controlSectionToggle.addEventListener("click", () => toggleSidebarSection("control"));
   elements.zigSectionToggle.addEventListener("click", () => toggleSidebarSection("zig"));
   elements.envelopeSectionToggle.addEventListener("click", () => toggleSidebarSection("envelope"));
+  elements.marketProfileSectionToggle.addEventListener("click", () => toggleSidebarSection("marketprofile"));
   elements.ottSectionToggle.addEventListener("click", () => toggleSidebarSection("ott"));
 
   elements.applyButton.addEventListener("click", () => loadData(true));

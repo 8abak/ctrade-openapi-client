@@ -32,9 +32,9 @@ The deploy workflow runs `git reset --hard origin/main` and `git clean -fd`, so 
 The deploy script:
 - activates `/home/ec2-user/venvs/datavis/bin/activate`
 - runs `pip install -r requirements.txt`
-- installs the repo-managed systemd unit files for `datavis`, `ottprocessor`, `envelopeprocessor`, and `zigzag`
+- installs the repo-managed systemd unit files for `datavis`, `ottprocessor`, `envelopeprocessor`, `zigzag`, `envelopezigprocessor`, and `marketprofile`
 - runs `systemctl daemon-reload`
-- enables and restarts `datavis`, `ottprocessor`, `envelopeprocessor`, and `zigzag`
+- enables and restarts `datavis`, `ottprocessor`, `envelopeprocessor`, `zigzag`, `envelopezigprocessor`, and `marketprofile`
 - verifies each service is active with `systemctl is-active --quiet`
 - prints `systemctl status <service> --no-pager -l` on failure
 - performs a local `curl` to `http://127.0.0.1:8000/api/health` when `curl` is available

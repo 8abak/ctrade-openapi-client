@@ -1,0 +1,17 @@
+[Unit]
+Description=datavis zig-envelope incremental processor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/home/ec2-user/cTrade
+ExecStart=/home/ec2-user/venvs/datavis/bin/python -m datavis.envelope_zig_jobs worker --symbol XAUUSD --levels all --length 500 --bandwidth 8 --mult 3 --poll-seconds 1.0 --chunk-size 500 --commit-every 500 --log-every 20
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

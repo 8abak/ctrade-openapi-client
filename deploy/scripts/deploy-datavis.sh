@@ -3,7 +3,7 @@ set -euo pipefail
 
 APP_DIR="/home/ec2-user/cTrade"
 VENV_ACTIVATE="/home/ec2-user/venvs/datavis/bin/activate"
-SERVICES=("datavis" "ottprocessor" "envelopeprocessor" "zigzag")
+SERVICES=("datavis" "ottprocessor" "envelopeprocessor" "zigzag" "envelopezigprocessor" "marketprofile")
 HEALTH_URL="http://127.0.0.1:8000/api/health"
 
 log() {

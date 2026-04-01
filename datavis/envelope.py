@@ -87,9 +87,16 @@ class EnvelopeCalculator:
             "errorhistory": list(self.error_history),
         }
 
-    def process_tick(self, row: Dict[str, Any]) -> Dict[str, Any]:
-        tickid = int(row["id"])
-        src = float(select_price(row, self.config.source))
+    def process_value(
+        self,
+        *,
+        tickid: int,
+        symbol: str,
+        timestamp: Any,
+        price: float,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        src = float(price)
         self.source_history.append(src)
 
         basis = self._basis()
@@ -105,20 +112,31 @@ class EnvelopeCalculator:
                 upper = basis + band
                 lower = basis - band
 
-        return {
+        record = {
             "tickid": tickid,
-            "symbol": row["symbol"],
+            "symbol": symbol,
             "source": self.config.source,
             "length": self.length,
             "bandwidth": self.bandwidth,
             "mult": self.mult,
-            "timestamp": row["timestamp"],
+            "timestamp": timestamp,
             "price": src,
             "basis": basis,
             "mae": mae,
             "upper": upper,
             "lower": lower,
         }
+        if extra:
+            record.update(extra)
+        return record
+
+    def process_tick(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        return self.process_value(
+            tickid=int(row["id"]),
+            symbol=row["symbol"],
+            timestamp=row["timestamp"],
+            price=float(select_price(row, self.config.source)),
+        )
 
     def _basis(self) -> Optional[float]:
         if len(self.source_history) < self.length:

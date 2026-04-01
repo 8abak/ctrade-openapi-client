@@ -174,7 +174,18 @@
               </div>
 
               <label>
-                <span>source</span>
+                <span>series source</span>
+                <select id="envelopeSeries">
+                  <option value="ticks">ticks</option>
+                  <option value="zigmicro">zigmicro</option>
+                  <option value="zigmed">zigmed</option>
+                  <option value="zigmaxi">zigmaxi</option>
+                  <option value="zigmacro">zigmacro</option>
+                </select>
+              </label>
+
+              <label>
+                <span>tick price</span>
                 <select id="envelopeSource">
                   <option value="mid">mid</option>
                   <option value="ask">ask</option>
@@ -196,6 +207,30 @@
                 <span>mult</span>
                 <input id="envelopeMult" type="number" min="0" step="0.1" inputmode="decimal" value="3">
               </label>
+            </div>
+          </div>
+        </section>
+
+        <section class="live-sidebar-section" data-section="marketprofile">
+          <button
+            class="ghost-button live-section-toggle"
+            id="marketProfileSectionToggle"
+            type="button"
+            aria-expanded="true"
+            aria-controls="marketProfileSectionBody"
+          >
+            <span class="live-section-title">Market Profile</span>
+            <span class="live-section-state">Collapse</span>
+          </button>
+          <div class="live-section-body" id="marketProfileSectionBody">
+            <div class="live-form-grid">
+              <div class="live-control-field live-control-field-wide">
+                <span>layer state</span>
+                <div class="segmented single-select" id="marketProfileToggle">
+                  <button type="button" data-value="on">Profile On</button>
+                  <button type="button" data-value="off">Profile Off</button>
+                </div>
+              </div>
             </div>
           </div>
         </section>
