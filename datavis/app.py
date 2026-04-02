@@ -641,7 +641,7 @@ def load_object_details(schema_name: str, object_name: str, object_kind: str) ->
         },
         "actions": {
             "insertSelect": "SELECT id, timestamp, bid, ask, mid, spread\nFROM public.ticks\nORDER BY id DESC\nLIMIT 100;",
-            "insertExplain": "EXPLAIN ANALYZE\nSELECT id, timestamp, bid, ask, mid, spread\nFROM public.ticks\nORDER BY id DESC\nLIMIT 100;",
+            "insertExplain": "EXPLAIN\nSELECT id, timestamp, bid, ask, mid, spread\nFROM public.ticks\nORDER BY id DESC\nLIMIT 100;",
         },
     }
 
