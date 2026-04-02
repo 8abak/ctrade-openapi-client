@@ -15,6 +15,10 @@
     bid: { label: "Bid", color: "#7ef0c7" },
   };
 
+  const REVIEW_SPEEDS = [0.5, 1, 2, 3, 5];
+  const MAX_WINDOW = 10000;
+  const ZOOM_COMPONENT_IDS = ["zoom-inside", "zoom-slider"];
+
   const state = {
     chart: null,
     rows: [],
@@ -25,9 +29,23 @@
     lastMetrics: null,
     streamConnected: false,
     hasMoreLeft: false,
+    viewport: null,
+    lastDatasetBounds: null,
+    applyingViewport: false,
+    optionalSeries: new Map(),
+    ui: {
+      sidebarCollapsed: true,
+      settingsCollapsed: true,
+    },
   };
 
   const elements = {
+    liveWorkspace: document.getElementById("liveWorkspace"),
+    sidebarToggle: document.getElementById("sidebarToggle"),
+    sidebarBackdrop: document.getElementById("sidebarBackdrop"),
+    settingsToggle: document.getElementById("settingsToggle"),
+    settingsSectionBody: document.getElementById("settingsSectionBody"),
+    settingsToggleState: document.getElementById("settingsToggleState"),
     modeToggle: document.getElementById("modeToggle"),
     runToggle: document.getElementById("runToggle"),
     seriesToggle: document.getElementById("seriesToggle"),
@@ -52,9 +70,13 @@
       series: Object.prototype.hasOwnProperty.call(SERIES_CONFIG, params.get("series")) ? params.get("series") : DEFAULTS.series,
       id: params.get("id") || DEFAULTS.id,
       reviewStart: params.get("reviewStart") || DEFAULTS.reviewStart,
-      reviewSpeed: [0.5, 1, 2, 3, 5].includes(reviewSpeed) ? reviewSpeed : DEFAULTS.reviewSpeed,
-      window: Math.max(1, Math.min(10000, Number.parseInt(params.get("window") || String(DEFAULTS.window), 10) || DEFAULTS.window)),
+      reviewSpeed: REVIEW_SPEEDS.includes(reviewSpeed) ? reviewSpeed : DEFAULTS.reviewSpeed,
+      window: sanitizeWindowValue(params.get("window")),
     };
+  }
+
+  function sanitizeWindowValue(rawValue) {
+    return Math.max(1, Math.min(MAX_WINDOW, Number.parseInt(rawValue || String(DEFAULTS.window), 10) || DEFAULTS.window));
   }
 
   function writeQuery() {
@@ -71,8 +93,7 @@
       params.set("reviewStart", config.reviewStart);
     }
     params.set("speed", String(config.reviewSpeed));
-    const nextUrl = window.location.pathname + "?" + params.toString();
-    window.history.replaceState({}, "", nextUrl);
+    window.history.replaceState({}, "", window.location.pathname + "?" + params.toString());
   }
 
   function bindSegment(container, handler) {
@@ -95,7 +116,7 @@
       id: (elements.tickId.value || "").trim(),
       reviewStart: (elements.reviewStart.value || "").trim(),
       reviewSpeed: Number.parseFloat(elements.reviewSpeedToggle.querySelector("button.active")?.dataset.value || String(DEFAULTS.reviewSpeed)),
-      window: Math.max(1, Math.min(10000, Number.parseInt(elements.windowSize.value || String(DEFAULTS.window), 10) || DEFAULTS.window)),
+      window: sanitizeWindowValue(elements.windowSize.value),
     };
   }
 
@@ -107,8 +128,40 @@
     elements.tickId.value = config.id;
     elements.reviewStart.value = config.reviewStart;
     elements.windowSize.value = String(config.window);
+    setSidebarCollapsed(true);
+    setSettingsCollapsed(true);
     updateReviewFields();
+    renderMeta();
+    renderPerf();
     writeQuery();
+  }
+
+  function setSidebarCollapsed(collapsed) {
+    state.ui.sidebarCollapsed = Boolean(collapsed);
+    elements.liveWorkspace.classList.toggle("is-sidebar-collapsed", state.ui.sidebarCollapsed);
+    elements.sidebarToggle.setAttribute("aria-expanded", String(!state.ui.sidebarCollapsed));
+    elements.sidebarToggle.setAttribute("aria-label", state.ui.sidebarCollapsed ? "Open live controls" : "Close live controls");
+    elements.sidebarBackdrop.tabIndex = state.ui.sidebarCollapsed ? -1 : 0;
+    queueChartResize();
+  }
+
+  function setSettingsCollapsed(collapsed) {
+    state.ui.settingsCollapsed = Boolean(collapsed);
+    elements.settingsSectionBody.classList.toggle("is-collapsed", state.ui.settingsCollapsed);
+    elements.settingsToggle.setAttribute("aria-expanded", String(!state.ui.settingsCollapsed));
+    elements.settingsToggleState.textContent = state.ui.settingsCollapsed ? "collapsed" : "open";
+  }
+
+  function queueChartResize() {
+    if (!state.chart) {
+      return;
+    }
+    state.chart.resize();
+    window.setTimeout(() => {
+      if (state.chart) {
+        state.chart.resize();
+      }
+    }, 220);
   }
 
   function updateReviewFields() {
@@ -130,14 +183,15 @@
       elements.liveMeta.textContent = "No ticks loaded.";
       return;
     }
+    const config = currentConfig();
     const first = state.rows[0];
     const last = state.rows[state.rows.length - 1];
     elements.liveMeta.textContent = [
-      currentConfig().mode.toUpperCase(),
-      "rows " + state.rows.length,
+      config.mode.toUpperCase(),
+      "loaded " + state.rows.length + "/" + config.window,
       "left " + first.id,
       "right " + last.id,
-      "series " + currentConfig().series,
+      "series " + config.series,
       state.hasMoreLeft ? "more-left yes" : "more-left no",
     ].join(" | ");
   }
@@ -163,16 +217,68 @@
   function ensureChart() {
     if (!state.chart) {
       state.chart = echarts.init(elements.chartHost, null, { renderer: "canvas" });
+      state.chart.setOption({
+        animation: false,
+        grid: { left: 54, right: 16, top: 14, bottom: 54 },
+        tooltip: {
+          trigger: "axis",
+          axisPointer: { type: "cross" },
+          valueFormatter: function (value) {
+            return typeof value === "number" ? value.toFixed(2) : value;
+          },
+        },
+        xAxis: {
+          type: "time",
+          axisLabel: { color: "#9eadc5" },
+        },
+        yAxis: {
+          type: "value",
+          scale: true,
+          axisLabel: { color: "#9eadc5" },
+        },
+        dataZoom: [
+          {
+            id: "zoom-inside",
+            type: "inside",
+            filterMode: "none",
+            zoomLock: false,
+          },
+          {
+            id: "zoom-slider",
+            type: "slider",
+            filterMode: "none",
+            height: 20,
+            bottom: 10,
+            borderColor: "rgba(147, 181, 255, 0.12)",
+            backgroundColor: "rgba(8, 13, 22, 0.92)",
+            fillerColor: "rgba(109, 216, 255, 0.12)",
+            handleStyle: {
+              color: "#6dd8ff",
+              borderColor: "#6dd8ff",
+            },
+          },
+        ],
+        series: [],
+      }, { notMerge: true, lazyUpdate: true });
+
+      state.chart.on("dataZoom", () => {
+        if (state.applyingViewport) {
+          return;
+        }
+        state.viewport = normalizeViewport(captureViewportFromChart(), getDatasetBounds());
+      });
+
       window.addEventListener("resize", () => {
         if (state.chart) {
           state.chart.resize();
         }
       });
     }
+
     return state.chart;
   }
 
-  function captureZoom() {
+  function captureViewportFromChart() {
     if (!state.chart) {
       return null;
     }
@@ -185,101 +291,284 @@
       return null;
     }
     return {
-      startValue: zoom.startValue,
-      endValue: zoom.endValue,
+      startValue: Number(zoom.startValue),
+      endValue: Number(zoom.endValue),
     };
   }
 
-  function restoreZoom(zoom) {
-    if (!state.chart || !zoom) {
-      return;
+  function getDatasetBounds() {
+    if (!state.rows.length) {
+      return null;
     }
-    state.chart.dispatchAction({
-      type: "dataZoom",
-      dataZoomIndex: 0,
-      startValue: zoom.startValue,
-      endValue: zoom.endValue,
-    });
-    state.chart.dispatchAction({
-      type: "dataZoom",
-      dataZoomIndex: 1,
-      startValue: zoom.startValue,
-      endValue: zoom.endValue,
+    return {
+      startValue: state.rows[0].timestampMs,
+      endValue: state.rows[state.rows.length - 1].timestampMs,
+    };
+  }
+
+  function fullViewport(bounds) {
+    if (!bounds) {
+      return null;
+    }
+    return {
+      startValue: bounds.startValue,
+      endValue: bounds.endValue,
+      span: Math.max(0, bounds.endValue - bounds.startValue),
+    };
+  }
+
+  function normalizeViewport(viewport, bounds) {
+    if (!bounds) {
+      return null;
+    }
+    if (!viewport) {
+      return fullViewport(bounds);
+    }
+
+    let startValue = Number(viewport.startValue);
+    let endValue = Number(viewport.endValue);
+    if (!Number.isFinite(startValue) || !Number.isFinite(endValue)) {
+      return fullViewport(bounds);
+    }
+    if (endValue < startValue) {
+      const swap = startValue;
+      startValue = endValue;
+      endValue = swap;
+    }
+
+    const minValue = bounds.startValue;
+    const maxValue = bounds.endValue;
+    const fullSpan = Math.max(0, maxValue - minValue);
+    let span = Math.max(0, endValue - startValue);
+
+    if (span >= fullSpan) {
+      return fullViewport(bounds);
+    }
+
+    if (startValue < minValue) {
+      endValue += minValue - startValue;
+      startValue = minValue;
+    }
+    if (endValue > maxValue) {
+      startValue -= endValue - maxValue;
+      endValue = maxValue;
+    }
+
+    startValue = Math.max(minValue, startValue);
+    endValue = Math.min(maxValue, endValue);
+
+    if (endValue < startValue) {
+      endValue = startValue;
+    }
+
+    span = Math.max(0, endValue - startValue);
+    if (span > fullSpan) {
+      return fullViewport(bounds);
+    }
+
+    return {
+      startValue,
+      endValue,
+      span,
+    };
+  }
+
+  function shiftViewportForward(viewport, previousBounds, nextBounds, shouldAdvance) {
+    if (!shouldAdvance || !viewport || !previousBounds || !nextBounds) {
+      return viewport;
+    }
+    const delta = nextBounds.endValue - previousBounds.endValue;
+    if (!Number.isFinite(delta) || delta <= 0) {
+      return viewport;
+    }
+    return {
+      startValue: viewport.startValue + delta,
+      endValue: viewport.endValue + delta,
+      span: viewport.span,
+    };
+  }
+
+  function buildDataZoomState(viewport) {
+    return ZOOM_COMPONENT_IDS.map((id) => {
+      const next = {
+        id,
+        filterMode: "none",
+      };
+      if (viewport) {
+        next.startValue = viewport.startValue;
+        next.endValue = viewport.endValue;
+      }
+      return next;
     });
   }
 
-  function chartData(seriesKey) {
-    return state.rows.map((row) => [row.timestampMs, row[seriesKey]]);
+  function rowsToSeriesData(rows, valueKey) {
+    const data = new Array(rows.length);
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index];
+      data[index] = [row.timestampMs, row[valueKey]];
+    }
+    return data;
+  }
+
+  function normalizeOptionalSeriesDefinition(definition) {
+    if (!definition || typeof definition !== "object") {
+      return null;
+    }
+    const id = String(definition.id || "").trim();
+    if (!id || !Array.isArray(definition.data)) {
+      return null;
+    }
+    return {
+      id,
+      label: String(definition.label || id),
+      type: definition.type === "line" ? "line" : "line",
+      color: typeof definition.color === "string" && definition.color ? definition.color : "#ffc857",
+      lineWidth: Number.isFinite(definition.lineWidth) ? Math.max(1, definition.lineWidth) : 1.2,
+      data: definition.data,
+    };
+  }
+
+  function syncOptionalSeries(payload, reset) {
+    if (reset) {
+      state.optionalSeries.clear();
+    }
+    if (!payload || !Array.isArray(payload.indicatorSeries)) {
+      return;
+    }
+
+    const nextSeries = new Map();
+    payload.indicatorSeries.forEach((definition) => {
+      const normalized = normalizeOptionalSeriesDefinition(definition);
+      if (normalized) {
+        nextSeries.set(normalized.id, normalized);
+      }
+    });
+    state.optionalSeries = nextSeries;
+  }
+
+  function buildChartSeries(config) {
+    const series = [
+      {
+        id: "raw-price",
+        name: SERIES_CONFIG[config.series].label,
+        type: "line",
+        showSymbol: false,
+        hoverAnimation: false,
+        animation: false,
+        connectNulls: false,
+        data: rowsToSeriesData(state.rows, config.series),
+        lineStyle: {
+          color: SERIES_CONFIG[config.series].color,
+          width: 1.45,
+        },
+      },
+    ];
+
+    // Future DB-backed indicators can be appended through payload.indicatorSeries
+    // without changing the raw tick series path or the loaded raw tick dataset flow.
+    if (!state.optionalSeries.size) {
+      return series;
+    }
+
+    state.optionalSeries.forEach((definition) => {
+      series.push({
+        id: "indicator:" + definition.id,
+        name: definition.label,
+        type: definition.type,
+        showSymbol: false,
+        hoverAnimation: false,
+        animation: false,
+        connectNulls: true,
+        data: definition.data,
+        lineStyle: {
+          color: definition.color,
+          width: definition.lineWidth,
+        },
+      });
+    });
+
+    return series;
   }
 
   function renderChart(options) {
     const settings = options || {};
     const chart = ensureChart();
-    const config = currentConfig();
-    const zoom = settings.preserveZoom ? captureZoom() : null;
+    const datasetBounds = getDatasetBounds();
+    const previousBounds = state.lastDatasetBounds;
+    let nextViewport;
+
+    if (!datasetBounds) {
+      nextViewport = null;
+    } else if (settings.resetView || !state.viewport) {
+      nextViewport = fullViewport(datasetBounds);
+    } else {
+      nextViewport = normalizeViewport(
+        shiftViewportForward(state.viewport, previousBounds, datasetBounds, Boolean(settings.shiftWithRun)),
+        datasetBounds,
+      );
+    }
+
+    state.applyingViewport = true;
     chart.setOption({
-      animation: false,
-      grid: { left: 58, right: 22, top: 18, bottom: 72 },
-      tooltip: {
-        trigger: "axis",
-        axisPointer: { type: "cross" },
-        valueFormatter: function (value) {
-          return typeof value === "number" ? value.toFixed(2) : value;
-        },
-      },
-      xAxis: {
-        type: "time",
-        axisLabel: { color: "#9eadc5" },
-      },
-      yAxis: {
-        type: "value",
-        scale: true,
-        axisLabel: { color: "#9eadc5" },
-      },
-      dataZoom: [
-        { type: "inside", filterMode: "none" },
-        { type: "slider", filterMode: "none", height: 28, bottom: 18 },
-      ],
-      series: [
-        {
-          name: SERIES_CONFIG[config.series].label,
-          type: "line",
-          showSymbol: false,
-          hoverAnimation: false,
-          animation: false,
-          data: chartData(config.series),
-          lineStyle: {
-            color: SERIES_CONFIG[config.series].color,
-            width: 1.6,
-          },
-        },
-      ],
-    }, { notMerge: true, lazyUpdate: true });
-    restoreZoom(zoom);
+      series: buildChartSeries(currentConfig()),
+      dataZoom: buildDataZoomState(nextViewport),
+    }, { replaceMerge: ["series"], lazyUpdate: true });
+    state.lastDatasetBounds = datasetBounds;
+
+    window.requestAnimationFrame(() => {
+      state.applyingViewport = false;
+      state.viewport = normalizeViewport(captureViewportFromChart() || nextViewport, datasetBounds);
+    });
+  }
+
+  function trimRowsToWindow(anchor) {
+    const windowSize = currentConfig().window;
+    if (state.rows.length <= windowSize) {
+      return;
+    }
+    if (anchor === "left") {
+      state.rows = state.rows.slice(0, windowSize);
+      return;
+    }
+    state.rows = state.rows.slice(state.rows.length - windowSize);
+  }
+
+  function replaceRows(rows) {
+    state.rows = Array.isArray(rows) ? rows.slice() : [];
+    trimRowsToWindow("right");
   }
 
   function dedupeAppend(rows) {
     if (!rows.length) {
-      return;
+      return 0;
     }
     const lastId = state.rows.length ? state.rows[state.rows.length - 1].id : 0;
+    let appended = 0;
     rows.forEach((row) => {
-      if (row.id > lastId) {
+      if (row.id > lastId + appended) {
         state.rows.push(row);
+        appended += 1;
       }
     });
+    if (appended) {
+      trimRowsToWindow("right");
+    }
+    return appended;
   }
 
   function dedupePrepend(rows) {
     if (!rows.length) {
-      return;
+      return 0;
     }
     const firstId = state.rows.length ? state.rows[0].id : Number.MAX_SAFE_INTEGER;
     const older = rows.filter((row) => row.id < firstId);
     if (!older.length) {
-      return;
+      return 0;
     }
     state.rows = older.concat(state.rows);
+    trimRowsToWindow("left");
+    return older.length;
   }
 
   function clearActivity() {
@@ -319,7 +608,7 @@
     throw new Error("Review mode requires a start id or Sydney review start time.");
   }
 
-  async function loadBootstrap(resetZoom) {
+  async function loadBootstrap(resetView) {
     const config = currentConfig();
     const params = new URLSearchParams({
       mode: config.mode,
@@ -329,14 +618,18 @@
       const startId = await resolveReviewStartId(config);
       params.set("id", String(startId));
     }
+
     const payload = await fetchJson("/api/live/bootstrap?" + params.toString());
-    state.rows = payload.rows || [];
+    replaceRows(payload.rows || []);
+    syncOptionalSeries(payload, true);
     state.reviewEndId = payload.reviewEndId || null;
     state.hasMoreLeft = Boolean(payload.hasMoreLeft);
     state.lastMetrics = payload.metrics || null;
+    state.lastDatasetBounds = null;
+    state.viewport = null;
     renderMeta();
     renderPerf();
-    renderChart({ preserveZoom: !resetZoom });
+    renderChart({ resetView: Boolean(resetView) });
     status("Loaded " + state.rows.length + " raw tick(s).", false);
 
     if (config.run === "run") {
@@ -355,23 +648,30 @@
       limit: "250",
     }).toString());
     state.source = source;
+
     source.onopen = function () {
       state.streamConnected = true;
       renderPerf();
       status("Live stream connected.", false);
     };
+
     source.onmessage = function (event) {
       const payload = JSON.parse(event.data);
       state.lastMetrics = payload;
-      dedupeAppend(payload.rows || []);
+      syncOptionalSeries(payload, false);
+      const appended = dedupeAppend(payload.rows || []);
       renderMeta();
       renderPerf();
-      renderChart();
+      if (appended) {
+        renderChart({ shiftWithRun: currentConfig().run === "run" });
+      }
     };
+
     source.addEventListener("heartbeat", function (event) {
       state.lastMetrics = JSON.parse(event.data);
       renderPerf();
     });
+
     source.onerror = function () {
       state.streamConnected = false;
       renderPerf();
@@ -389,11 +689,13 @@
       status("Review is waiting for rows.", true);
       return;
     }
+
     const lastId = state.rows[state.rows.length - 1].id;
     if (lastId >= state.reviewEndId) {
       status("Review reached the current end snapshot.", false);
       return;
     }
+
     const limit = Math.max(25, Math.min(500, Math.round(100 * config.reviewSpeed)));
     const payload = await fetchJson("/api/live/next?" + new URLSearchParams({
       afterId: String(lastId),
@@ -401,10 +703,11 @@
       limit: String(limit),
     }).toString());
     state.lastMetrics = payload.metrics || null;
+    syncOptionalSeries(payload, false);
     dedupeAppend(payload.rows || []);
     renderMeta();
     renderPerf();
-    renderChart();
+    renderChart({ shiftWithRun: true });
     status(payload.endReached ? "Review reached the current end snapshot." : "Review running.", false);
     if (!payload.endReached && currentConfig().run === "run") {
       scheduleReviewStep();
@@ -425,32 +728,55 @@
     }, delay);
   }
 
+  function historyBatchSize() {
+    const windowSize = currentConfig().window;
+    return Math.max(1, Math.min(windowSize, Math.round(windowSize / 2)));
+  }
+
+  async function resumeRunIfNeeded() {
+    const config = currentConfig();
+    if (config.run !== "run" || !state.rows.length) {
+      return;
+    }
+    if (config.mode === "live") {
+      connectStream(state.rows[state.rows.length - 1].id);
+      return;
+    }
+    scheduleReviewStep();
+  }
+
   async function loadMoreLeft() {
     if (!state.rows.length) {
       status("Load the chart first.", true);
       return;
     }
-    const zoom = captureZoom();
+
+    clearActivity();
     const payload = await fetchJson("/api/live/previous?" + new URLSearchParams({
       beforeId: String(state.rows[0].id),
-      limit: String(currentConfig().window),
+      limit: String(historyBatchSize()),
     }).toString());
     state.lastMetrics = payload.metrics || null;
-    dedupePrepend(payload.rows || []);
+    const prepended = dedupePrepend(payload.rows || []);
     state.hasMoreLeft = Boolean(payload.hasMoreLeft);
     renderMeta();
     renderPerf();
-    renderChart({ preserveZoom: Boolean(zoom) });
-    status((payload.rowCount || 0) + " older tick(s) prepended.", false);
+    if (prepended) {
+      renderChart({ shiftWithRun: false });
+      status(prepended + " older tick(s) merged into the current window.", false);
+    } else {
+      status("No older ticks were available.", false);
+    }
+    await resumeRunIfNeeded();
   }
 
-  async function loadAll(resetZoom) {
+  async function loadAll(resetView) {
     const token = state.loadToken + 1;
     state.loadToken = token;
     clearActivity();
     writeQuery();
     try {
-      await loadBootstrap(resetZoom);
+      await loadBootstrap(resetView);
     } catch (error) {
       if (token === state.loadToken) {
         status(error.message || "Load failed.", true);
@@ -470,11 +796,7 @@
     writeQuery();
     clearActivity();
     if (value === "run" && state.rows.length) {
-      if (currentConfig().mode === "live") {
-        connectStream(state.rows[state.rows.length - 1].id);
-      } else {
-        scheduleReviewStep();
-      }
+      resumeRunIfNeeded();
       return;
     }
     status("Run state updated.", false);
@@ -484,7 +806,7 @@
     setSegment(elements.seriesToggle, value);
     writeQuery();
     renderMeta();
-    renderChart({ preserveZoom: true });
+    renderChart({ shiftWithRun: false });
   });
 
   bindSegment(elements.reviewSpeedToggle, function (value) {
@@ -497,16 +819,40 @@
   });
 
   [elements.tickId, elements.reviewStart, elements.windowSize].forEach((control) => {
-    control.addEventListener("change", writeQuery);
+    control.addEventListener("change", function () {
+      if (control === elements.windowSize) {
+        elements.windowSize.value = String(sanitizeWindowValue(elements.windowSize.value));
+      }
+      writeQuery();
+    });
+  });
+
+  elements.sidebarToggle.addEventListener("click", function () {
+    setSidebarCollapsed(!state.ui.sidebarCollapsed);
+  });
+
+  elements.sidebarBackdrop.addEventListener("click", function () {
+    setSidebarCollapsed(true);
+  });
+
+  elements.settingsToggle.addEventListener("click", function () {
+    setSettingsCollapsed(!state.ui.settingsCollapsed);
   });
 
   elements.applyButton.addEventListener("click", function () {
     loadAll(true);
   });
+
   elements.loadMoreLeftButton.addEventListener("click", function () {
     loadMoreLeft().catch((error) => {
       status(error.message || "Load More Left failed.", true);
     });
+  });
+
+  window.addEventListener("keydown", function (event) {
+    if (event.key === "Escape" && !state.ui.sidebarCollapsed) {
+      setSidebarCollapsed(true);
+    }
   });
 
   const initialConfig = parseQuery();

@@ -10,7 +10,31 @@
   <link rel="stylesheet" href="/assets/app.css">
 </head>
 <body class="page-live">
-  <div class="live-workspace" id="liveWorkspace">
+  <div class="live-workspace is-sidebar-collapsed" id="liveWorkspace">
+    <button
+      class="ghost-button live-sidebar-toggle"
+      id="sidebarToggle"
+      type="button"
+      aria-controls="liveSidebar"
+      aria-expanded="false"
+      aria-label="Open live controls"
+    >
+      <span class="live-sidebar-toggle-bars" aria-hidden="true">
+        <span></span>
+        <span></span>
+        <span></span>
+      </span>
+      <span class="sr-only">Toggle live controls</span>
+    </button>
+
+    <button
+      class="live-sidebar-backdrop"
+      id="sidebarBackdrop"
+      type="button"
+      aria-hidden="true"
+      tabindex="-1"
+    ></button>
+
     <aside class="panel live-sidebar" id="liveSidebar">
       <div class="live-sidebar-scroll">
         <header class="live-sidebar-header">
@@ -41,15 +65,6 @@
                 </div>
               </div>
 
-              <div class="live-control-field live-control-field-wide">
-                <span>price series</span>
-                <div class="segmented" id="seriesToggle">
-                  <button type="button" data-value="mid">Mid</button>
-                  <button type="button" data-value="ask">Ask</button>
-                  <button type="button" data-value="bid">Bid</button>
-                </div>
-              </div>
-
               <label>
                 <span>review start id</span>
                 <input id="tickId" type="number" min="1" inputmode="numeric" placeholder="start id">
@@ -64,6 +79,37 @@
                 <span>review start (Sydney)</span>
                 <input id="reviewStart" type="datetime-local" step="1">
               </label>
+            </div>
+
+            <div class="live-inline-actions">
+              <button class="primary-button compact-button" id="applyButton" type="button">Load</button>
+              <button class="ghost-button compact-button" id="loadMoreLeftButton" type="button">Load More Left</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="live-sidebar-section">
+          <button
+            class="ghost-button live-section-toggle"
+            id="settingsToggle"
+            type="button"
+            aria-controls="settingsSectionBody"
+            aria-expanded="false"
+          >
+            <span class="live-section-title">Settings</span>
+            <span class="live-section-state" id="settingsToggleState">collapsed</span>
+          </button>
+
+          <div class="live-section-body is-collapsed" id="settingsSectionBody">
+            <div class="live-form-grid">
+              <div class="live-control-field live-control-field-wide">
+                <span>price series</span>
+                <div class="segmented" id="seriesToggle">
+                  <button type="button" data-value="mid">Mid</button>
+                  <button type="button" data-value="ask">Ask</button>
+                  <button type="button" data-value="bid">Bid</button>
+                </div>
+              </div>
 
               <div class="live-control-field live-control-field-wide review-speed-control">
                 <span>review speed</span>
@@ -75,11 +121,6 @@
                   <button type="button" data-value="5">5x</button>
                 </div>
               </div>
-            </div>
-
-            <div class="live-inline-actions">
-              <button class="primary-button compact-button" id="applyButton" type="button">Load</button>
-              <button class="ghost-button compact-button" id="loadMoreLeftButton" type="button">Load More Left</button>
             </div>
           </div>
         </section>
