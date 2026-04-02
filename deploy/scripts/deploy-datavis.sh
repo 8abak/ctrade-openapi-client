@@ -3,9 +3,12 @@ set -euo pipefail
 
 APP_DIR="/home/ec2-user/cTrade"
 VENV_ACTIVATE="/home/ec2-user/venvs/datavis/bin/activate"
+ENV_FILE="/etc/datavis.env"
+DEFAULT_DATABASE_URL="postgresql://babak:babak33044@localhost:5432/trading"
 UNIT_FILES=("datavis" "tickcollector" "fastzig")
 RESTART_SERVICES=("datavis" "fastzig")
 LEGACY_SERVICES=("ottprocessor" "envelopeprocessor" "zigzag" "envelopezigprocessor" "marketprofile")
+MIGRATION_FILES=("deploy/sql/20260403_fast_zig.sql")
 HEALTH_URL="http://127.0.0.1:8000/api/health"
 
 log() {
@@ -41,9 +44,24 @@ disable_legacy_services() {
   sudo systemctl daemon-reload
 }
 
+apply_sql_migrations() {
+  local database_url="${DATABASE_URL:-$DEFAULT_DATABASE_URL}"
+  for migration_path in "${MIGRATION_FILES[@]}"; do
+    log "Applying ${migration_path}"
+    psql "$database_url" -v ON_ERROR_STOP=1 -f "$migration_path"
+  done
+}
+
 trap on_error ERR
 
 cd "$APP_DIR"
+
+if [[ -f "$ENV_FILE" ]]; then
+  log "Loading environment from ${ENV_FILE}"
+  set -a
+  source "$ENV_FILE"
+  set +a
+fi
 
 if [[ ! -f "$VENV_ACTIVATE" ]]; then
   log "Missing virtualenv activate script: $VENV_ACTIVATE"
@@ -58,6 +76,7 @@ pip install -r requirements.txt
 
 install_systemd_units
 disable_legacy_services
+apply_sql_migrations
 
 for service_name in "${UNIT_FILES[@]}"; do
   log "Enabling ${service_name}"

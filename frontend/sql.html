@@ -17,9 +17,9 @@
       <div class="sql-sidebar-scroll">
         <div class="sql-sidebar-header">
           <a class="back-link" href="/">datavis.au</a>
-          <div class="sql-admin-badge">ticks only</div>
+          <div class="sql-admin-badge">layer 0 tables</div>
           <h1>Layer 0 SQL</h1>
-          <div class="sql-sidebar-copy">Read-only inspection for `public.ticks` only.</div>
+          <div class="sql-sidebar-copy">Read-only inspection for the exposed Layer 0 tables: ticks, fast zig pivots, and fast zig state.</div>
         </div>
         <div class="sql-connection-card">
           <div class="sql-connection-label">Connection</div>
@@ -27,7 +27,7 @@
         </div>
         <div class="sql-sidebar-section">
           <div class="sql-sidebar-section-header">
-            <div class="sql-toolbar-label">Visible Table</div>
+            <div class="sql-toolbar-label">Visible Tables</div>
             <button class="ghost-button compact-button" id="refreshSchemaButton" type="button">Refresh</button>
           </div>
           <div class="schema-tree" id="schemaTree">Loading schema browser...</div>
@@ -38,7 +38,7 @@
             <button class="ghost-button compact-button" id="previewButton" type="button">Preview Recent</button>
           </div>
           <div class="object-detail" id="objectDetail">
-            <div class="muted">Loading ticks table metadata...</div>
+            <div class="muted">Loading Layer 0 table metadata...</div>
           </div>
         </section>
       </div>
@@ -49,7 +49,7 @@
         <div class="sql-editor-header">
           <div class="sql-editor-heading">
             <div class="sql-toolbar-label">Read-Only Query</div>
-            <div class="sql-editor-copy">Only `SELECT` or `EXPLAIN` queries against `public.ticks` are allowed.</div>
+            <div class="sql-editor-copy">Only `SELECT` or `EXPLAIN` queries against one exposed Layer 0 table at a time are allowed.</div>
           </div>
           <div class="editor-toolbar">
             <button class="ghost-button compact-button" id="previewTopButton" type="button">Preview Recent</button>
@@ -62,7 +62,7 @@ ORDER BY id DESC
 LIMIT 100;</textarea>
         <div class="sql-editor-footer">
           <div class="status-line" id="queryStatus">Ready.</div>
-          <div class="sql-editor-context" id="editorContext">Read-only ticks access.</div>
+          <div class="sql-editor-context" id="editorContext">Read-only Layer 0 SQL.</div>
         </div>
       </section>
 
@@ -81,7 +81,7 @@ LIMIT 100;</textarea>
             <button class="ghost-button compact-button" id="previewNextButton" type="button">Next</button>
           </div>
         </div>
-        <div class="results-host" id="resultsHost"><div class="results-empty">Run a ticks query to see rows here.</div></div>
+        <div class="results-host" id="resultsHost"><div class="results-empty">Run a Layer 0 query to see rows here.</div></div>
       </section>
     </main>
   </div>

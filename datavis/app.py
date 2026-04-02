@@ -65,6 +65,46 @@ SQL_ADMIN_USER = os.getenv("DATAVIS_SQL_ADMIN_USER", "").strip()
 SQL_ADMIN_PASSWORD = os.getenv("DATAVIS_SQL_ADMIN_PASSWORD", "")
 DEFAULT_REVIEW_TIMEZONE = "Australia/Sydney"
 ALLOWED_SQL_HEADS = {"SELECT", "EXPLAIN"}
+SQL_EXPOSED_TABLES = {
+    ("public", "ticks"): {
+        "schema": "public",
+        "name": "ticks",
+        "kind": "table",
+        "default_order_by": "id",
+        "default_order_dir": "desc",
+        "select_sql": "SELECT id, timestamp, bid, ask, mid, spread\nFROM public.ticks\nORDER BY id DESC\nLIMIT 100;",
+    },
+    ("public", "fast_zig_pivots"): {
+        "schema": "public",
+        "name": "fast_zig_pivots",
+        "kind": "table",
+        "default_order_by": "version_id",
+        "default_order_dir": "desc",
+        "select_sql": (
+            "SELECT version_id, pivot_id, source_tick_id, source_timestamp, direction, pivot_price, level,\n"
+            "       visible_from_tick_id, visible_to_tick_id\n"
+            "FROM public.fast_zig_pivots\n"
+            "ORDER BY pivot_id DESC, version_id DESC\n"
+            "LIMIT 100;"
+        ),
+    },
+    ("public", "fast_zig_state"): {
+        "schema": "public",
+        "name": "fast_zig_state",
+        "kind": "table",
+        "default_order_by": "symbol",
+        "default_order_dir": "asc",
+        "select_sql": "SELECT symbol, last_processed_tick_id, last_pivot_id, updated_at\nFROM public.fast_zig_state\nORDER BY symbol ASC\nLIMIT 100;",
+    },
+}
+SQL_EXPOSED_RELATIONS = {
+    "{0}.{1}".format(schema_name, object_name)
+    for schema_name, object_name in SQL_EXPOSED_TABLES
+}
+SQL_EXPOSED_REFERENCES = SQL_EXPOSED_RELATIONS | {
+    object_name
+    for _, object_name in SQL_EXPOSED_TABLES
+}
 FORBIDDEN_SQL_RE = re.compile(
     r"\b("
     r"insert|update|delete|drop|alter|create|truncate|copy|grant|revoke|"
@@ -160,6 +200,7 @@ def serialize_zig_row(row: Dict[str, Any]) -> Dict[str, Any]:
         "timestampMs": dt_to_ms(timestamp),
         "direction": row["direction"],
         "price": row["pivot_price"],
+        "level": row["level"],
         "visibleFromTickId": row["visible_from_tick_id"],
         "visibleToTickId": row.get("visible_to_tick_id"),
     }
@@ -477,6 +518,7 @@ def fetch_zig_snapshot_rows(
             source_timestamp,
             direction,
             pivot_price,
+            level,
             visible_from_tick_id,
             visible_to_tick_id
         FROM public.fast_zig_pivots
@@ -502,6 +544,7 @@ def fetch_zig_snapshot_rows(
             source_timestamp,
             direction,
             pivot_price,
+            level,
             visible_from_tick_id,
             visible_to_tick_id
         FROM public.fast_zig_pivots
@@ -539,6 +582,7 @@ def fetch_zig_changes(cur: Any, *, after_tick_id: int, upto_tick_id: Optional[in
             source_timestamp,
             direction,
             pivot_price,
+            level,
             visible_from_tick_id,
             visible_to_tick_id
         FROM public.fast_zig_pivots
@@ -556,9 +600,15 @@ def serialize_zig_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def zig_storage_ready(cur: Any) -> bool:
-    cur.execute("SELECT to_regclass('public.fast_zig_pivots') AS regclass_name")
+    cur.execute(
+        """
+        SELECT
+            to_regclass('public.fast_zig_pivots') AS pivots_table,
+            to_regclass('public.fast_zig_state') AS state_table
+        """
+    )
     row = cur.fetchone() or {}
-    return bool(row.get("regclass_name"))
+    return bool(row.get("pivots_table")) and bool(row.get("state_table"))
 
 
 def split_sql_script(sql_text: str) -> List[str]:
@@ -647,30 +697,33 @@ def normalize_relation_reference(raw_reference: str) -> str:
     return raw_reference.replace(" ", "").replace('"', "").lower()
 
 
-def validate_ticks_query(sql_text: str) -> str:
+def validate_readonly_query(sql_text: str) -> str:
     statements = split_sql_script(sql_text)
     if len(statements) != 1:
-        raise HTTPException(status_code=400, detail="Only one read-only ticks query is allowed at a time.")
+        raise HTTPException(status_code=400, detail="Only one read-only query is allowed at a time.")
 
     statement = statements[0]
     head = statement_head(statement)
     if head not in ALLOWED_SQL_HEADS:
-        raise HTTPException(status_code=400, detail="Only SELECT and EXPLAIN queries against public.ticks are allowed.")
+        raise HTTPException(status_code=400, detail="Only SELECT and EXPLAIN queries are allowed.")
 
     lowered = statement.lower()
     if FORBIDDEN_SQL_RE.search(lowered):
-        raise HTTPException(status_code=400, detail="Only read-only queries against public.ticks are allowed.")
+        raise HTTPException(status_code=400, detail="Only read-only queries against exposed Layer 0 tables are allowed.")
     if re.search(r"\b(join|union|intersect|except)\b", lowered):
-        raise HTTPException(status_code=400, detail="The SQL page is limited to a single-table ticks query.")
+        raise HTTPException(status_code=400, detail="The SQL page is limited to a single exposed table per query.")
 
     relation_matches = re.findall(r"\bfrom\s+((?:\"[^\"]+\"|\w+)(?:\s*\.\s*(?:\"[^\"]+\"|\w+))?)", statement, re.IGNORECASE)
     if not relation_matches:
-        raise HTTPException(status_code=400, detail="Queries must read from public.ticks.")
+        raise HTTPException(status_code=400, detail="Queries must read from an exposed Layer 0 table.")
 
+    normalized_relations = {normalize_relation_reference(relation) for relation in relation_matches}
+    if len(normalized_relations) != 1:
+        raise HTTPException(status_code=400, detail="Queries may only read from one exposed table at a time.")
     for relation in relation_matches:
         normalized = normalize_relation_reference(relation)
-        if normalized not in {"ticks", "public.ticks"}:
-            raise HTTPException(status_code=400, detail="Queries may only read from public.ticks.")
+        if normalized not in SQL_EXPOSED_REFERENCES:
+            raise HTTPException(status_code=400, detail="Queries may only read from exposed Layer 0 tables.")
 
     return statement
 
@@ -719,7 +772,7 @@ def table_indexes(conn: Any, schema_name: str, object_name: str) -> List[Dict[st
         return [{"name": row["index_name"], "definition": row["indexdef"]} for row in cur.fetchall()]
 
 
-def ticks_table_summary(conn: Any) -> Dict[str, Any]:
+def relation_summary(conn: Any, schema_name: str, object_name: str) -> Optional[Dict[str, Any]]:
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             """
@@ -734,23 +787,42 @@ def ticks_table_summary(conn: Any) -> Dict[str, Any]:
               ON n.oid = c.relnamespace
             LEFT JOIN pg_stat_user_tables s
               ON s.relid = c.oid
-            WHERE n.nspname = 'public'
-              AND c.relname = 'ticks'
+            WHERE n.nspname = %s
+              AND c.relname = %s
               AND c.relkind IN ('r', 'p')
-            """
+            """,
+            (schema_name, object_name),
         )
         row = cur.fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="public.ticks was not found.")
-    return dict(row)
+    return dict(row) if row else None
+
+
+def sql_object_config(schema_name: str, object_name: str, object_kind: str = "table") -> Dict[str, Any]:
+    config = SQL_EXPOSED_TABLES.get((schema_name, object_name))
+    if not config or config["kind"] != object_kind:
+        raise HTTPException(status_code=404, detail="That Layer 0 SQL object is not exposed.")
+    return config
 
 
 def schema_payload() -> Dict[str, Any]:
     with db_connection(readonly=True) as conn:
         context = fetch_sql_context(conn)
-        summary = ticks_table_summary(conn)
-        columns = relation_columns(conn, "public", "ticks")
-        indexes = table_indexes(conn, "public", "ticks")
+        tables = []
+        for schema_name, object_name in SQL_EXPOSED_TABLES:
+            summary = relation_summary(conn, schema_name, object_name)
+            if not summary:
+                continue
+            tables.append(
+                {
+                    "name": object_name,
+                    "schema": schema_name,
+                    "kind": "table",
+                    "rowEstimate": summary["row_estimate"],
+                    "columns": relation_columns(conn, schema_name, object_name),
+                    "indexes": table_indexes(conn, schema_name, object_name),
+                    "totalSize": summary["total_size"],
+                }
+            )
 
     return {
         "context": context,
@@ -758,23 +830,14 @@ def schema_payload() -> Dict[str, Any]:
             {
                 "schema": "public",
                 "counts": {
-                    "tables": 1,
+                    "tables": len(tables),
                     "views": 0,
                     "materializedViews": 0,
                     "sequences": 0,
                     "functions": 0,
                 },
                 "objects": {
-                    "tables": [
-                        {
-                            "name": "ticks",
-                            "schema": "public",
-                            "kind": "table",
-                            "rowEstimate": summary["row_estimate"],
-                            "columns": columns,
-                            "indexes": indexes,
-                        }
-                    ],
+                    "tables": tables,
                     "views": [],
                     "materializedViews": [],
                     "sequences": [],
@@ -784,26 +847,23 @@ def schema_payload() -> Dict[str, Any]:
         ],
     }
 
-
-def assert_ticks_object(schema_name: str, object_name: str, object_kind: str) -> None:
-    if schema_name != "public" or object_name != "ticks" or object_kind != "table":
-        raise HTTPException(status_code=404, detail="Only public.ticks is exposed in the SQL page.")
-
-
 def load_object_details(schema_name: str, object_name: str, object_kind: str) -> Dict[str, Any]:
-    assert_ticks_object(schema_name, object_name, object_kind)
+    config = sql_object_config(schema_name, object_name, object_kind)
     with db_connection(readonly=True) as conn:
         context = fetch_sql_context(conn)
-        summary = ticks_table_summary(conn)
-        columns = relation_columns(conn, "public", "ticks")
-        indexes = table_indexes(conn, "public", "ticks")
+        summary = relation_summary(conn, schema_name, object_name)
+        if not summary:
+            raise HTTPException(status_code=404, detail="{0}.{1} was not found.".format(schema_name, object_name))
+        columns = relation_columns(conn, schema_name, object_name)
+        indexes = table_indexes(conn, schema_name, object_name)
+    select_sql = config["select_sql"]
 
     return {
         "context": context,
         "object": {
-            "schema": "public",
-            "name": "ticks",
-            "kind": "table",
+            "schema": schema_name,
+            "name": object_name,
+            "kind": object_kind,
             "rowEstimate": summary["row_estimate"],
             "totalBytes": summary["total_bytes"],
             "totalSize": summary["total_size"],
@@ -814,8 +874,12 @@ def load_object_details(schema_name: str, object_name: str, object_kind: str) ->
             "sequence": None,
         },
         "actions": {
-            "insertSelect": "SELECT id, timestamp, bid, ask, mid, spread\nFROM public.ticks\nORDER BY id DESC\nLIMIT 100;",
-            "insertExplain": "EXPLAIN\nSELECT id, timestamp, bid, ask, mid, spread\nFROM public.ticks\nORDER BY id DESC\nLIMIT 100;",
+            "insertSelect": select_sql,
+            "insertExplain": "EXPLAIN\n{0}".format(select_sql),
+        },
+        "preview": {
+            "orderBy": config["default_order_by"],
+            "orderDir": config["default_order_dir"],
         },
     }
 
@@ -828,21 +892,23 @@ def preview_relation(
     order_by: Optional[str],
     order_dir: str,
 ) -> Dict[str, Any]:
-    assert_ticks_object(schema_name, object_name, "table")
+    config = sql_object_config(schema_name, object_name, "table")
 
     started = time.perf_counter()
     limit = clamp_int(limit, 1, MAX_SQL_PREVIEW_LIMIT)
     with db_connection(readonly=True) as conn:
         context = fetch_sql_context(conn)
-        columns = relation_columns(conn, "public", "ticks")
+        columns = relation_columns(conn, schema_name, object_name)
         column_names = {column["name"] for column in columns}
         if order_by and order_by not in column_names:
             raise HTTPException(status_code=400, detail="Unknown sort column: {0}".format(order_by))
 
         direction = "DESC" if order_dir.lower() == "desc" else "ASC"
-        effective_order = order_by or "id"
+        effective_order = order_by or config["default_order_by"]
+        if effective_order not in column_names:
+            raise HTTPException(status_code=400, detail="Unknown sort column: {0}".format(effective_order))
         query = pg_sql.SQL("SELECT * FROM {} ORDER BY {} {} LIMIT %s OFFSET %s").format(
-            pg_sql.SQL(".").join([pg_sql.Identifier("public"), pg_sql.Identifier("ticks")]),
+            pg_sql.SQL(".").join([pg_sql.Identifier(schema_name), pg_sql.Identifier(object_name)]),
             pg_sql.Identifier(effective_order),
             pg_sql.SQL(direction),
         )
@@ -857,7 +923,7 @@ def preview_relation(
         "context": context,
         "result": {
             "index": 1,
-            "title": "public.ticks",
+            "title": "{0}.{1}".format(schema_name, object_name),
             "statement": "preview",
             "statementType": "SELECT",
             "commandTag": "SELECT",
@@ -869,8 +935,8 @@ def preview_relation(
             "maxRows": limit,
             "hasResultSet": True,
             "source": {
-                "schema": "public",
-                "name": "ticks",
+                "schema": schema_name,
+                "name": object_name,
                 "kind": "preview",
                 "orderBy": effective_order,
                 "orderDir": direction.lower(),
@@ -882,7 +948,7 @@ def preview_relation(
 
 
 def execute_query(sql_text: str) -> Dict[str, Any]:
-    statement = validate_ticks_query(sql_text)
+    statement = validate_readonly_query(sql_text)
     started = time.perf_counter()
     with db_connection(readonly=True, autocommit=False) as conn:
         try:

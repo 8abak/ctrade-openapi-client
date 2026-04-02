@@ -297,12 +297,17 @@
       return;
     }
     const config = currentConfig();
+    const level1Count = state.zigRows.filter((row) => (row.level || 1) >= 1).length;
+    const level2Count = state.zigRows.filter((row) => (row.level || 1) >= 2).length;
+    const level3Count = state.zigRows.filter((row) => (row.level || 1) >= 3).length;
     const parts = [
       config.mode.toUpperCase(),
       DISPLAY_CONFIG[config.display].label,
       "left " + state.rangeFirstId,
       "right " + state.rangeLastId,
-      "zigs " + state.zigRows.length,
+      "zig L1 " + level1Count,
+      "L2 " + level2Count,
+      "L3 " + level3Count,
       state.hasMoreLeft ? "more-left yes" : "more-left no",
     ];
     if (displayUsesTicks(config.display)) {
@@ -489,8 +494,12 @@
     return rows.map((row) => [row.timestampMs, row[valueKey]]);
   }
 
-  function zigToSeriesData() {
-    return state.zigRows.map((row) => [row.timestampMs, row.price]);
+  function zigRowsAtLevel(level) {
+    return state.zigRows.filter((row) => (row.level || 1) >= level);
+  }
+
+  function zigToSeriesData(level) {
+    return zigRowsAtLevel(level).map((row) => [row.timestampMs, row.price]);
   }
 
   function buildChartSeries(config) {
@@ -509,23 +518,34 @@
       });
     }
     if (displayUsesZig(config.display) && state.zigRows.length) {
-      series.push({
-        id: "fast-zig",
-        name: "Fast Zig 15",
-        type: "line",
-        showSymbol: true,
-        symbol: "circle",
-        symbolSize: 5,
-        hoverAnimation: false,
-        animation: false,
-        connectNulls: false,
-        data: zigToSeriesData(),
-        lineStyle: { color: "#ffc857", width: 2.1 },
-        itemStyle: {
-          color: "#ffc857",
-          borderColor: "#f7e7b3",
-          borderWidth: 1,
-        },
+      [
+        { level: 1, id: "fast-zig-l1", name: "Fast Zig L1", color: "#ffc857", border: "#f7e7b3", width: 1.8, symbolSize: 4 },
+        { level: 2, id: "fast-zig-l2", name: "Fast Zig L2", color: "#ff6b6b", border: "#ffd6d6", width: 2.4, symbolSize: 6 },
+        { level: 3, id: "fast-zig-l3", name: "Fast Zig L3", color: "#f8fafc", border: "#ffd166", width: 3.0, symbolSize: 8 },
+      ].forEach((entry) => {
+        const data = zigToSeriesData(entry.level);
+        if (!data.length) {
+          return;
+        }
+        series.push({
+          id: entry.id,
+          name: entry.name,
+          type: "line",
+          showSymbol: true,
+          symbol: "circle",
+          symbolSize: entry.symbolSize,
+          hoverAnimation: false,
+          animation: false,
+          connectNulls: false,
+          z: 5 + entry.level,
+          data: data,
+          lineStyle: { color: entry.color, width: entry.width },
+          itemStyle: {
+            color: entry.color,
+            borderColor: entry.border,
+            borderWidth: 1,
+          },
+        });
       });
     }
     return series;

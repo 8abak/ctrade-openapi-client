@@ -19,48 +19,11 @@ BATCH_SIZE = max(1, int(os.getenv("FAST_ZIG_BATCH_SIZE", "200")))
 WINDOW_SIZE = 15
 CENTER_INDEX = 7
 RECENT_TICK_COUNT = WINDOW_SIZE - 1
+PIVOT_WINDOW_SIZE = 9
+PIVOT_CENTER_INDEX = 4
+MAX_LEVEL = 3
 
 STOP = False
-
-
-SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS public.fast_zig_state (
-    symbol text PRIMARY KEY,
-    last_processed_tick_id bigint NOT NULL DEFAULT 0,
-    last_pivot_id bigint NOT NULL DEFAULT 0,
-    updated_at timestamptz NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS public.fast_zig_pivots (
-    version_id bigserial PRIMARY KEY,
-    pivot_id bigint NOT NULL,
-    symbol text NOT NULL,
-    source_tick_id bigint NOT NULL,
-    source_timestamp timestamptz NOT NULL,
-    direction text NOT NULL CHECK (direction IN ('high', 'low')),
-    pivot_price double precision NOT NULL,
-    visible_from_tick_id bigint NOT NULL,
-    visible_to_tick_id bigint NULL,
-    created_at timestamptz NOT NULL DEFAULT NOW()
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS fast_zig_state_symbol_idx
-    ON public.fast_zig_state (symbol);
-
-CREATE UNIQUE INDEX IF NOT EXISTS fast_zig_pivots_symbol_current_idx
-    ON public.fast_zig_pivots (symbol, pivot_id)
-    WHERE visible_to_tick_id IS NULL;
-
-CREATE INDEX IF NOT EXISTS fast_zig_pivots_symbol_source_tick_idx
-    ON public.fast_zig_pivots (symbol, source_tick_id, pivot_id, version_id);
-
-CREATE INDEX IF NOT EXISTS fast_zig_pivots_symbol_visible_from_idx
-    ON public.fast_zig_pivots (symbol, visible_from_tick_id, pivot_id, version_id);
-
-CREATE INDEX IF NOT EXISTS fast_zig_pivots_symbol_current_order_idx
-    ON public.fast_zig_pivots (symbol, pivot_id, version_id)
-    WHERE visible_to_tick_id IS NULL;
-"""
 
 
 def shutdown(*_: Any) -> None:
@@ -68,10 +31,18 @@ def shutdown(*_: Any) -> None:
     STOP = True
 
 
-def ensure_schema(conn: Any) -> None:
-    with conn.cursor() as cur:
-        cur.execute(SCHEMA_SQL)
-    conn.commit()
+def ensure_storage_ready(conn: Any) -> None:
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT
+                to_regclass('public.fast_zig_state') AS state_table,
+                to_regclass('public.fast_zig_pivots') AS pivots_table
+            """
+        )
+        row = dict(cur.fetchone() or {})
+    if not row.get("state_table") or not row.get("pivots_table"):
+        raise RuntimeError("fast zig tables are missing; apply deploy/sql/20260403_fast_zig.sql first")
 
 
 def load_state(cur: Any) -> Dict[str, int]:
@@ -152,7 +123,14 @@ def fetch_ticks_after(cur: Any, after_id: int, limit: int) -> List[Dict[str, Any
 def load_last_pivot(cur: Any) -> Optional[Dict[str, Any]]:
     cur.execute(
         """
-        SELECT version_id, pivot_id, direction, pivot_price, source_tick_id
+        SELECT
+            version_id,
+            pivot_id,
+            direction,
+            pivot_price,
+            source_tick_id,
+            source_timestamp,
+            level
         FROM public.fast_zig_pivots
         WHERE symbol = %s AND visible_to_tick_id IS NULL
         ORDER BY pivot_id DESC, version_id DESC
@@ -162,6 +140,31 @@ def load_last_pivot(cur: Any) -> Optional[Dict[str, Any]]:
     )
     row = cur.fetchone()
     return dict(row) if row else None
+
+
+def load_recent_current_pivots(cur: Any, *, minimum_level: int, limit: int) -> List[Dict[str, Any]]:
+    cur.execute(
+        """
+        SELECT
+            version_id,
+            pivot_id,
+            direction,
+            pivot_price,
+            source_tick_id,
+            source_timestamp,
+            level
+        FROM public.fast_zig_pivots
+        WHERE symbol = %s
+          AND visible_to_tick_id IS NULL
+          AND level >= %s
+        ORDER BY pivot_id DESC, version_id DESC
+        LIMIT %s
+        """,
+        (TICK_SYMBOL, minimum_level, limit),
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    rows.reverse()
+    return rows
 
 
 def detect_pivot(window_ticks: Deque[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -196,16 +199,34 @@ def detect_pivot(window_ticks: Deque[Dict[str, Any]]) -> Optional[Dict[str, Any]
 
 
 def is_more_extreme(previous: Dict[str, Any], candidate: Dict[str, Any]) -> bool:
+    previous_price = float(previous["pivot_price"])
+    candidate_price = float(candidate["price"])
     if previous["direction"] == "high":
-        return float(candidate["price"]) > float(previous["pivot_price"])
-    return float(candidate["price"]) < float(previous["pivot_price"])
+        return candidate_price > previous_price
+    return candidate_price < previous_price
+
+
+def close_pivot_version(cur: Any, *, version_id: int, decision_tick_id: int) -> None:
+    cur.execute(
+        """
+        UPDATE public.fast_zig_pivots
+        SET visible_to_tick_id = %s,
+            updated_at = NOW()
+        WHERE version_id = %s
+        """,
+        (decision_tick_id - 1, version_id),
+    )
 
 
 def insert_pivot_version(
     cur: Any,
     *,
     pivot_id: int,
-    candidate: Dict[str, Any],
+    direction: str,
+    pivot_price: float,
+    source_tick_id: int,
+    source_timestamp: Any,
+    level: int,
     decision_tick_id: int,
 ) -> Dict[str, Any]:
     cur.execute(
@@ -217,58 +238,142 @@ def insert_pivot_version(
             source_timestamp,
             direction,
             pivot_price,
-            visible_from_tick_id
+            level,
+            visible_from_tick_id,
+            updated_at
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
-        RETURNING version_id, pivot_id, direction, pivot_price, source_tick_id
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+        RETURNING
+            version_id,
+            pivot_id,
+            direction,
+            pivot_price,
+            source_tick_id,
+            source_timestamp,
+            level
         """,
         (
             pivot_id,
             TICK_SYMBOL,
-            candidate["source_tick_id"],
-            candidate["source_timestamp"],
-            candidate["direction"],
-            candidate["price"],
+            source_tick_id,
+            source_timestamp,
+            direction,
+            pivot_price,
+            level,
             decision_tick_id,
         ),
     )
     return dict(cur.fetchone())
 
 
-def replace_current_pivot_version(cur: Any, current: Dict[str, Any], *, decision_tick_id: int) -> None:
-    cur.execute(
-        """
-        UPDATE public.fast_zig_pivots
-        SET visible_to_tick_id = %s
-        WHERE version_id = %s
-        """,
-        (decision_tick_id - 1, current["version_id"]),
+def replace_with_candidate(
+    cur: Any,
+    current: Dict[str, Any],
+    *,
+    candidate: Dict[str, Any],
+    decision_tick_id: int,
+) -> Dict[str, Any]:
+    close_pivot_version(cur, version_id=int(current["version_id"]), decision_tick_id=decision_tick_id)
+    return insert_pivot_version(
+        cur,
+        pivot_id=int(current["pivot_id"]),
+        direction=str(candidate["direction"]),
+        pivot_price=float(candidate["price"]),
+        source_tick_id=int(candidate["source_tick_id"]),
+        source_timestamp=candidate["source_timestamp"],
+        level=int(current["level"] or 1),
+        decision_tick_id=decision_tick_id,
     )
 
 
-def apply_pivot(
+def promote_pivot(cur: Any, current: Dict[str, Any], *, target_level: int, decision_tick_id: int) -> Dict[str, Any]:
+    close_pivot_version(cur, version_id=int(current["version_id"]), decision_tick_id=decision_tick_id)
+    return insert_pivot_version(
+        cur,
+        pivot_id=int(current["pivot_id"]),
+        direction=str(current["direction"]),
+        pivot_price=float(current["pivot_price"]),
+        source_tick_id=int(current["source_tick_id"]),
+        source_timestamp=current["source_timestamp"],
+        level=target_level,
+        decision_tick_id=decision_tick_id,
+    )
+
+
+def apply_level_one(
     cur: Any,
     current: Optional[Dict[str, Any]],
     candidate: Dict[str, Any],
     *,
     last_pivot_id: int,
     decision_tick_id: int,
-) -> tuple[Optional[Dict[str, Any]], int]:
+) -> tuple[Optional[Dict[str, Any]], int, bool]:
     if current is None:
         next_pivot_id = max(1, last_pivot_id + 1)
-        return insert_pivot_version(cur, pivot_id=next_pivot_id, candidate=candidate, decision_tick_id=decision_tick_id), next_pivot_id
+        inserted = insert_pivot_version(
+            cur,
+            pivot_id=next_pivot_id,
+            direction=str(candidate["direction"]),
+            pivot_price=float(candidate["price"]),
+            source_tick_id=int(candidate["source_tick_id"]),
+            source_timestamp=candidate["source_timestamp"],
+            level=1,
+            decision_tick_id=decision_tick_id,
+        )
+        return inserted, next_pivot_id, True
 
     if candidate["direction"] == current["direction"]:
         if not is_more_extreme(current, candidate):
-            return current, max(last_pivot_id, int(current["pivot_id"]))
-        replace_current_pivot_version(cur, current, decision_tick_id=decision_tick_id)
-        return (
-            insert_pivot_version(cur, pivot_id=int(current["pivot_id"]), candidate=candidate, decision_tick_id=decision_tick_id),
-            max(last_pivot_id, int(current["pivot_id"])),
-        )
+            return current, max(last_pivot_id, int(current["pivot_id"])), False
+        replaced = replace_with_candidate(cur, current, candidate=candidate, decision_tick_id=decision_tick_id)
+        return replaced, max(last_pivot_id, int(current["pivot_id"])), True
 
     next_pivot_id = max(last_pivot_id, int(current["pivot_id"])) + 1
-    return insert_pivot_version(cur, pivot_id=next_pivot_id, candidate=candidate, decision_tick_id=decision_tick_id), next_pivot_id
+    inserted = insert_pivot_version(
+        cur,
+        pivot_id=next_pivot_id,
+        direction=str(candidate["direction"]),
+        pivot_price=float(candidate["price"]),
+        source_tick_id=int(candidate["source_tick_id"]),
+        source_timestamp=candidate["source_timestamp"],
+        level=1,
+        decision_tick_id=decision_tick_id,
+    )
+    return inserted, next_pivot_id, True
+
+
+def qualifies_for_promotion(pivots: List[Dict[str, Any]], *, target_level: int) -> Optional[Dict[str, Any]]:
+    if len(pivots) != PIVOT_WINDOW_SIZE:
+        return None
+
+    center = pivots[PIVOT_CENTER_INDEX]
+    if int(center["level"] or 1) >= target_level:
+        return None
+
+    peers = [row for row in pivots if row["direction"] == center["direction"]]
+    center_price = float(center["pivot_price"])
+    other_prices = [float(row["pivot_price"]) for row in peers if int(row["pivot_id"]) != int(center["pivot_id"])]
+    if not other_prices:
+        return None
+
+    if center["direction"] == "high":
+        return center if all(center_price > price for price in other_prices) else None
+    return center if all(center_price < price for price in other_prices) else None
+
+
+def apply_promotions(cur: Any, *, decision_tick_id: int) -> None:
+    while True:
+        promoted_any = False
+        for target_level in range(2, MAX_LEVEL + 1):
+            pivots = load_recent_current_pivots(cur, minimum_level=target_level - 1, limit=PIVOT_WINDOW_SIZE)
+            candidate = qualifies_for_promotion(pivots, target_level=target_level)
+            if not candidate:
+                continue
+            promote_pivot(cur, candidate, target_level=target_level, decision_tick_id=decision_tick_id)
+            promoted_any = True
+            break
+        if not promoted_any:
+            return
 
 
 def log_progress(*, last_processed_tick_id: int, last_pivot_id: int, batch_count: int, batch_ms: float) -> None:
@@ -293,7 +398,7 @@ def run_loop() -> None:
         try:
             conn = db_connect()
             conn.autocommit = False
-            ensure_schema(conn)
+            ensure_storage_ready(conn)
 
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 state = load_state(cur)
@@ -324,13 +429,15 @@ def run_loop() -> None:
                         if len(window_ticks) == WINDOW_SIZE:
                             candidate = detect_pivot(window_ticks)
                             if candidate:
-                                current_pivot, last_pivot_id = apply_pivot(
+                                current_pivot, last_pivot_id, changed = apply_level_one(
                                     cur,
                                     current_pivot,
                                     candidate,
                                     last_pivot_id=last_pivot_id,
                                     decision_tick_id=int(row["id"]),
                                 )
+                                if changed:
+                                    apply_promotions(cur, decision_tick_id=int(row["id"]))
                         last_processed_tick_id = int(row["id"])
 
                     store_state(

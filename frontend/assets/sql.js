@@ -16,6 +16,8 @@
     previewOrderBy: "id",
     previewOrderDir: "desc",
     activePreview: false,
+    tables: [],
+    activeObject: null,
   };
 
   const elements = {
@@ -66,6 +68,14 @@
     return payload;
   }
 
+  function objectLabel(object) {
+    return object ? (object.schema + "." + object.name) : "no-object";
+  }
+
+  function activeObject() {
+    return state.activeObject;
+  }
+
   function renderConnectionMeta(context) {
     if (!context) {
       elements.connectionMeta.textContent = "Protected admin route.";
@@ -80,12 +90,25 @@
   }
 
   function renderSchema(payload) {
-    const table = (((payload || {}).schemas || [])[0] || {}).objects?.tables?.[0];
-    if (!table) {
-      elements.schemaTree.innerHTML = "<div class=\"muted\">public.ticks is not available.</div>";
+    const tables = (((payload || {}).schemas || [])[0] || {}).objects?.tables || [];
+    state.tables = tables;
+    if (!tables.length) {
+      elements.schemaTree.innerHTML = "<div class=\"muted\">No exposed Layer 0 tables are available.</div>";
       return;
     }
-    elements.schemaTree.innerHTML = "<button type=\"button\" class=\"schema-object-button active\"><span class=\"object-name\">public.ticks</span><span class=\"object-meta\">est " + escapeHtml(String(table.rowEstimate || 0)) + "</span></button>";
+    elements.schemaTree.innerHTML = tables.map((table) => {
+      const active = activeObject() && activeObject().schema === table.schema && activeObject().name === table.name;
+      return [
+        "<button type=\"button\" class=\"schema-object-button",
+        active ? " active" : "",
+        "\" data-schema=\"", escapeHtml(table.schema),
+        "\" data-name=\"", escapeHtml(table.name),
+        "\" data-kind=\"", escapeHtml(table.kind || "table"),
+        "\"><span class=\"object-name\">", escapeHtml(table.schema + "." + table.name),
+        "</span><span class=\"object-meta\">est ", escapeHtml(String(table.rowEstimate || 0)),
+        "</span></button>",
+      ].join("");
+    }).join("");
   }
 
   function renderObject(payload) {
@@ -96,8 +119,17 @@
     const indexes = (object.indexes || []).map((index) => {
       return "<div class=\"definition-block\"><div class=\"definition-title\">" + escapeHtml(index.name) + "</div><pre>" + escapeHtml(index.definition || "") + "</pre></div>";
     }).join("");
+    state.activeObject = {
+      schema: object.schema,
+      name: object.name,
+      kind: object.kind,
+      actions: payload.actions || {},
+      preview: payload.preview || {},
+    };
+    state.previewOrderBy = state.activeObject.preview.orderBy || state.previewOrderBy;
+    state.previewOrderDir = state.activeObject.preview.orderDir || state.previewOrderDir;
     elements.objectDetail.innerHTML = [
-      "<div class=\"object-heading\"><div class=\"object-kind\">table</div><h2>public.ticks</h2></div>",
+      "<div class=\"object-heading\"><div class=\"object-kind\">table</div><h2>" + escapeHtml(object.schema + "." + object.name) + "</h2></div>",
       "<div class=\"object-metrics\">",
       "<div class=\"object-metric\"><span>Rows est.</span><strong>" + escapeHtml(String(object.rowEstimate || 0)) + "</strong></div>",
       "<div class=\"object-metric\"><span>Size</span><strong>" + escapeHtml(object.totalSize || "-") + "</strong></div>",
@@ -105,12 +137,13 @@
       "<div class=\"detail-block\"><div class=\"detail-title\">Columns</div><table class=\"inspector-table\"><thead><tr><th>Name</th><th>Type</th><th>Flags</th></tr></thead><tbody>" + columns + "</tbody></table></div>",
       "<div class=\"detail-block\"><div class=\"detail-title\">Indexes</div>" + indexes + "</div>",
     ].join("");
+    elements.editorContext.textContent = "Read-only Layer 0 SQL | active " + objectLabel(state.activeObject);
   }
 
   function renderResult(result, previewMeta) {
     elements.previewToolbar.hidden = !previewMeta;
     if (previewMeta) {
-      elements.previewMeta.textContent = "Offset " + previewMeta.offset + " | Limit " + previewMeta.limit + " | Sort " + previewMeta.orderBy + " " + previewMeta.orderDir.toUpperCase();
+      elements.previewMeta.textContent = objectLabel(activeObject()) + " | Offset " + previewMeta.offset + " | Limit " + previewMeta.limit + " | Sort " + previewMeta.orderBy + " " + previewMeta.orderDir.toUpperCase();
       elements.previewPrevButton.disabled = previewMeta.offset <= 0;
       elements.previewNextButton.disabled = !result.truncated && (result.rows || []).length < previewMeta.limit;
     }
@@ -141,21 +174,47 @@
     elements.resultsError.innerHTML = "";
   }
 
-  async function loadSchemaAndObject() {
+  async function loadObject(schema, name, kind, replaceEditor) {
+    const payload = await fetchJson("/api/sql/object?" + new URLSearchParams({
+      schema: schema,
+      name: name,
+      kind: kind,
+    }).toString());
+    renderObject(payload);
+    renderSchema({ schemas: [{ objects: { tables: state.tables } }] });
+    if (replaceEditor && payload.actions?.insertSelect) {
+      editor.setValue(payload.actions.insertSelect);
+    }
+    return payload;
+  }
+
+  async function loadSchemaAndObject(replaceEditor) {
     clearError();
     const schemaPayload = await fetchJson("/api/sql/schema");
     renderConnectionMeta(schemaPayload.context);
     renderSchema(schemaPayload);
-    const objectPayload = await fetchJson("/api/sql/object?schema=public&name=ticks&kind=table");
-    renderObject(objectPayload);
-    setStatus("Ticks metadata loaded.", "success");
+    const tables = (((schemaPayload || {}).schemas || [])[0] || {}).objects?.tables || [];
+    if (!tables.length) {
+      elements.objectDetail.innerHTML = "<div class=\"muted\">No exposed Layer 0 tables are available.</div>";
+      elements.resultsHost.innerHTML = "<div class=\"results-empty\">No exposed Layer 0 tables are available.</div>";
+      setStatus("No exposed Layer 0 tables were found.", "error");
+      return;
+    }
+    const current = activeObject();
+    const selected = tables.find((table) => current && table.schema === current.schema && table.name === current.name) || tables[0];
+    await loadObject(selected.schema, selected.name, selected.kind || "table", replaceEditor);
+    setStatus("Layer 0 metadata loaded.", "success");
   }
 
   async function loadPreview() {
     clearError();
+    if (!activeObject()) {
+      setStatus("Select a table first.", "error");
+      return;
+    }
     const payload = await fetchJson("/api/sql/table-preview?" + new URLSearchParams({
-      schema: "public",
-      name: "ticks",
+      schema: activeObject().schema,
+      name: activeObject().name,
       limit: String(state.previewLimit),
       offset: String(state.previewOffset),
       orderBy: state.previewOrderBy,
@@ -163,9 +222,9 @@
     }).toString());
     renderConnectionMeta(payload.context);
     state.activePreview = true;
-    elements.resultsMeta.textContent = "Preview public.ticks | " + payload.result.elapsedMs + " ms";
+    elements.resultsMeta.textContent = "Preview " + objectLabel(activeObject()) + " | " + payload.result.elapsedMs + " ms";
     renderResult(payload.result, payload.result.source);
-    setStatus("Ticks preview loaded.", "success");
+    setStatus("Preview loaded for " + objectLabel(activeObject()) + ".", "success");
   }
 
   async function runQuery() {
@@ -185,15 +244,16 @@
     elements.previewToolbar.hidden = true;
     elements.resultsMeta.textContent = payload.elapsedMs + " ms";
     renderResult(payload.results[0] || { columns: [], rows: [] }, null);
-    setStatus("Ticks query completed.", "success");
+    setStatus("Layer 0 query completed.", "success");
   }
 
   elements.refreshSchemaButton.addEventListener("click", function () {
-    loadSchemaAndObject().catch((error) => {
+    loadSchemaAndObject(false).catch((error) => {
       showError(error);
       setStatus(error.message || "Schema load failed.", "error");
     });
   });
+
   elements.previewButton.addEventListener("click", function () {
     state.previewOffset = 0;
     loadPreview().catch((error) => {
@@ -201,6 +261,7 @@
       setStatus(error.message || "Preview failed.", "error");
     });
   });
+
   elements.previewTopButton.addEventListener("click", function () {
     state.previewOffset = 0;
     loadPreview().catch((error) => {
@@ -208,12 +269,14 @@
       setStatus(error.message || "Preview failed.", "error");
     });
   });
+
   elements.runQueryButton.addEventListener("click", function () {
     runQuery().catch((error) => {
       showError(error);
       setStatus(error.message || "Query failed.", "error");
     });
   });
+
   elements.previewPrevButton.addEventListener("click", function () {
     state.previewOffset = Math.max(0, state.previewOffset - state.previewLimit);
     loadPreview().catch((error) => {
@@ -221,6 +284,7 @@
       setStatus(error.message || "Preview failed.", "error");
     });
   });
+
   elements.previewNextButton.addEventListener("click", function () {
     state.previewOffset += state.previewLimit;
     loadPreview().catch((error) => {
@@ -229,12 +293,26 @@
     });
   });
 
-  editor.on("cursorActivity", function () {
-    const value = editor.getValue();
-    elements.editorContext.textContent = "Ticks-only SQL editor | " + value.length + " chars";
+  elements.schemaTree.addEventListener("click", function (event) {
+    const button = event.target.closest(".schema-object-button");
+    if (!button) {
+      return;
+    }
+    state.previewOffset = 0;
+    loadObject(button.dataset.schema, button.dataset.name, button.dataset.kind || "table", true)
+      .then(loadPreview)
+      .catch((error) => {
+        showError(error);
+        setStatus(error.message || "Object load failed.", "error");
+      });
   });
 
-  loadSchemaAndObject()
+  editor.on("cursorActivity", function () {
+    const value = editor.getValue();
+    elements.editorContext.textContent = "Read-only Layer 0 SQL | active " + objectLabel(activeObject()) + " | " + value.length + " chars";
+  });
+
+  loadSchemaAndObject(true)
     .then(loadPreview)
     .catch((error) => {
       showError(error);
