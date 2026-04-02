@@ -59,7 +59,11 @@ cd "$APP_DIR"
 if [[ -f "$ENV_FILE" ]]; then
   log "Loading environment from ${ENV_FILE}"
   set -a
-  source "$ENV_FILE"
+  if [[ -r "$ENV_FILE" ]]; then
+    source "$ENV_FILE"
+  else
+    eval "$(sudo cat "$ENV_FILE")"
+  fi
   set +a
 fi
 
