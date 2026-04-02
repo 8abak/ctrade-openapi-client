@@ -64,7 +64,6 @@ DISPLAY_MODE_RE = "^(ticks|ticks-zig|zig)$"
 SQL_ADMIN_USER = os.getenv("DATAVIS_SQL_ADMIN_USER", "").strip()
 SQL_ADMIN_PASSWORD = os.getenv("DATAVIS_SQL_ADMIN_PASSWORD", "")
 DEFAULT_REVIEW_TIMEZONE = "Australia/Sydney"
-ALLOWED_SQL_HEADS = {"SELECT", "EXPLAIN"}
 SQL_EXPOSED_TABLES = {
     ("public", "ticks"): {
         "schema": "public",
@@ -81,7 +80,7 @@ SQL_EXPOSED_TABLES = {
         "default_order_by": "version_id",
         "default_order_dir": "desc",
         "select_sql": (
-            "SELECT version_id, pivot_id, source_tick_id, source_timestamp, direction, pivot_price, level,\n"
+            "SELECT version_id, pivot_id, source_tick_id, source_timestamp, direction, pivot_price, level, state,\n"
             "       visible_from_tick_id, visible_to_tick_id\n"
             "FROM public.fast_zig_pivots\n"
             "ORDER BY pivot_id DESC, version_id DESC\n"
@@ -97,22 +96,17 @@ SQL_EXPOSED_TABLES = {
         "select_sql": "SELECT symbol, last_processed_tick_id, last_pivot_id, updated_at\nFROM public.fast_zig_state\nORDER BY symbol ASC\nLIMIT 100;",
     },
 }
-SQL_EXPOSED_RELATIONS = {
-    "{0}.{1}".format(schema_name, object_name)
-    for schema_name, object_name in SQL_EXPOSED_TABLES
+ZIG_REQUIRED_PIVOT_COLUMNS = {
+    "level",
+    "state",
+    "updated_at",
 }
-SQL_EXPOSED_REFERENCES = SQL_EXPOSED_RELATIONS | {
-    object_name
-    for _, object_name in SQL_EXPOSED_TABLES
+ZIG_REQUIRED_STATE_COLUMNS = {
+    "symbol",
+    "last_processed_tick_id",
+    "last_pivot_id",
+    "updated_at",
 }
-FORBIDDEN_SQL_RE = re.compile(
-    r"\b("
-    r"insert|update|delete|drop|alter|create|truncate|copy|grant|revoke|"
-    r"vacuum|analyze|refresh|call|do|begin|commit|rollback|savepoint|release|"
-    r"listen|notify|unlisten|set|reset|show"
-    r")\b",
-    re.IGNORECASE,
-)
 
 
 class QueryRequest(BaseModel):
@@ -201,6 +195,7 @@ def serialize_zig_row(row: Dict[str, Any]) -> Dict[str, Any]:
         "direction": row["direction"],
         "price": row["pivot_price"],
         "level": row["level"],
+        "state": row["state"],
         "visibleFromTickId": row["visible_from_tick_id"],
         "visibleToTickId": row.get("visible_to_tick_id"),
     }
@@ -519,6 +514,7 @@ def fetch_zig_snapshot_rows(
             direction,
             pivot_price,
             level,
+            state,
             visible_from_tick_id,
             visible_to_tick_id
         FROM public.fast_zig_pivots
@@ -545,6 +541,7 @@ def fetch_zig_snapshot_rows(
             direction,
             pivot_price,
             level,
+            state,
             visible_from_tick_id,
             visible_to_tick_id
         FROM public.fast_zig_pivots
@@ -583,6 +580,7 @@ def fetch_zig_changes(cur: Any, *, after_tick_id: int, upto_tick_id: Optional[in
             direction,
             pivot_price,
             level,
+            state,
             visible_from_tick_id,
             visible_to_tick_id
         FROM public.fast_zig_pivots
@@ -608,7 +606,26 @@ def zig_storage_ready(cur: Any) -> bool:
         """
     )
     row = cur.fetchone() or {}
-    return bool(row.get("pivots_table")) and bool(row.get("state_table"))
+    if not row.get("pivots_table") or not row.get("state_table"):
+        return False
+    cur.execute(
+        """
+        SELECT table_name, column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name IN ('fast_zig_pivots', 'fast_zig_state')
+        """
+    )
+    columns: Dict[str, set[str]] = {
+        "fast_zig_pivots": set(),
+        "fast_zig_state": set(),
+    }
+    for info in cur.fetchall():
+        columns.setdefault(info["table_name"], set()).add(info["column_name"])
+    return (
+        ZIG_REQUIRED_PIVOT_COLUMNS.issubset(columns.get("fast_zig_pivots", set()))
+        and ZIG_REQUIRED_STATE_COLUMNS.issubset(columns.get("fast_zig_state", set()))
+    )
 
 
 def split_sql_script(sql_text: str) -> List[str]:
@@ -697,35 +714,11 @@ def normalize_relation_reference(raw_reference: str) -> str:
     return raw_reference.replace(" ", "").replace('"', "").lower()
 
 
-def validate_readonly_query(sql_text: str) -> str:
+def validate_admin_query(sql_text: str) -> List[str]:
     statements = split_sql_script(sql_text)
-    if len(statements) != 1:
-        raise HTTPException(status_code=400, detail="Only one read-only query is allowed at a time.")
-
-    statement = statements[0]
-    head = statement_head(statement)
-    if head not in ALLOWED_SQL_HEADS:
-        raise HTTPException(status_code=400, detail="Only SELECT and EXPLAIN queries are allowed.")
-
-    lowered = statement.lower()
-    if FORBIDDEN_SQL_RE.search(lowered):
-        raise HTTPException(status_code=400, detail="Only read-only queries against exposed Layer 0 tables are allowed.")
-    if re.search(r"\b(join|union|intersect|except)\b", lowered):
-        raise HTTPException(status_code=400, detail="The SQL page is limited to a single exposed table per query.")
-
-    relation_matches = re.findall(r"\bfrom\s+((?:\"[^\"]+\"|\w+)(?:\s*\.\s*(?:\"[^\"]+\"|\w+))?)", statement, re.IGNORECASE)
-    if not relation_matches:
-        raise HTTPException(status_code=400, detail="Queries must read from an exposed Layer 0 table.")
-
-    normalized_relations = {normalize_relation_reference(relation) for relation in relation_matches}
-    if len(normalized_relations) != 1:
-        raise HTTPException(status_code=400, detail="Queries may only read from one exposed table at a time.")
-    for relation in relation_matches:
-        normalized = normalize_relation_reference(relation)
-        if normalized not in SQL_EXPOSED_REFERENCES:
-            raise HTTPException(status_code=400, detail="Queries may only read from exposed Layer 0 tables.")
-
-    return statement
+    if not statements:
+        raise HTTPException(status_code=400, detail="SQL text is required.")
+    return statements
 
 
 def relation_columns(conn: Any, schema_name: str, object_name: str) -> List[Dict[str, Any]]:
@@ -800,7 +793,7 @@ def relation_summary(conn: Any, schema_name: str, object_name: str) -> Optional[
 def sql_object_config(schema_name: str, object_name: str, object_kind: str = "table") -> Dict[str, Any]:
     config = SQL_EXPOSED_TABLES.get((schema_name, object_name))
     if not config or config["kind"] != object_kind:
-        raise HTTPException(status_code=404, detail="That Layer 0 SQL object is not exposed.")
+        raise HTTPException(status_code=404, detail="That admin SQL object is not exposed.")
     return config
 
 
@@ -948,45 +941,56 @@ def preview_relation(
 
 
 def execute_query(sql_text: str) -> Dict[str, Any]:
-    statement = validate_readonly_query(sql_text)
+    statements = validate_admin_query(sql_text)
     started = time.perf_counter()
-    with db_connection(readonly=True, autocommit=False) as conn:
+    active_statement: Optional[str] = None
+    with db_connection(readonly=False, autocommit=False) as conn:
         try:
             with conn.cursor() as cur:
                 cur.execute("SET statement_timeout = %s", (str(STATEMENT_TIMEOUT_MS),))
                 cur.execute("SET lock_timeout = %s", (str(LOCK_TIMEOUT_MS),))
-                cur.execute("SET idle_in_transaction_session_timeout = '5000'")
-                statement_started = time.perf_counter()
-                cur.execute(statement)
-                columns = describe_columns(cur.description)
-                rows, truncated = fetch_result_rows(cur, MAX_QUERY_ROWS)
+                cur.execute("SET idle_in_transaction_session_timeout = '30000'")
+                results = []
+                for index, statement in enumerate(statements, start=1):
+                    active_statement = statement
+                    statement_started = time.perf_counter()
+                    cur.execute(statement)
+                    has_result_set = cur.description is not None
+                    columns = describe_columns(cur.description)
+                    rows, truncated = fetch_result_rows(cur, MAX_QUERY_ROWS) if has_result_set else ([], False)
+                    row_count = len(rows) if has_result_set else max(0, cur.rowcount)
+                    results.append(
+                        {
+                            "index": index,
+                            "statement": statement,
+                            "statementType": statement_head(statement),
+                            "commandTag": getattr(cur, "statusmessage", None) or statement_head(statement),
+                            "rowCount": row_count,
+                            "elapsedMs": elapsed_ms(statement_started),
+                            "columns": columns,
+                            "rows": rows,
+                            "truncated": truncated,
+                            "maxRows": MAX_QUERY_ROWS,
+                            "hasResultSet": has_result_set,
+                        }
+                    )
             context = fetch_sql_context(conn)
+            conn.commit()
         except Exception as exc:
             if conn.status != pg_extensions.STATUS_READY:
                 conn.rollback()
-            raise HTTPException(status_code=400, detail=serialize_pg_error(exc, statement=statement)) from exc
+            raise HTTPException(
+                status_code=400,
+                detail=serialize_pg_error(exc, statement=active_statement),
+            ) from exc
 
     return {
         "success": True,
-        "statementCount": 1,
-        "transactionMode": "readonly",
+        "statementCount": len(statements),
+        "transactionMode": "admin",
         "elapsedMs": elapsed_ms(started),
         "context": context,
-        "results": [
-            {
-                "index": 1,
-                "statement": statement,
-                "statementType": statement_head(statement),
-                "commandTag": statement_head(statement),
-                "rowCount": len(rows),
-                "elapsedMs": elapsed_ms(statement_started),
-                "columns": columns,
-                "rows": rows,
-                "truncated": truncated,
-                "maxRows": MAX_QUERY_ROWS,
-                "hasResultSet": True,
-            }
-        ],
+        "results": results,
     }
 
 

@@ -8,7 +8,7 @@ DEFAULT_DATABASE_URL="postgresql://babak:babak33044@localhost:5432/trading"
 UNIT_FILES=("datavis" "tickcollector" "fastzig")
 RESTART_SERVICES=("datavis" "fastzig")
 LEGACY_SERVICES=("ottprocessor" "envelopeprocessor" "zigzag" "envelopezigprocessor" "marketprofile")
-MIGRATION_FILES=("deploy/sql/20260403_fast_zig.sql")
+MIGRATION_FILES=("deploy/sql/20260403_fast_zig.sql" "deploy/sql/20260404_fast_zig_levels.sql")
 HEALTH_URL="http://127.0.0.1:8000/api/health"
 
 log() {

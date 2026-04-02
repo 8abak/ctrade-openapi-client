@@ -93,7 +93,7 @@
     const tables = (((payload || {}).schemas || [])[0] || {}).objects?.tables || [];
     state.tables = tables;
     if (!tables.length) {
-      elements.schemaTree.innerHTML = "<div class=\"muted\">No exposed Layer 0 tables are available.</div>";
+      elements.schemaTree.innerHTML = "<div class=\"muted\">No admin tables are available.</div>";
       return;
     }
     elements.schemaTree.innerHTML = tables.map((table) => {
@@ -137,22 +137,14 @@
       "<div class=\"detail-block\"><div class=\"detail-title\">Columns</div><table class=\"inspector-table\"><thead><tr><th>Name</th><th>Type</th><th>Flags</th></tr></thead><tbody>" + columns + "</tbody></table></div>",
       "<div class=\"detail-block\"><div class=\"detail-title\">Indexes</div>" + indexes + "</div>",
     ].join("");
-    elements.editorContext.textContent = "Read-only Layer 0 SQL | active " + objectLabel(state.activeObject);
+    elements.editorContext.textContent = "Admin SQL console | active " + objectLabel(state.activeObject);
   }
 
-  function renderResult(result, previewMeta) {
-    elements.previewToolbar.hidden = !previewMeta;
-    if (previewMeta) {
-      elements.previewMeta.textContent = objectLabel(activeObject()) + " | Offset " + previewMeta.offset + " | Limit " + previewMeta.limit + " | Sort " + previewMeta.orderBy + " " + previewMeta.orderDir.toUpperCase();
-      elements.previewPrevButton.disabled = previewMeta.offset <= 0;
-      elements.previewNextButton.disabled = !result.truncated && (result.rows || []).length < previewMeta.limit;
-    }
-
+  function renderResultGrid(result) {
     const columns = result.columns || [];
     const rows = result.rows || [];
     if (!columns.length) {
-      elements.resultsHost.innerHTML = "<div class=\"results-empty\">Query returned no result set.</div>";
-      return;
+      return "<div class=\"results-empty\">Statement completed without a result set.</div>";
     }
 
     const head = columns.map((column) => "<th>" + escapeHtml(column.name) + "</th>").join("");
@@ -160,7 +152,34 @@
       ? rows.map((row) => "<tr>" + row.map((value) => "<td>" + (value === null ? "<span class=\"null-pill\">NULL</span>" : escapeHtml(String(value))) + "</td>").join("") + "</tr>").join("")
       : "<tr><td colspan=\"" + columns.length + "\" class=\"muted\">Query completed successfully with 0 rows.</td></tr>";
 
-    elements.resultsHost.innerHTML = "<div class=\"result-grid-wrap\"><table class=\"result-table\"><thead><tr>" + head + "</tr></thead><tbody>" + body + "</tbody></table></div>";
+    return "<div class=\"result-grid-wrap\"><table class=\"result-table\"><thead><tr>" + head + "</tr></thead><tbody>" + body + "</tbody></table></div>";
+  }
+
+  function renderPreviewResult(result, previewMeta) {
+    elements.previewToolbar.hidden = !previewMeta;
+    if (previewMeta) {
+      elements.previewMeta.textContent = objectLabel(activeObject()) + " | Offset " + previewMeta.offset + " | Limit " + previewMeta.limit + " | Sort " + previewMeta.orderBy + " " + previewMeta.orderDir.toUpperCase();
+      elements.previewPrevButton.disabled = previewMeta.offset <= 0;
+      elements.previewNextButton.disabled = !result.truncated && (result.rows || []).length < previewMeta.limit;
+    }
+    elements.resultsHost.innerHTML = renderResultGrid(result);
+  }
+
+  function renderQueryResults(results) {
+    elements.previewToolbar.hidden = true;
+    if (!results.length) {
+      elements.resultsHost.innerHTML = "<div class=\"results-empty\">No statements were executed.</div>";
+      return;
+    }
+    elements.resultsHost.innerHTML = results.map((result) => {
+      return [
+        "<section class=\"detail-block\">",
+        "<div class=\"definition-title\">Statement ", escapeHtml(String(result.index || 0)), " · ", escapeHtml(result.commandTag || result.statementType || "SQL"), "</div>",
+        "<div class=\"muted\">", escapeHtml(result.statement || ""), "</div>",
+        renderResultGrid(result),
+        "</section>",
+      ].join("");
+    }).join("");
   }
 
   function showError(error) {
@@ -195,15 +214,15 @@
     renderSchema(schemaPayload);
     const tables = (((schemaPayload || {}).schemas || [])[0] || {}).objects?.tables || [];
     if (!tables.length) {
-      elements.objectDetail.innerHTML = "<div class=\"muted\">No exposed Layer 0 tables are available.</div>";
-      elements.resultsHost.innerHTML = "<div class=\"results-empty\">No exposed Layer 0 tables are available.</div>";
-      setStatus("No exposed Layer 0 tables were found.", "error");
+      elements.objectDetail.innerHTML = "<div class=\"muted\">No admin tables are available.</div>";
+      elements.resultsHost.innerHTML = "<div class=\"results-empty\">No admin tables are available.</div>";
+      setStatus("No admin tables were found.", "error");
       return;
     }
     const current = activeObject();
     const selected = tables.find((table) => current && table.schema === current.schema && table.name === current.name) || tables[0];
     await loadObject(selected.schema, selected.name, selected.kind || "table", replaceEditor);
-    setStatus("Layer 0 metadata loaded.", "success");
+    setStatus("Admin SQL metadata loaded.", "success");
   }
 
   async function loadPreview() {
@@ -223,7 +242,7 @@
     renderConnectionMeta(payload.context);
     state.activePreview = true;
     elements.resultsMeta.textContent = "Preview " + objectLabel(activeObject()) + " | " + payload.result.elapsedMs + " ms";
-    renderResult(payload.result, payload.result.source);
+    renderPreviewResult(payload.result, payload.result.source);
     setStatus("Preview loaded for " + objectLabel(activeObject()) + ".", "success");
   }
 
@@ -241,10 +260,9 @@
     });
     renderConnectionMeta(payload.context);
     state.activePreview = false;
-    elements.previewToolbar.hidden = true;
-    elements.resultsMeta.textContent = payload.elapsedMs + " ms";
-    renderResult(payload.results[0] || { columns: [], rows: [] }, null);
-    setStatus("Layer 0 query completed.", "success");
+    elements.resultsMeta.textContent = payload.elapsedMs + " ms | " + payload.statementCount + " statement(s)";
+    renderQueryResults(payload.results || []);
+    setStatus("Admin SQL statement(s) completed.", "success");
   }
 
   elements.refreshSchemaButton.addEventListener("click", function () {
@@ -309,7 +327,7 @@
 
   editor.on("cursorActivity", function () {
     const value = editor.getValue();
-    elements.editorContext.textContent = "Read-only Layer 0 SQL | active " + objectLabel(activeObject()) + " | " + value.length + " chars";
+    elements.editorContext.textContent = "Admin SQL console | active " + objectLabel(activeObject()) + " | " + value.length + " chars";
   });
 
   loadSchemaAndObject(true)

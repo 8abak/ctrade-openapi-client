@@ -297,17 +297,21 @@
       return;
     }
     const config = currentConfig();
-    const level1Count = state.zigRows.filter((row) => (row.level || 1) >= 1).length;
-    const level2Count = state.zigRows.filter((row) => (row.level || 1) >= 2).length;
-    const level3Count = state.zigRows.filter((row) => (row.level || 1) >= 3).length;
+    const level0Count = state.zigRows.filter((row) => (row.level ?? 0) >= 0).length;
+    const level1Count = state.zigRows.filter((row) => (row.level ?? 0) >= 1).length;
+    const level2Count = state.zigRows.filter((row) => (row.level ?? 0) >= 2).length;
+    const level3Count = state.zigRows.filter((row) => (row.level ?? 0) >= 3).length;
+    const candidateCount = state.zigRows.filter((row) => row.state === "candidate").length;
     const parts = [
       config.mode.toUpperCase(),
       DISPLAY_CONFIG[config.display].label,
       "left " + state.rangeFirstId,
       "right " + state.rangeLastId,
-      "zig L1 " + level1Count,
+      "zig L0 " + level0Count,
+      "L1 " + level1Count,
       "L2 " + level2Count,
       "L3 " + level3Count,
+      "cand " + candidateCount,
       state.hasMoreLeft ? "more-left yes" : "more-left no",
     ];
     if (displayUsesTicks(config.display)) {
@@ -495,11 +499,31 @@
   }
 
   function zigRowsAtLevel(level) {
-    return state.zigRows.filter((row) => (row.level || 1) >= level);
+    return state.zigRows.filter((row) => (row.level ?? 0) >= level);
   }
 
-  function zigToSeriesData(level) {
-    return zigRowsAtLevel(level).map((row) => [row.timestampMs, row.price]);
+  function zigSeriesRows(level, stateName) {
+    const rows = zigRowsAtLevel(level);
+    if (!rows.length) {
+      return [];
+    }
+    if (stateName === "final") {
+      return rows.filter((row) => row.state !== "candidate");
+    }
+    const candidateRows = rows.filter((row) => row.state === "candidate");
+    if (!candidateRows.length) {
+      return [];
+    }
+    const lastCandidate = candidateRows[candidateRows.length - 1];
+    const candidateIndex = rows.findIndex((row) => row.pivotId === lastCandidate.pivotId);
+    if (candidateIndex > 0) {
+      return [rows[candidateIndex - 1], lastCandidate];
+    }
+    return [lastCandidate];
+  }
+
+  function zigToSeriesData(level, stateName) {
+    return zigSeriesRows(level, stateName).map((row) => [row.timestampMs, row.price]);
   }
 
   function buildChartSeries(config) {
@@ -519,32 +543,55 @@
     }
     if (displayUsesZig(config.display) && state.zigRows.length) {
       [
-        { level: 1, id: "fast-zig-l1", name: "Fast Zig L1", color: "#ffc857", border: "#f7e7b3", width: 1.8, symbolSize: 4 },
-        { level: 2, id: "fast-zig-l2", name: "Fast Zig L2", color: "#ff6b6b", border: "#ffd6d6", width: 2.4, symbolSize: 6 },
+        { level: 0, id: "fast-zig-l0", name: "Fast Zig L0", color: "#ffc857", border: "#f7e7b3", width: 1.6, symbolSize: 4 },
+        { level: 1, id: "fast-zig-l1", name: "Fast Zig L1", color: "#ff8c42", border: "#ffd9b8", width: 2.0, symbolSize: 5 },
+        { level: 2, id: "fast-zig-l2", name: "Fast Zig L2", color: "#ff4d6d", border: "#ffd3dc", width: 2.5, symbolSize: 6 },
         { level: 3, id: "fast-zig-l3", name: "Fast Zig L3", color: "#f8fafc", border: "#ffd166", width: 3.0, symbolSize: 8 },
       ].forEach((entry) => {
-        const data = zigToSeriesData(entry.level);
-        if (!data.length) {
-          return;
-        }
-        series.push({
-          id: entry.id,
-          name: entry.name,
-          type: "line",
-          showSymbol: true,
-          symbol: "circle",
-          symbolSize: entry.symbolSize,
-          hoverAnimation: false,
-          animation: false,
-          connectNulls: false,
-          z: 5 + entry.level,
-          data: data,
-          lineStyle: { color: entry.color, width: entry.width },
-          itemStyle: {
-            color: entry.color,
+        [
+          {
+            stateName: "final",
+            suffix: "final",
+            lineType: "solid",
+            opacity: 1,
+            symbol: "circle",
+            fillColor: entry.color,
             borderColor: entry.border,
-            borderWidth: 1,
           },
+          {
+            stateName: "candidate",
+            suffix: "candidate",
+            lineType: "dashed",
+            opacity: 0.92,
+            symbol: "emptyCircle",
+            fillColor: "#0f172a",
+            borderColor: entry.color,
+          },
+        ].forEach((variant) => {
+          const data = zigToSeriesData(entry.level, variant.stateName);
+          if (!data.length) {
+            return;
+          }
+          series.push({
+            id: entry.id + "-" + variant.suffix,
+            name: entry.name + (variant.stateName === "candidate" ? " Candidate" : ""),
+            type: "line",
+            showSymbol: true,
+            symbol: variant.symbol,
+            symbolSize: entry.symbolSize,
+            hoverAnimation: false,
+            animation: false,
+            connectNulls: false,
+            z: 5 + entry.level,
+            data: data,
+            lineStyle: { color: entry.color, width: entry.width, type: variant.lineType, opacity: variant.opacity },
+            itemStyle: {
+              color: variant.fillColor,
+              borderColor: variant.borderColor,
+              borderWidth: 1,
+              opacity: variant.opacity,
+            },
+          });
         });
       });
     }

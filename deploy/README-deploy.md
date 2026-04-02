@@ -35,6 +35,7 @@ The deploy script:
 - installs the repo-managed systemd unit files for `datavis`, `tickcollector`, and `fastzig`
 - runs `systemctl daemon-reload`
 - loads `/etc/datavis.env` when present and applies `deploy/sql/20260403_fast_zig.sql`
+- applies `deploy/sql/20260404_fast_zig_levels.sql` for level/state upgrades on partial fast-zig deployments
 - disables and removes legacy processor services: `ottprocessor`, `envelopeprocessor`, `zigzag`, `envelopezigprocessor`, and `marketprofile`
 - enables `datavis`, `tickcollector`, and `fastzig`
 - restarts `datavis` and `fastzig`

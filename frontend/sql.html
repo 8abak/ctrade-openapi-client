@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>datavis.au | Layer 0 SQL</title>
+  <title>datavis.au | Admin SQL</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -17,9 +17,9 @@
       <div class="sql-sidebar-scroll">
         <div class="sql-sidebar-header">
           <a class="back-link" href="/">datavis.au</a>
-          <div class="sql-admin-badge">layer 0 tables</div>
-          <h1>Layer 0 SQL</h1>
-          <div class="sql-sidebar-copy">Read-only inspection for the exposed Layer 0 tables: ticks, fast zig pivots, and fast zig state.</div>
+          <div class="sql-admin-badge">admin</div>
+          <h1>Admin SQL</h1>
+          <div class="sql-sidebar-copy">Protected SQL console with quick access to ticks, fast zig pivots, and fast zig state.</div>
         </div>
         <div class="sql-connection-card">
           <div class="sql-connection-label">Connection</div>
@@ -38,7 +38,7 @@
             <button class="ghost-button compact-button" id="previewButton" type="button">Preview Recent</button>
           </div>
           <div class="object-detail" id="objectDetail">
-            <div class="muted">Loading Layer 0 table metadata...</div>
+            <div class="muted">Loading admin table metadata...</div>
           </div>
         </section>
       </div>
@@ -48,8 +48,8 @@
       <section class="panel sql-editor-panel">
         <div class="sql-editor-header">
           <div class="sql-editor-heading">
-            <div class="sql-toolbar-label">Read-Only Query</div>
-            <div class="sql-editor-copy">Only `SELECT` or `EXPLAIN` queries against one exposed Layer 0 table at a time are allowed.</div>
+            <div class="sql-toolbar-label">SQL Console</div>
+            <div class="sql-editor-copy">Authenticated admin console. Table shortcuts stay visible on the left; the editor can run direct SQL.</div>
           </div>
           <div class="editor-toolbar">
             <button class="ghost-button compact-button" id="previewTopButton" type="button">Preview Recent</button>
@@ -62,7 +62,7 @@ ORDER BY id DESC
 LIMIT 100;</textarea>
         <div class="sql-editor-footer">
           <div class="status-line" id="queryStatus">Ready.</div>
-          <div class="sql-editor-context" id="editorContext">Read-only Layer 0 SQL.</div>
+          <div class="sql-editor-context" id="editorContext">Admin SQL console.</div>
         </div>
       </section>
 
@@ -81,7 +81,7 @@ LIMIT 100;</textarea>
             <button class="ghost-button compact-button" id="previewNextButton" type="button">Next</button>
           </div>
         </div>
-        <div class="results-host" id="resultsHost"><div class="results-empty">Run a Layer 0 query to see rows here.</div></div>
+        <div class="results-host" id="resultsHost"><div class="results-empty">Run an admin SQL statement to see rows here.</div></div>
       </section>
     </main>
   </div>
