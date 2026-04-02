@@ -18,6 +18,8 @@
   const REVIEW_SPEEDS = [0.5, 1, 2, 3, 5];
   const MAX_WINDOW = 10000;
   const ZOOM_COMPONENT_IDS = ["zoom-inside", "zoom-slider"];
+  const MIN_CHART_WIDTH = 180;
+  const MIN_CHART_HEIGHT = 180;
 
   const state = {
     chart: null,
@@ -33,6 +35,11 @@
     lastDatasetBounds: null,
     applyingViewport: false,
     optionalSeries: new Map(),
+    pendingRenderOptions: null,
+    layoutResizeFrame: 0,
+    layoutResizeTimeout: 0,
+    resizeObserver: null,
+    resizeBound: false,
     ui: {
       sidebarCollapsed: true,
       settingsCollapsed: true,
@@ -41,6 +48,7 @@
 
   const elements = {
     liveWorkspace: document.getElementById("liveWorkspace"),
+    liveSidebar: document.getElementById("liveSidebar"),
     sidebarToggle: document.getElementById("sidebarToggle"),
     sidebarBackdrop: document.getElementById("sidebarBackdrop"),
     settingsToggle: document.getElementById("settingsToggle"),
@@ -58,6 +66,7 @@
     statusLine: document.getElementById("statusLine"),
     liveMeta: document.getElementById("liveMeta"),
     livePerf: document.getElementById("livePerf"),
+    chartPanel: document.getElementById("chartPanel"),
     chartHost: document.getElementById("liveChart"),
   };
 
@@ -150,18 +159,100 @@
     elements.settingsSectionBody.classList.toggle("is-collapsed", state.ui.settingsCollapsed);
     elements.settingsToggle.setAttribute("aria-expanded", String(!state.ui.settingsCollapsed));
     elements.settingsToggleState.textContent = state.ui.settingsCollapsed ? "collapsed" : "open";
+    queueChartResize();
   }
 
-  function queueChartResize() {
-    if (!state.chart) {
+  function chartHostRect() {
+    const rect = elements.chartHost.getBoundingClientRect();
+    return {
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+    };
+  }
+
+  function chartHostHasSize() {
+    const rect = chartHostRect();
+    return rect.width >= MIN_CHART_WIDTH && rect.height >= MIN_CHART_HEIGHT;
+  }
+
+  function flushChartResize() {
+    if (state.chart && chartHostHasSize()) {
+      state.chart.resize();
+    }
+
+    if (state.pendingRenderOptions && chartHostHasSize()) {
+      const pending = state.pendingRenderOptions;
+      state.pendingRenderOptions = null;
+      renderChart({ ...pending, deferUntilSized: false });
       return;
     }
-    state.chart.resize();
-    window.setTimeout(() => {
-      if (state.chart) {
-        state.chart.resize();
-      }
+  }
+
+  function queueChartResize(options) {
+    const settings = options || {};
+    if (settings.rerender) {
+      state.pendingRenderOptions = settings.renderOptions || state.pendingRenderOptions || { shiftWithRun: false };
+    }
+
+    if (state.layoutResizeFrame) {
+      window.cancelAnimationFrame(state.layoutResizeFrame);
+      state.layoutResizeFrame = 0;
+    }
+    if (state.layoutResizeTimeout) {
+      window.clearTimeout(state.layoutResizeTimeout);
+      state.layoutResizeTimeout = 0;
+    }
+
+    state.layoutResizeFrame = window.requestAnimationFrame(() => {
+      state.layoutResizeFrame = 0;
+      flushChartResize();
+      window.requestAnimationFrame(() => {
+        flushChartResize();
+      });
+    });
+
+    state.layoutResizeTimeout = window.setTimeout(() => {
+      state.layoutResizeTimeout = 0;
+      flushChartResize();
     }, 220);
+  }
+
+  function bindResizeLifecycle() {
+    if (!state.resizeObserver && typeof ResizeObserver === "function") {
+      state.resizeObserver = new ResizeObserver(() => {
+        queueChartResize();
+      });
+      [elements.liveWorkspace, elements.chartPanel, elements.chartHost].forEach((element) => {
+        if (element) {
+          state.resizeObserver.observe(element);
+        }
+      });
+    }
+
+    if (!state.resizeBound) {
+      state.resizeBound = true;
+
+      window.addEventListener("resize", () => {
+        queueChartResize();
+      });
+
+      [elements.liveWorkspace, elements.liveSidebar, elements.chartPanel].forEach((element) => {
+        if (!element) {
+          return;
+        }
+        element.addEventListener("transitionend", () => {
+          queueChartResize();
+        });
+      });
+
+      if (document.fonts && typeof document.fonts.ready?.then === "function") {
+        document.fonts.ready.then(() => {
+          queueChartResize();
+        }).catch(() => {
+          queueChartResize();
+        });
+      }
+    }
   }
 
   function updateReviewFields() {
@@ -215,6 +306,12 @@
   }
 
   function ensureChart() {
+    bindResizeLifecycle();
+
+    if (!chartHostHasSize()) {
+      return null;
+    }
+
     if (!state.chart) {
       state.chart = echarts.init(elements.chartHost, null, { renderer: "canvas" });
       state.chart.setOption({
@@ -266,12 +363,6 @@
           return;
         }
         state.viewport = normalizeViewport(captureViewportFromChart(), getDatasetBounds());
-      });
-
-      window.addEventListener("resize", () => {
-        if (state.chart) {
-          state.chart.resize();
-        }
       });
     }
 
@@ -494,6 +585,11 @@
   function renderChart(options) {
     const settings = options || {};
     const chart = ensureChart();
+    if (!chart) {
+      state.pendingRenderOptions = settings;
+      queueChartResize({ rerender: false });
+      return;
+    }
     const datasetBounds = getDatasetBounds();
     const previousBounds = state.lastDatasetBounds;
     let nextViewport;
