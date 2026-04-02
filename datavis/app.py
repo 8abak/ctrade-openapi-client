@@ -38,10 +38,13 @@ if DATABASE_URL.startswith("postgresql+psycopg2://"):
 
 TICK_SYMBOL = os.getenv("DATAVIS_SYMBOL", "XAUUSD")
 DEFAULT_WINDOW = 2000
-MAX_WINDOW = 10000
+MAX_TICK_WINDOW = 10000
+MAX_ZIG_WINDOW = 100000
 DEFAULT_HISTORY_LIMIT = 2000
-MAX_HISTORY_LIMIT = 10000
+MAX_TICK_HISTORY_LIMIT = 10000
+MAX_ZIG_HISTORY_LIMIT = 50000
 MAX_STREAM_BATCH = 1000
+MAX_ZIG_STREAM_BATCH = 500
 MAX_QUERY_ROWS = 1000
 DEFAULT_SQL_PREVIEW_LIMIT = 100
 MAX_SQL_PREVIEW_LIMIT = 500
@@ -56,6 +59,8 @@ STREAM_HEARTBEAT_SECONDS = max(
     STREAM_IDLE_POLL_SECONDS,
     float(os.getenv("DATAVIS_STREAM_HEARTBEAT_SECONDS", "5.0")),
 )
+DEFAULT_DISPLAY_MODE = "ticks"
+DISPLAY_MODE_RE = "^(ticks|ticks-zig|zig)$"
 SQL_ADMIN_USER = os.getenv("DATAVIS_SQL_ADMIN_USER", "").strip()
 SQL_ADMIN_PASSWORD = os.getenv("DATAVIS_SQL_ADMIN_PASSWORD", "")
 DEFAULT_REVIEW_TIMEZONE = "Australia/Sydney"
@@ -142,6 +147,40 @@ def serialize_tick_row(row: Dict[str, Any]) -> Dict[str, Any]:
         "mid": mid_value,
         "spread": row.get("spread"),
     }
+
+
+def serialize_zig_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    timestamp = row["source_timestamp"]
+    return {
+        "versionId": row["version_id"],
+        "pivotId": row["pivot_id"],
+        "symbol": row["symbol"],
+        "sourceTickId": row["source_tick_id"],
+        "timestamp": timestamp.isoformat(),
+        "timestampMs": dt_to_ms(timestamp),
+        "direction": row["direction"],
+        "price": row["pivot_price"],
+        "visibleFromTickId": row["visible_from_tick_id"],
+        "visibleToTickId": row.get("visible_to_tick_id"),
+    }
+
+
+def includes_ticks(display_mode: str) -> bool:
+    return display_mode in {"ticks", "ticks-zig"}
+
+
+def includes_zig(display_mode: str) -> bool:
+    return display_mode in {"ticks-zig", "zig"}
+
+
+def clamp_window(value: int, display_mode: str) -> int:
+    maximum = MAX_ZIG_WINDOW if display_mode == "zig" else MAX_TICK_WINDOW
+    return clamp_int(value, 1, maximum)
+
+
+def clamp_history_limit(value: int, display_mode: str) -> int:
+    maximum = MAX_ZIG_HISTORY_LIMIT if display_mode == "zig" else MAX_TICK_HISTORY_LIMIT
+    return clamp_int(value, 1, maximum)
 
 
 def serialize_metrics_payload(
@@ -255,25 +294,29 @@ def resolve_tick_at_timestamp(timestamp_value: datetime) -> Dict[str, Any]:
 def fetch_tick_bounds() -> Dict[str, Any]:
     with db_connection(readonly=True) as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT
-                    MIN(id) AS first_id,
-                    MAX(id) AS last_id,
-                    MIN(timestamp) AS first_timestamp,
-                    MAX(timestamp) AS last_timestamp
-                FROM public.ticks
-                WHERE symbol = %s
-                """,
-                (TICK_SYMBOL,),
-            )
-            row = dict(cur.fetchone() or {})
+            row = query_tick_bounds(cur)
     return {
         "firstId": row.get("first_id"),
         "lastId": row.get("last_id"),
         "firstTimestamp": row.get("first_timestamp"),
         "lastTimestamp": row.get("last_timestamp"),
     }
+
+
+def query_tick_bounds(cur: Any) -> Dict[str, Any]:
+    cur.execute(
+        """
+        SELECT
+            MIN(id) AS first_id,
+            MAX(id) AS last_id,
+            MIN(timestamp) AS first_timestamp,
+            MAX(timestamp) AS last_timestamp
+        FROM public.ticks
+        WHERE symbol = %s
+        """,
+        (TICK_SYMBOL,),
+    )
+    return dict(cur.fetchone() or {})
 
 
 def query_latest_tick(cur: Any) -> Optional[Dict[str, Any]]:
@@ -291,100 +334,231 @@ def query_latest_tick(cur: Any) -> Optional[Dict[str, Any]]:
     return dict(row) if row else None
 
 
-def tick_select_sql(where_sql: str, order_sql: str, limit_sql: str) -> str:
+def tick_select_sql(select_sql: str, where_sql: str, order_sql: str, limit_sql: str) -> str:
     return """
-        SELECT id, symbol, timestamp, bid, ask, mid, spread
+        SELECT {select_sql}
         FROM public.ticks
         WHERE symbol = %s {where_clause}
         ORDER BY {order_clause}
         {limit_clause}
-    """.format(where_clause=where_sql, order_clause=order_sql, limit_clause=limit_sql)
+    """.format(select_sql=select_sql, where_clause=where_sql, order_clause=order_sql, limit_clause=limit_sql)
 
 
-def fetch_bootstrap_rows(
+def tick_columns(include_rows: bool) -> str:
+    if include_rows:
+        return "id, symbol, timestamp, bid, ask, mid, spread"
+    return "id, timestamp"
+
+
+def fetch_bootstrap_tick_rows(
+    cur: Any,
+    *,
     mode: str,
     start_id: Optional[int],
     window: int,
-    end_id: Optional[int] = None,
+    end_id: Optional[int],
+    include_rows: bool,
 ) -> List[Dict[str, Any]]:
-    window = clamp_int(window, 1, MAX_WINDOW)
-    with db_connection(readonly=True) as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            if mode == "live":
-                cur.execute(
-                    """
-                    SELECT id, symbol, timestamp, bid, ask, mid, spread
-                    FROM (
-                        SELECT id, symbol, timestamp, bid, ask, mid, spread
-                        FROM public.ticks
-                        WHERE symbol = %s
-                        ORDER BY id DESC
-                        LIMIT %s
-                    ) recent
-                    ORDER BY id ASC
-                    """,
-                    (TICK_SYMBOL, window),
-                )
-            else:
-                if start_id is None:
-                    raise HTTPException(status_code=400, detail="Review mode requires an id value.")
-                if end_id is None:
-                    cur.execute(
-                        tick_select_sql("AND id >= %s", "id ASC", "LIMIT %s"),
-                        (TICK_SYMBOL, start_id, window),
-                    )
-                else:
-                    cur.execute(
-                        tick_select_sql("AND id >= %s AND id <= %s", "id ASC", "LIMIT %s"),
-                        (TICK_SYMBOL, start_id, end_id, window),
-                    )
-            return [dict(row) for row in cur.fetchall()]
+    select_sql = tick_columns(include_rows)
+    if mode == "live":
+        cur.execute(
+            """
+            SELECT {select_sql}
+            FROM (
+                SELECT {select_sql}
+                FROM public.ticks
+                WHERE symbol = %s
+                ORDER BY id DESC
+                LIMIT %s
+            ) recent
+            ORDER BY id ASC
+            """.format(select_sql=select_sql),
+            (TICK_SYMBOL, window),
+        )
+    else:
+        if start_id is None:
+            raise HTTPException(status_code=400, detail="Review mode requires an id value.")
+        if end_id is None:
+            cur.execute(
+                tick_select_sql(select_sql, "AND id >= %s", "id ASC", "LIMIT %s"),
+                (TICK_SYMBOL, start_id, window),
+            )
+        else:
+            cur.execute(
+                tick_select_sql(select_sql, "AND id >= %s AND id <= %s", "id ASC", "LIMIT %s"),
+                (TICK_SYMBOL, start_id, end_id, window),
+            )
+    return [dict(row) for row in cur.fetchall()]
 
 
-def query_rows_after(cur: Any, after_id: int, limit: int, *, end_id: Optional[int] = None) -> List[Dict[str, Any]]:
+def query_rows_after(
+    cur: Any,
+    after_id: int,
+    limit: int,
+    *,
+    end_id: Optional[int] = None,
+    include_rows: bool = True,
+) -> List[Dict[str, Any]]:
+    select_sql = tick_columns(include_rows)
     if end_id is None:
         cur.execute(
-            tick_select_sql("AND id > %s", "id ASC", "LIMIT %s"),
+            tick_select_sql(select_sql, "AND id > %s", "id ASC", "LIMIT %s"),
             (TICK_SYMBOL, after_id, limit),
         )
     else:
         cur.execute(
-            tick_select_sql("AND id > %s AND id <= %s", "id ASC", "LIMIT %s"),
+            tick_select_sql(select_sql, "AND id > %s AND id <= %s", "id ASC", "LIMIT %s"),
             (TICK_SYMBOL, after_id, end_id, limit),
         )
     return [dict(row) for row in cur.fetchall()]
 
 
-def query_rows_before(cur: Any, before_id: int, limit: int) -> List[Dict[str, Any]]:
+def query_rows_before(cur: Any, before_id: int, limit: int, *, include_rows: bool = True) -> List[Dict[str, Any]]:
+    select_sql = tick_columns(include_rows)
     cur.execute(
         """
-        SELECT id, symbol, timestamp, bid, ask, mid, spread
+        SELECT {select_sql}
         FROM (
-            SELECT id, symbol, timestamp, bid, ask, mid, spread
+            SELECT {select_sql}
             FROM public.ticks
             WHERE symbol = %s AND id < %s
             ORDER BY id DESC
             LIMIT %s
         ) older
         ORDER BY id ASC
-        """,
+        """.format(select_sql=select_sql),
         (TICK_SYMBOL, before_id, limit),
     )
     return [dict(row) for row in cur.fetchall()]
 
 
-def fetch_rows_after(after_id: int, limit: int, end_id: Optional[int] = None) -> List[Dict[str, Any]]:
+def fetch_rows_after(
+    after_id: int,
+    limit: int,
+    end_id: Optional[int] = None,
+    *,
+    include_rows: bool = True,
+) -> List[Dict[str, Any]]:
     limit = clamp_int(limit, 1, MAX_STREAM_BATCH)
     with db_connection(readonly=True) as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            return query_rows_after(cur, after_id, limit, end_id=end_id)
+            return query_rows_after(cur, after_id, limit, end_id=end_id, include_rows=include_rows)
 
 
-def fetch_rows_before(before_id: int, limit: int) -> List[Dict[str, Any]]:
-    limit = clamp_int(limit, 1, MAX_HISTORY_LIMIT)
+def fetch_rows_before(before_id: int, limit: int, *, include_rows: bool = True) -> List[Dict[str, Any]]:
+    limit = clamp_int(limit, 1, MAX_TICK_HISTORY_LIMIT if include_rows else MAX_ZIG_HISTORY_LIMIT)
     with db_connection(readonly=True) as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            return query_rows_before(cur, before_id, limit)
+            return query_rows_before(cur, before_id, limit, include_rows=include_rows)
+
+
+def serialize_tick_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [serialize_tick_row(row) for row in rows]
+
+
+def fetch_zig_snapshot_rows(
+    cur: Any,
+    *,
+    range_start_id: Optional[int],
+    range_end_id: Optional[int],
+    cursor_id: Optional[int],
+    include_left_neighbor: bool = True,
+) -> List[Dict[str, Any]]:
+    if range_start_id is None or range_end_id is None or cursor_id is None:
+        return []
+
+    cur.execute(
+        """
+        SELECT DISTINCT ON (pivot_id)
+            version_id,
+            pivot_id,
+            symbol,
+            source_tick_id,
+            source_timestamp,
+            direction,
+            pivot_price,
+            visible_from_tick_id,
+            visible_to_tick_id
+        FROM public.fast_zig_pivots
+        WHERE symbol = %s
+          AND source_tick_id BETWEEN %s AND %s
+          AND visible_from_tick_id <= %s
+          AND (visible_to_tick_id IS NULL OR visible_to_tick_id >= %s)
+        ORDER BY pivot_id ASC, version_id DESC
+        """,
+        (TICK_SYMBOL, range_start_id, range_end_id, cursor_id, cursor_id),
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    if not rows or not include_left_neighbor:
+        return rows
+
+    cur.execute(
+        """
+        SELECT DISTINCT ON (pivot_id)
+            version_id,
+            pivot_id,
+            symbol,
+            source_tick_id,
+            source_timestamp,
+            direction,
+            pivot_price,
+            visible_from_tick_id,
+            visible_to_tick_id
+        FROM public.fast_zig_pivots
+        WHERE symbol = %s
+          AND source_tick_id < %s
+          AND visible_from_tick_id <= %s
+          AND (visible_to_tick_id IS NULL OR visible_to_tick_id >= %s)
+        ORDER BY pivot_id DESC, version_id DESC
+        LIMIT 1
+        """,
+        (TICK_SYMBOL, range_start_id, cursor_id, cursor_id),
+    )
+    previous = cur.fetchone()
+    if previous and int(previous["pivot_id"]) != int(rows[0]["pivot_id"]):
+        rows.insert(0, dict(previous))
+    return rows
+
+
+def fetch_zig_changes(cur: Any, *, after_tick_id: int, upto_tick_id: Optional[int]) -> List[Dict[str, Any]]:
+    if upto_tick_id is not None and upto_tick_id <= after_tick_id:
+        return []
+    parameters: List[Any] = [TICK_SYMBOL, after_tick_id]
+    where_parts = ["symbol = %s", "visible_from_tick_id > %s"]
+    if upto_tick_id is not None:
+        where_parts.append("visible_from_tick_id <= %s")
+        parameters.append(upto_tick_id)
+    parameters.append(MAX_ZIG_STREAM_BATCH)
+    cur.execute(
+        """
+        SELECT
+            version_id,
+            pivot_id,
+            symbol,
+            source_tick_id,
+            source_timestamp,
+            direction,
+            pivot_price,
+            visible_from_tick_id,
+            visible_to_tick_id
+        FROM public.fast_zig_pivots
+        WHERE {where_sql}
+        ORDER BY visible_from_tick_id ASC, pivot_id ASC, version_id ASC
+        LIMIT %s
+        """.format(where_sql=" AND ".join(where_parts)),
+        tuple(parameters),
+    )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def serialize_zig_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [serialize_zig_row(row) for row in rows]
+
+
+def zig_storage_ready(cur: Any) -> bool:
+    cur.execute("SELECT to_regclass('public.fast_zig_pivots') AS regclass_name")
+    row = cur.fetchone() or {}
+    return bool(row.get("regclass_name"))
 
 
 def split_sql_script(sql_text: str) -> List[str]:
@@ -750,33 +924,267 @@ def execute_query(sql_text: str) -> Dict[str, Any]:
     }
 
 
-def stream_events(after_id: int, limit: int) -> Generator[str, None, None]:
+def build_live_range_payload(
+    *,
+    mode: str,
+    display_mode: str,
+    window: int,
+    range_rows: List[Dict[str, Any]],
+    rows: List[Dict[str, Any]],
+    zig_rows: List[Dict[str, Any]],
+    review_end_id: Optional[int],
+    review_end_timestamp: Optional[datetime],
+    bounds: Dict[str, Any],
+    fetch_ms: float,
+    serialize_ms: float,
+) -> Dict[str, Any]:
+    first_row = range_rows[0] if range_rows else None
+    last_row = range_rows[-1] if range_rows else None
+    first_row_id = first_row["id"] if first_row else None
+    last_row_id = last_row["id"] if last_row else None
+    return {
+        "rows": rows,
+        "rowCount": len(rows),
+        "zigRows": zig_rows,
+        "zigCount": len(zig_rows),
+        "firstId": first_row_id,
+        "lastId": last_row_id,
+        "firstTimestamp": serialize_value(first_row.get("timestamp") if first_row else None),
+        "lastTimestamp": serialize_value(last_row.get("timestamp") if last_row else None),
+        "firstTimestampMs": dt_to_ms(first_row.get("timestamp") if first_row else None),
+        "lastTimestampMs": dt_to_ms(last_row.get("timestamp") if last_row else None),
+        "mode": mode,
+        "window": window,
+        "displayMode": display_mode,
+        "symbol": TICK_SYMBOL,
+        "reviewEndId": review_end_id,
+        "reviewEndTimestamp": serialize_value(review_end_timestamp),
+        "hasMoreLeft": bool(bounds.get("firstId") and first_row_id and first_row_id > bounds["firstId"]),
+        "endReached": bool(mode == "review" and review_end_id is not None and last_row_id is not None and last_row_id >= review_end_id),
+        "metrics": serialize_metrics_payload(
+            fetch_ms=fetch_ms,
+            serialize_ms=serialize_ms,
+            latest_row=last_row,
+        ),
+    }
+
+
+def load_bootstrap_payload(
+    *,
+    mode: str,
+    start_id: Optional[int],
+    window: int,
+    display_mode: str,
+) -> Dict[str, Any]:
+    effective_window = clamp_window(window, display_mode)
+    fetch_started = time.perf_counter()
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            bounds_row = query_tick_bounds(cur)
+            bounds = {
+                "firstId": bounds_row.get("first_id"),
+                "lastId": bounds_row.get("last_id"),
+                "firstTimestamp": bounds_row.get("first_timestamp"),
+                "lastTimestamp": bounds_row.get("last_timestamp"),
+            }
+            review_end_id = bounds["lastId"] if mode == "review" else None
+            review_end_timestamp = bounds["lastTimestamp"] if mode == "review" else None
+            include_tick_rows = includes_ticks(display_mode)
+            zig_ready = includes_zig(display_mode) and zig_storage_ready(cur)
+            range_rows = fetch_bootstrap_tick_rows(
+                cur,
+                mode=mode,
+                start_id=start_id,
+                window=effective_window,
+                end_id=review_end_id,
+                include_rows=include_tick_rows,
+            )
+            raw_rows = range_rows
+            if not include_tick_rows:
+                range_rows = fetch_bootstrap_tick_rows(
+                    cur,
+                    mode=mode,
+                    start_id=start_id,
+                    window=effective_window,
+                    end_id=review_end_id,
+                    include_rows=False,
+                )
+            range_first_id = range_rows[0]["id"] if range_rows else None
+            range_last_id = range_rows[-1]["id"] if range_rows else None
+            zig_rows = (
+                fetch_zig_snapshot_rows(
+                    cur,
+                    range_start_id=range_first_id,
+                    range_end_id=range_last_id,
+                    cursor_id=range_last_id,
+                )
+                if zig_ready
+                else []
+            )
+    fetch_ms = elapsed_ms(fetch_started)
+    serialize_started = time.perf_counter()
+    payload = build_live_range_payload(
+        mode=mode,
+        display_mode=display_mode,
+        window=effective_window,
+        range_rows=range_rows,
+        rows=[],
+        zig_rows=zig_rows,
+        review_end_id=review_end_id,
+        review_end_timestamp=review_end_timestamp,
+        bounds=bounds,
+        fetch_ms=fetch_ms,
+        serialize_ms=0.0,
+    )
+    payload["rows"] = serialize_tick_rows(raw_rows) if include_tick_rows else []
+    payload["rowCount"] = len(payload["rows"])
+    payload["zigRows"] = serialize_zig_rows(zig_rows)
+    payload["zigCount"] = len(payload["zigRows"])
+    payload["metrics"]["serializeLatencyMs"] = elapsed_ms(serialize_started)
+    return payload
+
+
+def load_next_payload(
+    *,
+    after_id: int,
+    limit: int,
+    display_mode: str,
+    end_id: Optional[int],
+) -> Dict[str, Any]:
+    fetch_started = time.perf_counter()
+    include_tick_rows = includes_ticks(display_mode)
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            zig_ready = includes_zig(display_mode) and zig_storage_ready(cur)
+            tick_rows = query_rows_after(cur, after_id, limit, end_id=end_id, include_rows=include_tick_rows)
+            last_seen_id = tick_rows[-1]["id"] if tick_rows else after_id
+            zig_changes = (
+                fetch_zig_changes(cur, after_tick_id=after_id, upto_tick_id=last_seen_id)
+                if zig_ready
+                else []
+            )
+    fetch_ms = elapsed_ms(fetch_started)
+    serialize_started = time.perf_counter()
+    rows = serialize_tick_rows(tick_rows) if include_tick_rows else []
+    zig_rows = serialize_zig_rows(zig_changes)
+    serialize_ms = elapsed_ms(serialize_started)
+    return {
+        "rows": rows,
+        "rowCount": len(rows),
+        "zigChanges": zig_rows,
+        "zigChangeCount": len(zig_rows),
+        "lastId": last_seen_id,
+        "endId": end_id,
+        "displayMode": display_mode,
+        "endReached": bool(end_id is not None and last_seen_id >= end_id),
+        "metrics": serialize_metrics_payload(
+            fetch_ms=fetch_ms,
+            serialize_ms=serialize_ms,
+            latest_row=tick_rows[-1] if tick_rows else None,
+        ),
+    }
+
+
+def load_previous_payload(
+    *,
+    before_id: int,
+    limit: int,
+    display_mode: str,
+    current_last_id: Optional[int],
+) -> Dict[str, Any]:
+    effective_limit = clamp_history_limit(limit, display_mode)
+    fetch_started = time.perf_counter()
+    include_tick_rows = includes_ticks(display_mode)
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            zig_ready = includes_zig(display_mode) and zig_storage_ready(cur)
+            bounds_row = query_tick_bounds(cur)
+            bounds = {
+                "firstId": bounds_row.get("first_id"),
+                "lastId": bounds_row.get("last_id"),
+            }
+            previous_rows = query_rows_before(cur, before_id, effective_limit, include_rows=include_tick_rows)
+            range_rows = previous_rows
+            if not include_tick_rows:
+                range_rows = query_rows_before(cur, before_id, effective_limit, include_rows=False)
+            first_row = range_rows[0] if range_rows else None
+            range_end_id = current_last_id or (range_rows[-1]["id"] if range_rows else None)
+            zig_rows = (
+                fetch_zig_snapshot_rows(
+                    cur,
+                    range_start_id=first_row["id"] if first_row else None,
+                    range_end_id=range_end_id,
+                    cursor_id=range_end_id,
+                )
+                if zig_ready
+                else []
+            )
+    fetch_ms = elapsed_ms(fetch_started)
+    serialize_started = time.perf_counter()
+    rows = serialize_tick_rows(previous_rows) if include_tick_rows else []
+    zig_payload = serialize_zig_rows(zig_rows)
+    serialize_ms = elapsed_ms(serialize_started)
+    first_row_id = first_row["id"] if first_row else None
+    return {
+        "rows": rows,
+        "rowCount": len(rows),
+        "zigRows": zig_payload,
+        "zigCount": len(zig_payload),
+        "firstId": first_row_id,
+        "lastId": range_end_id,
+        "beforeId": before_id,
+        "displayMode": display_mode,
+        "hasMoreLeft": bool(bounds.get("firstId") and first_row_id and first_row_id > bounds["firstId"]),
+        "metrics": serialize_metrics_payload(
+            fetch_ms=fetch_ms,
+            serialize_ms=serialize_ms,
+            latest_row=range_rows[-1] if range_rows else None,
+        ),
+    }
+
+
+def stream_events(after_id: int, limit: int, display_mode: str) -> Generator[str, None, None]:
     last_id = max(0, after_id)
     limit = clamp_int(limit, 1, MAX_STREAM_BATCH)
+    include_tick_rows = includes_ticks(display_mode)
     last_heartbeat = time.monotonic()
     idle_sleep = STREAM_POLL_SECONDS
 
     try:
         with db_connection(readonly=True, autocommit=True) as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                include_zig_rows = includes_zig(display_mode) and zig_storage_ready(cur)
                 while True:
                     fetch_started = time.perf_counter()
-                    rows = query_rows_after(cur, last_id, limit)
+                    tick_rows = query_rows_after(cur, last_id, limit, include_rows=include_tick_rows)
+                    latest_tick_row = tick_rows[-1] if tick_rows else None
+                    next_last_id = int(latest_tick_row["id"]) if latest_tick_row else last_id
+                    zig_changes = (
+                        fetch_zig_changes(cur, after_tick_id=last_id, upto_tick_id=next_last_id)
+                        if include_zig_rows
+                        else []
+                    )
                     fetch_ms = elapsed_ms(fetch_started)
-                    if rows:
+
+                    should_emit = (include_tick_rows and bool(tick_rows)) or bool(zig_changes)
+                    if should_emit:
                         serialize_started = time.perf_counter()
-                        payload_rows = [serialize_tick_row(row) for row in rows]
+                        payload_rows = serialize_tick_rows(tick_rows) if include_tick_rows else []
+                        payload_zig = serialize_zig_rows(zig_changes)
                         serialize_ms = elapsed_ms(serialize_started)
-                        last_id = payload_rows[-1]["id"]
+                        last_id = next_last_id
                         payload = {
                             "rows": payload_rows,
-                            "lastId": last_id,
                             "rowCount": len(payload_rows),
+                            "zigChanges": payload_zig,
+                            "zigChangeCount": len(payload_zig),
+                            "lastId": last_id,
+                            "displayMode": display_mode,
                             "streamMode": "delta",
                             **serialize_metrics_payload(
                                 fetch_ms=fetch_ms,
                                 serialize_ms=serialize_ms,
-                                latest_row=rows[-1],
+                                latest_row=latest_tick_row,
                             ),
                         }
                         yield format_sse(payload)
@@ -784,13 +1192,19 @@ def stream_events(after_id: int, limit: int) -> Generator[str, None, None]:
                         idle_sleep = STREAM_POLL_SECONDS
                         continue
 
+                    if latest_tick_row and not include_tick_rows:
+                        last_id = next_last_id
+
                     now = time.monotonic()
                     if now - last_heartbeat >= STREAM_HEARTBEAT_SECONDS:
                         latest_row = query_latest_tick(cur)
                         payload = {
                             "rows": [],
-                            "lastId": last_id,
                             "rowCount": 0,
+                            "zigChanges": [],
+                            "zigChangeCount": 0,
+                            "lastId": last_id,
+                            "displayMode": display_mode,
                             "streamMode": "heartbeat",
                             "pollSleepMs": round(idle_sleep * 1000.0, 2),
                             **serialize_metrics_payload(
@@ -868,37 +1282,10 @@ def live_review_start(
 def live_bootstrap(
     mode: str = Query("live", pattern="^(live|review)$"),
     id: Optional[int] = Query(None, ge=1),
-    window: int = Query(DEFAULT_WINDOW, ge=1, le=MAX_WINDOW),
+    window: int = Query(DEFAULT_WINDOW, ge=1, le=MAX_ZIG_WINDOW),
+    display: str = Query(DEFAULT_DISPLAY_MODE, pattern=DISPLAY_MODE_RE),
 ) -> Dict[str, Any]:
-    fetch_started = time.perf_counter()
-    review_bounds = fetch_tick_bounds() if mode == "review" else None
-    review_end_id = review_bounds["lastId"] if review_bounds else None
-    review_end_timestamp = review_bounds["lastTimestamp"] if review_bounds else None
-    raw_rows = fetch_bootstrap_rows(mode, id, window, end_id=review_end_id)
-    fetch_ms = elapsed_ms(fetch_started)
-    serialize_started = time.perf_counter()
-    rows = [serialize_tick_row(row) for row in raw_rows]
-    serialize_ms = elapsed_ms(serialize_started)
-    last_row_id = rows[-1]["id"] if rows else None
-    first_row_id = rows[0]["id"] if rows else None
-    return {
-        "rows": rows,
-        "rowCount": len(rows),
-        "firstId": first_row_id,
-        "lastId": last_row_id,
-        "mode": mode,
-        "window": window,
-        "symbol": TICK_SYMBOL,
-        "reviewEndId": review_end_id,
-        "reviewEndTimestamp": serialize_value(review_end_timestamp),
-        "hasMoreLeft": bool(review_bounds and first_row_id and review_bounds["firstId"] and first_row_id > review_bounds["firstId"]),
-        "endReached": bool(mode == "review" and review_end_id is not None and last_row_id is not None and last_row_id >= review_end_id),
-        "metrics": serialize_metrics_payload(
-            fetch_ms=fetch_ms,
-            serialize_ms=serialize_ms,
-            latest_row=raw_rows[-1] if raw_rows else None,
-        ),
-    }
+    return load_bootstrap_payload(mode=mode, start_id=id, window=window, display_mode=display)
 
 
 @app.get("/api/live/next")
@@ -906,63 +1293,29 @@ def live_next(
     afterId: int = Query(..., ge=0),
     limit: int = Query(250, ge=1, le=MAX_STREAM_BATCH),
     endId: Optional[int] = Query(None, ge=1),
+    display: str = Query(DEFAULT_DISPLAY_MODE, pattern=DISPLAY_MODE_RE),
 ) -> Dict[str, Any]:
-    fetch_started = time.perf_counter()
-    raw_rows = fetch_rows_after(afterId, limit, end_id=endId)
-    fetch_ms = elapsed_ms(fetch_started)
-    serialize_started = time.perf_counter()
-    rows = [serialize_tick_row(row) for row in raw_rows]
-    serialize_ms = elapsed_ms(serialize_started)
-    last_seen_id = rows[-1]["id"] if rows else afterId
-    return {
-        "rows": rows,
-        "rowCount": len(rows),
-        "lastId": last_seen_id,
-        "endId": endId,
-        "endReached": bool(endId is not None and last_seen_id >= endId),
-        "metrics": serialize_metrics_payload(
-            fetch_ms=fetch_ms,
-            serialize_ms=serialize_ms,
-            latest_row=raw_rows[-1] if raw_rows else None,
-        ),
-    }
+    return load_next_payload(after_id=afterId, limit=limit, display_mode=display, end_id=endId)
 
 
 @app.get("/api/live/previous")
 def live_previous(
     beforeId: int = Query(..., ge=1),
-    limit: int = Query(DEFAULT_HISTORY_LIMIT, ge=1, le=MAX_HISTORY_LIMIT),
+    limit: int = Query(DEFAULT_HISTORY_LIMIT, ge=1, le=MAX_ZIG_HISTORY_LIMIT),
+    currentLastId: Optional[int] = Query(None, ge=1),
+    display: str = Query(DEFAULT_DISPLAY_MODE, pattern=DISPLAY_MODE_RE),
 ) -> Dict[str, Any]:
-    fetch_started = time.perf_counter()
-    bounds = fetch_tick_bounds()
-    raw_rows = fetch_rows_before(beforeId, limit)
-    fetch_ms = elapsed_ms(fetch_started)
-    serialize_started = time.perf_counter()
-    rows = [serialize_tick_row(row) for row in raw_rows]
-    serialize_ms = elapsed_ms(serialize_started)
-    first_row_id = rows[0]["id"] if rows else None
-    return {
-        "rows": rows,
-        "rowCount": len(rows),
-        "firstId": first_row_id,
-        "lastId": rows[-1]["id"] if rows else None,
-        "beforeId": beforeId,
-        "hasMoreLeft": bool(first_row_id and bounds["firstId"] and first_row_id > bounds["firstId"]),
-        "metrics": serialize_metrics_payload(
-            fetch_ms=fetch_ms,
-            serialize_ms=serialize_ms,
-            latest_row=raw_rows[-1] if raw_rows else None,
-        ),
-    }
+    return load_previous_payload(before_id=beforeId, limit=limit, display_mode=display, current_last_id=currentLastId)
 
 
 @app.get("/api/live/stream")
 def live_stream(
     afterId: int = Query(0, ge=0),
     limit: int = Query(250, ge=1, le=MAX_STREAM_BATCH),
+    display: str = Query(DEFAULT_DISPLAY_MODE, pattern=DISPLAY_MODE_RE),
 ) -> StreamingResponse:
     return StreamingResponse(
-        stream_events(afterId, limit),
+        stream_events(afterId, limit, display),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

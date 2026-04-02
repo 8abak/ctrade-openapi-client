@@ -3,8 +3,8 @@ set -euo pipefail
 
 APP_DIR="/home/ec2-user/cTrade"
 VENV_ACTIVATE="/home/ec2-user/venvs/datavis/bin/activate"
-UNIT_FILES=("datavis" "tickcollector")
-RESTART_SERVICES=("datavis")
+UNIT_FILES=("datavis" "tickcollector" "fastzig")
+RESTART_SERVICES=("datavis" "fastzig")
 LEGACY_SERVICES=("ottprocessor" "envelopeprocessor" "zigzag" "envelopezigprocessor" "marketprofile")
 HEALTH_URL="http://127.0.0.1:8000/api/health"
 

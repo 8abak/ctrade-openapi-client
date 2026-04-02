@@ -2,11 +2,18 @@
   const DEFAULTS = {
     mode: "live",
     run: "run",
+    display: "ticks",
     series: "mid",
     id: "",
     reviewStart: "",
     reviewSpeed: 1,
     window: 2000,
+  };
+
+  const DISPLAY_CONFIG = {
+    ticks: { label: "Ticks", maxWindow: 10000 },
+    "ticks-zig": { label: "Ticks + Zig", maxWindow: 10000 },
+    zig: { label: "Zig Only", maxWindow: 100000 },
   };
 
   const SERIES_CONFIG = {
@@ -16,7 +23,6 @@
   };
 
   const REVIEW_SPEEDS = [0.5, 1, 2, 3, 5];
-  const MAX_WINDOW = 10000;
   const ZOOM_COMPONENT_IDS = ["zoom-inside", "zoom-slider"];
   const MIN_CHART_WIDTH = 180;
   const MIN_CHART_HEIGHT = 180;
@@ -24,6 +30,7 @@
   const state = {
     chart: null,
     rows: [],
+    zigRows: [],
     source: null,
     reviewTimer: 0,
     reviewEndId: null,
@@ -34,12 +41,14 @@
     viewport: null,
     lastDatasetBounds: null,
     applyingViewport: false,
-    optionalSeries: new Map(),
-    pendingRenderOptions: null,
     layoutResizeFrame: 0,
     layoutResizeTimeout: 0,
     resizeObserver: null,
     resizeBound: false,
+    rangeFirstId: null,
+    rangeLastId: null,
+    rangeFirstTimestampMs: null,
+    rangeLastTimestampMs: null,
     ui: {
       sidebarCollapsed: true,
       settingsCollapsed: true,
@@ -56,6 +65,7 @@
     settingsToggleState: document.getElementById("settingsToggleState"),
     modeToggle: document.getElementById("modeToggle"),
     runToggle: document.getElementById("runToggle"),
+    displayToggle: document.getElementById("displayToggle"),
     seriesToggle: document.getElementById("seriesToggle"),
     tickId: document.getElementById("tickId"),
     reviewStart: document.getElementById("reviewStart"),
@@ -73,19 +83,22 @@
   function parseQuery() {
     const params = new URLSearchParams(window.location.search);
     const reviewSpeed = Number.parseFloat(params.get("speed") || String(DEFAULTS.reviewSpeed));
+    const display = params.get("display");
     return {
       mode: params.get("mode") === "review" ? "review" : DEFAULTS.mode,
       run: params.get("run") === "stop" ? "stop" : DEFAULTS.run,
+      display: Object.prototype.hasOwnProperty.call(DISPLAY_CONFIG, display) ? display : DEFAULTS.display,
       series: Object.prototype.hasOwnProperty.call(SERIES_CONFIG, params.get("series")) ? params.get("series") : DEFAULTS.series,
       id: params.get("id") || DEFAULTS.id,
       reviewStart: params.get("reviewStart") || DEFAULTS.reviewStart,
       reviewSpeed: REVIEW_SPEEDS.includes(reviewSpeed) ? reviewSpeed : DEFAULTS.reviewSpeed,
-      window: sanitizeWindowValue(params.get("window")),
+      window: sanitizeWindowValue(params.get("window"), Object.prototype.hasOwnProperty.call(DISPLAY_CONFIG, display) ? display : DEFAULTS.display),
     };
   }
 
-  function sanitizeWindowValue(rawValue) {
-    return Math.max(1, Math.min(MAX_WINDOW, Number.parseInt(rawValue || String(DEFAULTS.window), 10) || DEFAULTS.window));
+  function sanitizeWindowValue(rawValue, displayMode) {
+    const config = DISPLAY_CONFIG[displayMode] || DISPLAY_CONFIG[DEFAULTS.display];
+    return Math.max(1, Math.min(config.maxWindow, Number.parseInt(rawValue || String(DEFAULTS.window), 10) || DEFAULTS.window));
   }
 
   function writeQuery() {
@@ -93,6 +106,7 @@
     const params = new URLSearchParams();
     params.set("mode", config.mode);
     params.set("run", config.run);
+    params.set("display", config.display);
     params.set("series", config.series);
     params.set("window", String(config.window));
     if (config.id) {
@@ -118,20 +132,41 @@
   }
 
   function currentConfig() {
+    const display = elements.displayToggle.querySelector("button.active")?.dataset.value || DEFAULTS.display;
     return {
       mode: elements.modeToggle.querySelector("button.active")?.dataset.value || DEFAULTS.mode,
       run: elements.runToggle.querySelector("button.active")?.dataset.value || DEFAULTS.run,
+      display,
       series: elements.seriesToggle.querySelector("button.active")?.dataset.value || DEFAULTS.series,
       id: (elements.tickId.value || "").trim(),
       reviewStart: (elements.reviewStart.value || "").trim(),
       reviewSpeed: Number.parseFloat(elements.reviewSpeedToggle.querySelector("button.active")?.dataset.value || String(DEFAULTS.reviewSpeed)),
-      window: sanitizeWindowValue(elements.windowSize.value),
+      window: sanitizeWindowValue(elements.windowSize.value, display),
     };
+  }
+
+  function displayUsesTicks(displayMode) {
+    return displayMode === "ticks" || displayMode === "ticks-zig";
+  }
+
+  function displayUsesZig(displayMode) {
+    return displayMode === "ticks-zig" || displayMode === "zig";
+  }
+
+  function updateWindowConstraints() {
+    const display = currentConfig().display;
+    elements.windowSize.max = String(DISPLAY_CONFIG[display].maxWindow);
+    elements.windowSize.value = String(sanitizeWindowValue(elements.windowSize.value, display));
+  }
+
+  function updateSeriesAvailability() {
+    elements.seriesToggle.closest(".live-control-field").hidden = !displayUsesTicks(currentConfig().display);
   }
 
   function applyInitialConfig(config) {
     setSegment(elements.modeToggle, config.mode);
     setSegment(elements.runToggle, config.run);
+    setSegment(elements.displayToggle, config.display);
     setSegment(elements.seriesToggle, config.series);
     setSegment(elements.reviewSpeedToggle, config.reviewSpeed);
     elements.tickId.value = config.id;
@@ -139,7 +174,9 @@
     elements.windowSize.value = String(config.window);
     setSidebarCollapsed(true);
     setSettingsCollapsed(true);
+    updateWindowConstraints();
     updateReviewFields();
+    updateSeriesAvailability();
     renderMeta();
     renderPerf();
     writeQuery();
@@ -179,21 +216,9 @@
     if (state.chart && chartHostHasSize()) {
       state.chart.resize();
     }
-
-    if (state.pendingRenderOptions && chartHostHasSize()) {
-      const pending = state.pendingRenderOptions;
-      state.pendingRenderOptions = null;
-      renderChart({ ...pending, deferUntilSized: false });
-      return;
-    }
   }
 
-  function queueChartResize(options) {
-    const settings = options || {};
-    if (settings.rerender) {
-      state.pendingRenderOptions = settings.renderOptions || state.pendingRenderOptions || { shiftWithRun: false };
-    }
-
+  function queueChartResize() {
     if (state.layoutResizeFrame) {
       window.cancelAnimationFrame(state.layoutResizeFrame);
       state.layoutResizeFrame = 0;
@@ -231,11 +256,9 @@
 
     if (!state.resizeBound) {
       state.resizeBound = true;
-
       window.addEventListener("resize", () => {
         queueChartResize();
       });
-
       [elements.liveWorkspace, elements.liveSidebar, elements.chartPanel].forEach((element) => {
         if (!element) {
           return;
@@ -244,7 +267,6 @@
           queueChartResize();
         });
       });
-
       if (document.fonts && typeof document.fonts.ready?.then === "function") {
         document.fonts.ready.then(() => {
           queueChartResize();
@@ -270,21 +292,26 @@
   }
 
   function renderMeta() {
-    if (!state.rows.length) {
-      elements.liveMeta.textContent = "No ticks loaded.";
+    if (state.rangeLastId == null) {
+      elements.liveMeta.textContent = "No chart range loaded.";
       return;
     }
     const config = currentConfig();
-    const first = state.rows[0];
-    const last = state.rows[state.rows.length - 1];
-    elements.liveMeta.textContent = [
+    const parts = [
       config.mode.toUpperCase(),
-      "loaded " + state.rows.length + "/" + config.window,
-      "left " + first.id,
-      "right " + last.id,
-      "series " + config.series,
+      DISPLAY_CONFIG[config.display].label,
+      "left " + state.rangeFirstId,
+      "right " + state.rangeLastId,
+      "zigs " + state.zigRows.length,
       state.hasMoreLeft ? "more-left yes" : "more-left no",
-    ].join(" | ");
+    ];
+    if (displayUsesTicks(config.display)) {
+      parts.splice(2, 0, "ticks " + state.rows.length + "/" + config.window);
+      parts.push("series " + config.series);
+    } else {
+      parts.splice(2, 0, "tick-window " + config.window);
+    }
+    elements.liveMeta.textContent = parts.join(" | ");
   }
 
   function renderPerf() {
@@ -307,7 +334,6 @@
 
   function ensureChart() {
     bindResizeLifecycle();
-
     if (!chartHostHasSize()) {
       return null;
     }
@@ -324,22 +350,10 @@
             return typeof value === "number" ? value.toFixed(2) : value;
           },
         },
-        xAxis: {
-          type: "time",
-          axisLabel: { color: "#9eadc5" },
-        },
-        yAxis: {
-          type: "value",
-          scale: true,
-          axisLabel: { color: "#9eadc5" },
-        },
+        xAxis: { type: "time", axisLabel: { color: "#9eadc5" } },
+        yAxis: { type: "value", scale: true, axisLabel: { color: "#9eadc5" } },
         dataZoom: [
-          {
-            id: "zoom-inside",
-            type: "inside",
-            filterMode: "none",
-            zoomLock: false,
-          },
+          { id: "zoom-inside", type: "inside", filterMode: "none", zoomLock: false },
           {
             id: "zoom-slider",
             type: "slider",
@@ -349,10 +363,7 @@
             borderColor: "rgba(147, 181, 255, 0.12)",
             backgroundColor: "rgba(8, 13, 22, 0.92)",
             fillerColor: "rgba(109, 216, 255, 0.12)",
-            handleStyle: {
-              color: "#6dd8ff",
-              borderColor: "#6dd8ff",
-            },
+            handleStyle: { color: "#6dd8ff", borderColor: "#6dd8ff" },
           },
         ],
         series: [],
@@ -381,31 +392,27 @@
     if (zoom.startValue == null || zoom.endValue == null) {
       return null;
     }
-    return {
-      startValue: Number(zoom.startValue),
-      endValue: Number(zoom.endValue),
-    };
+    return { startValue: Number(zoom.startValue), endValue: Number(zoom.endValue) };
   }
 
   function getDatasetBounds() {
-    if (!state.rows.length) {
-      return null;
+    if (state.rows.length) {
+      return { startValue: state.rows[0].timestampMs, endValue: state.rows[state.rows.length - 1].timestampMs };
     }
-    return {
-      startValue: state.rows[0].timestampMs,
-      endValue: state.rows[state.rows.length - 1].timestampMs,
-    };
+    if (state.zigRows.length) {
+      return { startValue: state.zigRows[0].timestampMs, endValue: state.zigRows[state.zigRows.length - 1].timestampMs };
+    }
+    if (state.rangeFirstTimestampMs != null && state.rangeLastTimestampMs != null) {
+      return { startValue: state.rangeFirstTimestampMs, endValue: state.rangeLastTimestampMs };
+    }
+    return null;
   }
 
   function fullViewport(bounds) {
     if (!bounds) {
       return null;
     }
-    return {
-      startValue: bounds.startValue,
-      endValue: bounds.endValue,
-      span: Math.max(0, bounds.endValue - bounds.startValue),
-    };
+    return { startValue: bounds.startValue, endValue: bounds.endValue, span: Math.max(0, bounds.endValue - bounds.startValue) };
   }
 
   function normalizeViewport(viewport, bounds) {
@@ -415,7 +422,6 @@
     if (!viewport) {
       return fullViewport(bounds);
     }
-
     let startValue = Number(viewport.startValue);
     let endValue = Number(viewport.endValue);
     if (!Number.isFinite(startValue) || !Number.isFinite(endValue)) {
@@ -426,16 +432,13 @@
       startValue = endValue;
       endValue = swap;
     }
-
     const minValue = bounds.startValue;
     const maxValue = bounds.endValue;
     const fullSpan = Math.max(0, maxValue - minValue);
     let span = Math.max(0, endValue - startValue);
-
     if (span >= fullSpan) {
       return fullViewport(bounds);
     }
-
     if (startValue < minValue) {
       endValue += minValue - startValue;
       startValue = minValue;
@@ -444,24 +447,16 @@
       startValue -= endValue - maxValue;
       endValue = maxValue;
     }
-
     startValue = Math.max(minValue, startValue);
     endValue = Math.min(maxValue, endValue);
-
     if (endValue < startValue) {
       endValue = startValue;
     }
-
     span = Math.max(0, endValue - startValue);
     if (span > fullSpan) {
       return fullViewport(bounds);
     }
-
-    return {
-      startValue,
-      endValue,
-      span,
-    };
+    return { startValue, endValue, span };
   }
 
   function shiftViewportForward(viewport, previousBounds, nextBounds, shouldAdvance) {
@@ -481,10 +476,7 @@
 
   function buildDataZoomState(viewport) {
     return ZOOM_COMPONENT_IDS.map((id) => {
-      const next = {
-        id,
-        filterMode: "none",
-      };
+      const next = { id, filterMode: "none" };
       if (viewport) {
         next.startValue = viewport.startValue;
         next.endValue = viewport.endValue;
@@ -494,53 +486,17 @@
   }
 
   function rowsToSeriesData(rows, valueKey) {
-    const data = new Array(rows.length);
-    for (let index = 0; index < rows.length; index += 1) {
-      const row = rows[index];
-      data[index] = [row.timestampMs, row[valueKey]];
-    }
-    return data;
+    return rows.map((row) => [row.timestampMs, row[valueKey]]);
   }
 
-  function normalizeOptionalSeriesDefinition(definition) {
-    if (!definition || typeof definition !== "object") {
-      return null;
-    }
-    const id = String(definition.id || "").trim();
-    if (!id || !Array.isArray(definition.data)) {
-      return null;
-    }
-    return {
-      id,
-      label: String(definition.label || id),
-      type: definition.type === "line" ? "line" : "line",
-      color: typeof definition.color === "string" && definition.color ? definition.color : "#ffc857",
-      lineWidth: Number.isFinite(definition.lineWidth) ? Math.max(1, definition.lineWidth) : 1.2,
-      data: definition.data,
-    };
-  }
-
-  function syncOptionalSeries(payload, reset) {
-    if (reset) {
-      state.optionalSeries.clear();
-    }
-    if (!payload || !Array.isArray(payload.indicatorSeries)) {
-      return;
-    }
-
-    const nextSeries = new Map();
-    payload.indicatorSeries.forEach((definition) => {
-      const normalized = normalizeOptionalSeriesDefinition(definition);
-      if (normalized) {
-        nextSeries.set(normalized.id, normalized);
-      }
-    });
-    state.optionalSeries = nextSeries;
+  function zigToSeriesData() {
+    return state.zigRows.map((row) => [row.timestampMs, row.price]);
   }
 
   function buildChartSeries(config) {
-    const series = [
-      {
+    const series = [];
+    if (displayUsesTicks(config.display)) {
+      series.push({
         id: "raw-price",
         name: SERIES_CONFIG[config.series].label,
         type: "line",
@@ -549,36 +505,29 @@
         animation: false,
         connectNulls: false,
         data: rowsToSeriesData(state.rows, config.series),
-        lineStyle: {
-          color: SERIES_CONFIG[config.series].color,
-          width: 1.45,
-        },
-      },
-    ];
-
-    // Future DB-backed indicators can be appended through payload.indicatorSeries
-    // without changing the raw tick series path or the loaded raw tick dataset flow.
-    if (!state.optionalSeries.size) {
-      return series;
+        lineStyle: { color: SERIES_CONFIG[config.series].color, width: 1.45 },
+      });
     }
-
-    state.optionalSeries.forEach((definition) => {
+    if (displayUsesZig(config.display) && state.zigRows.length) {
       series.push({
-        id: "indicator:" + definition.id,
-        name: definition.label,
-        type: definition.type,
-        showSymbol: false,
+        id: "fast-zig",
+        name: "Fast Zig 15",
+        type: "line",
+        showSymbol: true,
+        symbol: "circle",
+        symbolSize: 5,
         hoverAnimation: false,
         animation: false,
-        connectNulls: true,
-        data: definition.data,
-        lineStyle: {
-          color: definition.color,
-          width: definition.lineWidth,
+        connectNulls: false,
+        data: zigToSeriesData(),
+        lineStyle: { color: "#ffc857", width: 2.1 },
+        itemStyle: {
+          color: "#ffc857",
+          borderColor: "#f7e7b3",
+          borderWidth: 1,
         },
       });
-    });
-
+    }
     return series;
   }
 
@@ -586,14 +535,12 @@
     const settings = options || {};
     const chart = ensureChart();
     if (!chart) {
-      state.pendingRenderOptions = settings;
-      queueChartResize({ rerender: false });
+      queueChartResize();
       return;
     }
     const datasetBounds = getDatasetBounds();
     const previousBounds = state.lastDatasetBounds;
     let nextViewport;
-
     if (!datasetBounds) {
       nextViewport = null;
     } else if (settings.resetView || !state.viewport) {
@@ -618,6 +565,15 @@
     });
   }
 
+  function sortZigRows(rows) {
+    return rows.slice().sort((left, right) => {
+      if (left.pivotId !== right.pivotId) {
+        return left.pivotId - right.pivotId;
+      }
+      return left.versionId - right.versionId;
+    });
+  }
+
   function trimRowsToWindow(anchor) {
     const windowSize = currentConfig().window;
     if (state.rows.length <= windowSize) {
@@ -630,9 +586,62 @@
     state.rows = state.rows.slice(state.rows.length - windowSize);
   }
 
+  function trimZigRowsToCurrentRange() {
+    if (!state.zigRows.length || state.rangeFirstId == null) {
+      return;
+    }
+    const retained = state.zigRows.filter((row) => row.sourceTickId >= state.rangeFirstId);
+    let leftNeighbor = null;
+    for (let index = 0; index < state.zigRows.length; index += 1) {
+      const row = state.zigRows[index];
+      if (row.sourceTickId < state.rangeFirstId) {
+        leftNeighbor = row;
+      } else {
+        break;
+      }
+    }
+    state.zigRows = leftNeighbor ? [leftNeighbor].concat(retained) : retained;
+  }
+
+  function syncRangeFromRows() {
+    if (!state.rows.length) {
+      return;
+    }
+    state.rangeFirstId = state.rows[0].id;
+    state.rangeLastId = state.rows[state.rows.length - 1].id;
+    state.rangeFirstTimestampMs = state.rows[0].timestampMs;
+    state.rangeLastTimestampMs = state.rows[state.rows.length - 1].timestampMs;
+  }
+
+  function applyRangePayload(payload) {
+    if (payload.firstId != null) {
+      state.rangeFirstId = payload.firstId;
+    }
+    if (payload.lastId != null) {
+      state.rangeLastId = payload.lastId;
+    }
+    if (payload.firstTimestampMs != null) {
+      state.rangeFirstTimestampMs = payload.firstTimestampMs;
+    }
+    if (payload.lastTimestampMs != null) {
+      state.rangeLastTimestampMs = payload.lastTimestampMs;
+    }
+    if (state.rows.length) {
+      syncRangeFromRows();
+    }
+  }
+
   function replaceRows(rows) {
     state.rows = Array.isArray(rows) ? rows.slice() : [];
     trimRowsToWindow("right");
+    syncRangeFromRows();
+  }
+
+  function replaceZigRows(rows) {
+    state.zigRows = sortZigRows(Array.isArray(rows) ? rows : []);
+    if (displayUsesTicks(currentConfig().display)) {
+      trimZigRowsToCurrentRange();
+    }
   }
 
   function dedupeAppend(rows) {
@@ -649,6 +658,7 @@
     });
     if (appended) {
       trimRowsToWindow("right");
+      syncRangeFromRows();
     }
     return appended;
   }
@@ -664,7 +674,26 @@
     }
     state.rows = older.concat(state.rows);
     trimRowsToWindow("left");
+    syncRangeFromRows();
     return older.length;
+  }
+
+  function mergeZigChanges(rows) {
+    if (!rows.length) {
+      return 0;
+    }
+    const byPivotId = new Map();
+    state.zigRows.forEach((row) => {
+      byPivotId.set(row.pivotId, row);
+    });
+    rows.forEach((row) => {
+      byPivotId.set(row.pivotId, row);
+    });
+    state.zigRows = sortZigRows(Array.from(byPivotId.values()));
+    if (displayUsesTicks(currentConfig().display)) {
+      trimZigRowsToCurrentRange();
+    }
+    return rows.length;
   }
 
   function clearActivity() {
@@ -704,20 +733,46 @@
     throw new Error("Review mode requires a start id or Sydney review start time.");
   }
 
-  async function loadBootstrap(resetView) {
-    const config = currentConfig();
+  function bootstrapUrl(config, startId) {
     const params = new URLSearchParams({
       mode: config.mode,
       window: String(config.window),
+      display: config.display,
     });
-    if (config.mode === "review") {
-      const startId = await resolveReviewStartId(config);
+    if (config.mode === "review" && startId != null) {
       params.set("id", String(startId));
     }
+    return "/api/live/bootstrap?" + params.toString();
+  }
 
-    const payload = await fetchJson("/api/live/bootstrap?" + params.toString());
+  function nextUrl(config, afterId, endId, limit) {
+    const params = new URLSearchParams({
+      afterId: String(afterId),
+      limit: String(limit),
+      display: config.display,
+    });
+    if (endId != null) {
+      params.set("endId", String(endId));
+    }
+    return "/api/live/next?" + params.toString();
+  }
+
+  function previousUrl(config) {
+    return "/api/live/previous?" + new URLSearchParams({
+      beforeId: String(state.rangeFirstId || 1),
+      currentLastId: String(state.rangeLastId || state.rangeFirstId || 1),
+      limit: String(historyBatchSize()),
+      display: config.display,
+    }).toString();
+  }
+
+  async function loadBootstrap(resetView) {
+    const config = currentConfig();
+    const startId = config.mode === "review" ? await resolveReviewStartId(config) : null;
+    const payload = await fetchJson(bootstrapUrl(config, startId));
     replaceRows(payload.rows || []);
-    syncOptionalSeries(payload, true);
+    replaceZigRows(payload.zigRows || []);
+    applyRangePayload(payload);
     state.reviewEndId = payload.reviewEndId || null;
     state.hasMoreLeft = Boolean(payload.hasMoreLeft);
     state.lastMetrics = payload.metrics || null;
@@ -726,11 +781,15 @@
     renderMeta();
     renderPerf();
     renderChart({ resetView: Boolean(resetView) });
-    status("Loaded " + state.rows.length + " raw tick(s).", false);
+
+    const message = displayUsesTicks(config.display)
+      ? "Loaded " + state.rows.length + " tick(s) and " + state.zigRows.length + " zig point(s)."
+      : "Loaded " + state.zigRows.length + " zig point(s) over tick range " + state.rangeFirstId + "-" + state.rangeLastId + ".";
+    status(message, false);
 
     if (config.run === "run") {
       if (config.mode === "live") {
-        connectStream(payload.lastId || 0);
+        connectStream(state.rangeLastId || 0);
       } else {
         scheduleReviewStep();
       }
@@ -739,9 +798,11 @@
 
   function connectStream(afterId) {
     clearActivity();
+    const config = currentConfig();
     const source = new EventSource("/api/live/stream?" + new URLSearchParams({
       afterId: String(afterId || 0),
       limit: "250",
+      display: config.display,
     }).toString());
     state.source = source;
 
@@ -754,11 +815,14 @@
     source.onmessage = function (event) {
       const payload = JSON.parse(event.data);
       state.lastMetrics = payload;
-      syncOptionalSeries(payload, false);
-      const appended = dedupeAppend(payload.rows || []);
+      const tickAppended = displayUsesTicks(config.display) ? dedupeAppend(payload.rows || []) : 0;
+      const zigChanged = displayUsesZig(config.display) ? mergeZigChanges(payload.zigChanges || []) : 0;
+      if (!displayUsesTicks(config.display) && payload.lastId != null) {
+        state.rangeLastId = payload.lastId;
+      }
       renderMeta();
       renderPerf();
-      if (appended) {
+      if (tickAppended || zigChanged) {
         renderChart({ shiftWithRun: currentConfig().run === "run" });
       }
     };
@@ -781,29 +845,28 @@
     if (config.mode !== "review" || config.run !== "run") {
       return;
     }
-    if (!state.rows.length || !state.reviewEndId) {
-      status("Review is waiting for rows.", true);
+    if (state.rangeLastId == null || !state.reviewEndId) {
+      status("Review is waiting for a loaded range.", true);
       return;
     }
-
-    const lastId = state.rows[state.rows.length - 1].id;
-    if (lastId >= state.reviewEndId) {
+    if (state.rangeLastId >= state.reviewEndId) {
       status("Review reached the current end snapshot.", false);
       return;
     }
 
     const limit = Math.max(25, Math.min(500, Math.round(100 * config.reviewSpeed)));
-    const payload = await fetchJson("/api/live/next?" + new URLSearchParams({
-      afterId: String(lastId),
-      endId: String(state.reviewEndId),
-      limit: String(limit),
-    }).toString());
+    const payload = await fetchJson(nextUrl(config, state.rangeLastId, state.reviewEndId, limit));
     state.lastMetrics = payload.metrics || null;
-    syncOptionalSeries(payload, false);
-    dedupeAppend(payload.rows || []);
+    const tickAppended = displayUsesTicks(config.display) ? dedupeAppend(payload.rows || []) : 0;
+    const zigChanged = displayUsesZig(config.display) ? mergeZigChanges(payload.zigChanges || []) : 0;
+    if (!displayUsesTicks(config.display) && payload.lastId != null) {
+      state.rangeLastId = payload.lastId;
+    }
     renderMeta();
     renderPerf();
-    renderChart({ shiftWithRun: true });
+    if (tickAppended || zigChanged) {
+      renderChart({ shiftWithRun: true });
+    }
     status(payload.endReached ? "Review reached the current end snapshot." : "Review running.", false);
     if (!payload.endReached && currentConfig().run === "run") {
       scheduleReviewStep();
@@ -831,37 +894,49 @@
 
   async function resumeRunIfNeeded() {
     const config = currentConfig();
-    if (config.run !== "run" || !state.rows.length) {
+    if (config.run !== "run" || state.rangeLastId == null) {
       return;
     }
     if (config.mode === "live") {
-      connectStream(state.rows[state.rows.length - 1].id);
+      connectStream(state.rangeLastId);
       return;
     }
     scheduleReviewStep();
   }
 
   async function loadMoreLeft() {
-    if (!state.rows.length) {
+    if (state.rangeFirstId == null) {
       status("Load the chart first.", true);
       return;
     }
 
     clearActivity();
-    const payload = await fetchJson("/api/live/previous?" + new URLSearchParams({
-      beforeId: String(state.rows[0].id),
-      limit: String(historyBatchSize()),
-    }).toString());
+    const config = currentConfig();
+    const payload = await fetchJson(previousUrl(config));
     state.lastMetrics = payload.metrics || null;
-    const prepended = dedupePrepend(payload.rows || []);
+    const prepended = displayUsesTicks(config.display) ? dedupePrepend(payload.rows || []) : 0;
+    if (!displayUsesTicks(config.display)) {
+      state.rangeFirstId = payload.firstId;
+      state.rangeLastId = payload.lastId;
+    } else if (payload.firstId != null) {
+      state.rangeFirstId = payload.firstId;
+    }
+    if (displayUsesZig(config.display)) {
+      replaceZigRows(payload.zigRows || []);
+    }
     state.hasMoreLeft = Boolean(payload.hasMoreLeft);
     renderMeta();
     renderPerf();
-    if (prepended) {
+    if (prepended || displayUsesZig(config.display)) {
       renderChart({ shiftWithRun: false });
-      status(prepended + " older tick(s) merged into the current window.", false);
+      status(
+        displayUsesTicks(config.display)
+          ? prepended + " older tick(s) merged into the current window."
+          : "Older zig history merged into the current range.",
+        false
+      );
     } else {
-      status("No older ticks were available.", false);
+      status("No older data was available.", false);
     }
     await resumeRunIfNeeded();
   }
@@ -884,18 +959,28 @@
     setSegment(elements.modeToggle, value);
     updateReviewFields();
     writeQuery();
-    status("Mode updated. Click Load to refresh ticks.", false);
+    status("Mode updated. Click Load to refresh data.", false);
   });
 
   bindSegment(elements.runToggle, function (value) {
     setSegment(elements.runToggle, value);
     writeQuery();
     clearActivity();
-    if (value === "run" && state.rows.length) {
+    if (value === "run" && state.rangeLastId != null) {
       resumeRunIfNeeded();
       return;
     }
     status("Run state updated.", false);
+  });
+
+  bindSegment(elements.displayToggle, function (value) {
+    setSegment(elements.displayToggle, value);
+    updateWindowConstraints();
+    updateSeriesAvailability();
+    writeQuery();
+    renderMeta();
+    renderChart({ shiftWithRun: false });
+    status("Display mode updated. Click Load to refresh the range.", false);
   });
 
   bindSegment(elements.seriesToggle, function (value) {
@@ -917,7 +1002,7 @@
   [elements.tickId, elements.reviewStart, elements.windowSize].forEach((control) => {
     control.addEventListener("change", function () {
       if (control === elements.windowSize) {
-        elements.windowSize.value = String(sanitizeWindowValue(elements.windowSize.value));
+        updateWindowConstraints();
       }
       writeQuery();
     });

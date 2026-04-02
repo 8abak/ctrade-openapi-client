@@ -40,7 +40,7 @@
         <header class="live-sidebar-header">
           <a class="back-link" href="/">datavis.au</a>
           <h1>Layer 0</h1>
-          <p class="live-sidebar-copy">Raw ticks only. No overlays, no calculators, no derived layers.</p>
+          <p class="live-sidebar-copy">Raw ticks stay primary. Fast zig is optional and loaded separately from the collector path.</p>
           <div class="meta-strip" id="liveMeta">Waiting for ticks...</div>
           <div class="meta-strip" id="livePerf">Stream down.</div>
           <div class="status-line live-status" id="statusLine">Ready.</div>
@@ -62,6 +62,15 @@
                 <div class="segmented" id="runToggle">
                   <button type="button" data-value="run">Run</button>
                   <button type="button" data-value="stop">Stop</button>
+                </div>
+              </div>
+
+              <div class="live-control-field live-control-field-wide">
+                <span>display</span>
+                <div class="segmented" id="displayToggle">
+                  <button type="button" data-value="ticks">Ticks</button>
+                  <button type="button" data-value="ticks-zig">Ticks + Zig</button>
+                  <button type="button" data-value="zig">Zig Only</button>
                 </div>
               </div>
 
