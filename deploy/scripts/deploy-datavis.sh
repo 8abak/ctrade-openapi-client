@@ -3,7 +3,9 @@ set -euo pipefail
 
 APP_DIR="/home/ec2-user/cTrade"
 VENV_ACTIVATE="/home/ec2-user/venvs/datavis/bin/activate"
-SERVICES=("datavis" "ottprocessor" "envelopeprocessor" "zigzag" "envelopezigprocessor" "marketprofile")
+UNIT_FILES=("datavis" "tickcollector")
+RESTART_SERVICES=("datavis")
+LEGACY_SERVICES=("ottprocessor" "envelopeprocessor" "zigzag" "envelopezigprocessor" "marketprofile")
 HEALTH_URL="http://127.0.0.1:8000/api/health"
 
 log() {
@@ -17,7 +19,7 @@ show_service_status() {
 
 install_systemd_units() {
   log "Installing systemd units"
-  for service_name in "${SERVICES[@]}"; do
+  for service_name in "${UNIT_FILES[@]}"; do
     sudo install -m 0644 "deploy/systemd/${service_name}.service" "/etc/systemd/system/${service_name}.service"
   done
   sudo systemctl daemon-reload
@@ -25,9 +27,18 @@ install_systemd_units() {
 
 on_error() {
   log "Deployment failed"
-  for service_name in "${SERVICES[@]}"; do
+  for service_name in "${RESTART_SERVICES[@]}"; do
     show_service_status "$service_name"
   done
+}
+
+disable_legacy_services() {
+  for service_name in "${LEGACY_SERVICES[@]}"; do
+    log "Disabling legacy service ${service_name}"
+    sudo systemctl disable --now "${service_name}.service" >/dev/null 2>&1 || true
+    sudo rm -f "/etc/systemd/system/${service_name}.service"
+  done
+  sudo systemctl daemon-reload
 }
 
 trap on_error ERR
@@ -46,11 +57,14 @@ log "Installing Python dependencies"
 pip install -r requirements.txt
 
 install_systemd_units
+disable_legacy_services
 
-for service_name in "${SERVICES[@]}"; do
+for service_name in "${UNIT_FILES[@]}"; do
   log "Enabling ${service_name}"
   sudo systemctl enable "${service_name}.service" >/dev/null 2>&1 || true
+done
 
+for service_name in "${RESTART_SERVICES[@]}"; do
   log "Restarting ${service_name}"
   sudo systemctl restart "${service_name}.service"
 
@@ -60,6 +74,8 @@ for service_name in "${SERVICES[@]}"; do
     exit 1
   fi
 done
+
+log "tickcollector is intentionally not restarted by deploy"
 
 if command -v curl >/dev/null 2>&1; then
   log "Running local health check"

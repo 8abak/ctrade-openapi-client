@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>datavis.au | SQL Admin</title>
+  <title>datavis.au | Layer 0 SQL</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -17,16 +17,9 @@
       <div class="sql-sidebar-scroll">
         <div class="sql-sidebar-header">
           <a class="back-link" href="/">datavis.au</a>
-          <div class="sql-admin-badge">admin-only</div>
-          <h1>PostgreSQL Console</h1>
-          <div class="sql-sidebar-copy">Compact SQL admin for public tables, quick inspection, and visible query results.</div>
-        </div>
-        <div class="sql-sidebar-tools">
-          <label class="sql-inline-field">
-            <span>Filter Tables</span>
-            <input id="schemaSearch" type="search" autocomplete="off" placeholder="public table">
-          </label>
-          <button class="ghost-button compact-button" id="refreshSchemaButton" type="button">Refresh</button>
+          <div class="sql-admin-badge">ticks only</div>
+          <h1>Layer 0 SQL</h1>
+          <div class="sql-sidebar-copy">Read-only inspection for `public.ticks` only.</div>
         </div>
         <div class="sql-connection-card">
           <div class="sql-connection-label">Connection</div>
@@ -34,18 +27,18 @@
         </div>
         <div class="sql-sidebar-section">
           <div class="sql-sidebar-section-header">
-            <div class="sql-toolbar-label">Public Tables</div>
+            <div class="sql-toolbar-label">Visible Table</div>
+            <button class="ghost-button compact-button" id="refreshSchemaButton" type="button">Refresh</button>
           </div>
           <div class="schema-tree" id="schemaTree">Loading schema browser...</div>
         </div>
         <section class="sql-sidebar-inspector">
           <div class="sql-inspector-header">
-            <div class="sql-toolbar-label">Object Inspector</div>
-            <button class="ghost-button compact-button" id="refreshObjectButton" type="button" disabled>Reload</button>
+            <div class="sql-toolbar-label">Inspector</div>
+            <button class="ghost-button compact-button" id="previewButton" type="button">Preview Recent</button>
           </div>
-          <div class="object-actions" id="objectActions"></div>
           <div class="object-detail" id="objectDetail">
-            <div class="muted">Select a public table to inspect columns, indexes, definitions, and preview actions.</div>
+            <div class="muted">Loading ticks table metadata...</div>
           </div>
         </section>
       </div>
@@ -55,41 +48,32 @@
       <section class="panel sql-editor-panel">
         <div class="sql-editor-header">
           <div class="sql-editor-heading">
-            <div class="sql-toolbar-label">Query Editor</div>
-            <div class="sql-editor-copy">`Ctrl+Enter` runs selection or current script. `Ctrl+Shift+Enter` runs the full editor.</div>
+            <div class="sql-toolbar-label">Read-Only Query</div>
+            <div class="sql-editor-copy">Only `SELECT` or `EXPLAIN` queries against `public.ticks` are allowed.</div>
           </div>
           <div class="editor-toolbar">
-            <button class="ghost-button compact-button" id="clearEditorButton" type="button">Clear</button>
-            <button class="ghost-button compact-button" id="runAllButton" type="button">Run All</button>
+            <button class="ghost-button compact-button" id="previewTopButton" type="button">Preview Recent</button>
             <button class="primary-button compact-button" id="runQueryButton" type="button">Run</button>
           </div>
         </div>
-        <textarea id="sqlEditor">SELECT *
-FROM public.otttick
-LIMIT 10;</textarea>
+        <textarea id="sqlEditor">SELECT id, timestamp, bid, ask, mid, spread
+FROM public.ticks
+ORDER BY id DESC
+LIMIT 100;</textarea>
         <div class="sql-editor-footer">
-          <div class="status-line" id="queryStatus">Waiting for SQL execution.</div>
-          <div class="sql-editor-context" id="editorContext">Selection-aware execution is enabled.</div>
+          <div class="status-line" id="queryStatus">Ready.</div>
+          <div class="sql-editor-context" id="editorContext">Read-only ticks access.</div>
         </div>
       </section>
 
       <section class="panel sql-results-panel">
         <div class="results-toolbar">
           <div>
-            <div class="sql-toolbar-label">Execution Results</div>
-            <div class="results-meta" id="resultsMeta">No statements executed yet.</div>
-          </div>
-          <div class="results-actions">
-            <button class="ghost-button compact-button" id="copyTsvButton" type="button">Copy TSV</button>
-            <button class="ghost-button compact-button" id="copyCsvButton" type="button">Copy CSV</button>
-            <button class="ghost-button compact-button" id="clearResultsButton" type="button">Clear</button>
+            <div class="sql-toolbar-label">Results</div>
+            <div class="results-meta" id="resultsMeta">No query executed yet.</div>
           </div>
         </div>
         <div class="error-panel" id="resultsError" hidden></div>
-        <div class="results-strip">
-          <div class="result-tabs" id="resultTabs"></div>
-          <div class="statement-summary" id="statementSummary"></div>
-        </div>
         <div class="preview-toolbar" id="previewToolbar" hidden>
           <div class="preview-meta" id="previewMeta"></div>
           <div class="preview-actions">
@@ -97,7 +81,7 @@ LIMIT 10;</textarea>
             <button class="ghost-button compact-button" id="previewNextButton" type="button">Next</button>
           </div>
         </div>
-        <div class="results-host" id="resultsHost"><div class="results-empty">Run a query to see rows here.</div></div>
+        <div class="results-host" id="resultsHost"><div class="results-empty">Run a ticks query to see rows here.</div></div>
       </section>
     </main>
   </div>

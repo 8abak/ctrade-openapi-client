@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>datavis.au | Live</title>
+  <title>datavis.au | Layer 0 Live</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -11,44 +11,18 @@
 </head>
 <body class="page-live">
   <div class="live-workspace" id="liveWorkspace">
-    <button
-      class="ghost-button live-sidebar-toggle"
-      id="sidebarToggle"
-      type="button"
-      aria-expanded="true"
-      aria-controls="liveSidebar"
-      aria-label="Toggle sidebar"
-    >
-      <span class="live-sidebar-toggle-bars" aria-hidden="true">
-        <span></span>
-        <span></span>
-        <span></span>
-      </span>
-      <span class="sr-only">Toggle sidebar</span>
-    </button>
-
     <aside class="panel live-sidebar" id="liveSidebar">
       <div class="live-sidebar-scroll">
         <header class="live-sidebar-header">
           <a class="back-link" href="/">datavis.au</a>
-          <h1>Live</h1>
-          <p class="live-sidebar-copy">Chart-first workspace with removable analysis layers.</p>
-          <div class="meta-strip" id="liveMeta">Waiting for data...</div>
+          <h1>Layer 0</h1>
+          <p class="live-sidebar-copy">Raw ticks only. No overlays, no calculators, no derived layers.</p>
+          <div class="meta-strip" id="liveMeta">Waiting for ticks...</div>
           <div class="meta-strip" id="livePerf">Stream down.</div>
           <div class="status-line live-status" id="statusLine">Ready.</div>
         </header>
 
-        <section class="live-sidebar-section" data-section="control">
-          <button
-            class="ghost-button live-section-toggle"
-            id="controlSectionToggle"
-            type="button"
-            aria-expanded="true"
-            aria-controls="controlSectionBody"
-          >
-            <span class="live-section-title">Control Panel</span>
-            <span class="live-section-state">Collapse</span>
-          </button>
+        <section class="live-sidebar-section">
           <div class="live-section-body" id="controlSectionBody">
             <div class="live-form-grid">
               <div class="live-control-field live-control-field-wide">
@@ -67,8 +41,17 @@
                 </div>
               </div>
 
+              <div class="live-control-field live-control-field-wide">
+                <span>price series</span>
+                <div class="segmented" id="seriesToggle">
+                  <button type="button" data-value="mid">Mid</button>
+                  <button type="button" data-value="ask">Ask</button>
+                  <button type="button" data-value="bid">Bid</button>
+                </div>
+              </div>
+
               <label>
-                <span>id</span>
+                <span>review start id</span>
                 <input id="tickId" type="number" min="1" inputmode="numeric" placeholder="start id">
               </label>
 
@@ -83,7 +66,7 @@
               </label>
 
               <div class="live-control-field live-control-field-wide review-speed-control">
-                <span>speed</span>
+                <span>review speed</span>
                 <div class="segmented single-select" id="reviewSpeedToggle" aria-label="Review speed">
                   <button type="button" data-value="0.5">0.5x</button>
                   <button type="button" data-value="1">1x</button>
@@ -92,241 +75,11 @@
                   <button type="button" data-value="5">5x</button>
                 </div>
               </div>
-
-              <div class="live-control-field live-control-field-wide">
-                <span>series</span>
-                <div class="series-selector" id="seriesSelector" aria-label="Series selector">
-                  <button type="button" data-series="ask">ask</button>
-                  <button type="button" data-series="bid">bid</button>
-                  <button type="button" data-series="mid">mid</button>
-                </div>
-              </div>
             </div>
 
             <div class="live-inline-actions">
-              <button class="ghost-button compact-button" id="reviewYesterdayButton" type="button">Yesterday 08:00</button>
               <button class="primary-button compact-button" id="applyButton" type="button">Load</button>
-            </div>
-          </div>
-        </section>
-
-        <section class="live-sidebar-section" data-section="zig">
-          <button
-            class="ghost-button live-section-toggle"
-            id="zigSectionToggle"
-            type="button"
-            aria-expanded="true"
-            aria-controls="zigSectionBody"
-          >
-            <span class="live-section-title">Zig</span>
-            <span class="live-section-state">Collapse</span>
-          </button>
-          <div class="live-section-body" id="zigSectionBody">
-            <div class="live-check-grid live-control-field-wide">
-              <label class="compact-check">
-                <input id="zigMicroToggle" type="checkbox">
-                <span>Micro</span>
-              </label>
-              <label class="compact-check">
-                <input id="zigMedToggle" type="checkbox" checked>
-                <span>Medium</span>
-              </label>
-              <label class="compact-check">
-                <input id="zigMaxiToggle" type="checkbox" checked>
-                <span>Maxi</span>
-              </label>
-              <label class="compact-check">
-                <input id="zigMacroToggle" type="checkbox" checked>
-                <span>Macro</span>
-              </label>
-            </div>
-
-            <div class="live-control-field live-control-field-wide">
-              <span>chart view</span>
-              <div class="segmented single-select" id="zigViewToggle" aria-label="Zig chart view">
-                <button type="button" data-value="normal">Normal</button>
-                <button type="button" data-value="structure">Structure</button>
-                <button type="button" data-value="zigonly">Zig Only</button>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <section class="live-sidebar-section" data-section="envelope">
-          <button
-            class="ghost-button live-section-toggle"
-            id="envelopeSectionToggle"
-            type="button"
-            aria-expanded="true"
-            aria-controls="envelopeSectionBody"
-          >
-            <span class="live-section-title">Envelope</span>
-            <span class="live-section-state">Collapse</span>
-          </button>
-          <div class="live-section-body" id="envelopeSectionBody">
-            <div class="live-form-grid">
-              <div class="live-control-field live-control-field-wide">
-                <span>layer state</span>
-                <div class="segmented single-select" id="envelopeToggle">
-                  <button type="button" data-value="on">Envelope On</button>
-                  <button type="button" data-value="off">Envelope Off</button>
-                </div>
-              </div>
-
-              <label>
-                <span>series source</span>
-                <select id="envelopeSeries">
-                  <option value="ticks">ticks</option>
-                  <option value="zigmicro">zigmicro</option>
-                  <option value="zigmed">zigmed</option>
-                  <option value="zigmaxi">zigmaxi</option>
-                  <option value="zigmacro">zigmacro</option>
-                </select>
-              </label>
-
-              <label>
-                <span>tick price</span>
-                <select id="envelopeSource">
-                  <option value="mid">mid</option>
-                  <option value="ask">ask</option>
-                  <option value="bid">bid</option>
-                </select>
-              </label>
-
-              <label class="ott-length-field">
-                <span>lookback</span>
-                <input id="envelopeLength" type="number" min="1" inputmode="numeric" value="500">
-              </label>
-
-              <label>
-                <span>bandwidth h</span>
-                <input id="envelopeBandwidth" type="number" min="0.1" step="0.1" inputmode="decimal" value="8">
-              </label>
-
-              <label>
-                <span>mult</span>
-                <input id="envelopeMult" type="number" min="0" step="0.1" inputmode="decimal" value="3">
-              </label>
-            </div>
-          </div>
-        </section>
-
-        <section class="live-sidebar-section" data-section="marketprofile">
-          <button
-            class="ghost-button live-section-toggle"
-            id="marketProfileSectionToggle"
-            type="button"
-            aria-expanded="true"
-            aria-controls="marketProfileSectionBody"
-          >
-            <span class="live-section-title">Market Profile</span>
-            <span class="live-section-state">Collapse</span>
-          </button>
-          <div class="live-section-body" id="marketProfileSectionBody">
-            <div class="live-form-grid">
-              <div class="live-control-field live-control-field-wide">
-                <span>layer state</span>
-                <div class="segmented single-select" id="marketProfileToggle">
-                  <button type="button" data-value="on">Profile On</button>
-                  <button type="button" data-value="off">Profile Off</button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <section class="live-sidebar-section" data-section="ott">
-          <button
-            class="ghost-button live-section-toggle"
-            id="ottSectionToggle"
-            type="button"
-            aria-expanded="true"
-            aria-controls="ottSectionBody"
-          >
-            <span class="live-section-title">OTT</span>
-            <span class="live-section-state">Collapse</span>
-          </button>
-          <div class="live-section-body" id="ottSectionBody">
-            <div class="live-form-grid">
-              <div class="live-control-field live-control-field-wide">
-                <span>layer state</span>
-                <div class="segmented single-select" id="ottToggle">
-                  <button type="button" data-value="on">OTT On</button>
-                  <button type="button" data-value="off">OTT Off</button>
-                </div>
-              </div>
-
-              <div class="live-check-grid live-control-field-wide">
-                <label class="compact-check">
-                  <input id="ottSupportToggle" type="checkbox" checked>
-                  <span>support line</span>
-                </label>
-                <label class="compact-check">
-                  <input id="ottMarkersToggle" type="checkbox" checked>
-                  <span>buy/sell markers</span>
-                </label>
-                <label class="compact-check">
-                  <input id="ottTradesToggle" type="checkbox" checked>
-                  <span>backtest trades</span>
-                </label>
-                <label class="compact-check">
-                  <input id="ottHighlightToggle" type="checkbox" checked>
-                  <span>highlight</span>
-                </label>
-              </div>
-
-              <label>
-                <span>source</span>
-                <select id="ottSource">
-                  <option value="mid">mid</option>
-                  <option value="ask">ask</option>
-                  <option value="bid">bid</option>
-                </select>
-              </label>
-
-              <label>
-                <span>signal mode</span>
-                <select id="ottSignalMode">
-                  <option value="support">support</option>
-                  <option value="price">price</option>
-                  <option value="color">color</option>
-                </select>
-              </label>
-
-              <label>
-                <span>MA</span>
-                <select id="ottMaType">
-                  <option value="VAR">VAR</option>
-                  <option value="SMA">SMA</option>
-                  <option value="EMA">EMA</option>
-                  <option value="WMA">WMA</option>
-                  <option value="TMA">TMA</option>
-                  <option value="WWMA">WWMA</option>
-                  <option value="ZLEMA">ZLEMA</option>
-                  <option value="TSF">TSF</option>
-                </select>
-              </label>
-
-              <label class="ott-length-field">
-                <span>length</span>
-                <input id="ottLength" type="number" min="1" inputmode="numeric" value="2">
-              </label>
-
-              <label>
-                <span>percent</span>
-                <input id="ottPercent" type="number" min="0" step="0.1" inputmode="decimal" value="1.4">
-              </label>
-
-              <label>
-                <span>backtest range</span>
-                <select id="ottRangePreset">
-                  <option value="lastweek">last week</option>
-                </select>
-              </label>
-            </div>
-
-            <div class="live-inline-actions">
-              <button class="ghost-button compact-button" id="runOttBacktestButton" type="button">Run Backtest</button>
+              <button class="ghost-button compact-button" id="loadMoreLeftButton" type="button">Load More Left</button>
             </div>
           </div>
         </section>
