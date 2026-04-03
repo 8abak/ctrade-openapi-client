@@ -217,7 +217,7 @@
   function flushChartResize() {
     if (state.chart && chartHostHasSize()) {
       state.chart.resize();
-      queueVisibleYAxisUpdate(state.viewport || captureViewportFromChart() || getDatasetBounds());
+      queueVisibleYAxisUpdate(state.viewport || captureViewportFromChart(getDatasetBounds()) || getDatasetBounds());
     }
   }
 
@@ -381,11 +381,14 @@
         series: [],
       }, { notMerge: true, lazyUpdate: true });
 
-      state.chart.on("dataZoom", () => {
+      state.chart.on("dataZoom", (event) => {
         if (state.applyingViewport) {
           return;
         }
-        state.viewport = normalizeViewport(captureViewportFromChart(), getDatasetBounds());
+        const bounds = getDatasetBounds();
+        state.viewport = viewportFromZoomState(resolveZoomSource(event), bounds)
+          || captureViewportFromChart(bounds)
+          || normalizeViewport(state.viewport, bounds);
         queueVisibleYAxisUpdate(state.viewport);
       });
     }
@@ -393,7 +396,45 @@
     return state.chart;
   }
 
-  function captureViewportFromChart() {
+  function resolveZoomSource(source) {
+    if (!source) {
+      return null;
+    }
+    if (Array.isArray(source.batch) && source.batch.length) {
+      return source.batch[0];
+    }
+    return source;
+  }
+
+  function viewportFromZoomState(source, bounds) {
+    if (!bounds || !source) {
+      return null;
+    }
+    const zoomState = resolveZoomSource(source);
+    if (!zoomState) {
+      return null;
+    }
+    const fullSpan = Math.max(0, bounds.endValue - bounds.startValue);
+    const startPercent = Number(zoomState.start);
+    const endPercent = Number(zoomState.end);
+    let startValue;
+    let endValue;
+
+    if (Number.isFinite(startPercent) && Number.isFinite(endPercent)) {
+      startValue = bounds.startValue + (Math.max(0, Math.min(100, startPercent)) / 100) * fullSpan;
+      endValue = bounds.startValue + (Math.max(0, Math.min(100, endPercent)) / 100) * fullSpan;
+    } else {
+      startValue = Number(zoomState.startValue);
+      endValue = Number(zoomState.endValue);
+    }
+
+    if (!Number.isFinite(startValue) || !Number.isFinite(endValue)) {
+      return null;
+    }
+    return normalizeViewport({ startValue, endValue }, bounds);
+  }
+
+  function captureViewportFromChart(bounds) {
     if (!state.chart) {
       return null;
     }
@@ -401,11 +442,7 @@
     if (!option || !option.dataZoom || !option.dataZoom.length) {
       return null;
     }
-    const zoom = option.dataZoom[0] || {};
-    if (zoom.startValue == null || zoom.endValue == null) {
-      return null;
-    }
-    return { startValue: Number(zoom.startValue), endValue: Number(zoom.endValue) };
+    return viewportFromZoomState(option.dataZoom[0] || {}, bounds);
   }
 
   function getDatasetBounds() {
@@ -487,13 +524,19 @@
     };
   }
 
-  function buildDataZoomState(viewport) {
+  function buildDataZoomState(viewport, bounds) {
+    const normalized = normalizeViewport(viewport, bounds);
+    const fullSpan = bounds ? Math.max(0, bounds.endValue - bounds.startValue) : 0;
+    const startPercent = !normalized || fullSpan <= 0
+      ? 0
+      : ((normalized.startValue - bounds.startValue) / fullSpan) * 100;
+    const endPercent = !normalized || fullSpan <= 0
+      ? 100
+      : ((normalized.endValue - bounds.startValue) / fullSpan) * 100;
     return ZOOM_COMPONENT_IDS.map((id) => {
       const next = { id, filterMode: "none" };
-      if (viewport) {
-        next.startValue = viewport.startValue;
-        next.endValue = viewport.endValue;
-      }
+      next.start = Math.max(0, Math.min(100, startPercent));
+      next.end = Math.max(0, Math.min(100, endPercent));
       return next;
     });
   }
@@ -551,8 +594,8 @@
     const firstVisible = lowerBoundSeriesData(data, startX);
     const afterVisible = upperBoundSeriesData(data, endX);
     return {
-      startIndex: Math.max(0, firstVisible - 1),
-      endIndex: Math.min(data.length, afterVisible + 1),
+      startIndex: firstVisible,
+      endIndex: afterVisible,
     };
   }
 
@@ -617,7 +660,8 @@
     }
     state.autoscaleFrame = window.requestAnimationFrame(() => {
       state.autoscaleFrame = 0;
-      applyVisibleYAxis(viewport || state.viewport || captureViewportFromChart() || getDatasetBounds());
+      const bounds = getDatasetBounds();
+      applyVisibleYAxis(viewport || state.viewport || captureViewportFromChart(bounds) || bounds);
     });
   }
 
@@ -758,13 +802,13 @@
         min: nextYAxisBounds.min,
         max: nextYAxisBounds.max,
       } : {},
-      dataZoom: buildDataZoomState(nextViewport),
+      dataZoom: buildDataZoomState(nextViewport, datasetBounds),
     }, { replaceMerge: ["series"], lazyUpdate: true });
     state.lastDatasetBounds = datasetBounds;
 
     window.requestAnimationFrame(() => {
       state.applyingViewport = false;
-      state.viewport = normalizeViewport(captureViewportFromChart() || nextViewport, datasetBounds);
+      state.viewport = captureViewportFromChart(datasetBounds) || nextViewport;
       queueVisibleYAxisUpdate(state.viewport);
     });
   }
