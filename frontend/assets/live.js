@@ -31,6 +31,7 @@
     chart: null,
     rows: [],
     zigRows: [],
+    renderedSeries: [],
     source: null,
     reviewTimer: 0,
     reviewEndId: null,
@@ -41,6 +42,7 @@
     viewport: null,
     lastDatasetBounds: null,
     applyingViewport: false,
+    autoscaleFrame: 0,
     layoutResizeFrame: 0,
     layoutResizeTimeout: 0,
     resizeObserver: null,
@@ -215,6 +217,7 @@
   function flushChartResize() {
     if (state.chart && chartHostHasSize()) {
       state.chart.resize();
+      queueVisibleYAxisUpdate(state.viewport || captureViewportFromChart() || getDatasetBounds());
     }
   }
 
@@ -383,6 +386,7 @@
           return;
         }
         state.viewport = normalizeViewport(captureViewportFromChart(), getDatasetBounds());
+        queueVisibleYAxisUpdate(state.viewport);
       });
     }
 
@@ -494,6 +498,129 @@
     });
   }
 
+  function pointValueAt(item, index) {
+    if (Array.isArray(item)) {
+      return Number(item[index]);
+    }
+    if (item && Array.isArray(item.value)) {
+      return Number(item.value[index]);
+    }
+    if (item && typeof item === "object") {
+      return Number(index === 0 ? item.x : item.y);
+    }
+    return Number.NaN;
+  }
+
+  function lowerBoundSeriesData(data, targetX) {
+    let low = 0;
+    let high = data.length;
+    while (low < high) {
+      const mid = Math.floor((low + high) / 2);
+      if (pointValueAt(data[mid], 0) < targetX) {
+        low = mid + 1;
+      } else {
+        high = mid;
+      }
+    }
+    return low;
+  }
+
+  function upperBoundSeriesData(data, targetX) {
+    let low = 0;
+    let high = data.length;
+    while (low < high) {
+      const mid = Math.floor((low + high) / 2);
+      if (pointValueAt(data[mid], 0) <= targetX) {
+        low = mid + 1;
+      } else {
+        high = mid;
+      }
+    }
+    return low;
+  }
+
+  function seriesVisibleSliceBounds(data, viewport) {
+    if (!data.length || !viewport) {
+      return { startIndex: 0, endIndex: data.length };
+    }
+    const startX = Number(viewport.startValue);
+    const endX = Number(viewport.endValue);
+    if (!Number.isFinite(startX) || !Number.isFinite(endX)) {
+      return { startIndex: 0, endIndex: data.length };
+    }
+    const firstVisible = lowerBoundSeriesData(data, startX);
+    const afterVisible = upperBoundSeriesData(data, endX);
+    return {
+      startIndex: Math.max(0, firstVisible - 1),
+      endIndex: Math.min(data.length, afterVisible + 1),
+    };
+  }
+
+  function yAxisPadding(minValue, maxValue) {
+    const span = Math.max(0, maxValue - minValue);
+    if (span > 0) {
+      return Math.max(span * 0.04, Math.abs(span) * 0.01, 0.01);
+    }
+    return Math.max(Math.abs(maxValue || minValue || 0) * 0.0025, 0.05);
+  }
+
+  function visibleYBounds(viewport, seriesList) {
+    let minValue = Number.POSITIVE_INFINITY;
+    let maxValue = Number.NEGATIVE_INFINITY;
+
+    (seriesList || []).forEach((series) => {
+      if (!series || series.includeInYAutoscale === false || !Array.isArray(series.data) || !series.data.length) {
+        return;
+      }
+      const slice = seriesVisibleSliceBounds(series.data, viewport);
+      for (let index = slice.startIndex; index < slice.endIndex; index += 1) {
+        const xValue = pointValueAt(series.data[index], 0);
+        const yValue = pointValueAt(series.data[index], 1);
+        if (!Number.isFinite(xValue) || !Number.isFinite(yValue)) {
+          continue;
+        }
+        minValue = Math.min(minValue, yValue);
+        maxValue = Math.max(maxValue, yValue);
+      }
+    });
+
+    if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) {
+      return null;
+    }
+    const padding = yAxisPadding(minValue, maxValue);
+    return {
+      min: Number((minValue - padding).toFixed(6)),
+      max: Number((maxValue + padding).toFixed(6)),
+    };
+  }
+
+  function applyVisibleYAxis(viewport) {
+    if (!state.chart) {
+      return;
+    }
+    const bounds = visibleYBounds(viewport, state.renderedSeries);
+    if (!bounds) {
+      return;
+    }
+    state.chart.setOption({
+      yAxis: {
+        min: bounds.min,
+        max: bounds.max,
+      },
+    }, { lazyUpdate: true });
+  }
+
+  function queueVisibleYAxisUpdate(viewport) {
+    if (state.autoscaleFrame) {
+      window.cancelAnimationFrame(state.autoscaleFrame);
+      state.autoscaleFrame = 0;
+    }
+    state.autoscaleFrame = window.requestAnimationFrame(() => {
+      state.autoscaleFrame = 0;
+      applyVisibleYAxis(viewport || state.viewport || captureViewportFromChart() || getDatasetBounds());
+    });
+  }
+
   function rowsToSeriesData(rows, valueKey) {
     return rows.map((row) => [row.timestampMs, row[valueKey]]);
   }
@@ -533,6 +660,7 @@
         id: "raw-price",
         name: SERIES_CONFIG[config.series].label,
         type: "line",
+        includeInYAutoscale: true,
         showSymbol: false,
         hoverAnimation: false,
         animation: false,
@@ -576,6 +704,7 @@
             id: entry.id + "-" + variant.suffix,
             name: entry.name + (variant.stateName === "candidate" ? " Candidate" : ""),
             type: "line",
+            includeInYAutoscale: true,
             showSymbol: true,
             symbol: variant.symbol,
             symbolSize: entry.symbolSize,
@@ -618,10 +747,17 @@
         datasetBounds,
       );
     }
+    const nextSeries = buildChartSeries(currentConfig());
+    const nextYAxisBounds = visibleYBounds(nextViewport, nextSeries);
+    state.renderedSeries = nextSeries;
 
     state.applyingViewport = true;
     chart.setOption({
-      series: buildChartSeries(currentConfig()),
+      series: nextSeries,
+      yAxis: nextYAxisBounds ? {
+        min: nextYAxisBounds.min,
+        max: nextYAxisBounds.max,
+      } : {},
       dataZoom: buildDataZoomState(nextViewport),
     }, { replaceMerge: ["series"], lazyUpdate: true });
     state.lastDatasetBounds = datasetBounds;
@@ -629,6 +765,7 @@
     window.requestAnimationFrame(() => {
       state.applyingViewport = false;
       state.viewport = normalizeViewport(captureViewportFromChart() || nextViewport, datasetBounds);
+      queueVisibleYAxisUpdate(state.viewport);
     });
   }
 
