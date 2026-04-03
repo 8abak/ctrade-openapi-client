@@ -6,6 +6,7 @@ import os
 import re
 import secrets
 import time
+from bisect import bisect_left, bisect_right
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,6 +44,8 @@ MAX_ZIG_WINDOW = 100000
 DEFAULT_HISTORY_LIMIT = 2000
 MAX_TICK_HISTORY_LIMIT = 10000
 MAX_ZIG_HISTORY_LIMIT = 50000
+MAX_ZIG_CANDLE_WINDOW = 10000
+MAX_ZIG_CANDLE_HISTORY_LIMIT = 10000
 MAX_STREAM_BATCH = 1000
 MAX_ZIG_STREAM_BATCH = 500
 MAX_QUERY_ROWS = 1000
@@ -61,6 +64,9 @@ STREAM_HEARTBEAT_SECONDS = max(
 )
 DEFAULT_DISPLAY_MODE = "ticks"
 DISPLAY_MODE_RE = "^(ticks|ticks-zig|zig)$"
+PRICE_SERIES_RE = "^(mid|ask|bid)$"
+MAX_ZIG_LEVEL = 3
+LEVEL_ZERO_PROVING_TICKS = 4
 SQL_ADMIN_USER = os.getenv("DATAVIS_SQL_ADMIN_USER", "").strip()
 SQL_ADMIN_PASSWORD = os.getenv("DATAVIS_SQL_ADMIN_PASSWORD", "")
 DEFAULT_REVIEW_TIMEZONE = "Australia/Sydney"
@@ -595,6 +601,710 @@ def fetch_zig_changes(cur: Any, *, after_tick_id: int, upto_tick_id: Optional[in
 
 def serialize_zig_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [serialize_zig_row(row) for row in rows]
+
+
+def clamp_zig_candle_window(value: int) -> int:
+    return clamp_int(value, 1, MAX_ZIG_CANDLE_WINDOW)
+
+
+def clamp_zig_candle_history_limit(value: int) -> int:
+    return clamp_int(value, 1, MAX_ZIG_CANDLE_HISTORY_LIMIT)
+
+
+def clamp_zig_level(value: int) -> int:
+    return clamp_int(value, 0, MAX_ZIG_LEVEL)
+
+
+def price_series_value(row: Dict[str, Any], series: str) -> Optional[float]:
+    direct_value = row.get(series)
+    if direct_value is not None:
+        return float(direct_value)
+    if series == "mid" and row.get("bid") is not None and row.get("ask") is not None:
+        return round((float(row["bid"]) + float(row["ask"])) / 2.0, 2)
+    return None
+
+
+def format_duration_ms(duration_ms: int) -> str:
+    total_ms = max(0, int(duration_ms))
+    if total_ms < 1000:
+        return "{0} ms".format(total_ms)
+    total_seconds, remainder_ms = divmod(total_ms, 1000)
+    hours, remainder_seconds = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder_seconds, 60)
+    parts: List[str] = []
+    if hours:
+        parts.append("{0}h".format(hours))
+    if minutes:
+        parts.append("{0}m".format(minutes))
+    if seconds:
+        parts.append("{0}s".format(seconds))
+    if not parts and remainder_ms:
+        parts.append("{0}ms".format(remainder_ms))
+    return " ".join(parts[:3]) if parts else "0 ms"
+
+
+def zig_level_boundary_start_tick_id(pivot: Dict[str, Any], selected_level: int) -> Optional[int]:
+    source_tick_id = pivot.get("source_tick_id")
+    if source_tick_id is None:
+        return None
+    if selected_level == 0:
+        return max(1, int(source_tick_id) - LEVEL_ZERO_PROVING_TICKS)
+    visible_tick_id = pivot.get("selected_visible_from_tick_id")
+    if visible_tick_id is None:
+        return None
+    return int(visible_tick_id)
+
+
+def zig_level_boundary_end_tick_id(pivot: Dict[str, Any]) -> Optional[int]:
+    visible_tick_id = pivot.get("selected_visible_from_tick_id")
+    if visible_tick_id is None:
+        return None
+    return int(visible_tick_id)
+
+
+def query_tick_window_before_cursor(
+    cur: Any,
+    *,
+    cursor_id: int,
+    window: int,
+    offset: int = 0,
+    minimum_id: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    where_parts = ["symbol = %s", "id <= %s"]
+    parameters: List[Any] = [TICK_SYMBOL, cursor_id]
+    if minimum_id is not None:
+        where_parts.append("id >= %s")
+        parameters.append(minimum_id)
+    parameters.extend([offset, window])
+    cur.execute(
+        """
+        SELECT id, timestamp
+        FROM (
+            SELECT id, timestamp
+            FROM public.ticks
+            WHERE {where_sql}
+            ORDER BY id DESC
+            OFFSET %s
+            LIMIT %s
+        ) recent
+        ORDER BY id ASC
+        """.format(where_sql=" AND ".join(where_parts)),
+        tuple(parameters),
+    )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def fetch_zig_candle_pivot_ids(
+    cur: Any,
+    *,
+    range_start_id: int,
+    cursor_id: int,
+    selected_level: int,
+) -> List[int]:
+    cur.execute(
+        """
+        SELECT DISTINCT pivot_id
+        FROM public.fast_zig_pivots
+        WHERE symbol = %s
+          AND level >= %s
+          AND visible_from_tick_id <= %s
+          AND visible_from_tick_id >= %s
+        ORDER BY pivot_id ASC
+        """,
+        (TICK_SYMBOL, selected_level, cursor_id, range_start_id),
+    )
+    pivot_ids = [int(row["pivot_id"]) for row in cur.fetchall()]
+    cur.execute(
+        """
+        SELECT pivot_id
+        FROM public.fast_zig_pivots
+        WHERE symbol = %s
+          AND level >= %s
+          AND visible_from_tick_id <= %s
+          AND visible_from_tick_id < %s
+        ORDER BY visible_from_tick_id DESC, pivot_id DESC
+        LIMIT 1
+        """,
+        (TICK_SYMBOL, selected_level, cursor_id, range_start_id),
+    )
+    previous = cur.fetchone()
+    if previous:
+        previous_id = int(previous["pivot_id"])
+        if not pivot_ids or pivot_ids[0] != previous_id:
+            pivot_ids.insert(0, previous_id)
+    return pivot_ids
+
+
+def fetch_zig_candle_pivots(
+    cur: Any,
+    *,
+    pivot_ids: List[int],
+    cursor_id: int,
+    selected_level: int,
+) -> List[Dict[str, Any]]:
+    if not pivot_ids:
+        return []
+
+    cur.execute(
+        """
+        SELECT pivot_id, MIN(visible_from_tick_id) AS selected_visible_from_tick_id
+        FROM public.fast_zig_pivots
+        WHERE symbol = %s
+          AND pivot_id = ANY(%s)
+          AND level >= %s
+          AND visible_from_tick_id <= %s
+        GROUP BY pivot_id
+        """,
+        (TICK_SYMBOL, pivot_ids, selected_level, cursor_id),
+    )
+    selected_bounds = {
+        int(row["pivot_id"]): int(row["selected_visible_from_tick_id"])
+        for row in cur.fetchall()
+        if row.get("selected_visible_from_tick_id") is not None
+    }
+    if not selected_bounds:
+        return []
+
+    cur.execute(
+        """
+        SELECT DISTINCT ON (pivot_id)
+            version_id,
+            pivot_id,
+            symbol,
+            source_tick_id,
+            source_timestamp,
+            direction,
+            pivot_price,
+            level,
+            state,
+            visible_from_tick_id,
+            visible_to_tick_id
+        FROM public.fast_zig_pivots
+        WHERE symbol = %s
+          AND pivot_id = ANY(%s)
+          AND level >= %s
+          AND visible_from_tick_id <= %s
+          AND (visible_to_tick_id IS NULL OR visible_to_tick_id >= %s)
+        ORDER BY pivot_id ASC, version_id DESC
+        """,
+        (TICK_SYMBOL, list(selected_bounds.keys()), selected_level, cursor_id, cursor_id),
+    )
+    rows = []
+    for row in cur.fetchall():
+        item = dict(row)
+        item["selected_visible_from_tick_id"] = selected_bounds.get(int(item["pivot_id"]))
+        if item["selected_visible_from_tick_id"] is not None:
+            rows.append(item)
+    return rows
+
+
+def fetch_ticks_for_zig_candle_range(cur: Any, *, start_id: int, end_id: int) -> List[Dict[str, Any]]:
+    cur.execute(
+        """
+        SELECT id, symbol, timestamp, bid, ask, mid, spread
+        FROM public.ticks
+        WHERE symbol = %s
+          AND id >= %s
+          AND id <= %s
+        ORDER BY id ASC
+        """,
+        (TICK_SYMBOL, start_id, end_id),
+    )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def build_zig_candle_rows(
+    cur: Any,
+    *,
+    range_start_id: Optional[int],
+    cursor_id: Optional[int],
+    selected_level: int,
+    series: str,
+    include_provisional: bool,
+) -> List[Dict[str, Any]]:
+    if range_start_id is None or cursor_id is None or cursor_id < range_start_id:
+        return []
+
+    pivot_ids = fetch_zig_candle_pivot_ids(
+        cur,
+        range_start_id=range_start_id,
+        cursor_id=cursor_id,
+        selected_level=selected_level,
+    )
+    pivots = fetch_zig_candle_pivots(
+        cur,
+        pivot_ids=pivot_ids,
+        cursor_id=cursor_id,
+        selected_level=selected_level,
+    )
+    if not pivots:
+        return []
+
+    bar_specs: List[Dict[str, Any]] = []
+    for index in range(1, len(pivots)):
+        start_pivot = pivots[index - 1]
+        end_pivot = pivots[index]
+        start_tick_id = zig_level_boundary_start_tick_id(start_pivot, selected_level)
+        end_tick_id = zig_level_boundary_end_tick_id(end_pivot)
+        if start_tick_id is None or end_tick_id is None or end_tick_id < start_tick_id:
+            continue
+        is_last_pair = index == len(pivots) - 1
+        is_candidate_pair = is_last_pair and str(end_pivot.get("state") or "") == "candidate"
+        bar_specs.append(
+            {
+                "start_pivot": start_pivot,
+                "end_pivot": end_pivot,
+                "start_tick_id": start_tick_id,
+                "end_tick_id": end_tick_id,
+                "is_final": not is_candidate_pair,
+                "bar_state": "candidate" if is_candidate_pair else "final",
+            }
+        )
+
+    if include_provisional:
+        last_pivot = pivots[-1]
+        if str(last_pivot.get("state") or "") != "candidate":
+            start_tick_id = zig_level_boundary_start_tick_id(last_pivot, selected_level)
+            if start_tick_id is not None and cursor_id >= start_tick_id:
+                bar_specs.append(
+                    {
+                        "start_pivot": last_pivot,
+                        "end_pivot": None,
+                        "start_tick_id": start_tick_id,
+                        "end_tick_id": cursor_id,
+                        "is_final": False,
+                        "bar_state": "active",
+                    }
+                )
+
+    included_specs = [
+        spec
+        for spec in bar_specs
+        if spec["end_tick_id"] >= range_start_id and spec["start_tick_id"] <= cursor_id
+    ]
+    if not included_specs:
+        return []
+
+    fetch_start_id = min(spec["start_tick_id"] for spec in included_specs)
+    fetch_end_id = max(spec["end_tick_id"] for spec in included_specs)
+    tick_rows = fetch_ticks_for_zig_candle_range(cur, start_id=fetch_start_id, end_id=fetch_end_id)
+    if not tick_rows:
+        return []
+
+    tick_ids = [int(row["id"]) for row in tick_rows]
+    bars: List[Dict[str, Any]] = []
+    for spec in included_specs:
+        left_index = bisect_left(tick_ids, spec["start_tick_id"])
+        right_index = bisect_right(tick_ids, spec["end_tick_id"])
+        segment_rows = tick_rows[left_index:right_index]
+        if not segment_rows:
+            continue
+        prices = [price_series_value(row, series) for row in segment_rows]
+        prices = [value for value in prices if value is not None]
+        if not prices:
+            continue
+        first_tick = segment_rows[0]
+        last_tick = segment_rows[-1]
+        open_price = prices[0]
+        close_price = prices[-1]
+        high_price = max(prices)
+        low_price = min(prices)
+        duration_ms = max(0, dt_to_ms(last_tick["timestamp"]) - dt_to_ms(first_tick["timestamp"]))
+        start_pivot = spec["start_pivot"]
+        end_pivot = spec["end_pivot"]
+        if end_pivot is not None:
+            direction = "up" if float(end_pivot["pivot_price"]) >= float(start_pivot["pivot_price"]) else "down"
+        elif close_price > open_price:
+            direction = "up"
+        elif close_price < open_price:
+            direction = "down"
+        else:
+            direction = "flat"
+        bars.append(
+            {
+                "id": "{0}:{1}".format(
+                    int(start_pivot["pivot_id"]),
+                    "active" if end_pivot is None else int(end_pivot["pivot_id"]),
+                ),
+                "symbol": TICK_SYMBOL,
+                "level": selected_level,
+                "series": series,
+                "barState": spec["bar_state"],
+                "isFinal": bool(spec["is_final"]),
+                "isProvisional": not bool(spec["is_final"]),
+                "direction": direction,
+                "open": round(open_price, 6),
+                "high": round(high_price, 6),
+                "low": round(low_price, 6),
+                "close": round(close_price, 6),
+                "startTickId": int(first_tick["id"]),
+                "endTickId": int(last_tick["id"]),
+                "startTimestamp": first_tick["timestamp"].isoformat(),
+                "endTimestamp": last_tick["timestamp"].isoformat(),
+                "startTimestampMs": dt_to_ms(first_tick["timestamp"]),
+                "endTimestampMs": dt_to_ms(last_tick["timestamp"]),
+                "durationMs": duration_ms,
+                "durationLabel": format_duration_ms(duration_ms),
+                "tickCount": len(segment_rows),
+                "priceRange": round(high_price - low_price, 6),
+                "netMove": round(close_price - open_price, 6),
+                "startPivotId": int(start_pivot["pivot_id"]),
+                "endPivotId": int(end_pivot["pivot_id"]) if end_pivot is not None else None,
+                "startPivotPrice": float(start_pivot["pivot_price"]),
+                "endPivotPrice": float(end_pivot["pivot_price"]) if end_pivot is not None else None,
+                "startPivotDirection": str(start_pivot["direction"]),
+                "endPivotDirection": str(end_pivot["direction"]) if end_pivot is not None else None,
+                "startPivotTickId": int(start_pivot["source_tick_id"]),
+                "endPivotTickId": int(end_pivot["source_tick_id"]) if end_pivot is not None else None,
+                "startBoundaryTickId": int(spec["start_tick_id"]),
+                "endBoundaryTickId": int(spec["end_tick_id"]),
+                "startVisibleFromTickId": int(start_pivot["selected_visible_from_tick_id"]),
+                "endVisibleFromTickId": int(end_pivot["selected_visible_from_tick_id"]) if end_pivot is not None else None,
+                "sourceVisibleFromTickId": int(start_pivot["visible_from_tick_id"]) if start_pivot.get("visible_from_tick_id") is not None else None,
+                "sourceVisibleToTickId": int(start_pivot["visible_to_tick_id"]) if start_pivot.get("visible_to_tick_id") is not None else None,
+                "labelTimestampMs": dt_to_ms(last_tick["timestamp"]),
+            }
+        )
+    return bars
+
+
+def build_zig_candle_range_payload(
+    *,
+    mode: str,
+    window: int,
+    selected_level: int,
+    series: str,
+    range_rows: List[Dict[str, Any]],
+    candle_rows: List[Dict[str, Any]],
+    review_end_id: Optional[int],
+    review_end_timestamp: Optional[datetime],
+    bounds: Dict[str, Any],
+    fetch_ms: float,
+    serialize_ms: float,
+) -> Dict[str, Any]:
+    first_row = range_rows[0] if range_rows else None
+    last_row = range_rows[-1] if range_rows else None
+    first_row_id = first_row["id"] if first_row else None
+    last_row_id = last_row["id"] if last_row else None
+    return {
+        "bars": candle_rows,
+        "barCount": len(candle_rows),
+        "firstId": first_row_id,
+        "lastId": last_row_id,
+        "firstTimestamp": serialize_value(first_row.get("timestamp") if first_row else None),
+        "lastTimestamp": serialize_value(last_row.get("timestamp") if last_row else None),
+        "firstTimestampMs": dt_to_ms(first_row.get("timestamp") if first_row else None),
+        "lastTimestampMs": dt_to_ms(last_row.get("timestamp") if last_row else None),
+        "mode": mode,
+        "window": window,
+        "symbol": TICK_SYMBOL,
+        "level": selected_level,
+        "series": series,
+        "reviewEndId": review_end_id,
+        "reviewEndTimestamp": serialize_value(review_end_timestamp),
+        "hasMoreLeft": bool(bounds.get("firstId") and first_row_id and first_row_id > bounds["firstId"]),
+        "endReached": bool(mode == "review" and review_end_id is not None and last_row_id is not None and last_row_id >= review_end_id),
+        "metrics": serialize_metrics_payload(
+            fetch_ms=fetch_ms,
+            serialize_ms=serialize_ms,
+            latest_row=last_row,
+        ),
+    }
+
+
+def load_zig_candle_bootstrap_payload(
+    *,
+    mode: str,
+    start_id: Optional[int],
+    window: int,
+    selected_level: int,
+    series: str,
+    include_provisional: bool,
+) -> Dict[str, Any]:
+    effective_window = clamp_zig_candle_window(window)
+    effective_level = clamp_zig_level(selected_level)
+    fetch_started = time.perf_counter()
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            bounds_row = query_tick_bounds(cur)
+            bounds = {
+                "firstId": bounds_row.get("first_id"),
+                "lastId": bounds_row.get("last_id"),
+                "firstTimestamp": bounds_row.get("first_timestamp"),
+                "lastTimestamp": bounds_row.get("last_timestamp"),
+            }
+            review_end_id = bounds["lastId"] if mode == "review" else None
+            review_end_timestamp = bounds["lastTimestamp"] if mode == "review" else None
+            range_rows = fetch_bootstrap_tick_rows(
+                cur,
+                mode=mode,
+                start_id=start_id,
+                window=effective_window,
+                end_id=review_end_id,
+                include_rows=False,
+            )
+            range_first_id = range_rows[0]["id"] if range_rows else None
+            range_last_id = range_rows[-1]["id"] if range_rows else None
+            candle_rows = (
+                build_zig_candle_rows(
+                    cur,
+                    range_start_id=range_first_id,
+                    cursor_id=range_last_id,
+                    selected_level=effective_level,
+                    series=series,
+                    include_provisional=include_provisional,
+                )
+                if zig_storage_ready(cur)
+                else []
+            )
+    fetch_ms = elapsed_ms(fetch_started)
+    serialize_started = time.perf_counter()
+    payload = build_zig_candle_range_payload(
+        mode=mode,
+        window=effective_window,
+        selected_level=effective_level,
+        series=series,
+        range_rows=range_rows,
+        candle_rows=candle_rows,
+        review_end_id=review_end_id,
+        review_end_timestamp=review_end_timestamp,
+        bounds=bounds,
+        fetch_ms=fetch_ms,
+        serialize_ms=0.0,
+    )
+    payload["metrics"]["serializeLatencyMs"] = elapsed_ms(serialize_started)
+    return payload
+
+
+def load_zig_candle_next_payload(
+    *,
+    after_id: int,
+    limit: int,
+    end_id: Optional[int],
+    window: int,
+    selected_level: int,
+    series: str,
+    include_provisional: bool,
+    review_start_id: Optional[int],
+) -> Dict[str, Any]:
+    effective_window = clamp_zig_candle_window(window)
+    effective_level = clamp_zig_level(selected_level)
+    fetch_started = time.perf_counter()
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            bounds_row = query_tick_bounds(cur)
+            bounds = {
+                "firstId": bounds_row.get("first_id"),
+                "lastId": bounds_row.get("last_id"),
+                "firstTimestamp": bounds_row.get("first_timestamp"),
+                "lastTimestamp": bounds_row.get("last_timestamp"),
+            }
+            step_rows = query_rows_after(cur, after_id, clamp_int(limit, 1, MAX_STREAM_BATCH), end_id=end_id, include_rows=False)
+            next_last_id = step_rows[-1]["id"] if step_rows else after_id
+            range_rows = query_tick_window_before_cursor(
+                cur,
+                cursor_id=next_last_id,
+                window=effective_window,
+                minimum_id=review_start_id,
+            ) if next_last_id else []
+            range_first_id = range_rows[0]["id"] if range_rows else None
+            range_last_id = range_rows[-1]["id"] if range_rows else None
+            candle_rows = (
+                build_zig_candle_rows(
+                    cur,
+                    range_start_id=range_first_id,
+                    cursor_id=range_last_id,
+                    selected_level=effective_level,
+                    series=series,
+                    include_provisional=include_provisional,
+                )
+                if zig_storage_ready(cur)
+                else []
+            )
+    fetch_ms = elapsed_ms(fetch_started)
+    serialize_started = time.perf_counter()
+    payload = build_zig_candle_range_payload(
+        mode="review" if review_start_id is not None else "live",
+        window=effective_window,
+        selected_level=effective_level,
+        series=series,
+        range_rows=range_rows,
+        candle_rows=candle_rows,
+        review_end_id=end_id,
+        review_end_timestamp=bounds.get("lastTimestamp") if review_start_id is not None else None,
+        bounds=bounds,
+        fetch_ms=fetch_ms,
+        serialize_ms=0.0,
+    )
+    payload["lastId"] = range_last_id
+    payload["endId"] = end_id
+    payload["metrics"]["serializeLatencyMs"] = elapsed_ms(serialize_started)
+    return payload
+
+
+def load_zig_candle_previous_payload(
+    *,
+    current_last_id: int,
+    limit: int,
+    window: int,
+    selected_level: int,
+    series: str,
+    include_provisional: bool,
+) -> Dict[str, Any]:
+    effective_window = clamp_zig_candle_window(window)
+    effective_limit = clamp_zig_candle_history_limit(limit)
+    effective_level = clamp_zig_level(selected_level)
+    fetch_started = time.perf_counter()
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            bounds_row = query_tick_bounds(cur)
+            bounds = {
+                "firstId": bounds_row.get("first_id"),
+                "lastId": bounds_row.get("last_id"),
+                "firstTimestamp": bounds_row.get("first_timestamp"),
+                "lastTimestamp": bounds_row.get("last_timestamp"),
+            }
+            range_rows = query_tick_window_before_cursor(
+                cur,
+                cursor_id=current_last_id,
+                window=effective_window,
+                offset=effective_limit,
+            )
+            range_first_id = range_rows[0]["id"] if range_rows else None
+            range_last_id = range_rows[-1]["id"] if range_rows else None
+            candle_rows = (
+                build_zig_candle_rows(
+                    cur,
+                    range_start_id=range_first_id,
+                    cursor_id=range_last_id,
+                    selected_level=effective_level,
+                    series=series,
+                    include_provisional=include_provisional,
+                )
+                if zig_storage_ready(cur)
+                else []
+            )
+    fetch_ms = elapsed_ms(fetch_started)
+    serialize_started = time.perf_counter()
+    payload = build_zig_candle_range_payload(
+        mode="live",
+        window=effective_window,
+        selected_level=effective_level,
+        series=series,
+        range_rows=range_rows,
+        candle_rows=candle_rows,
+        review_end_id=None,
+        review_end_timestamp=None,
+        bounds=bounds,
+        fetch_ms=fetch_ms,
+        serialize_ms=0.0,
+    )
+    payload["beforeId"] = range_first_id
+    payload["metrics"]["serializeLatencyMs"] = elapsed_ms(serialize_started)
+    return payload
+
+
+def stream_zig_candle_events(
+    *,
+    after_id: int,
+    limit: int,
+    window: int,
+    selected_level: int,
+    series: str,
+    include_provisional: bool,
+) -> Generator[str, None, None]:
+    last_id = max(0, after_id)
+    effective_window = clamp_zig_candle_window(window)
+    effective_limit = clamp_int(limit, 1, MAX_STREAM_BATCH)
+    effective_level = clamp_zig_level(selected_level)
+    last_heartbeat = time.monotonic()
+    idle_sleep = STREAM_POLL_SECONDS
+
+    try:
+        with db_connection(readonly=True, autocommit=True) as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                zig_ready = zig_storage_ready(cur)
+                bounds_row = query_tick_bounds(cur)
+                bounds = {
+                    "firstId": bounds_row.get("first_id"),
+                    "lastId": bounds_row.get("last_id"),
+                    "firstTimestamp": bounds_row.get("first_timestamp"),
+                    "lastTimestamp": bounds_row.get("last_timestamp"),
+                }
+                while True:
+                    fetch_started = time.perf_counter()
+                    step_rows = query_rows_after(cur, last_id, effective_limit, include_rows=False)
+                    latest_tick_row = step_rows[-1] if step_rows else None
+                    next_last_id = int(latest_tick_row["id"]) if latest_tick_row else last_id
+
+                    if next_last_id > last_id:
+                        range_rows = query_tick_window_before_cursor(
+                            cur,
+                            cursor_id=next_last_id,
+                            window=effective_window,
+                        )
+                        range_first_id = range_rows[0]["id"] if range_rows else None
+                        range_last_id = range_rows[-1]["id"] if range_rows else None
+                        candle_rows = (
+                            build_zig_candle_rows(
+                                cur,
+                                range_start_id=range_first_id,
+                                cursor_id=range_last_id,
+                                selected_level=effective_level,
+                                series=series,
+                                include_provisional=include_provisional,
+                            )
+                            if zig_ready
+                            else []
+                        )
+                        fetch_ms = elapsed_ms(fetch_started)
+                        serialize_started = time.perf_counter()
+                        payload = build_zig_candle_range_payload(
+                            mode="live",
+                            window=effective_window,
+                            selected_level=effective_level,
+                            series=series,
+                            range_rows=range_rows,
+                            candle_rows=candle_rows,
+                            review_end_id=None,
+                            review_end_timestamp=None,
+                            bounds=bounds,
+                            fetch_ms=fetch_ms,
+                            serialize_ms=0.0,
+                        )
+                        payload["streamMode"] = "delta"
+                        payload["metrics"]["serializeLatencyMs"] = elapsed_ms(serialize_started)
+                        last_id = next_last_id
+                        yield format_sse(payload)
+                        last_heartbeat = time.monotonic()
+                        idle_sleep = STREAM_POLL_SECONDS
+                        continue
+
+                    now = time.monotonic()
+                    fetch_ms = elapsed_ms(fetch_started)
+                    if now - last_heartbeat >= STREAM_HEARTBEAT_SECONDS:
+                        latest_row = query_latest_tick(cur)
+                        payload = {
+                            "bars": [],
+                            "barCount": 0,
+                            "lastId": last_id,
+                            "window": effective_window,
+                            "level": effective_level,
+                            "series": series,
+                            "streamMode": "heartbeat",
+                            "pollSleepMs": round(idle_sleep * 1000.0, 2),
+                            **serialize_metrics_payload(
+                                fetch_ms=fetch_ms,
+                                serialize_ms=0.0,
+                                latest_row=latest_row,
+                            ),
+                        }
+                        yield format_sse(payload, event_name="heartbeat")
+                        last_heartbeat = now
+                    time.sleep(idle_sleep)
+                    idle_sleep = STREAM_IDLE_POLL_SECONDS
+    except GeneratorExit:
+        return
 
 
 def zig_storage_ready(cur: Any) -> bool:
@@ -1301,6 +2011,11 @@ def live_page() -> FileResponse:
     return FileResponse(FRONTEND_DIR / "live.html")
 
 
+@app.get("/zigcandles", include_in_schema=False)
+def zig_candles_page() -> FileResponse:
+    return FileResponse(FRONTEND_DIR / "zigcandles.html")
+
+
 @app.get("/sql", include_in_schema=False)
 def sql_page(_: str = Depends(require_sql_admin)) -> FileResponse:
     return FileResponse(FRONTEND_DIR / "sql.html")
@@ -1348,6 +2063,14 @@ def live_review_start(
     }
 
 
+@app.get("/api/zigcandles/review-start")
+def zig_candles_review_start(
+    timestamp: str = Query(..., min_length=1),
+    timezoneName: str = Query(DEFAULT_REVIEW_TIMEZONE, min_length=1),
+) -> Dict[str, Any]:
+    return live_review_start(timestamp=timestamp, timezoneName=timezoneName)
+
+
 @app.get("/api/live/bootstrap")
 def live_bootstrap(
     mode: str = Query("live", pattern="^(live|review)$"),
@@ -1386,6 +2109,95 @@ def live_stream(
 ) -> StreamingResponse:
     return StreamingResponse(
         stream_events(afterId, limit, display),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.get("/api/zigcandles/bootstrap")
+def zig_candles_bootstrap(
+    mode: str = Query("live", pattern="^(live|review)$"),
+    id: Optional[int] = Query(None, ge=1),
+    window: int = Query(DEFAULT_WINDOW, ge=1, le=MAX_ZIG_CANDLE_WINDOW),
+    level: int = Query(0, ge=0, le=MAX_ZIG_LEVEL),
+    series: str = Query("mid", pattern=PRICE_SERIES_RE),
+    provisional: bool = Query(True),
+) -> Dict[str, Any]:
+    return load_zig_candle_bootstrap_payload(
+        mode=mode,
+        start_id=id,
+        window=window,
+        selected_level=level,
+        series=series,
+        include_provisional=provisional,
+    )
+
+
+@app.get("/api/zigcandles/next")
+def zig_candles_next(
+    afterId: int = Query(..., ge=0),
+    limit: int = Query(250, ge=1, le=MAX_STREAM_BATCH),
+    endId: Optional[int] = Query(None, ge=1),
+    window: int = Query(DEFAULT_WINDOW, ge=1, le=MAX_ZIG_CANDLE_WINDOW),
+    level: int = Query(0, ge=0, le=MAX_ZIG_LEVEL),
+    series: str = Query("mid", pattern=PRICE_SERIES_RE),
+    provisional: bool = Query(True),
+    reviewStartId: Optional[int] = Query(None, ge=1),
+) -> Dict[str, Any]:
+    return load_zig_candle_next_payload(
+        after_id=afterId,
+        limit=limit,
+        end_id=endId,
+        window=window,
+        selected_level=level,
+        series=series,
+        include_provisional=provisional,
+        review_start_id=reviewStartId,
+    )
+
+
+@app.get("/api/zigcandles/previous")
+def zig_candles_previous(
+    beforeId: int = Query(..., ge=1),
+    currentLastId: int = Query(..., ge=1),
+    limit: int = Query(DEFAULT_HISTORY_LIMIT, ge=1, le=MAX_ZIG_CANDLE_HISTORY_LIMIT),
+    window: int = Query(DEFAULT_WINDOW, ge=1, le=MAX_ZIG_CANDLE_WINDOW),
+    level: int = Query(0, ge=0, le=MAX_ZIG_LEVEL),
+    series: str = Query("mid", pattern=PRICE_SERIES_RE),
+    provisional: bool = Query(True),
+) -> Dict[str, Any]:
+    return load_zig_candle_previous_payload(
+        current_last_id=currentLastId,
+        limit=limit,
+        window=window,
+        selected_level=level,
+        series=series,
+        include_provisional=provisional,
+    )
+
+
+@app.get("/api/zigcandles/stream")
+def zig_candles_stream(
+    afterId: int = Query(0, ge=0),
+    limit: int = Query(250, ge=1, le=MAX_STREAM_BATCH),
+    window: int = Query(DEFAULT_WINDOW, ge=1, le=MAX_ZIG_CANDLE_WINDOW),
+    level: int = Query(0, ge=0, le=MAX_ZIG_LEVEL),
+    series: str = Query("mid", pattern=PRICE_SERIES_RE),
+    provisional: bool = Query(True),
+) -> StreamingResponse:
+    return StreamingResponse(
+        stream_zig_candle_events(
+            after_id=afterId,
+            limit=limit,
+            window=window,
+            selected_level=level,
+            series=series,
+            include_provisional=provisional,
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

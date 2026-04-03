@@ -603,6 +603,55 @@ select {
   min-height: 0;
 }
 
+.page-zigcandles .zigcandles-stage {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) minmax(180px, 34%);
+  gap: 0.48rem;
+}
+
+.page-zigcandles .zigcandles-table-panel {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  padding: 0.42rem 0.46rem 0.46rem;
+}
+
+.zigcandles-table-toolbar {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.zigcandles-table-host {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: auto;
+  border: 1px solid rgba(147, 181, 255, 0.12);
+  border-radius: 14px;
+}
+
+.zigcandles-table {
+  font-size: 0.78rem;
+}
+
+.zigcandles-table tbody tr {
+  cursor: pointer;
+}
+
+.zigcandles-table tbody tr.is-selected {
+  background: rgba(109, 216, 255, 0.12);
+}
+
+.zigcandles-table tbody tr.is-provisional {
+  color: #c3dcff;
+}
+
+.zigcandles-tip {
+  line-height: 1.45;
+}
+
 .sql-shell {
   display: grid;
   grid-template-columns: 320px minmax(0, 1fr);
@@ -792,6 +841,10 @@ select {
 
   .page-live .chart-host {
     min-height: 0;
+  }
+
+  .page-zigcandles .zigcandles-stage {
+    grid-template-rows: minmax(0, 1fr) minmax(200px, 40%);
   }
 
   .editor-toolbar {
