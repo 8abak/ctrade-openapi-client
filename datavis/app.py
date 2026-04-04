@@ -1594,6 +1594,7 @@ def load_zig_candle_previous_payload(
     effective_window = clamp_zig_candle_window(window)
     effective_limit = clamp_zig_candle_history_limit(limit)
     effective_level = clamp_zig_level(selected_level)
+    expanded_window = clamp_zig_candle_window(effective_window + effective_limit)
     fetch_started = time.perf_counter()
     with db_connection(readonly=True) as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -1607,8 +1608,7 @@ def load_zig_candle_previous_payload(
             range_rows = query_tick_window_before_cursor(
                 cur,
                 cursor_id=current_last_id,
-                window=effective_window,
-                offset=effective_limit,
+                window=expanded_window,
             )
             range_first_id = range_rows[0]["id"] if range_rows else None
             range_last_id = range_rows[-1]["id"] if range_rows else None
@@ -1640,7 +1640,7 @@ def load_zig_candle_previous_payload(
     serialize_started = time.perf_counter()
     payload = build_zig_candle_range_payload(
         mode="live",
-        window=effective_window,
+        window=expanded_window,
         selected_level=effective_level,
         series=series,
         range_rows=range_rows,

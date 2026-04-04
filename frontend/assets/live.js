@@ -31,6 +31,7 @@
     chart: null,
     rows: [],
     zigRows: [],
+    loadedWindow: DEFAULTS.window,
     renderedSeries: [],
     source: null,
     reviewTimer: 0,
@@ -159,6 +160,15 @@
     const display = currentConfig().display;
     elements.windowSize.max = String(DISPLAY_CONFIG[display].maxWindow);
     elements.windowSize.value = String(sanitizeWindowValue(elements.windowSize.value, display));
+  }
+
+  function maxLoadedWindow(displayMode) {
+    return (DISPLAY_CONFIG[displayMode] || DISPLAY_CONFIG[DEFAULTS.display]).maxWindow;
+  }
+
+  function currentLoadedWindow(config) {
+    const effectiveConfig = config || currentConfig();
+    return Math.max(1, Math.min(maxLoadedWindow(effectiveConfig.display), Number(state.loadedWindow) || effectiveConfig.window));
   }
 
   function updateSeriesAvailability() {
@@ -362,14 +372,19 @@
             return typeof value === "number" ? value.toFixed(2) : value;
           },
         },
-        xAxis: { type: "time", axisLabel: { color: "#9eadc5" } },
+        xAxis: {
+          type: "time",
+          boundaryGap: [0.01, 0.02],
+          axisLabel: { color: "#9eadc5" },
+        },
         yAxis: { type: "value", scale: true, axisLabel: { color: "#9eadc5" } },
         dataZoom: [
-          { id: "zoom-inside", type: "inside", filterMode: "none", zoomLock: false },
+          { id: "zoom-inside", type: "inside", filterMode: "none", zoomLock: false, rangeMode: ["value", "value"] },
           {
             id: "zoom-slider",
             type: "slider",
             filterMode: "none",
+            rangeMode: ["value", "value"],
             height: 20,
             bottom: 10,
             borderColor: "rgba(147, 181, 255, 0.12)",
@@ -537,6 +552,11 @@
       const next = { id, filterMode: "none" };
       next.start = Math.max(0, Math.min(100, startPercent));
       next.end = Math.max(0, Math.min(100, endPercent));
+      next.rangeMode = ["value", "value"];
+      if (normalized) {
+        next.startValue = normalized.startValue;
+        next.endValue = normalized.endValue;
+      }
       return next;
     });
   }
@@ -823,7 +843,7 @@
   }
 
   function trimRowsToWindow(anchor) {
-    const windowSize = currentConfig().window;
+    const windowSize = currentLoadedWindow();
     if (state.rows.length <= windowSize) {
       return;
     }
@@ -1005,11 +1025,11 @@
     return "/api/live/next?" + params.toString();
   }
 
-  function previousUrl(config) {
+  function previousUrl(config, limit) {
     return "/api/live/previous?" + new URLSearchParams({
       beforeId: String(state.rangeFirstId || 1),
       currentLastId: String(state.rangeLastId || state.rangeFirstId || 1),
-      limit: String(historyBatchSize()),
+      limit: String(limit),
       display: config.display,
     }).toString();
   }
@@ -1018,6 +1038,7 @@
     const config = currentConfig();
     const startId = config.mode === "review" ? await resolveReviewStartId(config) : null;
     const payload = await fetchJson(bootstrapUrl(config, startId));
+    state.loadedWindow = config.window;
     replaceRows(payload.rows || []);
     replaceZigRows(payload.zigRows || []);
     applyRangePayload(payload);
@@ -1136,8 +1157,12 @@
   }
 
   function historyBatchSize() {
-    const windowSize = currentConfig().window;
-    return Math.max(1, Math.min(windowSize, Math.round(windowSize / 2)));
+    const config = currentConfig();
+    const remaining = Math.max(0, maxLoadedWindow(config.display) - currentLoadedWindow(config));
+    if (remaining <= 0) {
+      return 0;
+    }
+    return Math.max(1, Math.min(config.window, remaining));
   }
 
   async function resumeRunIfNeeded() {
@@ -1160,9 +1185,22 @@
 
     clearActivity();
     const config = currentConfig();
-    const payload = await fetchJson(previousUrl(config));
+    const previousFirstId = state.rangeFirstId;
+    const previousLoadedWindow = currentLoadedWindow(config);
+    const batchSize = historyBatchSize();
+    if (!batchSize) {
+      status("Loaded history is already at the current chart cap.", false);
+      await resumeRunIfNeeded();
+      return;
+    }
+    const preservedViewport = captureViewportFromChart(getDatasetBounds()) || state.viewport;
+    const payload = await fetchJson(previousUrl(config, batchSize));
     state.lastMetrics = payload.metrics || null;
     const prepended = displayUsesTicks(config.display) ? dedupePrepend(payload.rows || []) : 0;
+    const didExpandLeft = payload.firstId != null && previousFirstId != null && payload.firstId < previousFirstId;
+    state.loadedWindow = prepended || didExpandLeft
+      ? previousLoadedWindow + batchSize
+      : previousLoadedWindow;
     if (!displayUsesTicks(config.display)) {
       state.rangeFirstId = payload.firstId;
       state.rangeLastId = payload.lastId;
@@ -1173,14 +1211,15 @@
       replaceZigRows(payload.zigRows || []);
     }
     state.hasMoreLeft = Boolean(payload.hasMoreLeft);
+    state.viewport = preservedViewport;
     renderMeta();
     renderPerf();
-    if (prepended || displayUsesZig(config.display)) {
+    if (prepended || didExpandLeft) {
       renderChart({ shiftWithRun: false });
       status(
         displayUsesTicks(config.display)
-          ? prepended + " older tick(s) merged into the current window."
-          : "Older zig history merged into the current range.",
+          ? prepended + " older tick(s) were added off-screen to the left."
+          : "Older zig history was added off-screen to the left.",
         false
       );
     } else {

@@ -26,6 +26,8 @@
   };
 
   const REVIEW_SPEEDS = [0.5, 1, 2, 3, 5];
+  const ZOOM_COMPONENT_IDS = ["zoom-inside", "zoom-slider"];
+  const MAX_CANDLE_WINDOW = 10000;
   const MIN_CHART_WIDTH = 180;
   const MIN_CHART_HEIGHT = 180;
 
@@ -34,6 +36,7 @@
     bars: [],
     zones: [],
     zoneConfig: null,
+    loadedWindow: DEFAULTS.window,
     renderedSeries: [],
     source: null,
     reviewTimer: 0,
@@ -139,6 +142,14 @@
       return fallback;
     }
     return Math.max(minimum, Math.min(maximum, Number(value.toFixed(6))));
+  }
+
+  function clampLoadedWindow(value) {
+    return Math.max(1, Math.min(MAX_CANDLE_WINDOW, Number(value) || DEFAULTS.window));
+  }
+
+  function currentLoadedWindow() {
+    return clampLoadedWindow(state.loadedWindow || currentConfig().window);
   }
 
   function bindSegment(container, handler) {
@@ -508,25 +519,25 @@
   function zoneStyle(zone) {
     if (zone.status === "active") {
       return {
-        fill: "rgba(109, 216, 255, 0.16)",
-        stroke: "rgba(109, 216, 255, 0.52)",
-        lineWidth: 1.1,
+        fill: "rgba(109, 216, 255, 0.14)",
+        stroke: "rgba(176, 238, 255, 0.82)",
+        lineWidth: 1.35,
         lineDash: [],
       };
     }
     if (zone.status === "closed") {
       return {
-        fill: "rgba(255, 194, 102, 0.08)",
-        stroke: "rgba(255, 194, 102, 0.30)",
-        lineWidth: 1,
+        fill: "rgba(255, 200, 87, 0.065)",
+        stroke: "rgba(255, 214, 138, 0.42)",
+        lineWidth: 1.05,
         lineDash: [],
       };
     }
     return {
-      fill: "rgba(195, 220, 255, 0.08)",
-      stroke: "rgba(195, 220, 255, 0.32)",
-      lineWidth: 1,
-      lineDash: [5, 4],
+      fill: "rgba(195, 220, 255, 0.09)",
+      stroke: "rgba(213, 229, 255, 0.62)",
+      lineWidth: 1.1,
+      lineDash: [6, 4],
     };
   }
 
@@ -567,11 +578,37 @@
       return null;
     }
     const item = params.data || {};
+    const rectShape = {
+      x: shape.x,
+      y: shape.y,
+      width: shape.width,
+      height: shape.height,
+      r: 2,
+    };
     return {
-      type: "rect",
-      shape: shape,
+      type: "group",
       silent: true,
-      style: item.style || {},
+      children: [
+        {
+          type: "rect",
+          shape: rectShape,
+          silent: true,
+          style: {
+            fill: item.style?.fill || "rgba(0,0,0,0)",
+          },
+        },
+        {
+          type: "rect",
+          shape: rectShape,
+          silent: true,
+          style: {
+            fill: "rgba(0,0,0,0)",
+            stroke: item.style?.stroke || "rgba(0,0,0,0)",
+            lineWidth: item.style?.lineWidth || 0,
+            lineDash: item.style?.lineDash || [],
+          },
+        },
+      ],
     };
   }
 
@@ -590,6 +627,67 @@
 
   function candleSeriesIndex() {
     return state.renderedSeries.findIndex((series) => series.id === "zig-candles-main");
+  }
+
+  function zoomIndicesFromState(zoomState, barCount) {
+    if (!barCount) {
+      return null;
+    }
+    const directStart = Number(zoomState?.startValue);
+    const directEnd = Number(zoomState?.endValue);
+    if (Number.isFinite(directStart) && Number.isFinite(directEnd)) {
+      const startIndex = Math.max(0, Math.min(barCount - 1, Math.floor(Math.min(directStart, directEnd))));
+      const endIndex = Math.max(startIndex, Math.min(barCount - 1, Math.ceil(Math.max(directStart, directEnd))));
+      return { startIndex, endIndex };
+    }
+    const startPercent = Math.max(0, Math.min(100, Number(zoomState?.start)));
+    const endPercent = Math.max(0, Math.min(100, Number(zoomState?.end)));
+    const startIndex = Math.max(0, Math.min(barCount - 1, Math.floor((startPercent / 100) * barCount)));
+    const endIndex = Math.max(startIndex, Math.min(barCount - 1, Math.ceil((endPercent / 100) * barCount) - 1));
+    return { startIndex, endIndex };
+  }
+
+  function zoomStateFromIndexRange(startIndex, endIndex, barCount) {
+    if (!barCount) {
+      return { start: 0, end: 100 };
+    }
+    const clampedStart = Math.max(0, Math.min(barCount - 1, Math.floor(startIndex)));
+    const clampedEnd = Math.max(clampedStart, Math.min(barCount - 1, Math.ceil(endIndex)));
+    return {
+      start: (clampedStart / barCount) * 100,
+      end: ((clampedEnd + 1) / barCount) * 100,
+      startValue: clampedStart,
+      endValue: clampedEnd,
+    };
+  }
+
+  function captureVisibleBarWindow() {
+    if (!state.bars.length) {
+      return null;
+    }
+    const option = state.chart ? state.chart.getOption() : null;
+    const zoomState = option?.dataZoom?.[0] || state.zoom;
+    const indices = zoomIndicesFromState(zoomState, state.bars.length);
+    if (!indices) {
+      return null;
+    }
+    return {
+      startBarId: state.bars[indices.startIndex]?.id ?? null,
+      endBarId: state.bars[indices.endIndex]?.id ?? null,
+    };
+  }
+
+  function restoreVisibleBarWindow(windowState) {
+    if (!windowState || !state.bars.length) {
+      return false;
+    }
+    const startIndex = state.bars.findIndex((bar) => bar.id === windowState.startBarId);
+    const endIndex = state.bars.findIndex((bar) => bar.id === windowState.endBarId);
+    if (startIndex < 0 || endIndex < 0) {
+      return false;
+    }
+    state.zoom = zoomStateFromIndexRange(startIndex, endIndex, state.bars.length);
+    return true;
   }
 
   function ensureChart() {
@@ -629,6 +727,7 @@
         },
         xAxis: {
           type: "category",
+          boundaryGap: true,
           axisLabel: { color: "#9eadc5" },
           axisLine: { lineStyle: { color: "rgba(147, 181, 255, 0.18)" } },
         },
@@ -639,11 +738,12 @@
           splitLine: { lineStyle: { color: "rgba(147, 181, 255, 0.08)" } },
         },
         dataZoom: [
-          { id: "zoom-inside", type: "inside", filterMode: "none" },
+          { id: "zoom-inside", type: "inside", filterMode: "none", rangeMode: ["value", "value"] },
           {
             id: "zoom-slider",
             type: "slider",
             filterMode: "none",
+            rangeMode: ["value", "value"],
             height: 20,
             bottom: 10,
             borderColor: "rgba(147, 181, 255, 0.12)",
@@ -662,11 +762,11 @@
 
       state.chart.on("dataZoom", function () {
         const option = state.chart.getOption();
-        const zoom = option?.dataZoom?.[0] || {};
-        state.zoom = {
-          start: Number.isFinite(Number(zoom.start)) ? Number(zoom.start) : 0,
-          end: Number.isFinite(Number(zoom.end)) ? Number(zoom.end) : 100,
-        };
+        const zoom = option?.dataZoom?.[0] || state.zoom;
+        const indices = zoomIndicesFromState(zoom, state.bars.length);
+        state.zoom = indices
+          ? zoomStateFromIndexRange(indices.startIndex, indices.endIndex, state.bars.length)
+          : { start: 0, end: 100 };
         queueVisibleYAxisUpdate();
       });
     }
@@ -677,11 +777,11 @@
     if (!state.bars.length) {
       return [];
     }
-    const startPercent = Math.max(0, Math.min(100, state.zoom.start));
-    const endPercent = Math.max(0, Math.min(100, state.zoom.end));
-    const startIndex = Math.max(0, Math.floor((startPercent / 100) * state.bars.length));
-    const endIndex = Math.min(state.bars.length, Math.ceil((endPercent / 100) * state.bars.length));
-    return state.bars.slice(startIndex, Math.max(startIndex + 1, endIndex));
+    const indices = zoomIndicesFromState(state.zoom, state.bars.length);
+    if (!indices) {
+      return state.bars.slice();
+    }
+    return state.bars.slice(indices.startIndex, Math.max(indices.startIndex + 1, indices.endIndex + 1));
   }
 
   function queueVisibleYAxisUpdate() {
@@ -705,7 +805,7 @@
         return;
       }
       const span = Math.max(0.01, maxValue - minValue);
-      const padding = Math.max(0.05, span * 0.04);
+      const padding = Math.max(0.05, span * 0.055);
       state.chart.setOption({
         yAxis: {
           min: Number((minValue - padding).toFixed(6)),
@@ -733,10 +833,14 @@
     }
     chart.setOption({
       xAxis: { data: state.bars.map(candleAxisLabel) },
-      dataZoom: [
-        { id: "zoom-inside", start: state.zoom.start, end: state.zoom.end },
-        { id: "zoom-slider", start: state.zoom.start, end: state.zoom.end },
-      ],
+      dataZoom: ZOOM_COMPONENT_IDS.map((id) => ({
+        id: id,
+        start: state.zoom.start,
+        end: state.zoom.end,
+        startValue: Number.isFinite(Number(state.zoom.startValue)) ? Number(state.zoom.startValue) : undefined,
+        endValue: Number.isFinite(Number(state.zoom.endValue)) ? Number(state.zoom.endValue) : undefined,
+        rangeMode: ["value", "value"],
+      })),
       series: (function () {
         const series = [];
         const zoneSeriesData = buildZoneSeriesData();
@@ -874,7 +978,7 @@
     const params = new URLSearchParams({
       afterId: String(afterId),
       limit: String(Math.max(25, Math.min(500, Math.round(100 * config.reviewSpeed)))),
-      window: String(config.window),
+      window: String(currentLoadedWindow()),
       level: String(config.level),
       series: config.series,
       zones: config.zones ? "true" : "false",
@@ -894,12 +998,12 @@
     return "/api/zigcandles/next?" + params.toString();
   }
 
-  function previousUrl(config) {
+  function previousUrl(config, limit) {
     return "/api/zigcandles/previous?" + new URLSearchParams({
       beforeId: String(state.rangeFirstId || 1),
       currentLastId: String(state.rangeLastId || 1),
-      limit: String(historyBatchSize()),
-      window: String(config.window),
+      limit: String(limit),
+      window: String(currentLoadedWindow()),
       level: String(config.level),
       series: config.series,
       zones: config.zones ? "true" : "false",
@@ -916,6 +1020,7 @@
     const config = currentConfig();
     state.reviewStartId = config.mode === "review" ? await resolveReviewStartId(config) : null;
     const payload = await fetchJson(bootstrapUrl(config, state.reviewStartId));
+    state.loadedWindow = clampLoadedWindow(payload.window || config.window);
     syncPayload(payload);
     renderChart(Boolean(resetView));
     status("Loaded " + state.bars.length + " zig candle(s) and " + state.zones.length + " zone(s).", false);
@@ -926,9 +1031,6 @@
         scheduleReviewStep();
       }
     }
-    if (state.selectedBarId) {
-      focusBar(state.selectedBarId);
-    }
   }
 
   function connectStream(afterId) {
@@ -937,7 +1039,7 @@
     const source = new EventSource("/api/zigcandles/stream?" + new URLSearchParams({
       afterId: String(afterId || 0),
       limit: "250",
-      window: String(config.window),
+      window: String(currentLoadedWindow()),
       level: String(config.level),
       series: config.series,
       zones: config.zones ? "true" : "false",
@@ -1012,8 +1114,11 @@
   }
 
   function historyBatchSize() {
-    const windowSize = currentConfig().window;
-    return Math.max(1, Math.min(windowSize, Math.round(windowSize / 2)));
+    const remaining = Math.max(0, MAX_CANDLE_WINDOW - currentLoadedWindow());
+    if (remaining <= 0) {
+      return 0;
+    }
+    return Math.max(1, Math.min(currentConfig().window, remaining));
   }
 
   async function resumeRunIfNeeded() {
@@ -1034,10 +1139,22 @@
       return;
     }
     clearActivity();
-    const payload = await fetchJson(previousUrl(currentConfig()));
+    const previousFirstId = state.rangeFirstId;
+    const previousLoadedWindow = currentLoadedWindow();
+    const batchSize = historyBatchSize();
+    if (!batchSize) {
+      status("Loaded history is already at the current chart cap.", false);
+      await resumeRunIfNeeded();
+      return;
+    }
+    const preservedViewport = captureVisibleBarWindow();
+    const payload = await fetchJson(previousUrl(currentConfig(), batchSize));
+    const didExpandLeft = payload.firstId != null && previousFirstId != null && payload.firstId < previousFirstId;
+    state.loadedWindow = didExpandLeft ? clampLoadedWindow(previousLoadedWindow + batchSize) : previousLoadedWindow;
     syncPayload(payload);
+    restoreVisibleBarWindow(preservedViewport);
     renderChart(false);
-    status(state.bars.length ? "Older zig candles and zones shifted into view." : "No older data was available.", false);
+    status(state.bars.length && didExpandLeft ? "Older zig candles and zones were added off-screen to the left." : "No older data was available.", false);
     await resumeRunIfNeeded();
   }
 
