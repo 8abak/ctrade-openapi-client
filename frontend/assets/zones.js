@@ -2,28 +2,20 @@
   const DEFAULTS = {
     mode: "live",
     run: "run",
-    display: "candles",
+    display: "zones",
     level: 0,
     series: "mid",
     id: "",
     reviewStart: "",
     reviewSpeed: 1,
     window: 2000,
-    zoneMinTicks: 24,
-    zoneMinMs: 3000,
-    zoneSameSideTolerance: 0.24,
-    zoneOvershoot: 0.18,
-    zoneBreakTicks: 4,
-    zoneBreakTolerance: 0.24,
     provisional: true,
     table: true,
-    zoneDebug: false,
   };
 
   const DISPLAY_CONFIG = {
-    candles: { label: "Candles", showsCandles: true, showsZones: false },
-    "candles-zones": { label: "Candles + Zones", showsCandles: true, showsZones: true },
-    zones: { label: "Zones Only", showsCandles: false, showsZones: true },
+    zones: { label: "Zones Only", showsCandles: false },
+    "zones-candles": { label: "Zones + Zig Candles", showsCandles: true },
   };
 
   const SERIES_CONFIG = {
@@ -42,7 +34,7 @@
     chart: null,
     bars: [],
     zones: [],
-    zoneConfig: null,
+    zoneState: null,
     loadedWindow: DEFAULTS.window,
     renderedSeries: [],
     source: null,
@@ -57,7 +49,7 @@
     rangeLastId: null,
     rangeFirstTimestampMs: null,
     rangeLastTimestampMs: null,
-    selectedBarId: null,
+    selectedZoneId: null,
     zoom: { start: 0, end: 100 },
     autoscaleFrame: 0,
     layoutResizeFrame: 0,
@@ -88,24 +80,18 @@
     reviewStart: document.getElementById("reviewStart"),
     reviewSpeedToggle: document.getElementById("reviewSpeedToggle"),
     windowSize: document.getElementById("windowSize"),
-    zoneMinTicks: document.getElementById("zoneMinTicks"),
-    zoneMinMs: document.getElementById("zoneMinMs"),
-    zoneSameSideTolerance: document.getElementById("zoneSameSideTolerance"),
-    zoneOvershoot: document.getElementById("zoneOvershoot"),
-    zoneBreakTicks: document.getElementById("zoneBreakTicks"),
-    zoneBreakTolerance: document.getElementById("zoneBreakTolerance"),
     showProvisional: document.getElementById("showProvisional"),
-    zoneDebugOverlay: document.getElementById("zoneDebugOverlay"),
     showTable: document.getElementById("showTable"),
     applyButton: document.getElementById("applyButton"),
     loadMoreLeftButton: document.getElementById("loadMoreLeftButton"),
     statusLine: document.getElementById("statusLine"),
     liveMeta: document.getElementById("liveMeta"),
+    zoneStateMeta: document.getElementById("zoneStateMeta"),
     livePerf: document.getElementById("livePerf"),
-    chartHost: document.getElementById("zigCandlesChart"),
+    chartHost: document.getElementById("zonesChart"),
     tablePanel: document.getElementById("tablePanel"),
     tableMeta: document.getElementById("tableMeta"),
-    barsTableBody: document.getElementById("barsTableBody"),
+    zonesTableBody: document.getElementById("zonesTableBody"),
   };
 
   function parseQuery() {
@@ -123,36 +109,13 @@
       reviewStart: params.get("reviewStart") || DEFAULTS.reviewStart,
       reviewSpeed: REVIEW_SPEEDS.includes(reviewSpeed) ? reviewSpeed : DEFAULTS.reviewSpeed,
       window: sanitizeWindowValue(params.get("window")),
-      zoneMinTicks: sanitizeIntValue(params.get("zoneMinTicks"), DEFAULTS.zoneMinTicks, 4, 500),
-      zoneMinMs: sanitizeIntValue(params.get("zoneMinMs"), DEFAULTS.zoneMinMs, 100, 300000),
-      zoneSameSideTolerance: sanitizeFloatValue(params.get("zoneSameSideTolerance"), DEFAULTS.zoneSameSideTolerance, 0, 10),
-      zoneOvershoot: sanitizeFloatValue(params.get("zoneOvershoot"), DEFAULTS.zoneOvershoot, 0, 10),
-      zoneBreakTicks: sanitizeIntValue(params.get("zoneBreakTicks"), DEFAULTS.zoneBreakTicks, 1, 64),
-      zoneBreakTolerance: sanitizeFloatValue(params.get("zoneBreakTolerance"), DEFAULTS.zoneBreakTolerance, 0, 10),
       provisional: params.get("provisional") !== "0",
       table: params.get("table") !== "0",
-      zoneDebug: params.get("zoneDebug") === "1",
     };
   }
 
   function sanitizeWindowValue(rawValue) {
-    return Math.max(1, Math.min(10000, Number.parseInt(rawValue || String(DEFAULTS.window), 10) || DEFAULTS.window));
-  }
-
-  function sanitizeIntValue(rawValue, fallback, minimum, maximum) {
-    const value = Number.parseInt(rawValue || String(fallback), 10);
-    if (!Number.isFinite(value)) {
-      return fallback;
-    }
-    return Math.max(minimum, Math.min(maximum, value));
-  }
-
-  function sanitizeFloatValue(rawValue, fallback, minimum, maximum) {
-    const value = Number.parseFloat(rawValue || String(fallback));
-    if (!Number.isFinite(value)) {
-      return fallback;
-    }
-    return Math.max(minimum, Math.min(maximum, Number(value.toFixed(6))));
+    return Math.max(1, Math.min(MAX_CANDLE_WINDOW, Number.parseInt(rawValue || String(DEFAULTS.window), 10) || DEFAULTS.window));
   }
 
   function clampLoadedWindow(value) {
@@ -165,10 +128,6 @@
 
   function displayShowsCandles(display) {
     return Boolean((DISPLAY_CONFIG[display] || DISPLAY_CONFIG[DEFAULTS.display]).showsCandles);
-  }
-
-  function displayShowsZones(display) {
-    return Boolean((DISPLAY_CONFIG[display] || DISPLAY_CONFIG[DEFAULTS.display]).showsZones);
   }
 
   function bindSegment(container, handler) {
@@ -194,15 +153,8 @@
       reviewStart: (elements.reviewStart.value || "").trim(),
       reviewSpeed: Number.parseFloat(elements.reviewSpeedToggle.querySelector("button.active")?.dataset.value || String(DEFAULTS.reviewSpeed)),
       window: sanitizeWindowValue(elements.windowSize.value),
-      zoneMinTicks: sanitizeIntValue(elements.zoneMinTicks.value, DEFAULTS.zoneMinTicks, 4, 500),
-      zoneMinMs: sanitizeIntValue(elements.zoneMinMs.value, DEFAULTS.zoneMinMs, 100, 300000),
-      zoneSameSideTolerance: sanitizeFloatValue(elements.zoneSameSideTolerance.value, DEFAULTS.zoneSameSideTolerance, 0, 10),
-      zoneOvershoot: sanitizeFloatValue(elements.zoneOvershoot.value, DEFAULTS.zoneOvershoot, 0, 10),
-      zoneBreakTicks: sanitizeIntValue(elements.zoneBreakTicks.value, DEFAULTS.zoneBreakTicks, 1, 64),
-      zoneBreakTolerance: sanitizeFloatValue(elements.zoneBreakTolerance.value, DEFAULTS.zoneBreakTolerance, 0, 10),
       provisional: Boolean(elements.showProvisional.checked),
       table: Boolean(elements.showTable.checked),
-      zoneDebug: Boolean(elements.zoneDebugOverlay.checked),
     };
   }
 
@@ -216,15 +168,8 @@
     params.set("series", config.series);
     params.set("window", String(config.window));
     params.set("speed", String(config.reviewSpeed));
-    params.set("zoneMinTicks", String(config.zoneMinTicks));
-    params.set("zoneMinMs", String(config.zoneMinMs));
-    params.set("zoneSameSideTolerance", String(config.zoneSameSideTolerance));
-    params.set("zoneOvershoot", String(config.zoneOvershoot));
-    params.set("zoneBreakTicks", String(config.zoneBreakTicks));
-    params.set("zoneBreakTolerance", String(config.zoneBreakTolerance));
     params.set("provisional", config.provisional ? "1" : "0");
     params.set("table", config.table ? "1" : "0");
-    params.set("zoneDebug", config.zoneDebug ? "1" : "0");
     if (config.id) {
       params.set("id", config.id);
     }
@@ -243,7 +188,7 @@
     state.ui.sidebarCollapsed = Boolean(collapsed);
     elements.liveWorkspace.classList.toggle("is-sidebar-collapsed", state.ui.sidebarCollapsed);
     elements.sidebarToggle.setAttribute("aria-expanded", String(!state.ui.sidebarCollapsed));
-    elements.sidebarToggle.setAttribute("aria-label", state.ui.sidebarCollapsed ? "Open zig candle controls" : "Close zig candle controls");
+    elements.sidebarToggle.setAttribute("aria-label", state.ui.sidebarCollapsed ? "Open zone controls" : "Close zone controls");
     elements.sidebarBackdrop.tabIndex = state.ui.sidebarCollapsed ? -1 : 0;
     queueChartResize();
   }
@@ -275,20 +220,14 @@
     elements.tickId.value = config.id;
     elements.reviewStart.value = config.reviewStart;
     elements.windowSize.value = String(config.window);
-    elements.zoneMinTicks.value = String(config.zoneMinTicks);
-    elements.zoneMinMs.value = String(config.zoneMinMs);
-    elements.zoneSameSideTolerance.value = String(config.zoneSameSideTolerance);
-    elements.zoneOvershoot.value = String(config.zoneOvershoot);
-    elements.zoneBreakTicks.value = String(config.zoneBreakTicks);
-    elements.zoneBreakTolerance.value = String(config.zoneBreakTolerance);
     elements.showProvisional.checked = Boolean(config.provisional);
-    elements.zoneDebugOverlay.checked = Boolean(config.zoneDebug);
     elements.showTable.checked = Boolean(config.table);
     elements.tablePanel.hidden = !config.table;
     setSidebarCollapsed(true);
     setSettingsCollapsed(true);
     updateReviewFields();
     renderMeta();
+    renderZoneStateMeta();
     renderPerf();
     writeQuery();
   }
@@ -317,7 +256,7 @@
       if (state.chart && chartHostHasSize()) {
         state.chart.resize();
         queueVisibleYAxisUpdate();
-        queueZoneOverlayRender("resize");
+        queueZoneOverlayRender();
       }
     });
     state.layoutResizeTimeout = window.setTimeout(() => {
@@ -325,7 +264,7 @@
       if (state.chart && chartHostHasSize()) {
         state.chart.resize();
         queueVisibleYAxisUpdate();
-        queueZoneOverlayRender("resize-timeout");
+        queueZoneOverlayRender();
       }
     }, 220);
   }
@@ -358,12 +297,10 @@
 
   function renderMeta() {
     if (state.rangeLastId == null) {
-      elements.liveMeta.textContent = "No candle window loaded.";
+      elements.liveMeta.textContent = "No persisted zone window loaded.";
       return;
     }
     const config = currentConfig();
-    const finalCount = state.bars.filter((bar) => bar.isFinal).length;
-    const provisionalCount = state.bars.filter((bar) => !bar.isFinal).length;
     const activeZones = state.zones.filter((zone) => zone.status === "active").length;
     const provisionalZones = state.zones.filter((zone) => zone.status === "provisional").length;
     const closedZones = state.zones.filter((zone) => zone.status === "closed").length;
@@ -372,16 +309,29 @@
       DISPLAY_CONFIG[config.display].label,
       "L" + config.level,
       config.series,
-      "bars " + state.bars.length,
-      "final " + finalCount,
-      "active " + provisionalCount,
       "zones " + state.zones.length,
       "z-active " + activeZones,
       "z-prov " + provisionalZones,
       "z-closed " + closedZones,
+      "bars " + state.bars.length,
       "left " + state.rangeFirstId,
       "right " + state.rangeLastId,
       state.hasMoreLeft ? "more-left yes" : "more-left no",
+    ].join(" | ");
+  }
+
+  function renderZoneStateMeta() {
+    const zoneState = state.zoneState;
+    if (!zoneState) {
+      elements.zoneStateMeta.textContent = "Zone state unavailable for this level.";
+      return;
+    }
+    elements.zoneStateMeta.textContent = [
+      "state L" + zoneState.level,
+      "activeZoneId " + (zoneState.activeZoneId ?? "-"),
+      "lastTick " + (zoneState.lastProcessedTickId ?? "-"),
+      "lastPivot " + (zoneState.lastProcessedPivotId ?? "-"),
+      zoneState.updatedAt ? "updated " + zoneState.updatedAt : "updated -",
     ].join(" | ");
   }
 
@@ -403,18 +353,17 @@
     elements.livePerf.textContent = parts.join(" | ");
   }
 
-  function formatNumber(value) {
-    return typeof value === "number" ? value.toFixed(2) : "";
-  }
-
-  function formatSignedNumber(value) {
+  function formatPrice(value) {
     if (typeof value !== "number") {
       return "";
     }
-    return (value > 0 ? "+" : "") + value.toFixed(2);
+    return value.toFixed(6).replace(/\.?0+$/, "");
   }
 
   function formatTableTimestamp(timestamp) {
+    if (!timestamp) {
+      return "";
+    }
     const date = new Date(timestamp);
     return date.toLocaleString("en-AU", {
       month: "2-digit",
@@ -433,39 +382,52 @@
       .replaceAll("\"", "&quot;");
   }
 
+  function zoneRowValue(zone, key) {
+    return zone[key] == null ? "" : zone[key];
+  }
+
   function renderTable() {
-    if (!state.bars.length) {
-      elements.tableMeta.textContent = "No bars loaded.";
-      elements.barsTableBody.innerHTML = "";
+    if (!state.zones.length) {
+      elements.tableMeta.textContent = "No zones loaded.";
+      elements.zonesTableBody.innerHTML = "";
       return;
     }
-    elements.tableMeta.textContent = state.bars.length + " bar(s) | " + state.zones.length + " zone(s) | most recent first";
-    const rows = state.bars.slice().reverse().map((bar) => {
+    elements.tableMeta.textContent = state.zones.length + " zone(s) | most recent first";
+    const rows = state.zones.slice().reverse().map((zone) => {
       const tr = document.createElement("tr");
-      tr.dataset.barId = bar.id;
-      tr.classList.toggle("is-selected", bar.id === state.selectedBarId);
-      tr.classList.toggle("is-provisional", !bar.isFinal);
+      tr.dataset.zoneId = String(zone.id);
+      tr.classList.toggle("is-selected", zone.id === state.selectedZoneId);
+      tr.classList.toggle("is-active", zone.status === "active");
+      tr.classList.toggle("is-closed", zone.status === "closed");
       tr.innerHTML = [
-        "<td>" + escapeHtml(bar.barState) + "</td>",
-        "<td>" + escapeHtml(formatTableTimestamp(bar.endTimestamp)) + "</td>",
-        "<td>" + escapeHtml(bar.direction) + "</td>",
-        "<td>" + formatNumber(bar.open) + "</td>",
-        "<td>" + formatNumber(bar.high) + "</td>",
-        "<td>" + formatNumber(bar.low) + "</td>",
-        "<td>" + formatNumber(bar.close) + "</td>",
-        "<td>" + escapeHtml(String(bar.tickCount)) + "</td>",
-        "<td>" + formatSignedNumber(bar.priceRange) + "</td>",
-        "<td>" + formatSignedNumber(bar.netMove) + "</td>",
-        "<td>" + escapeHtml(bar.durationLabel) + "</td>",
-        "<td>" + escapeHtml(String(bar.startPivotId) + " -> " + (bar.endPivotId == null ? "active" : String(bar.endPivotId))) + "</td>",
-        "<td>" + escapeHtml(String(bar.startTickId) + "-" + String(bar.endTickId)) + "</td>",
+        "<td>" + escapeHtml(zoneRowValue(zone, "symbol")) + "</td>",
+        "<td>" + escapeHtml(String(zoneRowValue(zone, "selectedLevel"))) + "</td>",
+        "<td>" + escapeHtml(zoneRowValue(zone, "status")) + "</td>",
+        "<td>" + escapeHtml(zoneRowValue(zone, "patternType")) + "</td>",
+        "<td>" + escapeHtml(formatTableTimestamp(zone.startTimestamp)) + "</td>",
+        "<td>" + escapeHtml(formatTableTimestamp(zone.endTimestamp)) + "</td>",
+        "<td>" + escapeHtml(String(zoneRowValue(zone, "startTickId"))) + "</td>",
+        "<td>" + escapeHtml(String(zoneRowValue(zone, "endTickId"))) + "</td>",
+        "<td>" + escapeHtml(String(zoneRowValue(zone, "anchorStartPivotId"))) + "</td>",
+        "<td>" + escapeHtml(String(zoneRowValue(zone, "anchorMiddlePivotId"))) + "</td>",
+        "<td>" + escapeHtml(String(zoneRowValue(zone, "anchorEndPivotId"))) + "</td>",
+        "<td>" + escapeHtml(formatPrice(zone.initialZoneLow)) + "</td>",
+        "<td>" + escapeHtml(formatPrice(zone.initialZoneHigh)) + "</td>",
+        "<td>" + escapeHtml(formatPrice(zone.zoneLow)) + "</td>",
+        "<td>" + escapeHtml(formatPrice(zone.zoneHigh)) + "</td>",
+        "<td>" + escapeHtml(formatPrice(zone.zoneHeight)) + "</td>",
+        "<td>" + escapeHtml(formatPrice(zone.sameSideDistance)) + "</td>",
+        "<td>" + escapeHtml(String(zoneRowValue(zone, "tickCountInside"))) + "</td>",
+        "<td>" + escapeHtml(String(zoneRowValue(zone, "durationInsideMs"))) + "</td>",
+        "<td>" + escapeHtml(zoneRowValue(zone, "breakoutDirection")) + "</td>",
+        "<td>" + escapeHtml(String(zoneRowValue(zone, "breakoutTickId"))) + "</td>",
       ].join("");
       tr.addEventListener("click", () => {
-        focusBar(bar.id);
+        focusZone(zone.id);
       });
       return tr;
     });
-    elements.barsTableBody.replaceChildren(...rows);
+    elements.zonesTableBody.replaceChildren(...rows);
   }
 
   function candleAxisLabel(bar) {
@@ -476,7 +438,7 @@
     return date.toLocaleTimeString("en-AU", options);
   }
 
-  function candleItemStyle(bar, isSelected) {
+  function candleItemStyle(bar) {
     if (!displayShowsCandles(currentConfig().display)) {
       return {
         color: "rgba(0, 0, 0, 0)",
@@ -488,30 +450,30 @@
     }
     const up = bar.close >= bar.open;
     const palette = up
-      ? { color: "#7ef0c7", border: "#bcffe8" }
-      : { color: "#ff8c42", border: "#ffd9b8" };
+      ? { color: "rgba(126, 240, 199, 0.34)", border: "rgba(188, 255, 232, 0.82)" }
+      : { color: "rgba(255, 140, 66, 0.34)", border: "rgba(255, 217, 184, 0.82)" };
     if (!bar.isFinal) {
       return {
-        color: "rgba(109, 216, 255, 0.18)",
-        color0: "rgba(109, 216, 255, 0.18)",
-        borderColor: isSelected ? "#f3f6fb" : "#6dd8ff",
-        borderColor0: isSelected ? "#f3f6fb" : "#6dd8ff",
-        borderWidth: isSelected ? 2.2 : 1.4,
+        color: "rgba(109, 216, 255, 0.12)",
+        color0: "rgba(109, 216, 255, 0.12)",
+        borderColor: "rgba(109, 216, 255, 0.56)",
+        borderColor0: "rgba(109, 216, 255, 0.56)",
+        borderWidth: 1,
       };
     }
     return {
       color: palette.color,
       color0: palette.color,
-      borderColor: isSelected ? "#f3f6fb" : palette.border,
-      borderColor0: isSelected ? "#f3f6fb" : palette.border,
-      borderWidth: isSelected ? 2.2 : 1.1,
+      borderColor: palette.border,
+      borderColor0: palette.border,
+      borderWidth: 1,
     };
   }
 
   function buildChartData() {
     return state.bars.map((bar) => ({
       value: [bar.open, bar.close, bar.low, bar.high],
-      itemStyle: candleItemStyle(bar, bar.id === state.selectedBarId),
+      itemStyle: candleItemStyle(bar),
       bar: bar,
     }));
   }
@@ -550,47 +512,31 @@
   }
 
   function zoneStyle(zone) {
+    if (zone.id === state.selectedZoneId) {
+      return {
+        fill: "rgba(176, 238, 255, 0.2)",
+        stroke: "rgba(243, 246, 251, 0.95)",
+        lineWidth: 2,
+      };
+    }
     if (zone.status === "active") {
       return {
-        fill: "rgba(109, 216, 255, 0.14)",
-        stroke: "rgba(176, 238, 255, 0.82)",
-        lineWidth: 1.35,
-        lineDash: [],
+        fill: "rgba(109, 216, 255, 0.16)",
+        stroke: "rgba(176, 238, 255, 0.84)",
+        lineWidth: 1.5,
       };
     }
     if (zone.status === "closed") {
       return {
-        fill: "rgba(255, 200, 87, 0.065)",
-        stroke: "rgba(255, 214, 138, 0.42)",
+        fill: "rgba(255, 200, 87, 0.055)",
+        stroke: "rgba(255, 214, 138, 0.38)",
         lineWidth: 1.05,
-        lineDash: [],
       };
     }
     return {
-      fill: "rgba(195, 220, 255, 0.09)",
-      stroke: "rgba(213, 229, 255, 0.62)",
-      lineWidth: 1.1,
-      lineDash: [6, 4],
-    };
-  }
-
-  function zoneOverlayStyle(zone, debugOverlay) {
-    if (debugOverlay) {
-      return {
-        fill: "rgba(0, 229, 255, 0.22)",
-        stroke: "rgba(0, 229, 255, 0.95)",
-        lineWidth: 2,
-        labelColor: "#00e5ff",
-        labelBg: "rgba(2, 9, 14, 0.7)",
-      };
-    }
-    const base = zoneStyle(zone);
-    return {
-      fill: base.fill,
-      stroke: base.stroke,
-      lineWidth: base.lineWidth,
-      labelColor: base.stroke,
-      labelBg: "rgba(2, 9, 14, 0.6)",
+      fill: "rgba(203, 223, 255, 0.08)",
+      stroke: "rgba(216, 231, 255, 0.58)",
+      lineWidth: 1.05,
     };
   }
 
@@ -615,13 +561,9 @@
     return Number.isFinite(step) && step > 0 ? step : 12;
   }
 
-  function buildZoneOverlayGraphics(reason) {
+  function buildZoneOverlayGraphics() {
     const chart = state.chart;
-    if (!chart) {
-      return [];
-    }
-    const config = currentConfig();
-    if (!displayShowsZones(config.display) || !state.zones.length || !state.bars.length) {
+    if (!chart || !state.zones.length || !state.bars.length) {
       return [];
     }
     const grid = chart.getModel()?.getComponent("grid", 0);
@@ -630,69 +572,28 @@
       return [];
     }
 
-    const debugOverlay = config.zoneDebug;
     const elements = [];
-    const minWidth = debugOverlay ? 12 : 8;
-    const minHeight = debugOverlay ? 6 : 2;
-    const maxLog = 4;
-    let logged = 0;
-
     state.zones.forEach((zone, index) => {
       const span = zoneSpanFor(zone);
       if (!span) {
-        if (logged < maxLog) {
-          console.warn("[zones] skip", zone.id || index, "no-span", reason);
-          logged += 1;
-        }
         return;
       }
 
-      const startIndex = span.startIndex;
-      const endIndex = span.endIndex;
-      const leftPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [startIndex, zone.zoneLow]);
-      const rightPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [endIndex, zone.zoneLow]);
-      const topPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [startIndex, zone.zoneHigh]);
-      const bottomPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [startIndex, zone.zoneLow]);
-
+      const leftPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [span.startIndex, zone.zoneLow]);
+      const rightPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [span.endIndex, zone.zoneLow]);
+      const topPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [span.startIndex, zone.zoneHigh]);
+      const bottomPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [span.startIndex, zone.zoneLow]);
       if (!Array.isArray(leftPoint) || !Array.isArray(rightPoint) || !Array.isArray(topPoint) || !Array.isArray(bottomPoint)) {
-        if (logged < maxLog) {
-          console.warn("[zones] skip", zone.id || index, "pixel-mapping-failed", reason);
-          logged += 1;
-        }
         return;
       }
 
-      const stepStart = zoneCenterStepPx(startIndex);
-      const stepEnd = zoneCenterStepPx(endIndex);
+      const stepStart = zoneCenterStepPx(span.startIndex);
+      const stepEnd = zoneCenterStepPx(span.endIndex);
       let left = Number(leftPoint[0]) - stepStart / 2;
       let right = Number(rightPoint[0]) + stepEnd / 2;
       let top = Math.min(Number(topPoint[1]), Number(bottomPoint[1]));
       let bottom = Math.max(Number(topPoint[1]), Number(bottomPoint[1]));
-
       if (!Number.isFinite(left) || !Number.isFinite(right) || !Number.isFinite(top) || !Number.isFinite(bottom)) {
-        if (logged < maxLog) {
-          console.warn("[zones] skip", zone.id || index, "non-finite-pixels", reason);
-          logged += 1;
-        }
-        return;
-      }
-
-      if (right - left < minWidth) {
-        const center = (left + right) / 2;
-        left = center - minWidth / 2;
-        right = center + minWidth / 2;
-      }
-      if (bottom - top < minHeight) {
-        const centerY = (top + bottom) / 2;
-        top = centerY - minHeight / 2;
-        bottom = centerY + minHeight / 2;
-      }
-
-      if (right < rect.x || left > rect.x + rect.width || bottom < rect.y || top > rect.y + rect.height) {
-        if (logged < maxLog) {
-          console.warn("[zones] skip", zone.id || index, "outside-viewport", reason);
-          logged += 1;
-        }
         return;
       }
 
@@ -700,19 +601,18 @@
       right = Math.min(rect.x + rect.width, right);
       top = Math.max(rect.y, top);
       bottom = Math.min(rect.y + rect.height, bottom);
+      const style = zoneStyle(zone);
 
-      const style = zoneOverlayStyle(zone, debugOverlay);
-      const rectId = "zone-rect-" + (zone.id || index);
       elements.push({
-        id: rectId,
+        id: "zone-rect-" + (zone.id || index),
         type: "rect",
         silent: true,
-        z: 1,
+        z: 2,
         shape: {
           x: left,
           y: top,
           width: Math.max(1, right - left),
-          height: Math.max(1, bottom - top),
+          height: Math.max(2, bottom - top),
           r: 2,
         },
         style: {
@@ -721,90 +621,64 @@
           lineWidth: style.lineWidth,
         },
       });
-
-      if (debugOverlay) {
-        elements.push({
-          id: rectId + "-label",
-          type: "text",
-          silent: true,
-          z: 2,
-          style: {
-            text: String(index + 1) + " " + String(zone.status || "").toUpperCase(),
-            x: left + 4,
-            y: top + 4,
-            fill: style.labelColor,
-            font: "12px \"IBM Plex Mono\", monospace",
-            backgroundColor: style.labelBg,
-            padding: [2, 4],
-          },
-        });
-      }
-
-      if (logged < maxLog) {
-        console.log("[zones]", zone.id || index, "span", startIndex + "-" + endIndex, "px", {
-          left: Math.round(left),
-          right: Math.round(right),
-          top: Math.round(top),
-          bottom: Math.round(bottom),
-        }, reason);
-        logged += 1;
-      }
     });
 
     return elements;
   }
 
-  function renderZoneOverlay(reason) {
+  function renderZoneOverlay() {
     if (!state.chart) {
       return;
     }
-    const elements = buildZoneOverlayGraphics(reason);
     state.chart.setOption({
       graphic: [{
         id: "zone-overlay",
         type: "group",
         silent: true,
-        z: 1,
-        children: elements,
+        z: 2,
+        children: buildZoneOverlayGraphics(),
       }],
     }, { replaceMerge: ["graphic"], lazyUpdate: true });
   }
 
-  function queueZoneOverlayRender(reason) {
+  function queueZoneOverlayRender() {
     if (state.zoneOverlayFrame) {
       window.cancelAnimationFrame(state.zoneOverlayFrame);
     }
     state.zoneOverlayFrame = window.requestAnimationFrame(() => {
       state.zoneOverlayFrame = 0;
-      renderZoneOverlay(reason);
+      renderZoneOverlay();
     });
   }
 
   function zoneTooltipHtml(zone) {
-    const anchors = Array.isArray(zone.anchorPivots)
-      ? zone.anchorPivots.map((pivot) => {
-        const side = String(pivot?.direction || "").toLowerCase() === "high" ? "H" : "L";
-        return side + "#" + String(pivot?.pivotId ?? "?") + " " + formatNumber(pivot?.price);
-      }).join(" | ")
-      : "";
-    const breakoutLabel = zone.breakoutDirection ? "break " + zone.breakoutDirection : "break pending";
     return [
-      "<div class=\"zigcandles-tip-zone\">",
-      "<strong>" + escapeHtml("Zone " + zone.status.toUpperCase()) + "</strong><br>",
-      escapeHtml(String(zone.patternType || "zone")) + " | same-side " + formatNumber(zone.sameSideDistance) + " / " + formatNumber(zone.sameSideTolerance) + "<br>",
-      escapeHtml(zone.birthRule || "") + "<br>",
-      "anchors " + escapeHtml(anchors) + "<br>",
-      "init box " + formatNumber(zone.initialZoneLow ?? zone.zoneLow) + " - " + formatNumber(zone.initialZoneHigh ?? zone.zoneHigh) + " | h " + formatNumber(zone.initialZoneHeight ?? zone.zoneHeight) + "<br>",
-      "continue tol " + formatNumber(zone.continuationTolerance ?? zone.maxAllowedOvershoot) + " | " + breakoutLabel + "<br>",
-      "inside " + escapeHtml(String(zone.tickCountInside)) + " ticks | " + escapeHtml(zone.durationInsideLabel || "") + "<br>",
-      "touches " + escapeHtml(String(zone.touchCount)) + " | revisits " + escapeHtml(String(zone.revisitCount)) + "<br>",
-      "anchor ids " + escapeHtml(String(zone.anchorStartPivotId ?? zone.parentStartPivotId) + " -> " + String(zone.anchorMiddlePivotId ?? "?") + " -> " + String(zone.anchorEndPivotId ?? zone.parentEndPivotId)),
+      "<div class=\"zones-tip-zone\">",
+      "<strong>" + escapeHtml(zone.symbol + " L" + zone.selectedLevel + " " + String(zone.status || "").toUpperCase()) + "</strong><br>",
+      "pattern " + escapeHtml(zone.patternType || "") + " | start " + escapeHtml(String(zone.startTickId ?? "")) + " | end " + escapeHtml(String(zone.endTickId ?? "")) + "<br>",
+      "starttime " + escapeHtml(zone.startTimestamp || "") + "<br>",
+      "endtime " + escapeHtml(zone.endTimestamp || "") + "<br>",
+      "pivots " + escapeHtml(String(zone.anchorStartPivotId ?? "")) + " -> " + escapeHtml(String(zone.anchorMiddlePivotId ?? "")) + " -> " + escapeHtml(String(zone.anchorEndPivotId ?? "")) + "<br>",
+      "initial " + escapeHtml(formatPrice(zone.initialZoneLow)) + " - " + escapeHtml(formatPrice(zone.initialZoneHigh)) + "<br>",
+      "current " + escapeHtml(formatPrice(zone.zoneLow)) + " - " + escapeHtml(formatPrice(zone.zoneHigh)) + " | h " + escapeHtml(formatPrice(zone.zoneHeight)) + "<br>",
+      "same-side " + escapeHtml(formatPrice(zone.sameSideDistance)) + " | inside " + escapeHtml(String(zone.tickCountInside ?? "")) + " | durationms " + escapeHtml(String(zone.durationInsideMs ?? "")) + "<br>",
+      "break " + escapeHtml(zone.breakoutDirection || "-") + " | breaktickid " + escapeHtml(String(zone.breakoutTickId ?? "")),
       "</div>",
     ].join("");
   }
 
-  function candleSeriesIndex() {
-    return state.renderedSeries.findIndex((series) => series.id === "zig-candles-main");
+  function candleContextHtml(bar) {
+    if (!bar || !displayShowsCandles(currentConfig().display)) {
+      return "";
+    }
+    return [
+      "<div class=\"zones-tip-candle\">",
+      "<strong>" + escapeHtml("Zig candle " + bar.barState.toUpperCase()) + "</strong><br>",
+      escapeHtml(bar.direction + " | " + bar.series) + "<br>",
+      "O " + escapeHtml(formatPrice(bar.open)) + " | H " + escapeHtml(formatPrice(bar.high)) + " | L " + escapeHtml(formatPrice(bar.low)) + " | C " + escapeHtml(formatPrice(bar.close)) + "<br>",
+      "ticks " + escapeHtml(String(bar.tickCount)) + " | ids " + escapeHtml(String(bar.startTickId) + "-" + String(bar.endTickId)),
+      "</div>",
+    ].join("");
   }
 
   function zoomIndicesFromState(zoomState, barCount) {
@@ -883,24 +757,17 @@
           axisPointer: { type: "cross" },
           formatter: function (params) {
             const point = Array.isArray(params)
-              ? params.find((entry) => entry?.seriesId === "zig-candles-main") || params[0]
+              ? params.find((entry) => entry?.seriesId === "zones-candles-main") || params[0]
               : params;
             const bar = point?.data?.bar;
-            if (!bar) {
+            const zoneHtml = zonesForBarIndex(Number(point?.dataIndex)).map(zoneTooltipHtml).join("");
+            if (!zoneHtml && !bar) {
               return "";
             }
-            const zoneHtml = displayShowsZones(currentConfig().display)
-              ? zonesForBarIndex(Number(point?.dataIndex)).map(zoneTooltipHtml).join("")
-              : "";
             return [
-              "<div class=\"zigcandles-tip\">",
-              "<strong>" + escapeHtml(bar.symbol + " L" + bar.level + " " + bar.barState.toUpperCase()) + "</strong><br>",
-              escapeHtml(bar.direction + " | " + bar.series) + "<br>",
-              "O " + formatNumber(bar.open) + " | H " + formatNumber(bar.high) + " | L " + formatNumber(bar.low) + " | C " + formatNumber(bar.close) + "<br>",
-              "ticks " + escapeHtml(String(bar.tickCount)) + " | range " + formatSignedNumber(bar.priceRange) + " | move " + formatSignedNumber(bar.netMove) + "<br>",
-              "dur " + escapeHtml(bar.durationLabel) + " | ids " + escapeHtml(String(bar.startTickId) + "-" + String(bar.endTickId)) + "<br>",
-              "pivots " + escapeHtml(String(bar.startPivotId) + " -> " + (bar.endPivotId == null ? "active" : String(bar.endPivotId))),
+              "<div class=\"zones-tip\">",
               zoneHtml,
+              candleContextHtml(bar),
               "</div>",
             ].join("");
           },
@@ -933,7 +800,7 @@
           },
         ],
         series: [{
-          id: "zig-candles-main",
+          id: "zones-candles-main",
           type: "candlestick",
           name: "Zig candles",
           data: [],
@@ -948,21 +815,17 @@
           ? zoomStateFromIndexRange(indices.startIndex, indices.endIndex, state.bars.length)
           : { start: 0, end: 100 };
         queueVisibleYAxisUpdate();
-        queueZoneOverlayRender("zoom");
+        queueZoneOverlayRender();
       });
     }
     return state.chart;
   }
 
-  function visibleBarSlice() {
+  function visibleIndexRange() {
     if (!state.bars.length) {
-      return [];
+      return null;
     }
-    const indices = zoomIndicesFromState(state.zoom, state.bars.length);
-    if (!indices) {
-      return state.bars.slice();
-    }
-    return state.bars.slice(indices.startIndex, Math.max(indices.startIndex + 1, indices.endIndex + 1));
+    return zoomIndicesFromState(state.zoom, state.bars.length);
   }
 
   function queueVisibleYAxisUpdate() {
@@ -975,13 +838,26 @@
       if (!state.chart || !state.bars.length) {
         return;
       }
-      const visible = visibleBarSlice();
+      const range = visibleIndexRange();
+      const startIndex = range ? range.startIndex : 0;
+      const endIndex = range ? range.endIndex : state.bars.length - 1;
       let minValue = Number.POSITIVE_INFINITY;
       let maxValue = Number.NEGATIVE_INFINITY;
-      visible.forEach((bar) => {
+
+      state.bars.slice(startIndex, Math.max(startIndex + 1, endIndex + 1)).forEach((bar) => {
         minValue = Math.min(minValue, bar.low);
         maxValue = Math.max(maxValue, bar.high);
       });
+
+      state.zones.forEach((zone) => {
+        const span = zoneSpanFor(zone);
+        if (!span || span.endIndex < startIndex || span.startIndex > endIndex) {
+          return;
+        }
+        minValue = Math.min(minValue, zone.zoneLow);
+        maxValue = Math.max(maxValue, zone.zoneHigh);
+      });
+
       if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) {
         return;
       }
@@ -1005,9 +881,9 @@
     if (!state.bars.length) {
       chart.setOption({
         xAxis: { data: [] },
-        series: [{ id: "zig-candles-main", data: [] }],
+        series: [{ id: "zones-candles-main", data: [] }],
       }, { replaceMerge: ["series"], lazyUpdate: true });
-      queueZoneOverlayRender("clear");
+      queueZoneOverlayRender();
       return;
     }
     if (resetView) {
@@ -1023,27 +899,28 @@
         endValue: Number.isFinite(Number(state.zoom.endValue)) ? Number(state.zoom.endValue) : undefined,
         rangeMode: ["value", "value"],
       })),
-      series: (function () {
-        const series = [];
-        series.push({
-          id: "zig-candles-main",
-          type: "candlestick",
-          name: "Zig candles",
-          data: buildChartData(),
-          z: 4,
-        });
-        state.renderedSeries = series;
-        return series;
-      })(),
+      series: [{
+        id: "zones-candles-main",
+        type: "candlestick",
+        name: "Zig candles",
+        data: buildChartData(),
+        z: 1,
+      }],
     }, { replaceMerge: ["series"], lazyUpdate: true });
+    state.renderedSeries = chart.getOption()?.series || [];
     queueVisibleYAxisUpdate();
-    queueZoneOverlayRender("render");
+    queueZoneOverlayRender();
   }
 
   function replaceBars(rows) {
     state.bars = Array.isArray(rows) ? rows.slice() : [];
-    if (!state.bars.some((bar) => bar.id === state.selectedBarId)) {
-      state.selectedBarId = state.bars.length ? state.bars[state.bars.length - 1].id : null;
+  }
+
+  function replaceZones(rows) {
+    state.zones = Array.isArray(rows) ? rows.slice() : [];
+    if (!state.zones.some((zone) => zone.id === state.selectedZoneId)) {
+      const activeZone = state.zones.find((zone) => zone.status === "active");
+      state.selectedZoneId = activeZone ? activeZone.id : (state.zones[state.zones.length - 1]?.id ?? null);
     }
   }
 
@@ -1056,8 +933,7 @@
 
   function syncPayload(payload) {
     replaceBars(payload.bars || []);
-    state.zones = Array.isArray(payload.zones) ? payload.zones.slice() : [];
-    state.zoneConfig = payload.zoneConfig || null;
+    replaceZones(payload.zones || []);
     applyRangePayload(payload);
     state.reviewEndId = payload.reviewEndId || state.reviewEndId || null;
     state.hasMoreLeft = Boolean(payload.hasMoreLeft);
@@ -1067,23 +943,23 @@
     renderTable();
   }
 
-  function focusBar(barId) {
-    const index = state.bars.findIndex((bar) => bar.id === barId);
-    if (index < 0) {
+  function focusZone(zoneId) {
+    const zone = state.zones.find((item) => item.id === zoneId);
+    if (!zone) {
       return;
     }
-    state.selectedBarId = barId;
+    state.selectedZoneId = zoneId;
     renderTable();
     renderChart(false);
-    if (state.chart) {
-      const startValue = Math.max(0, index - 8);
-      const endValue = Math.min(state.bars.length - 1, index + 8);
-      const seriesIndex = candleSeriesIndex();
-      state.chart.dispatchAction({ type: "dataZoom", startValue: startValue, endValue: endValue });
-      if (seriesIndex >= 0) {
-        state.chart.dispatchAction({ type: "showTip", seriesIndex: seriesIndex, dataIndex: index });
-      }
+    const span = zoneSpanFor(zone);
+    if (!span || !state.chart) {
+      return;
     }
+    const startValue = Math.max(0, span.startIndex - 2);
+    const endValue = Math.min(state.bars.length - 1, span.endIndex + 2);
+    state.chart.dispatchAction({ type: "dataZoom", startValue: startValue, endValue: endValue });
+    const focusIndex = Math.max(startValue, Math.min(endValue, Math.round((span.startIndex + span.endIndex) / 2)));
+    state.chart.dispatchAction({ type: "showTip", seriesIndex: 0, dataIndex: focusIndex });
   }
 
   function clearActivity() {
@@ -1108,9 +984,17 @@
     return payload;
   }
 
+  async function refreshZoneState(level) {
+    const payload = await fetchJson("/api/zones/state?" + new URLSearchParams({
+      level: String(level),
+    }).toString());
+    state.zoneState = payload.state || null;
+    renderZoneStateMeta();
+  }
+
   async function resolveReviewStartId(config) {
     if (config.reviewStart) {
-      const payload = await fetchJson("/api/zigcandles/review-start?" + new URLSearchParams({
+      const payload = await fetchJson("/api/zones/review-start?" + new URLSearchParams({
         timestamp: config.reviewStart,
         timezoneName: "Australia/Sydney",
       }).toString());
@@ -1130,12 +1014,6 @@
       level: String(config.level),
       series: config.series,
       zones: "true",
-      zoneMinTicks: String(config.zoneMinTicks),
-      zoneMinMs: String(config.zoneMinMs),
-      zoneSameSideTolerance: String(config.zoneSameSideTolerance),
-      zoneOvershoot: String(config.zoneOvershoot),
-      zoneBreakTicks: String(config.zoneBreakTicks),
-      zoneBreakTolerance: String(config.zoneBreakTolerance),
       provisional: config.provisional ? "true" : "false",
     });
     if (config.mode === "review" && startId != null) {
@@ -1152,12 +1030,6 @@
       level: String(config.level),
       series: config.series,
       zones: "true",
-      zoneMinTicks: String(config.zoneMinTicks),
-      zoneMinMs: String(config.zoneMinMs),
-      zoneSameSideTolerance: String(config.zoneSameSideTolerance),
-      zoneOvershoot: String(config.zoneOvershoot),
-      zoneBreakTicks: String(config.zoneBreakTicks),
-      zoneBreakTolerance: String(config.zoneBreakTolerance),
       provisional: config.provisional ? "true" : "false",
     });
     if (endId != null) {
@@ -1178,12 +1050,6 @@
       level: String(config.level),
       series: config.series,
       zones: "true",
-      zoneMinTicks: String(config.zoneMinTicks),
-      zoneMinMs: String(config.zoneMinMs),
-      zoneSameSideTolerance: String(config.zoneSameSideTolerance),
-      zoneOvershoot: String(config.zoneOvershoot),
-      zoneBreakTicks: String(config.zoneBreakTicks),
-      zoneBreakTolerance: String(config.zoneBreakTolerance),
       provisional: config.provisional ? "true" : "false",
     }).toString();
   }
@@ -1194,8 +1060,9 @@
     const payload = await fetchJson(bootstrapUrl(config, state.reviewStartId));
     state.loadedWindow = clampLoadedWindow(payload.window || config.window);
     syncPayload(payload);
+    await refreshZoneState(config.level);
     renderChart(Boolean(resetView));
-    status("Loaded " + state.bars.length + " zig candle(s) and " + state.zones.length + " persisted zone(s).", false);
+    status("Loaded " + state.zones.length + " persisted zone(s).", false);
     if (config.run === "run") {
       if (config.mode === "live") {
         connectStream(state.rangeLastId || 0);
@@ -1215,12 +1082,6 @@
       level: String(config.level),
       series: config.series,
       zones: "true",
-      zoneMinTicks: String(config.zoneMinTicks),
-      zoneMinMs: String(config.zoneMinMs),
-      zoneSameSideTolerance: String(config.zoneSameSideTolerance),
-      zoneOvershoot: String(config.zoneOvershoot),
-      zoneBreakTicks: String(config.zoneBreakTicks),
-      zoneBreakTolerance: String(config.zoneBreakTolerance),
       provisional: config.provisional ? "true" : "false",
     }).toString());
     state.source = source;
@@ -1235,6 +1096,7 @@
       const payload = JSON.parse(event.data);
       syncPayload(payload);
       renderChart(false);
+      refreshZoneState(currentConfig().level).catch(() => {});
     };
 
     source.addEventListener("heartbeat", function (event) {
@@ -1265,6 +1127,7 @@
     }
     const payload = await fetchJson(nextUrl(config, state.rangeLastId, state.reviewEndId));
     syncPayload(payload);
+    await refreshZoneState(config.level);
     renderChart(false);
     status(payload.endReached ? "Review reached the current end snapshot." : "Review running.", false);
     if (!payload.endReached && currentConfig().run === "run") {
@@ -1312,6 +1175,7 @@
       return;
     }
     clearActivity();
+    const config = currentConfig();
     const previousFirstId = state.rangeFirstId;
     const previousLoadedWindow = currentLoadedWindow();
     const batchSize = historyBatchSize();
@@ -1321,13 +1185,14 @@
       return;
     }
     const preservedViewport = captureVisibleBarWindow();
-    const payload = await fetchJson(previousUrl(currentConfig(), batchSize));
+    const payload = await fetchJson(previousUrl(config, batchSize));
     const didExpandLeft = payload.firstId != null && previousFirstId != null && payload.firstId < previousFirstId;
     state.loadedWindow = didExpandLeft ? clampLoadedWindow(previousLoadedWindow + batchSize) : previousLoadedWindow;
     syncPayload(payload);
+    await refreshZoneState(config.level);
     restoreVisibleBarWindow(preservedViewport);
     renderChart(false);
-    status(state.bars.length && didExpandLeft ? "Older zig candles and zones were added off-screen to the left." : "No older data was available.", false);
+    status(state.zones.length && didExpandLeft ? "Older persisted zones were added off-screen to the left." : "No older data was available.", false);
     await resumeRunIfNeeded();
   }
 
@@ -1393,18 +1258,18 @@
     }
   });
 
-  [elements.tickId, elements.reviewStart, elements.windowSize, elements.zoneMinTicks, elements.zoneMinMs, elements.zoneSameSideTolerance, elements.zoneOvershoot, elements.zoneBreakTicks, elements.zoneBreakTolerance].forEach((control) => {
+  [elements.tickId, elements.reviewStart, elements.windowSize].forEach((control) => {
     control.addEventListener("change", writeQuery);
   });
 
-  [elements.showProvisional, elements.zoneDebugOverlay, elements.showTable].forEach((control) => {
+  [elements.showProvisional, elements.showTable].forEach((control) => {
     control.addEventListener("change", function () {
       elements.tablePanel.hidden = !elements.showTable.checked;
       writeQuery();
       renderMeta();
       renderChart(false);
       queueChartResize();
-      status("Settings updated. Click Load to refresh bars and zones.", false);
+      status("Settings updated. Click Load to refresh persisted zones.", false);
     });
   });
 
@@ -1432,4 +1297,4 @@
 
   applyInitialConfig(parseQuery());
   loadAll(true);
-})();
+}());

@@ -3,13 +3,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>datavis.au | Zig Candles</title>
+  <title>datavis.au | Zones</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/assets/app.css">
 </head>
-<body class="page-live page-zigcandles">
+<body class="page-live page-zones">
   <div class="live-workspace is-sidebar-collapsed" id="liveWorkspace">
     <button
       class="ghost-button live-sidebar-toggle"
@@ -17,14 +17,14 @@
       type="button"
       aria-controls="liveSidebar"
       aria-expanded="false"
-      aria-label="Open zig candle controls"
+      aria-label="Open zone controls"
     >
       <span class="live-sidebar-toggle-bars" aria-hidden="true">
         <span></span>
         <span></span>
         <span></span>
       </span>
-      <span class="sr-only">Toggle zig candle controls</span>
+      <span class="sr-only">Toggle zone controls</span>
     </button>
 
     <button
@@ -39,9 +39,10 @@
       <div class="live-sidebar-scroll">
         <header class="live-sidebar-header">
           <a class="back-link" href="/">datavis.au</a>
-          <h1>Zig Candles</h1>
-          <p class="live-sidebar-copy">Fast-zig legs rendered as bounded bars over the same tick store. Review, live, run/stop, and left-shift behavior stay aligned with Layer 0.</p>
-          <div class="meta-strip" id="liveMeta">Waiting for bars...</div>
+          <h1>Zones</h1>
+          <p class="live-sidebar-copy">Persisted zone review over the same tick-backed zig candle range. Active and closed zones stay primary, with optional zig-candle overlay for context.</p>
+          <div class="meta-strip" id="liveMeta">Waiting for persisted zones...</div>
+          <div class="meta-strip" id="zoneStateMeta">Zone state pending.</div>
           <div class="meta-strip" id="livePerf">Stream down.</div>
           <div class="status-line live-status" id="statusLine">Ready.</div>
         </header>
@@ -68,9 +69,8 @@
               <div class="live-control-field live-control-field-wide">
                 <span>display</span>
                 <div class="segmented single-select" id="displayToggle" aria-label="Display mode">
-                  <button type="button" class="active" data-value="candles">Candles</button>
-                  <button type="button" data-value="candles-zones">Candles + Zones</button>
-                  <button type="button" data-value="zones">Zones Only</button>
+                  <button type="button" class="active" data-value="zones">Zones Only</button>
+                  <button type="button" data-value="zones-candles">Zones + Zig Candles</button>
                 </div>
               </div>
 
@@ -144,48 +144,12 @@
 
             <div class="live-check-grid">
               <label class="compact-check">
-                <input id="zoneDebugOverlay" type="checkbox">
-                <span>Zone Debug Overlay</span>
-              </label>
-              <label class="compact-check">
                 <input id="showProvisional" type="checkbox" checked>
-                <span>Show provisional</span>
+                <span>Show provisional candles</span>
               </label>
               <label class="compact-check">
                 <input id="showTable" type="checkbox" checked>
-                <span>Show table</span>
-              </label>
-            </div>
-
-            <div class="live-form-grid zone-settings-grid">
-              <label>
-                <span>zone confirm ticks</span>
-                <input id="zoneMinTicks" type="number" min="4" max="500" inputmode="numeric" value="24">
-              </label>
-
-              <label>
-                <span>zone confirm ms</span>
-                <input id="zoneMinMs" type="number" min="100" max="300000" inputmode="numeric" value="3000">
-              </label>
-
-              <label>
-                <span>same-side tol</span>
-                <input id="zoneSameSideTolerance" type="number" min="0" max="10" step="0.01" inputmode="decimal" value="0.24">
-              </label>
-
-              <label>
-                <span>zone overshoot</span>
-                <input id="zoneOvershoot" type="number" min="0" max="10" step="0.01" inputmode="decimal" value="0.18">
-              </label>
-
-              <label>
-                <span>zone break ticks</span>
-                <input id="zoneBreakTicks" type="number" min="1" max="64" inputmode="numeric" value="4">
-              </label>
-
-              <label class="live-control-field-wide">
-                <span>zone break tol</span>
-                <input id="zoneBreakTolerance" type="number" min="0" max="10" step="0.01" inputmode="decimal" value="0.24">
+                <span>Show zone table</span>
               </label>
             </div>
           </div>
@@ -193,35 +157,43 @@
       </div>
     </aside>
 
-    <section class="live-chart-stage zigcandles-stage">
+    <section class="live-chart-stage zones-stage">
       <div class="panel chart-panel live-chart-panel">
-        <div id="zigCandlesChart" class="chart-host"></div>
+        <div id="zonesChart" class="chart-host"></div>
       </div>
 
-      <div class="panel zigcandles-table-panel" id="tablePanel">
-        <div class="zigcandles-table-toolbar">
-          <div class="meta-strip" id="tableMeta">No bars loaded.</div>
+      <div class="panel zones-table-panel" id="tablePanel">
+        <div class="zones-table-toolbar">
+          <div class="meta-strip" id="tableMeta">No zones loaded.</div>
         </div>
-        <div class="zigcandles-table-host">
-          <table class="result-table zigcandles-table">
+        <div class="zones-table-host">
+          <table class="result-table zones-table">
             <thead>
               <tr>
+                <th>symbol</th>
+                <th>level</th>
                 <th>state</th>
-                <th>end</th>
-                <th>dir</th>
-                <th>o</th>
-                <th>h</th>
-                <th>l</th>
-                <th>c</th>
-                <th>ticks</th>
-                <th>range</th>
-                <th>move</th>
-                <th>dur</th>
-                <th>pivots</th>
-                <th>ids</th>
+                <th>pattern</th>
+                <th>starttime</th>
+                <th>endtime</th>
+                <th>starttickid</th>
+                <th>endtickid</th>
+                <th>startpivotid</th>
+                <th>middlepivotid</th>
+                <th>endpivotid</th>
+                <th>initialzonelow</th>
+                <th>initialzonehigh</th>
+                <th>zonelow</th>
+                <th>zonehigh</th>
+                <th>zoneheight</th>
+                <th>samesidedistance</th>
+                <th>tickcountinside</th>
+                <th>durationms</th>
+                <th>breakdirection</th>
+                <th>breaktickid</th>
               </tr>
             </thead>
-            <tbody id="barsTableBody"></tbody>
+            <tbody id="zonesTableBody"></tbody>
           </table>
         </div>
       </div>
@@ -229,6 +201,6 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
-  <script src="/assets/zigcandles.js"></script>
+  <script src="/assets/zones.js"></script>
 </body>
 </html>

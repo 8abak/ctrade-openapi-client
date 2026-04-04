@@ -2096,6 +2096,44 @@ def fetch_persisted_zone_rows(
     return [serialize_zonebox_row(dict(row)) for row in cur.fetchall()]
 
 
+def serialize_zoneboxstate_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    updated_at = row.get("updated_at")
+    return {
+        "id": row["id"],
+        "symbol": row["symbol"],
+        "level": row["level"],
+        "lastProcessedTickId": row.get("lastprocessedtickid"),
+        "lastProcessedPivotId": row.get("lastprocessedpivotid"),
+        "activeZoneId": row.get("activezoneid"),
+        "updatedAt": updated_at.isoformat() if updated_at else None,
+        "updatedAtMs": dt_to_ms(updated_at),
+    }
+
+
+def fetch_zoneboxstate_snapshot(selected_level: int) -> Optional[Dict[str, Any]]:
+    effective_level = clamp_zig_level(selected_level)
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            if not zone_storage_ready(cur):
+                raise HTTPException(
+                    status_code=503,
+                    detail="Persisted zone storage is not ready.",
+                )
+            cur.execute(
+                """
+                SELECT id, symbol, level, lastprocessedtickid, lastprocessedpivotid, activezoneid, updated_at
+                FROM public.zoneboxstate
+                WHERE symbol = %s
+                  AND level = %s
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (TICK_SYMBOL, effective_level),
+            )
+            row = cur.fetchone()
+    return serialize_zoneboxstate_row(dict(row)) if row else None
+
+
 def split_sql_script(sql_text: str) -> List[str]:
     text = (sql_text or "").strip()
     if not text:
@@ -2774,6 +2812,11 @@ def zig_candles_page() -> FileResponse:
     return FileResponse(FRONTEND_DIR / "zigcandles.html")
 
 
+@app.get("/zones", include_in_schema=False)
+def zones_page() -> FileResponse:
+    return FileResponse(FRONTEND_DIR / "zones.html")
+
+
 @app.get("/sql", include_in_schema=False)
 def sql_page(_: str = Depends(require_sql_admin)) -> FileResponse:
     return FileResponse(FRONTEND_DIR / "sql.html")
@@ -2827,6 +2870,25 @@ def zig_candles_review_start(
     timezoneName: str = Query(DEFAULT_REVIEW_TIMEZONE, min_length=1),
 ) -> Dict[str, Any]:
     return live_review_start(timestamp=timestamp, timezoneName=timezoneName)
+
+
+@app.get("/api/zones/review-start")
+def zones_review_start(
+    timestamp: str = Query(..., min_length=1),
+    timezoneName: str = Query(DEFAULT_REVIEW_TIMEZONE, min_length=1),
+) -> Dict[str, Any]:
+    return live_review_start(timestamp=timestamp, timezoneName=timezoneName)
+
+
+@app.get("/api/zones/state")
+def zones_state(
+    level: int = Query(0, ge=0, le=MAX_ZIG_LEVEL),
+) -> Dict[str, Any]:
+    return {
+        "symbol": TICK_SYMBOL,
+        "level": clamp_zig_level(level),
+        "state": fetch_zoneboxstate_snapshot(level),
+    }
 
 
 @app.get("/api/live/bootstrap")

@@ -19,7 +19,7 @@
           <a class="back-link" href="/">datavis.au</a>
           <div class="sql-admin-badge">admin</div>
           <h1>Admin SQL</h1>
-          <div class="sql-sidebar-copy">Protected SQL console with quick access to ticks, fast zig pivots, and fast zig state.</div>
+          <div class="sql-sidebar-copy">Protected SQL console with quick access to ticks, fast zig pivots, persisted zonebox rows, and zonebox state.</div>
         </div>
         <div class="sql-connection-card">
           <div class="sql-connection-label">Connection</div>
@@ -32,13 +32,24 @@
           </div>
           <div class="schema-tree" id="schemaTree">Loading schema browser...</div>
         </div>
-        <section class="sql-sidebar-inspector">
+        <section class="sql-sidebar-inspector is-collapsed" id="inspectorSection">
           <div class="sql-inspector-header">
-            <div class="sql-toolbar-label">Inspector</div>
+            <button
+              class="ghost-button compact-button sql-inspector-toggle"
+              id="inspectorToggle"
+              type="button"
+              aria-controls="inspectorBody"
+              aria-expanded="false"
+            >
+              <span class="sql-toolbar-label">Inspector</span>
+              <span class="sql-inspector-state" id="inspectorToggleState">collapsed</span>
+            </button>
             <button class="ghost-button compact-button" id="previewButton" type="button">Preview Recent</button>
           </div>
-          <div class="object-detail" id="objectDetail">
-            <div class="muted">Loading admin table metadata...</div>
+          <div class="sql-inspector-body is-collapsed" id="inspectorBody">
+            <div class="object-detail" id="objectDetail">
+              <div class="muted">Loading admin table metadata...</div>
+            </div>
           </div>
         </section>
       </div>
@@ -49,7 +60,7 @@
         <div class="sql-editor-header">
           <div class="sql-editor-heading">
             <div class="sql-toolbar-label">SQL Console</div>
-            <div class="sql-editor-copy">Authenticated admin console. Table shortcuts stay visible on the left; the editor can run direct SQL.</div>
+            <div class="sql-editor-copy">Authenticated admin console. Table shortcuts stay visible on the left; the editor can run direct SQL over ticks, zig, and persisted zone tables.</div>
           </div>
           <div class="editor-toolbar">
             <button class="ghost-button compact-button" id="previewTopButton" type="button">Preview Recent</button>

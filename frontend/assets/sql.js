@@ -23,6 +23,10 @@
   const elements = {
     schemaTree: document.getElementById("schemaTree"),
     refreshSchemaButton: document.getElementById("refreshSchemaButton"),
+    inspectorSection: document.getElementById("inspectorSection"),
+    inspectorToggle: document.getElementById("inspectorToggle"),
+    inspectorToggleState: document.getElementById("inspectorToggleState"),
+    inspectorBody: document.getElementById("inspectorBody"),
     previewButton: document.getElementById("previewButton"),
     previewTopButton: document.getElementById("previewTopButton"),
     connectionMeta: document.getElementById("connectionMeta"),
@@ -38,6 +42,14 @@
     previewNextButton: document.getElementById("previewNextButton"),
     resultsHost: document.getElementById("resultsHost"),
   };
+
+  function setInspectorCollapsed(collapsed) {
+    const isCollapsed = Boolean(collapsed);
+    elements.inspectorSection.classList.toggle("is-collapsed", isCollapsed);
+    elements.inspectorBody.classList.toggle("is-collapsed", isCollapsed);
+    elements.inspectorToggle.setAttribute("aria-expanded", String(!isCollapsed));
+    elements.inspectorToggleState.textContent = isCollapsed ? "collapsed" : "open";
+  }
 
   function setStatus(message, tone) {
     elements.queryStatus.textContent = message;
@@ -272,6 +284,10 @@
     });
   });
 
+  elements.inspectorToggle.addEventListener("click", function () {
+    setInspectorCollapsed(!elements.inspectorSection.classList.contains("is-collapsed"));
+  });
+
   elements.previewButton.addEventListener("click", function () {
     state.previewOffset = 0;
     loadPreview().catch((error) => {
@@ -329,6 +345,8 @@
     const value = editor.getValue();
     elements.editorContext.textContent = "Admin SQL console | active " + objectLabel(activeObject()) + " | " + value.length + " chars";
   });
+
+  setInspectorCollapsed(true);
 
   loadSchemaAndObject(true)
     .then(loadPreview)
