@@ -7,7 +7,6 @@ import re
 import secrets
 import time
 from bisect import bisect_left, bisect_right
-from collections import deque
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,6 +50,7 @@ MAX_STREAM_BATCH = 1000
 MAX_ZIG_STREAM_BATCH = 500
 MAX_ZONE_MIN_DWELL_TICKS = 500
 MAX_ZONE_MIN_DWELL_MS = 300000
+MAX_ZONE_SAME_SIDE_TOLERANCE = 10.0
 MAX_ZONE_ALLOWED_OVERSHOOT = 10.0
 MAX_ZONE_BREAKOUT_TICKS = 64
 MAX_ZONE_BREAKOUT_TOLERANCE = 10.0
@@ -76,14 +76,13 @@ MAX_ZIG_LEVEL = 3
 LEVEL_ZERO_PROVING_TICKS = 4
 DEFAULT_ZONE_MIN_DWELL_TICKS = int(os.getenv("DATAVIS_ZONE_MIN_DWELL_TICKS", "24"))
 DEFAULT_ZONE_MIN_DWELL_MS = int(os.getenv("DATAVIS_ZONE_MIN_DWELL_MS", "3000"))
+DEFAULT_ZONE_SAME_SIDE_TOLERANCE = float(os.getenv("DATAVIS_ZONE_SAME_SIDE_TOLERANCE", "0.24"))
 DEFAULT_ZONE_ALLOWED_OVERSHOOT = float(os.getenv("DATAVIS_ZONE_ALLOWED_OVERSHOOT", "0.18"))
 DEFAULT_ZONE_BREAKOUT_TICKS = int(os.getenv("DATAVIS_ZONE_BREAKOUT_TICKS", "4"))
 DEFAULT_ZONE_BREAKOUT_TOLERANCE = float(os.getenv("DATAVIS_ZONE_BREAKOUT_TOLERANCE", "0.24"))
 DEFAULT_ZONE_MIN_HEIGHT = float(os.getenv("DATAVIS_ZONE_MIN_HEIGHT", "0.05"))
 DEFAULT_ZONE_MAX_HEIGHT = float(os.getenv("DATAVIS_ZONE_MAX_HEIGHT", "1.60"))
 ZONE_CONTEXT_PIVOTS = 3
-ZONE_SEED_RATIO = 0.6
-ZONE_MAX_CONTEXT_RATIO = 0.58
 ZONE_WARMUP_MULTIPLIER = 4
 ZONE_MIN_WARMUP_TICKS = 64
 SQL_ADMIN_USER = os.getenv("DATAVIS_SQL_ADMIN_USER", "").strip()
@@ -646,6 +645,10 @@ def clamp_zone_min_dwell_ms(value: int) -> int:
     return clamp_int(value, 100, MAX_ZONE_MIN_DWELL_MS)
 
 
+def clamp_zone_same_side_tolerance(value: float) -> float:
+    return round(clamp_float(value, 0.0, MAX_ZONE_SAME_SIDE_TOLERANCE), 6)
+
+
 def clamp_zone_allowed_overshoot(value: float) -> float:
     return round(clamp_float(value, 0.0, MAX_ZONE_ALLOWED_OVERSHOOT), 6)
 
@@ -667,6 +670,7 @@ def build_zone_settings(
     enabled: bool,
     min_dwell_ticks: int,
     min_dwell_ms: int,
+    same_side_tolerance: float,
     allowed_overshoot: float,
     breakout_ticks: int,
     breakout_tolerance: float,
@@ -679,21 +683,18 @@ def build_zone_settings(
         effective_max_height = effective_min_height
     effective_min_dwell_ticks = clamp_zone_min_dwell_ticks(min_dwell_ticks)
     effective_min_dwell_ms = clamp_zone_min_dwell_ms(min_dwell_ms)
-    seed_dwell_ticks = max(4, int(round(effective_min_dwell_ticks * ZONE_SEED_RATIO)))
-    seed_dwell_ms = max(250, int(round(effective_min_dwell_ms * ZONE_SEED_RATIO)))
     return {
         "enabled": bool(enabled),
         "minDwellTicks": effective_min_dwell_ticks,
         "minDwellMs": effective_min_dwell_ms,
-        "seedDwellTicks": seed_dwell_ticks,
-        "seedDwellMs": seed_dwell_ms,
+        "sameSideTolerance": clamp_zone_same_side_tolerance(same_side_tolerance),
         "allowedOvershoot": clamp_zone_allowed_overshoot(allowed_overshoot),
+        "continuationTolerance": clamp_zone_allowed_overshoot(allowed_overshoot),
         "breakoutTicks": clamp_zone_breakout_ticks(breakout_ticks),
         "breakoutTolerance": clamp_zone_breakout_tolerance(breakout_tolerance),
         "minHeight": effective_min_height,
         "maxHeight": effective_max_height,
         "contextPivots": ZONE_CONTEXT_PIVOTS,
-        "maxContextRatio": ZONE_MAX_CONTEXT_RATIO,
         "warmupTicks": max(ZONE_MIN_WARMUP_TICKS, effective_min_dwell_ticks * ZONE_WARMUP_MULTIPLIER),
     }
 
@@ -951,12 +952,93 @@ def round_price(value: float) -> float:
     return round(float(value), 6)
 
 
+def zone_contains_with_tolerance(price: float, low: float, high: float, tolerance: float) -> bool:
+    return price >= low - tolerance and price <= high + tolerance
+
+
 def zone_touch_side(price: float, low: float, high: float, tolerance: float) -> Optional[str]:
     if abs(price - low) <= tolerance:
         return "low"
     if abs(price - high) <= tolerance:
         return "high"
     return None
+
+
+def pivot_breakout_direction(
+    pivot: Dict[str, Any],
+    *,
+    low: float,
+    high: float,
+    tolerance: float,
+) -> Optional[str]:
+    price = float(pivot["pivot_price"])
+    if price > high + tolerance:
+        return "up"
+    if price < low - tolerance:
+        return "down"
+    return None
+
+
+def zone_birth_candidate(
+    pivots: List[Dict[str, Any]],
+    *,
+    same_side_tolerance: float,
+    min_height: float,
+    max_height: float,
+) -> Optional[Dict[str, Any]]:
+    if len(pivots) < 3:
+        return None
+
+    anchor_a = pivots[-3]
+    anchor_b = pivots[-2]
+    anchor_c = pivots[-1]
+    pattern = (str(anchor_a.get("direction") or "").lower(), str(anchor_b.get("direction") or "").lower(), str(anchor_c.get("direction") or "").lower())
+    if pattern == ("high", "low", "high"):
+        zone_low = float(anchor_b["pivot_price"])
+        zone_high = max(float(anchor_a["pivot_price"]), float(anchor_c["pivot_price"]))
+        birth_rule = "Repeated high near prior high; middle low defines the bracket."
+        pattern_type = "H-L-H"
+    elif pattern == ("low", "high", "low"):
+        zone_low = min(float(anchor_a["pivot_price"]), float(anchor_c["pivot_price"]))
+        zone_high = float(anchor_b["pivot_price"])
+        birth_rule = "Repeated low near prior low; middle high defines the bracket."
+        pattern_type = "L-H-L"
+    else:
+        return None
+
+    same_side_distance = abs(float(anchor_c["pivot_price"]) - float(anchor_a["pivot_price"]))
+    if same_side_distance > same_side_tolerance:
+        return None
+
+    zone_height = zone_high - zone_low
+    if zone_height < min_height or zone_height > max_height:
+        return None
+
+    anchor_pivots = []
+    for pivot in (anchor_a, anchor_b, anchor_c):
+        anchor_pivots.append(
+            {
+                "pivotId": int(pivot["pivot_id"]),
+                "direction": str(pivot["direction"]).lower(),
+                "price": round_price(float(pivot["pivot_price"])),
+                "sourceTickId": int(pivot["source_tick_id"]),
+                "timestamp": pivot["source_timestamp"].isoformat(),
+                "timestampMs": dt_to_ms(pivot["source_timestamp"]),
+                "selectedVisibleFromTickId": int(pivot["selected_visible_from_tick_id"]),
+            }
+        )
+
+    return {
+        "pattern_type": pattern_type,
+        "birth_rule": birth_rule,
+        "zone_low": zone_low,
+        "zone_high": zone_high,
+        "same_side_distance": same_side_distance,
+        "anchor_start_pivot_id": int(anchor_a["pivot_id"]),
+        "anchor_middle_pivot_id": int(anchor_b["pivot_id"]),
+        "anchor_end_pivot_id": int(anchor_c["pivot_id"]),
+        "anchor_pivots": anchor_pivots,
+    }
 
 
 def zone_payload_from_state(zone: Dict[str, Any]) -> Dict[str, Any]:
@@ -979,6 +1061,9 @@ def zone_payload_from_state(zone: Dict[str, Any]) -> Dict[str, Any]:
         "zoneLow": round_price(zone["zone_low"]),
         "zoneHigh": round_price(zone["zone_high"]),
         "zoneHeight": round_price(zone["zone_high"] - zone["zone_low"]),
+        "initialZoneLow": round_price(zone["initial_zone_low"]),
+        "initialZoneHigh": round_price(zone["initial_zone_high"]),
+        "initialZoneHeight": round_price(zone["initial_zone_high"] - zone["initial_zone_low"]),
         "tickCountInside": zone["tick_count_inside"],
         "durationInsideMs": duration_inside_ms,
         "durationInsideLabel": format_duration_ms(duration_inside_ms),
@@ -988,19 +1073,28 @@ def zone_payload_from_state(zone: Dict[str, Any]) -> Dict[str, Any]:
         "closeTimestamp": zone["breakout_timestamp"] if zone["status"] == "closed" else None,
         "touchCount": zone["touch_count"],
         "revisitCount": zone["revisit_count"],
+        "patternType": zone["pattern_type"],
+        "birthRule": zone["birth_rule"],
+        "sameSideDistance": round_price(zone["same_side_distance"]),
+        "sameSideTolerance": round_price(zone["same_side_tolerance"]),
+        "continuationTolerance": round_price(zone["allowed_overshoot"]),
         "maxAllowedOvershoot": round_price(zone["allowed_overshoot"]),
         "breakoutDirection": zone["breakout_direction"],
         "breakoutTickId": zone["breakout_tick_id"],
         "breakoutTimestamp": zone["breakout_timestamp"],
         "breakoutTimestampMs": zone["breakout_timestamp_ms"],
+        "anchorStartPivotId": zone["anchor_start_pivot_id"],
+        "anchorMiddlePivotId": zone["anchor_middle_pivot_id"],
+        "anchorEndPivotId": zone["anchor_end_pivot_id"],
+        "anchorPivots": zone["anchor_pivots"],
         "parentStartPivotId": zone["parent_start_pivot_id"],
         "parentEndPivotId": zone["parent_end_pivot_id"],
         "contextStartPivotId": zone["context_start_pivot_id"],
         "contextEndPivotId": zone["context_end_pivot_id"],
         "derivedFromAcceptance": True,
-        "seedLow": round_price(zone["seed_low"]),
-        "seedHigh": round_price(zone["seed_high"]),
-        "seedHeight": round_price(zone["seed_high"] - zone["seed_low"]),
+        "seedLow": round_price(zone["initial_zone_low"]),
+        "seedHigh": round_price(zone["initial_zone_high"]),
+        "seedHeight": round_price(zone["initial_zone_high"] - zone["initial_zone_low"]),
     }
 
 
@@ -1050,7 +1144,6 @@ def build_zig_zone_rows(
 
     visible_pivots: List[Dict[str, Any]] = []
     pivot_index = 0
-    recent_ticks: deque[Dict[str, Any]] = deque(maxlen=max(int(zone_settings["minDwellTicks"]) * 2, 128))
     zones: List[Dict[str, Any]] = []
     active_zone: Optional[Dict[str, Any]] = None
     next_zone_id = 1
@@ -1058,10 +1151,12 @@ def build_zig_zone_rows(
 
     for tick_row in tick_rows:
         tick_id = int(tick_row["id"])
+        newly_visible_pivots: List[Dict[str, Any]] = []
         while pivot_index < len(pivots) and int(pivots[pivot_index]["selected_visible_from_tick_id"]) <= tick_id:
             visible_pivots.append(pivots[pivot_index])
-            if len(visible_pivots) > 10:
-                visible_pivots = visible_pivots[-10:]
+            newly_visible_pivots.append(pivots[pivot_index])
+            if len(visible_pivots) > 12:
+                visible_pivots = visible_pivots[-12:]
             pivot_index += 1
 
         price = price_series_value(tick_row, series)
@@ -1070,39 +1165,30 @@ def build_zig_zone_rows(
         timestamp_ms = dt_to_ms(tick_row["timestamp"])
         if timestamp_ms is None:
             continue
-        recent_tick = {
-            "id": tick_id,
-            "timestamp": tick_row["timestamp"].isoformat(),
-            "timestamp_ms": timestamp_ms,
-            "price": float(price),
-        }
-        recent_ticks.append(recent_tick)
+        price_value = float(price)
 
         if active_zone is None:
-            if len(visible_pivots) < int(zone_settings["contextPivots"]):
+            if len(newly_visible_pivots) == 0 or len(visible_pivots) < int(zone_settings["contextPivots"]):
                 continue
-            context_pivots = visible_pivots[-int(zone_settings["contextPivots"]):]
-            if not pivots_alternate(context_pivots):
-                continue
-            if len(recent_ticks) < int(zone_settings["seedDwellTicks"]):
+            anchor_pivots = visible_pivots[-int(zone_settings["contextPivots"]):]
+            if not pivots_alternate(anchor_pivots):
                 continue
 
-            seed_ticks = list(recent_ticks)[-int(zone_settings["seedDwellTicks"]):]
-            seed_duration_ms = int(seed_ticks[-1]["timestamp_ms"]) - int(seed_ticks[0]["timestamp_ms"])
-            if seed_duration_ms < int(zone_settings["seedDwellMs"]):
-                continue
-
-            seed_prices = [float(row["price"]) for row in seed_ticks]
-            seed_low = min(seed_prices)
-            seed_high = max(seed_prices)
-            seed_height = seed_high - seed_low
-            context_prices = [float(row["pivot_price"]) for row in context_pivots]
-            context_height = max(context_prices) - min(context_prices)
-            max_context_height = max(
-                float(zone_settings["minHeight"]),
-                min(float(zone_settings["maxHeight"]), context_height * float(zone_settings["maxContextRatio"])),
+            candidate = zone_birth_candidate(
+                anchor_pivots,
+                same_side_tolerance=float(zone_settings["sameSideTolerance"]),
+                min_height=float(zone_settings["minHeight"]),
+                max_height=float(zone_settings["maxHeight"]),
             )
-            if seed_height < float(zone_settings["minHeight"]) or seed_height > max_context_height:
+            if candidate is None:
+                continue
+
+            if not zone_contains_with_tolerance(
+                price_value,
+                float(candidate["zone_low"]),
+                float(candidate["zone_high"]),
+                float(zone_settings["allowedOvershoot"]),
+            ):
                 continue
 
             active_zone = {
@@ -1110,20 +1196,24 @@ def build_zig_zone_rows(
                 "symbol": TICK_SYMBOL,
                 "selected_level": selected_level,
                 "status": "provisional",
-                "start_tick_id": int(seed_ticks[0]["id"]),
-                "start_timestamp": seed_ticks[0]["timestamp"],
-                "start_timestamp_ms": int(seed_ticks[0]["timestamp_ms"]),
+                "start_tick_id": tick_id,
+                "start_timestamp": tick_row["timestamp"].isoformat(),
+                "start_timestamp_ms": timestamp_ms,
                 "right_tick_id": tick_id,
                 "right_timestamp": tick_row["timestamp"].isoformat(),
                 "right_timestamp_ms": timestamp_ms,
                 "last_inside_timestamp_ms": timestamp_ms,
-                "zone_low": seed_low,
-                "zone_high": seed_high,
-                "seed_low": seed_low,
-                "seed_high": seed_high,
-                "tick_count_inside": len(seed_ticks),
+                "zone_low": float(candidate["zone_low"]),
+                "zone_high": float(candidate["zone_high"]),
+                "initial_zone_low": float(candidate["zone_low"]),
+                "initial_zone_high": float(candidate["zone_high"]),
+                "tick_count_inside": 1,
                 "touch_count": 0,
                 "revisit_count": 0,
+                "pattern_type": candidate["pattern_type"],
+                "birth_rule": candidate["birth_rule"],
+                "same_side_distance": float(candidate["same_side_distance"]),
+                "same_side_tolerance": float(zone_settings["sameSideTolerance"]),
                 "allowed_overshoot": float(zone_settings["allowedOvershoot"]),
                 "breakout_direction": None,
                 "breakout_tick_id": None,
@@ -1131,14 +1221,18 @@ def build_zig_zone_rows(
                 "breakout_timestamp_ms": None,
                 "outside_direction": None,
                 "outside_streak": 0,
-                "parent_start_pivot_id": int(context_pivots[0]["pivot_id"]),
-                "parent_end_pivot_id": int(context_pivots[-1]["pivot_id"]),
-                "context_start_pivot_id": int(context_pivots[0]["pivot_id"]),
-                "context_end_pivot_id": int(context_pivots[-1]["pivot_id"]),
+                "anchor_start_pivot_id": int(candidate["anchor_start_pivot_id"]),
+                "anchor_middle_pivot_id": int(candidate["anchor_middle_pivot_id"]),
+                "anchor_end_pivot_id": int(candidate["anchor_end_pivot_id"]),
+                "anchor_pivots": candidate["anchor_pivots"],
+                "parent_start_pivot_id": int(candidate["anchor_start_pivot_id"]),
+                "parent_end_pivot_id": int(candidate["anchor_end_pivot_id"]),
+                "context_start_pivot_id": int(candidate["anchor_start_pivot_id"]),
+                "context_end_pivot_id": int(candidate["anchor_end_pivot_id"]),
                 "last_touch_side": None,
             }
             next_zone_id += 1
-            touch_side = zone_touch_side(float(price), seed_low, seed_high, touch_tolerance)
+            touch_side = zone_touch_side(price_value, float(candidate["zone_low"]), float(candidate["zone_high"]), touch_tolerance)
             if touch_side:
                 active_zone["touch_count"] = 1
                 active_zone["last_touch_side"] = touch_side
@@ -1152,22 +1246,32 @@ def build_zig_zone_rows(
         active_zone["right_tick_id"] = tick_id
         active_zone["right_timestamp"] = tick_row["timestamp"].isoformat()
         active_zone["right_timestamp_ms"] = timestamp_ms
+        if visible_pivots:
+            active_zone["context_end_pivot_id"] = int(visible_pivots[-1]["pivot_id"])
 
-        price_value = float(price)
-        within_overshoot = (
-            price_value >= float(active_zone["zone_low"]) - float(zone_settings["allowedOvershoot"])
-            and price_value <= float(active_zone["zone_high"]) + float(zone_settings["allowedOvershoot"])
+        pivot_confirm_direction: Optional[str] = None
+        for pivot in newly_visible_pivots:
+            direction = pivot_breakout_direction(
+                pivot,
+                low=float(active_zone["zone_low"]),
+                high=float(active_zone["zone_high"]),
+                tolerance=float(zone_settings["allowedOvershoot"]),
+            )
+            if direction is not None:
+                pivot_confirm_direction = direction
+                break
+
+        within_overshoot = zone_contains_with_tolerance(
+            price_value,
+            float(active_zone["zone_low"]),
+            float(active_zone["zone_high"]),
+            float(zone_settings["allowedOvershoot"]),
         )
         if within_overshoot:
             if active_zone["outside_streak"] > 0:
                 active_zone["revisit_count"] += 1
             active_zone["outside_streak"] = 0
             active_zone["outside_direction"] = None
-            next_low = min(float(active_zone["zone_low"]), price_value)
-            next_high = max(float(active_zone["zone_high"]), price_value)
-            if next_high - next_low <= float(zone_settings["maxHeight"]):
-                active_zone["zone_low"] = next_low
-                active_zone["zone_high"] = next_high
             active_zone["tick_count_inside"] += 1
             active_zone["last_inside_timestamp_ms"] = timestamp_ms
             touch_side = zone_touch_side(price_value, float(active_zone["zone_low"]), float(active_zone["zone_high"]), touch_tolerance)
@@ -1200,7 +1304,10 @@ def build_zig_zone_rows(
             active_zone["outside_direction"] = breakout_direction
             active_zone["outside_streak"] = 1
 
-        if active_zone["outside_streak"] < int(zone_settings["breakoutTicks"]):
+        if (
+            active_zone["outside_streak"] < int(zone_settings["breakoutTicks"])
+            and pivot_confirm_direction != breakout_direction
+        ):
             continue
 
         active_zone["status"] = "closed"
@@ -2598,6 +2705,7 @@ def zig_candles_bootstrap(
     zones: bool = Query(True),
     zoneMinTicks: int = Query(DEFAULT_ZONE_MIN_DWELL_TICKS, ge=4, le=MAX_ZONE_MIN_DWELL_TICKS),
     zoneMinMs: int = Query(DEFAULT_ZONE_MIN_DWELL_MS, ge=100, le=MAX_ZONE_MIN_DWELL_MS),
+    zoneSameSideTolerance: float = Query(DEFAULT_ZONE_SAME_SIDE_TOLERANCE, ge=0.0, le=MAX_ZONE_SAME_SIDE_TOLERANCE),
     zoneOvershoot: float = Query(DEFAULT_ZONE_ALLOWED_OVERSHOOT, ge=0.0, le=MAX_ZONE_ALLOWED_OVERSHOOT),
     zoneBreakTicks: int = Query(DEFAULT_ZONE_BREAKOUT_TICKS, ge=1, le=MAX_ZONE_BREAKOUT_TICKS),
     zoneBreakTolerance: float = Query(DEFAULT_ZONE_BREAKOUT_TOLERANCE, ge=0.0, le=MAX_ZONE_BREAKOUT_TOLERANCE),
@@ -2606,6 +2714,7 @@ def zig_candles_bootstrap(
         enabled=zones,
         min_dwell_ticks=zoneMinTicks,
         min_dwell_ms=zoneMinMs,
+        same_side_tolerance=zoneSameSideTolerance,
         allowed_overshoot=zoneOvershoot,
         breakout_ticks=zoneBreakTicks,
         breakout_tolerance=zoneBreakTolerance,
@@ -2636,6 +2745,7 @@ def zig_candles_next(
     zones: bool = Query(True),
     zoneMinTicks: int = Query(DEFAULT_ZONE_MIN_DWELL_TICKS, ge=4, le=MAX_ZONE_MIN_DWELL_TICKS),
     zoneMinMs: int = Query(DEFAULT_ZONE_MIN_DWELL_MS, ge=100, le=MAX_ZONE_MIN_DWELL_MS),
+    zoneSameSideTolerance: float = Query(DEFAULT_ZONE_SAME_SIDE_TOLERANCE, ge=0.0, le=MAX_ZONE_SAME_SIDE_TOLERANCE),
     zoneOvershoot: float = Query(DEFAULT_ZONE_ALLOWED_OVERSHOOT, ge=0.0, le=MAX_ZONE_ALLOWED_OVERSHOOT),
     zoneBreakTicks: int = Query(DEFAULT_ZONE_BREAKOUT_TICKS, ge=1, le=MAX_ZONE_BREAKOUT_TICKS),
     zoneBreakTolerance: float = Query(DEFAULT_ZONE_BREAKOUT_TOLERANCE, ge=0.0, le=MAX_ZONE_BREAKOUT_TOLERANCE),
@@ -2644,6 +2754,7 @@ def zig_candles_next(
         enabled=zones,
         min_dwell_ticks=zoneMinTicks,
         min_dwell_ms=zoneMinMs,
+        same_side_tolerance=zoneSameSideTolerance,
         allowed_overshoot=zoneOvershoot,
         breakout_ticks=zoneBreakTicks,
         breakout_tolerance=zoneBreakTolerance,
@@ -2675,6 +2786,7 @@ def zig_candles_previous(
     zones: bool = Query(True),
     zoneMinTicks: int = Query(DEFAULT_ZONE_MIN_DWELL_TICKS, ge=4, le=MAX_ZONE_MIN_DWELL_TICKS),
     zoneMinMs: int = Query(DEFAULT_ZONE_MIN_DWELL_MS, ge=100, le=MAX_ZONE_MIN_DWELL_MS),
+    zoneSameSideTolerance: float = Query(DEFAULT_ZONE_SAME_SIDE_TOLERANCE, ge=0.0, le=MAX_ZONE_SAME_SIDE_TOLERANCE),
     zoneOvershoot: float = Query(DEFAULT_ZONE_ALLOWED_OVERSHOOT, ge=0.0, le=MAX_ZONE_ALLOWED_OVERSHOOT),
     zoneBreakTicks: int = Query(DEFAULT_ZONE_BREAKOUT_TICKS, ge=1, le=MAX_ZONE_BREAKOUT_TICKS),
     zoneBreakTolerance: float = Query(DEFAULT_ZONE_BREAKOUT_TOLERANCE, ge=0.0, le=MAX_ZONE_BREAKOUT_TOLERANCE),
@@ -2683,6 +2795,7 @@ def zig_candles_previous(
         enabled=zones,
         min_dwell_ticks=zoneMinTicks,
         min_dwell_ms=zoneMinMs,
+        same_side_tolerance=zoneSameSideTolerance,
         allowed_overshoot=zoneOvershoot,
         breakout_ticks=zoneBreakTicks,
         breakout_tolerance=zoneBreakTolerance,
@@ -2711,6 +2824,7 @@ def zig_candles_stream(
     zones: bool = Query(True),
     zoneMinTicks: int = Query(DEFAULT_ZONE_MIN_DWELL_TICKS, ge=4, le=MAX_ZONE_MIN_DWELL_TICKS),
     zoneMinMs: int = Query(DEFAULT_ZONE_MIN_DWELL_MS, ge=100, le=MAX_ZONE_MIN_DWELL_MS),
+    zoneSameSideTolerance: float = Query(DEFAULT_ZONE_SAME_SIDE_TOLERANCE, ge=0.0, le=MAX_ZONE_SAME_SIDE_TOLERANCE),
     zoneOvershoot: float = Query(DEFAULT_ZONE_ALLOWED_OVERSHOOT, ge=0.0, le=MAX_ZONE_ALLOWED_OVERSHOOT),
     zoneBreakTicks: int = Query(DEFAULT_ZONE_BREAKOUT_TICKS, ge=1, le=MAX_ZONE_BREAKOUT_TICKS),
     zoneBreakTolerance: float = Query(DEFAULT_ZONE_BREAKOUT_TOLERANCE, ge=0.0, le=MAX_ZONE_BREAKOUT_TOLERANCE),
@@ -2719,6 +2833,7 @@ def zig_candles_stream(
         enabled=zones,
         min_dwell_ticks=zoneMinTicks,
         min_dwell_ms=zoneMinMs,
+        same_side_tolerance=zoneSameSideTolerance,
         allowed_overshoot=zoneOvershoot,
         breakout_ticks=zoneBreakTicks,
         breakout_tolerance=zoneBreakTolerance,

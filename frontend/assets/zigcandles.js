@@ -12,6 +12,7 @@
     zones: true,
     zoneMinTicks: 24,
     zoneMinMs: 3000,
+    zoneSameSideTolerance: 0.24,
     zoneOvershoot: 0.18,
     zoneBreakTicks: 4,
     zoneBreakTolerance: 0.24,
@@ -85,6 +86,7 @@
     showZones: document.getElementById("showZones"),
     zoneMinTicks: document.getElementById("zoneMinTicks"),
     zoneMinMs: document.getElementById("zoneMinMs"),
+    zoneSameSideTolerance: document.getElementById("zoneSameSideTolerance"),
     zoneOvershoot: document.getElementById("zoneOvershoot"),
     zoneBreakTicks: document.getElementById("zoneBreakTicks"),
     zoneBreakTolerance: document.getElementById("zoneBreakTolerance"),
@@ -119,6 +121,7 @@
       zones: params.get("zones") !== "0",
       zoneMinTicks: sanitizeIntValue(params.get("zoneMinTicks"), DEFAULTS.zoneMinTicks, 4, 500),
       zoneMinMs: sanitizeIntValue(params.get("zoneMinMs"), DEFAULTS.zoneMinMs, 100, 300000),
+      zoneSameSideTolerance: sanitizeFloatValue(params.get("zoneSameSideTolerance"), DEFAULTS.zoneSameSideTolerance, 0, 10),
       zoneOvershoot: sanitizeFloatValue(params.get("zoneOvershoot"), DEFAULTS.zoneOvershoot, 0, 10),
       zoneBreakTicks: sanitizeIntValue(params.get("zoneBreakTicks"), DEFAULTS.zoneBreakTicks, 1, 64),
       zoneBreakTolerance: sanitizeFloatValue(params.get("zoneBreakTolerance"), DEFAULTS.zoneBreakTolerance, 0, 10),
@@ -182,6 +185,7 @@
       zones: Boolean(elements.showZones.checked),
       zoneMinTicks: sanitizeIntValue(elements.zoneMinTicks.value, DEFAULTS.zoneMinTicks, 4, 500),
       zoneMinMs: sanitizeIntValue(elements.zoneMinMs.value, DEFAULTS.zoneMinMs, 100, 300000),
+      zoneSameSideTolerance: sanitizeFloatValue(elements.zoneSameSideTolerance.value, DEFAULTS.zoneSameSideTolerance, 0, 10),
       zoneOvershoot: sanitizeFloatValue(elements.zoneOvershoot.value, DEFAULTS.zoneOvershoot, 0, 10),
       zoneBreakTicks: sanitizeIntValue(elements.zoneBreakTicks.value, DEFAULTS.zoneBreakTicks, 1, 64),
       zoneBreakTolerance: sanitizeFloatValue(elements.zoneBreakTolerance.value, DEFAULTS.zoneBreakTolerance, 0, 10),
@@ -204,6 +208,7 @@
     params.set("zones", config.zones ? "1" : "0");
     params.set("zoneMinTicks", String(config.zoneMinTicks));
     params.set("zoneMinMs", String(config.zoneMinMs));
+    params.set("zoneSameSideTolerance", String(config.zoneSameSideTolerance));
     params.set("zoneOvershoot", String(config.zoneOvershoot));
     params.set("zoneBreakTicks", String(config.zoneBreakTicks));
     params.set("zoneBreakTolerance", String(config.zoneBreakTolerance));
@@ -263,6 +268,7 @@
     elements.showZones.checked = Boolean(config.zones);
     elements.zoneMinTicks.value = String(config.zoneMinTicks);
     elements.zoneMinMs.value = String(config.zoneMinMs);
+    elements.zoneSameSideTolerance.value = String(config.zoneSameSideTolerance);
     elements.zoneOvershoot.value = String(config.zoneOvershoot);
     elements.zoneBreakTicks.value = String(config.zoneBreakTicks);
     elements.zoneBreakTolerance.value = String(config.zoneBreakTolerance);
@@ -757,14 +763,24 @@
   }
 
   function zoneTooltipHtml(zone) {
+    const anchors = Array.isArray(zone.anchorPivots)
+      ? zone.anchorPivots.map((pivot) => {
+        const side = String(pivot?.direction || "").toLowerCase() === "high" ? "H" : "L";
+        return side + "#" + String(pivot?.pivotId ?? "?") + " " + formatNumber(pivot?.price);
+      }).join(" | ")
+      : "";
     const breakoutLabel = zone.breakoutDirection ? "break " + zone.breakoutDirection : "break pending";
     return [
       "<div class=\"zigcandles-tip-zone\">",
       "<strong>" + escapeHtml("Zone " + zone.status.toUpperCase()) + "</strong><br>",
-      "box " + formatNumber(zone.zoneLow) + " - " + formatNumber(zone.zoneHigh) + " | h " + formatNumber(zone.zoneHeight) + "<br>",
+      escapeHtml(String(zone.patternType || "zone")) + " | same-side " + formatNumber(zone.sameSideDistance) + " / " + formatNumber(zone.sameSideTolerance) + "<br>",
+      escapeHtml(zone.birthRule || "") + "<br>",
+      "anchors " + escapeHtml(anchors) + "<br>",
+      "init box " + formatNumber(zone.initialZoneLow ?? zone.zoneLow) + " - " + formatNumber(zone.initialZoneHigh ?? zone.zoneHigh) + " | h " + formatNumber(zone.initialZoneHeight ?? zone.zoneHeight) + "<br>",
+      "continue tol " + formatNumber(zone.continuationTolerance ?? zone.maxAllowedOvershoot) + " | " + breakoutLabel + "<br>",
       "inside " + escapeHtml(String(zone.tickCountInside)) + " ticks | " + escapeHtml(zone.durationInsideLabel || "") + "<br>",
-      breakoutLabel + " | touches " + escapeHtml(String(zone.touchCount)) + " | revisits " + escapeHtml(String(zone.revisitCount)) + "<br>",
-      "pivots " + escapeHtml(String(zone.parentStartPivotId) + " -> " + String(zone.parentEndPivotId)),
+      "touches " + escapeHtml(String(zone.touchCount)) + " | revisits " + escapeHtml(String(zone.revisitCount)) + "<br>",
+      "anchor ids " + escapeHtml(String(zone.anchorStartPivotId ?? zone.parentStartPivotId) + " -> " + String(zone.anchorMiddlePivotId ?? "?") + " -> " + String(zone.anchorEndPivotId ?? zone.parentEndPivotId)),
       "</div>",
     ].join("");
   }
@@ -1096,6 +1112,7 @@
       zones: config.zones ? "true" : "false",
       zoneMinTicks: String(config.zoneMinTicks),
       zoneMinMs: String(config.zoneMinMs),
+      zoneSameSideTolerance: String(config.zoneSameSideTolerance),
       zoneOvershoot: String(config.zoneOvershoot),
       zoneBreakTicks: String(config.zoneBreakTicks),
       zoneBreakTolerance: String(config.zoneBreakTolerance),
@@ -1117,6 +1134,7 @@
       zones: config.zones ? "true" : "false",
       zoneMinTicks: String(config.zoneMinTicks),
       zoneMinMs: String(config.zoneMinMs),
+      zoneSameSideTolerance: String(config.zoneSameSideTolerance),
       zoneOvershoot: String(config.zoneOvershoot),
       zoneBreakTicks: String(config.zoneBreakTicks),
       zoneBreakTolerance: String(config.zoneBreakTolerance),
@@ -1142,6 +1160,7 @@
       zones: config.zones ? "true" : "false",
       zoneMinTicks: String(config.zoneMinTicks),
       zoneMinMs: String(config.zoneMinMs),
+      zoneSameSideTolerance: String(config.zoneSameSideTolerance),
       zoneOvershoot: String(config.zoneOvershoot),
       zoneBreakTicks: String(config.zoneBreakTicks),
       zoneBreakTolerance: String(config.zoneBreakTolerance),
@@ -1178,6 +1197,7 @@
       zones: config.zones ? "true" : "false",
       zoneMinTicks: String(config.zoneMinTicks),
       zoneMinMs: String(config.zoneMinMs),
+      zoneSameSideTolerance: String(config.zoneSameSideTolerance),
       zoneOvershoot: String(config.zoneOvershoot),
       zoneBreakTicks: String(config.zoneBreakTicks),
       zoneBreakTolerance: String(config.zoneBreakTolerance),
@@ -1344,7 +1364,7 @@
     }
   });
 
-  [elements.tickId, elements.reviewStart, elements.windowSize, elements.zoneMinTicks, elements.zoneMinMs, elements.zoneOvershoot, elements.zoneBreakTicks, elements.zoneBreakTolerance].forEach((control) => {
+  [elements.tickId, elements.reviewStart, elements.windowSize, elements.zoneMinTicks, elements.zoneMinMs, elements.zoneSameSideTolerance, elements.zoneOvershoot, elements.zoneBreakTicks, elements.zoneBreakTolerance].forEach((control) => {
     control.addEventListener("change", writeQuery);
   });
 

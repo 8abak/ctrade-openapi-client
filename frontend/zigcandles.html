@@ -161,13 +161,18 @@
 
             <div class="live-form-grid zone-settings-grid">
               <label>
-                <span>zone dwell ticks</span>
+                <span>zone confirm ticks</span>
                 <input id="zoneMinTicks" type="number" min="4" max="500" inputmode="numeric" value="24">
               </label>
 
               <label>
-                <span>zone dwell ms</span>
+                <span>zone confirm ms</span>
                 <input id="zoneMinMs" type="number" min="100" max="300000" inputmode="numeric" value="3000">
+              </label>
+
+              <label>
+                <span>same-side tol</span>
+                <input id="zoneSameSideTolerance" type="number" min="0" max="10" step="0.01" inputmode="decimal" value="0.24">
               </label>
 
               <label>
