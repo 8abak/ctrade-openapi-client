@@ -7,6 +7,7 @@ import re
 import secrets
 import time
 from bisect import bisect_left, bisect_right
+from collections import deque
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,6 +49,12 @@ MAX_ZIG_CANDLE_WINDOW = 10000
 MAX_ZIG_CANDLE_HISTORY_LIMIT = 10000
 MAX_STREAM_BATCH = 1000
 MAX_ZIG_STREAM_BATCH = 500
+MAX_ZONE_MIN_DWELL_TICKS = 500
+MAX_ZONE_MIN_DWELL_MS = 300000
+MAX_ZONE_ALLOWED_OVERSHOOT = 10.0
+MAX_ZONE_BREAKOUT_TICKS = 64
+MAX_ZONE_BREAKOUT_TOLERANCE = 10.0
+MAX_ZONE_HEIGHT = 25.0
 MAX_QUERY_ROWS = 1000
 DEFAULT_SQL_PREVIEW_LIMIT = 100
 MAX_SQL_PREVIEW_LIMIT = 500
@@ -67,6 +74,18 @@ DISPLAY_MODE_RE = "^(ticks|ticks-zig|zig)$"
 PRICE_SERIES_RE = "^(mid|ask|bid)$"
 MAX_ZIG_LEVEL = 3
 LEVEL_ZERO_PROVING_TICKS = 4
+DEFAULT_ZONE_MIN_DWELL_TICKS = int(os.getenv("DATAVIS_ZONE_MIN_DWELL_TICKS", "24"))
+DEFAULT_ZONE_MIN_DWELL_MS = int(os.getenv("DATAVIS_ZONE_MIN_DWELL_MS", "3000"))
+DEFAULT_ZONE_ALLOWED_OVERSHOOT = float(os.getenv("DATAVIS_ZONE_ALLOWED_OVERSHOOT", "0.18"))
+DEFAULT_ZONE_BREAKOUT_TICKS = int(os.getenv("DATAVIS_ZONE_BREAKOUT_TICKS", "4"))
+DEFAULT_ZONE_BREAKOUT_TOLERANCE = float(os.getenv("DATAVIS_ZONE_BREAKOUT_TOLERANCE", "0.24"))
+DEFAULT_ZONE_MIN_HEIGHT = float(os.getenv("DATAVIS_ZONE_MIN_HEIGHT", "0.05"))
+DEFAULT_ZONE_MAX_HEIGHT = float(os.getenv("DATAVIS_ZONE_MAX_HEIGHT", "1.60"))
+ZONE_CONTEXT_PIVOTS = 3
+ZONE_SEED_RATIO = 0.6
+ZONE_MAX_CONTEXT_RATIO = 0.58
+ZONE_WARMUP_MULTIPLIER = 4
+ZONE_MIN_WARMUP_TICKS = 64
 SQL_ADMIN_USER = os.getenv("DATAVIS_SQL_ADMIN_USER", "").strip()
 SQL_ADMIN_PASSWORD = os.getenv("DATAVIS_SQL_ADMIN_PASSWORD", "")
 DEFAULT_REVIEW_TIMEZONE = "Australia/Sydney"
@@ -148,6 +167,10 @@ def db_connection(readonly: bool = False, autocommit: bool = False):
 
 def clamp_int(value: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(value, maximum))
+
+
+def clamp_float(value: float, minimum: float, maximum: float) -> float:
+    return max(minimum, min(float(value), maximum))
 
 
 def now_ms() -> int:
@@ -615,6 +638,66 @@ def clamp_zig_level(value: int) -> int:
     return clamp_int(value, 0, MAX_ZIG_LEVEL)
 
 
+def clamp_zone_min_dwell_ticks(value: int) -> int:
+    return clamp_int(value, 4, MAX_ZONE_MIN_DWELL_TICKS)
+
+
+def clamp_zone_min_dwell_ms(value: int) -> int:
+    return clamp_int(value, 100, MAX_ZONE_MIN_DWELL_MS)
+
+
+def clamp_zone_allowed_overshoot(value: float) -> float:
+    return round(clamp_float(value, 0.0, MAX_ZONE_ALLOWED_OVERSHOOT), 6)
+
+
+def clamp_zone_breakout_ticks(value: int) -> int:
+    return clamp_int(value, 1, MAX_ZONE_BREAKOUT_TICKS)
+
+
+def clamp_zone_breakout_tolerance(value: float) -> float:
+    return round(clamp_float(value, 0.0, MAX_ZONE_BREAKOUT_TOLERANCE), 6)
+
+
+def clamp_zone_height_value(value: float) -> float:
+    return round(clamp_float(value, 0.0, MAX_ZONE_HEIGHT), 6)
+
+
+def build_zone_settings(
+    *,
+    enabled: bool,
+    min_dwell_ticks: int,
+    min_dwell_ms: int,
+    allowed_overshoot: float,
+    breakout_ticks: int,
+    breakout_tolerance: float,
+    min_height: float,
+    max_height: float,
+) -> Dict[str, Any]:
+    effective_min_height = clamp_zone_height_value(min_height)
+    effective_max_height = clamp_zone_height_value(max_height)
+    if effective_max_height < effective_min_height:
+        effective_max_height = effective_min_height
+    effective_min_dwell_ticks = clamp_zone_min_dwell_ticks(min_dwell_ticks)
+    effective_min_dwell_ms = clamp_zone_min_dwell_ms(min_dwell_ms)
+    seed_dwell_ticks = max(4, int(round(effective_min_dwell_ticks * ZONE_SEED_RATIO)))
+    seed_dwell_ms = max(250, int(round(effective_min_dwell_ms * ZONE_SEED_RATIO)))
+    return {
+        "enabled": bool(enabled),
+        "minDwellTicks": effective_min_dwell_ticks,
+        "minDwellMs": effective_min_dwell_ms,
+        "seedDwellTicks": seed_dwell_ticks,
+        "seedDwellMs": seed_dwell_ms,
+        "allowedOvershoot": clamp_zone_allowed_overshoot(allowed_overshoot),
+        "breakoutTicks": clamp_zone_breakout_ticks(breakout_ticks),
+        "breakoutTolerance": clamp_zone_breakout_tolerance(breakout_tolerance),
+        "minHeight": effective_min_height,
+        "maxHeight": effective_max_height,
+        "contextPivots": ZONE_CONTEXT_PIVOTS,
+        "maxContextRatio": ZONE_MAX_CONTEXT_RATIO,
+        "warmupTicks": max(ZONE_MIN_WARMUP_TICKS, effective_min_dwell_ticks * ZONE_WARMUP_MULTIPLIER),
+    }
+
+
 def price_series_value(row: Dict[str, Any], series: str) -> Optional[float]:
     direct_value = row.get(series)
     if direct_value is not None:
@@ -798,6 +881,51 @@ def fetch_zig_candle_pivots(
     return rows
 
 
+def fetch_selected_zig_pivot_ids(
+    cur: Any,
+    *,
+    range_start_id: int,
+    cursor_id: int,
+    selected_level: int,
+    left_context_count: int = ZONE_CONTEXT_PIVOTS + 1,
+) -> List[int]:
+    cur.execute(
+        """
+        SELECT DISTINCT pivot_id
+        FROM public.fast_zig_pivots
+        WHERE symbol = %s
+          AND level >= %s
+          AND visible_from_tick_id <= %s
+          AND visible_from_tick_id >= %s
+        ORDER BY pivot_id ASC
+        """,
+        (TICK_SYMBOL, selected_level, cursor_id, range_start_id),
+    )
+    pivot_ids = [int(row["pivot_id"]) for row in cur.fetchall()]
+    cur.execute(
+        """
+        SELECT pivot_id
+        FROM public.fast_zig_pivots
+        WHERE symbol = %s
+          AND level >= %s
+          AND visible_from_tick_id < %s
+        ORDER BY visible_from_tick_id DESC, pivot_id DESC
+        LIMIT %s
+        """,
+        (TICK_SYMBOL, selected_level, range_start_id, left_context_count),
+    )
+    left_context_ids = [int(row["pivot_id"]) for row in cur.fetchall()]
+    left_context_ids.reverse()
+    combined_ids: List[int] = []
+    seen_ids = set()
+    for pivot_id in left_context_ids + pivot_ids:
+        if pivot_id in seen_ids:
+            continue
+        seen_ids.add(pivot_id)
+        combined_ids.append(pivot_id)
+    return combined_ids
+
+
 def fetch_ticks_for_zig_candle_range(cur: Any, *, start_id: int, end_id: int) -> List[Dict[str, Any]]:
     cur.execute(
         """
@@ -811,6 +939,282 @@ def fetch_ticks_for_zig_candle_range(cur: Any, *, start_id: int, end_id: int) ->
         (TICK_SYMBOL, start_id, end_id),
     )
     return [dict(row) for row in cur.fetchall()]
+
+
+def pivots_alternate(pivots: List[Dict[str, Any]]) -> bool:
+    if len(pivots) < 2:
+        return False
+    return all(str(pivots[index]["direction"]) != str(pivots[index - 1]["direction"]) for index in range(1, len(pivots)))
+
+
+def round_price(value: float) -> float:
+    return round(float(value), 6)
+
+
+def zone_touch_side(price: float, low: float, high: float, tolerance: float) -> Optional[str]:
+    if abs(price - low) <= tolerance:
+        return "low"
+    if abs(price - high) <= tolerance:
+        return "high"
+    return None
+
+
+def zone_payload_from_state(zone: Dict[str, Any]) -> Dict[str, Any]:
+    duration_inside_ms = max(0, int(zone["last_inside_timestamp_ms"]) - int(zone["start_timestamp_ms"]))
+    episode_duration_ms = max(0, int(zone["right_timestamp_ms"]) - int(zone["start_timestamp_ms"]))
+    return {
+        "id": zone["id"],
+        "symbol": zone["symbol"],
+        "selectedLevel": zone["selected_level"],
+        "status": zone["status"],
+        "startTickId": zone["start_tick_id"],
+        "endTickId": zone["breakout_tick_id"] if zone["status"] == "closed" else None,
+        "rightTickId": zone["right_tick_id"],
+        "startTimestamp": zone["start_timestamp"],
+        "endTimestamp": zone["breakout_timestamp"] if zone["status"] == "closed" else None,
+        "rightTimestamp": zone["right_timestamp"],
+        "startTimestampMs": zone["start_timestamp_ms"],
+        "endTimestampMs": zone["breakout_timestamp_ms"] if zone["status"] == "closed" else None,
+        "rightTimestampMs": zone["right_timestamp_ms"],
+        "zoneLow": round_price(zone["zone_low"]),
+        "zoneHigh": round_price(zone["zone_high"]),
+        "zoneHeight": round_price(zone["zone_high"] - zone["zone_low"]),
+        "tickCountInside": zone["tick_count_inside"],
+        "durationInsideMs": duration_inside_ms,
+        "durationInsideLabel": format_duration_ms(duration_inside_ms),
+        "episodeDurationMs": episode_duration_ms,
+        "episodeDurationLabel": format_duration_ms(episode_duration_ms),
+        "openTimestamp": zone["start_timestamp"],
+        "closeTimestamp": zone["breakout_timestamp"] if zone["status"] == "closed" else None,
+        "touchCount": zone["touch_count"],
+        "revisitCount": zone["revisit_count"],
+        "maxAllowedOvershoot": round_price(zone["allowed_overshoot"]),
+        "breakoutDirection": zone["breakout_direction"],
+        "breakoutTickId": zone["breakout_tick_id"],
+        "breakoutTimestamp": zone["breakout_timestamp"],
+        "breakoutTimestampMs": zone["breakout_timestamp_ms"],
+        "parentStartPivotId": zone["parent_start_pivot_id"],
+        "parentEndPivotId": zone["parent_end_pivot_id"],
+        "contextStartPivotId": zone["context_start_pivot_id"],
+        "contextEndPivotId": zone["context_end_pivot_id"],
+        "derivedFromAcceptance": True,
+        "seedLow": round_price(zone["seed_low"]),
+        "seedHigh": round_price(zone["seed_high"]),
+        "seedHeight": round_price(zone["seed_high"] - zone["seed_low"]),
+    }
+
+
+def build_zig_zone_rows(
+    cur: Any,
+    *,
+    range_start_id: Optional[int],
+    cursor_id: Optional[int],
+    selected_level: int,
+    series: str,
+    zone_settings: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    if (
+        not zone_settings.get("enabled")
+        or range_start_id is None
+        or cursor_id is None
+        or cursor_id < range_start_id
+    ):
+        return []
+
+    warmup_rows = query_rows_before(
+        cur,
+        range_start_id,
+        int(zone_settings["warmupTicks"]),
+        include_rows=True,
+    )
+    visible_rows = fetch_ticks_for_zig_candle_range(cur, start_id=range_start_id, end_id=cursor_id)
+    tick_rows = warmup_rows + visible_rows
+    if not tick_rows:
+        return []
+
+    context_start_id = int(tick_rows[0]["id"])
+    pivot_ids = fetch_selected_zig_pivot_ids(
+        cur,
+        range_start_id=context_start_id,
+        cursor_id=cursor_id,
+        selected_level=selected_level,
+    )
+    pivots = fetch_zig_candle_pivots(
+        cur,
+        pivot_ids=pivot_ids,
+        cursor_id=cursor_id,
+        selected_level=selected_level,
+    )
+    if len(pivots) < int(zone_settings["contextPivots"]):
+        return []
+
+    visible_pivots: List[Dict[str, Any]] = []
+    pivot_index = 0
+    recent_ticks: deque[Dict[str, Any]] = deque(maxlen=max(int(zone_settings["minDwellTicks"]) * 2, 128))
+    zones: List[Dict[str, Any]] = []
+    active_zone: Optional[Dict[str, Any]] = None
+    next_zone_id = 1
+    touch_tolerance = max(float(zone_settings["allowedOvershoot"]) * 0.6, 0.01)
+
+    for tick_row in tick_rows:
+        tick_id = int(tick_row["id"])
+        while pivot_index < len(pivots) and int(pivots[pivot_index]["selected_visible_from_tick_id"]) <= tick_id:
+            visible_pivots.append(pivots[pivot_index])
+            if len(visible_pivots) > 10:
+                visible_pivots = visible_pivots[-10:]
+            pivot_index += 1
+
+        price = price_series_value(tick_row, series)
+        if price is None:
+            continue
+        timestamp_ms = dt_to_ms(tick_row["timestamp"])
+        if timestamp_ms is None:
+            continue
+        recent_tick = {
+            "id": tick_id,
+            "timestamp": tick_row["timestamp"].isoformat(),
+            "timestamp_ms": timestamp_ms,
+            "price": float(price),
+        }
+        recent_ticks.append(recent_tick)
+
+        if active_zone is None:
+            if len(visible_pivots) < int(zone_settings["contextPivots"]):
+                continue
+            context_pivots = visible_pivots[-int(zone_settings["contextPivots"]):]
+            if not pivots_alternate(context_pivots):
+                continue
+            if len(recent_ticks) < int(zone_settings["seedDwellTicks"]):
+                continue
+
+            seed_ticks = list(recent_ticks)[-int(zone_settings["seedDwellTicks"]):]
+            seed_duration_ms = int(seed_ticks[-1]["timestamp_ms"]) - int(seed_ticks[0]["timestamp_ms"])
+            if seed_duration_ms < int(zone_settings["seedDwellMs"]):
+                continue
+
+            seed_prices = [float(row["price"]) for row in seed_ticks]
+            seed_low = min(seed_prices)
+            seed_high = max(seed_prices)
+            seed_height = seed_high - seed_low
+            context_prices = [float(row["pivot_price"]) for row in context_pivots]
+            context_height = max(context_prices) - min(context_prices)
+            max_context_height = max(
+                float(zone_settings["minHeight"]),
+                min(float(zone_settings["maxHeight"]), context_height * float(zone_settings["maxContextRatio"])),
+            )
+            if seed_height < float(zone_settings["minHeight"]) or seed_height > max_context_height:
+                continue
+
+            active_zone = {
+                "id": "zone:{0}:{1}".format(selected_level, next_zone_id),
+                "symbol": TICK_SYMBOL,
+                "selected_level": selected_level,
+                "status": "provisional",
+                "start_tick_id": int(seed_ticks[0]["id"]),
+                "start_timestamp": seed_ticks[0]["timestamp"],
+                "start_timestamp_ms": int(seed_ticks[0]["timestamp_ms"]),
+                "right_tick_id": tick_id,
+                "right_timestamp": tick_row["timestamp"].isoformat(),
+                "right_timestamp_ms": timestamp_ms,
+                "last_inside_timestamp_ms": timestamp_ms,
+                "zone_low": seed_low,
+                "zone_high": seed_high,
+                "seed_low": seed_low,
+                "seed_high": seed_high,
+                "tick_count_inside": len(seed_ticks),
+                "touch_count": 0,
+                "revisit_count": 0,
+                "allowed_overshoot": float(zone_settings["allowedOvershoot"]),
+                "breakout_direction": None,
+                "breakout_tick_id": None,
+                "breakout_timestamp": None,
+                "breakout_timestamp_ms": None,
+                "outside_direction": None,
+                "outside_streak": 0,
+                "parent_start_pivot_id": int(context_pivots[0]["pivot_id"]),
+                "parent_end_pivot_id": int(context_pivots[-1]["pivot_id"]),
+                "context_start_pivot_id": int(context_pivots[0]["pivot_id"]),
+                "context_end_pivot_id": int(context_pivots[-1]["pivot_id"]),
+                "last_touch_side": None,
+            }
+            next_zone_id += 1
+            touch_side = zone_touch_side(float(price), seed_low, seed_high, touch_tolerance)
+            if touch_side:
+                active_zone["touch_count"] = 1
+                active_zone["last_touch_side"] = touch_side
+            if (
+                active_zone["tick_count_inside"] >= int(zone_settings["minDwellTicks"])
+                and timestamp_ms - int(active_zone["start_timestamp_ms"]) >= int(zone_settings["minDwellMs"])
+            ):
+                active_zone["status"] = "active"
+            continue
+
+        active_zone["right_tick_id"] = tick_id
+        active_zone["right_timestamp"] = tick_row["timestamp"].isoformat()
+        active_zone["right_timestamp_ms"] = timestamp_ms
+
+        price_value = float(price)
+        within_overshoot = (
+            price_value >= float(active_zone["zone_low"]) - float(zone_settings["allowedOvershoot"])
+            and price_value <= float(active_zone["zone_high"]) + float(zone_settings["allowedOvershoot"])
+        )
+        if within_overshoot:
+            if active_zone["outside_streak"] > 0:
+                active_zone["revisit_count"] += 1
+            active_zone["outside_streak"] = 0
+            active_zone["outside_direction"] = None
+            next_low = min(float(active_zone["zone_low"]), price_value)
+            next_high = max(float(active_zone["zone_high"]), price_value)
+            if next_high - next_low <= float(zone_settings["maxHeight"]):
+                active_zone["zone_low"] = next_low
+                active_zone["zone_high"] = next_high
+            active_zone["tick_count_inside"] += 1
+            active_zone["last_inside_timestamp_ms"] = timestamp_ms
+            touch_side = zone_touch_side(price_value, float(active_zone["zone_low"]), float(active_zone["zone_high"]), touch_tolerance)
+            if touch_side and touch_side != active_zone.get("last_touch_side"):
+                active_zone["touch_count"] += 1
+            active_zone["last_touch_side"] = touch_side
+            if (
+                active_zone["status"] == "provisional"
+                and active_zone["tick_count_inside"] >= int(zone_settings["minDwellTicks"])
+                and timestamp_ms - int(active_zone["start_timestamp_ms"]) >= int(zone_settings["minDwellMs"])
+            ):
+                active_zone["status"] = "active"
+            continue
+
+        breakout_direction: Optional[str] = None
+        if price_value > float(active_zone["zone_high"]) + float(zone_settings["breakoutTolerance"]):
+            breakout_direction = "up"
+        elif price_value < float(active_zone["zone_low"]) - float(zone_settings["breakoutTolerance"]):
+            breakout_direction = "down"
+
+        if breakout_direction is None:
+            active_zone["outside_streak"] = 0
+            active_zone["outside_direction"] = None
+            active_zone["last_touch_side"] = None
+            continue
+
+        if active_zone["outside_direction"] == breakout_direction:
+            active_zone["outside_streak"] += 1
+        else:
+            active_zone["outside_direction"] = breakout_direction
+            active_zone["outside_streak"] = 1
+
+        if active_zone["outside_streak"] < int(zone_settings["breakoutTicks"]):
+            continue
+
+        active_zone["status"] = "closed"
+        active_zone["breakout_direction"] = breakout_direction
+        active_zone["breakout_tick_id"] = tick_id
+        active_zone["breakout_timestamp"] = tick_row["timestamp"].isoformat()
+        active_zone["breakout_timestamp_ms"] = timestamp_ms
+        if int(active_zone["right_tick_id"]) >= range_start_id:
+            zones.append(zone_payload_from_state(active_zone))
+        active_zone = None
+
+    if active_zone is not None and int(active_zone["right_tick_id"]) >= range_start_id:
+        zones.append(zone_payload_from_state(active_zone))
+    return zones
 
 
 def build_zig_candle_rows(
@@ -976,6 +1380,8 @@ def build_zig_candle_range_payload(
     series: str,
     range_rows: List[Dict[str, Any]],
     candle_rows: List[Dict[str, Any]],
+    zone_rows: List[Dict[str, Any]],
+    zone_settings: Dict[str, Any],
     review_end_id: Optional[int],
     review_end_timestamp: Optional[datetime],
     bounds: Dict[str, Any],
@@ -989,6 +1395,9 @@ def build_zig_candle_range_payload(
     return {
         "bars": candle_rows,
         "barCount": len(candle_rows),
+        "zones": zone_rows,
+        "zoneCount": len(zone_rows),
+        "zoneConfig": zone_settings,
         "firstId": first_row_id,
         "lastId": last_row_id,
         "firstTimestamp": serialize_value(first_row.get("timestamp") if first_row else None),
@@ -1020,6 +1429,7 @@ def load_zig_candle_bootstrap_payload(
     selected_level: int,
     series: str,
     include_provisional: bool,
+    zone_settings: Dict[str, Any],
 ) -> Dict[str, Any]:
     effective_window = clamp_zig_candle_window(window)
     effective_level = clamp_zig_level(selected_level)
@@ -1057,6 +1467,18 @@ def load_zig_candle_bootstrap_payload(
                 if zig_storage_ready(cur)
                 else []
             )
+            zone_rows = (
+                build_zig_zone_rows(
+                    cur,
+                    range_start_id=range_first_id,
+                    cursor_id=range_last_id,
+                    selected_level=effective_level,
+                    series=series,
+                    zone_settings=zone_settings,
+                )
+                if zig_storage_ready(cur)
+                else []
+            )
     fetch_ms = elapsed_ms(fetch_started)
     serialize_started = time.perf_counter()
     payload = build_zig_candle_range_payload(
@@ -1066,6 +1488,8 @@ def load_zig_candle_bootstrap_payload(
         series=series,
         range_rows=range_rows,
         candle_rows=candle_rows,
+        zone_rows=zone_rows,
+        zone_settings=zone_settings,
         review_end_id=review_end_id,
         review_end_timestamp=review_end_timestamp,
         bounds=bounds,
@@ -1086,6 +1510,7 @@ def load_zig_candle_next_payload(
     series: str,
     include_provisional: bool,
     review_start_id: Optional[int],
+    zone_settings: Dict[str, Any],
 ) -> Dict[str, Any]:
     effective_window = clamp_zig_candle_window(window)
     effective_level = clamp_zig_level(selected_level)
@@ -1121,6 +1546,18 @@ def load_zig_candle_next_payload(
                 if zig_storage_ready(cur)
                 else []
             )
+            zone_rows = (
+                build_zig_zone_rows(
+                    cur,
+                    range_start_id=range_first_id,
+                    cursor_id=range_last_id,
+                    selected_level=effective_level,
+                    series=series,
+                    zone_settings=zone_settings,
+                )
+                if zig_storage_ready(cur)
+                else []
+            )
     fetch_ms = elapsed_ms(fetch_started)
     serialize_started = time.perf_counter()
     payload = build_zig_candle_range_payload(
@@ -1130,6 +1567,8 @@ def load_zig_candle_next_payload(
         series=series,
         range_rows=range_rows,
         candle_rows=candle_rows,
+        zone_rows=zone_rows,
+        zone_settings=zone_settings,
         review_end_id=end_id,
         review_end_timestamp=bounds.get("lastTimestamp") if review_start_id is not None else None,
         bounds=bounds,
@@ -1150,6 +1589,7 @@ def load_zig_candle_previous_payload(
     selected_level: int,
     series: str,
     include_provisional: bool,
+    zone_settings: Dict[str, Any],
 ) -> Dict[str, Any]:
     effective_window = clamp_zig_candle_window(window)
     effective_limit = clamp_zig_candle_history_limit(limit)
@@ -1184,6 +1624,18 @@ def load_zig_candle_previous_payload(
                 if zig_storage_ready(cur)
                 else []
             )
+            zone_rows = (
+                build_zig_zone_rows(
+                    cur,
+                    range_start_id=range_first_id,
+                    cursor_id=range_last_id,
+                    selected_level=effective_level,
+                    series=series,
+                    zone_settings=zone_settings,
+                )
+                if zig_storage_ready(cur)
+                else []
+            )
     fetch_ms = elapsed_ms(fetch_started)
     serialize_started = time.perf_counter()
     payload = build_zig_candle_range_payload(
@@ -1193,6 +1645,8 @@ def load_zig_candle_previous_payload(
         series=series,
         range_rows=range_rows,
         candle_rows=candle_rows,
+        zone_rows=zone_rows,
+        zone_settings=zone_settings,
         review_end_id=None,
         review_end_timestamp=None,
         bounds=bounds,
@@ -1212,6 +1666,7 @@ def stream_zig_candle_events(
     selected_level: int,
     series: str,
     include_provisional: bool,
+    zone_settings: Dict[str, Any],
 ) -> Generator[str, None, None]:
     last_id = max(0, after_id)
     effective_window = clamp_zig_candle_window(window)
@@ -1257,6 +1712,18 @@ def stream_zig_candle_events(
                             if zig_ready
                             else []
                         )
+                        zone_rows = (
+                            build_zig_zone_rows(
+                                cur,
+                                range_start_id=range_first_id,
+                                cursor_id=range_last_id,
+                                selected_level=effective_level,
+                                series=series,
+                                zone_settings=zone_settings,
+                            )
+                            if zig_ready
+                            else []
+                        )
                         fetch_ms = elapsed_ms(fetch_started)
                         serialize_started = time.perf_counter()
                         payload = build_zig_candle_range_payload(
@@ -1266,6 +1733,8 @@ def stream_zig_candle_events(
                             series=series,
                             range_rows=range_rows,
                             candle_rows=candle_rows,
+                            zone_rows=zone_rows,
+                            zone_settings=zone_settings,
                             review_end_id=None,
                             review_end_timestamp=None,
                             bounds=bounds,
@@ -2126,7 +2595,23 @@ def zig_candles_bootstrap(
     level: int = Query(0, ge=0, le=MAX_ZIG_LEVEL),
     series: str = Query("mid", pattern=PRICE_SERIES_RE),
     provisional: bool = Query(True),
+    zones: bool = Query(True),
+    zoneMinTicks: int = Query(DEFAULT_ZONE_MIN_DWELL_TICKS, ge=4, le=MAX_ZONE_MIN_DWELL_TICKS),
+    zoneMinMs: int = Query(DEFAULT_ZONE_MIN_DWELL_MS, ge=100, le=MAX_ZONE_MIN_DWELL_MS),
+    zoneOvershoot: float = Query(DEFAULT_ZONE_ALLOWED_OVERSHOOT, ge=0.0, le=MAX_ZONE_ALLOWED_OVERSHOOT),
+    zoneBreakTicks: int = Query(DEFAULT_ZONE_BREAKOUT_TICKS, ge=1, le=MAX_ZONE_BREAKOUT_TICKS),
+    zoneBreakTolerance: float = Query(DEFAULT_ZONE_BREAKOUT_TOLERANCE, ge=0.0, le=MAX_ZONE_BREAKOUT_TOLERANCE),
 ) -> Dict[str, Any]:
+    zone_settings = build_zone_settings(
+        enabled=zones,
+        min_dwell_ticks=zoneMinTicks,
+        min_dwell_ms=zoneMinMs,
+        allowed_overshoot=zoneOvershoot,
+        breakout_ticks=zoneBreakTicks,
+        breakout_tolerance=zoneBreakTolerance,
+        min_height=DEFAULT_ZONE_MIN_HEIGHT,
+        max_height=DEFAULT_ZONE_MAX_HEIGHT,
+    )
     return load_zig_candle_bootstrap_payload(
         mode=mode,
         start_id=id,
@@ -2134,6 +2619,7 @@ def zig_candles_bootstrap(
         selected_level=level,
         series=series,
         include_provisional=provisional,
+        zone_settings=zone_settings,
     )
 
 
@@ -2147,7 +2633,23 @@ def zig_candles_next(
     series: str = Query("mid", pattern=PRICE_SERIES_RE),
     provisional: bool = Query(True),
     reviewStartId: Optional[int] = Query(None, ge=1),
+    zones: bool = Query(True),
+    zoneMinTicks: int = Query(DEFAULT_ZONE_MIN_DWELL_TICKS, ge=4, le=MAX_ZONE_MIN_DWELL_TICKS),
+    zoneMinMs: int = Query(DEFAULT_ZONE_MIN_DWELL_MS, ge=100, le=MAX_ZONE_MIN_DWELL_MS),
+    zoneOvershoot: float = Query(DEFAULT_ZONE_ALLOWED_OVERSHOOT, ge=0.0, le=MAX_ZONE_ALLOWED_OVERSHOOT),
+    zoneBreakTicks: int = Query(DEFAULT_ZONE_BREAKOUT_TICKS, ge=1, le=MAX_ZONE_BREAKOUT_TICKS),
+    zoneBreakTolerance: float = Query(DEFAULT_ZONE_BREAKOUT_TOLERANCE, ge=0.0, le=MAX_ZONE_BREAKOUT_TOLERANCE),
 ) -> Dict[str, Any]:
+    zone_settings = build_zone_settings(
+        enabled=zones,
+        min_dwell_ticks=zoneMinTicks,
+        min_dwell_ms=zoneMinMs,
+        allowed_overshoot=zoneOvershoot,
+        breakout_ticks=zoneBreakTicks,
+        breakout_tolerance=zoneBreakTolerance,
+        min_height=DEFAULT_ZONE_MIN_HEIGHT,
+        max_height=DEFAULT_ZONE_MAX_HEIGHT,
+    )
     return load_zig_candle_next_payload(
         after_id=afterId,
         limit=limit,
@@ -2157,6 +2659,7 @@ def zig_candles_next(
         series=series,
         include_provisional=provisional,
         review_start_id=reviewStartId,
+        zone_settings=zone_settings,
     )
 
 
@@ -2169,7 +2672,23 @@ def zig_candles_previous(
     level: int = Query(0, ge=0, le=MAX_ZIG_LEVEL),
     series: str = Query("mid", pattern=PRICE_SERIES_RE),
     provisional: bool = Query(True),
+    zones: bool = Query(True),
+    zoneMinTicks: int = Query(DEFAULT_ZONE_MIN_DWELL_TICKS, ge=4, le=MAX_ZONE_MIN_DWELL_TICKS),
+    zoneMinMs: int = Query(DEFAULT_ZONE_MIN_DWELL_MS, ge=100, le=MAX_ZONE_MIN_DWELL_MS),
+    zoneOvershoot: float = Query(DEFAULT_ZONE_ALLOWED_OVERSHOOT, ge=0.0, le=MAX_ZONE_ALLOWED_OVERSHOOT),
+    zoneBreakTicks: int = Query(DEFAULT_ZONE_BREAKOUT_TICKS, ge=1, le=MAX_ZONE_BREAKOUT_TICKS),
+    zoneBreakTolerance: float = Query(DEFAULT_ZONE_BREAKOUT_TOLERANCE, ge=0.0, le=MAX_ZONE_BREAKOUT_TOLERANCE),
 ) -> Dict[str, Any]:
+    zone_settings = build_zone_settings(
+        enabled=zones,
+        min_dwell_ticks=zoneMinTicks,
+        min_dwell_ms=zoneMinMs,
+        allowed_overshoot=zoneOvershoot,
+        breakout_ticks=zoneBreakTicks,
+        breakout_tolerance=zoneBreakTolerance,
+        min_height=DEFAULT_ZONE_MIN_HEIGHT,
+        max_height=DEFAULT_ZONE_MAX_HEIGHT,
+    )
     return load_zig_candle_previous_payload(
         current_last_id=currentLastId,
         limit=limit,
@@ -2177,6 +2696,7 @@ def zig_candles_previous(
         selected_level=level,
         series=series,
         include_provisional=provisional,
+        zone_settings=zone_settings,
     )
 
 
@@ -2188,7 +2708,23 @@ def zig_candles_stream(
     level: int = Query(0, ge=0, le=MAX_ZIG_LEVEL),
     series: str = Query("mid", pattern=PRICE_SERIES_RE),
     provisional: bool = Query(True),
+    zones: bool = Query(True),
+    zoneMinTicks: int = Query(DEFAULT_ZONE_MIN_DWELL_TICKS, ge=4, le=MAX_ZONE_MIN_DWELL_TICKS),
+    zoneMinMs: int = Query(DEFAULT_ZONE_MIN_DWELL_MS, ge=100, le=MAX_ZONE_MIN_DWELL_MS),
+    zoneOvershoot: float = Query(DEFAULT_ZONE_ALLOWED_OVERSHOOT, ge=0.0, le=MAX_ZONE_ALLOWED_OVERSHOOT),
+    zoneBreakTicks: int = Query(DEFAULT_ZONE_BREAKOUT_TICKS, ge=1, le=MAX_ZONE_BREAKOUT_TICKS),
+    zoneBreakTolerance: float = Query(DEFAULT_ZONE_BREAKOUT_TOLERANCE, ge=0.0, le=MAX_ZONE_BREAKOUT_TOLERANCE),
 ) -> StreamingResponse:
+    zone_settings = build_zone_settings(
+        enabled=zones,
+        min_dwell_ticks=zoneMinTicks,
+        min_dwell_ms=zoneMinMs,
+        allowed_overshoot=zoneOvershoot,
+        breakout_ticks=zoneBreakTicks,
+        breakout_tolerance=zoneBreakTolerance,
+        min_height=DEFAULT_ZONE_MIN_HEIGHT,
+        max_height=DEFAULT_ZONE_MAX_HEIGHT,
+    )
     return StreamingResponse(
         stream_zig_candle_events(
             after_id=afterId,
@@ -2197,6 +2733,7 @@ def zig_candles_stream(
             selected_level=level,
             series=series,
             include_provisional=provisional,
+            zone_settings=zone_settings,
         ),
         media_type="text/event-stream",
         headers={

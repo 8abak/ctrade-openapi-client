@@ -142,12 +142,43 @@
 
             <div class="live-check-grid">
               <label class="compact-check">
+                <input id="showZones" type="checkbox" checked>
+                <span>Show zones</span>
+              </label>
+              <label class="compact-check">
                 <input id="showProvisional" type="checkbox" checked>
                 <span>Show provisional</span>
               </label>
               <label class="compact-check">
                 <input id="showTable" type="checkbox" checked>
                 <span>Show table</span>
+              </label>
+            </div>
+
+            <div class="live-form-grid zone-settings-grid">
+              <label>
+                <span>zone dwell ticks</span>
+                <input id="zoneMinTicks" type="number" min="4" max="500" inputmode="numeric" value="24">
+              </label>
+
+              <label>
+                <span>zone dwell ms</span>
+                <input id="zoneMinMs" type="number" min="100" max="300000" inputmode="numeric" value="3000">
+              </label>
+
+              <label>
+                <span>zone overshoot</span>
+                <input id="zoneOvershoot" type="number" min="0" max="10" step="0.01" inputmode="decimal" value="0.18">
+              </label>
+
+              <label>
+                <span>zone break ticks</span>
+                <input id="zoneBreakTicks" type="number" min="1" max="64" inputmode="numeric" value="4">
+              </label>
+
+              <label class="live-control-field-wide">
+                <span>zone break tol</span>
+                <input id="zoneBreakTolerance" type="number" min="0" max="10" step="0.01" inputmode="decimal" value="0.24">
               </label>
             </div>
           </div>

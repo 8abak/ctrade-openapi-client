@@ -9,6 +9,12 @@
     reviewStart: "",
     reviewSpeed: 1,
     window: 2000,
+    zones: true,
+    zoneMinTicks: 24,
+    zoneMinMs: 3000,
+    zoneOvershoot: 0.18,
+    zoneBreakTicks: 4,
+    zoneBreakTolerance: 0.24,
     provisional: true,
     table: true,
   };
@@ -26,6 +32,9 @@
   const state = {
     chart: null,
     bars: [],
+    zones: [],
+    zoneConfig: null,
+    renderedSeries: [],
     source: null,
     reviewTimer: 0,
     reviewEndId: null,
@@ -68,6 +77,12 @@
     reviewStart: document.getElementById("reviewStart"),
     reviewSpeedToggle: document.getElementById("reviewSpeedToggle"),
     windowSize: document.getElementById("windowSize"),
+    showZones: document.getElementById("showZones"),
+    zoneMinTicks: document.getElementById("zoneMinTicks"),
+    zoneMinMs: document.getElementById("zoneMinMs"),
+    zoneOvershoot: document.getElementById("zoneOvershoot"),
+    zoneBreakTicks: document.getElementById("zoneBreakTicks"),
+    zoneBreakTolerance: document.getElementById("zoneBreakTolerance"),
     showProvisional: document.getElementById("showProvisional"),
     showTable: document.getElementById("showTable"),
     applyButton: document.getElementById("applyButton"),
@@ -95,6 +110,12 @@
       reviewStart: params.get("reviewStart") || DEFAULTS.reviewStart,
       reviewSpeed: REVIEW_SPEEDS.includes(reviewSpeed) ? reviewSpeed : DEFAULTS.reviewSpeed,
       window: sanitizeWindowValue(params.get("window")),
+      zones: params.get("zones") !== "0",
+      zoneMinTicks: sanitizeIntValue(params.get("zoneMinTicks"), DEFAULTS.zoneMinTicks, 4, 500),
+      zoneMinMs: sanitizeIntValue(params.get("zoneMinMs"), DEFAULTS.zoneMinMs, 100, 300000),
+      zoneOvershoot: sanitizeFloatValue(params.get("zoneOvershoot"), DEFAULTS.zoneOvershoot, 0, 10),
+      zoneBreakTicks: sanitizeIntValue(params.get("zoneBreakTicks"), DEFAULTS.zoneBreakTicks, 1, 64),
+      zoneBreakTolerance: sanitizeFloatValue(params.get("zoneBreakTolerance"), DEFAULTS.zoneBreakTolerance, 0, 10),
       provisional: params.get("provisional") !== "0",
       table: params.get("table") !== "0",
     };
@@ -102,6 +123,22 @@
 
   function sanitizeWindowValue(rawValue) {
     return Math.max(1, Math.min(10000, Number.parseInt(rawValue || String(DEFAULTS.window), 10) || DEFAULTS.window));
+  }
+
+  function sanitizeIntValue(rawValue, fallback, minimum, maximum) {
+    const value = Number.parseInt(rawValue || String(fallback), 10);
+    if (!Number.isFinite(value)) {
+      return fallback;
+    }
+    return Math.max(minimum, Math.min(maximum, value));
+  }
+
+  function sanitizeFloatValue(rawValue, fallback, minimum, maximum) {
+    const value = Number.parseFloat(rawValue || String(fallback));
+    if (!Number.isFinite(value)) {
+      return fallback;
+    }
+    return Math.max(minimum, Math.min(maximum, Number(value.toFixed(6))));
   }
 
   function bindSegment(container, handler) {
@@ -127,6 +164,12 @@
       reviewStart: (elements.reviewStart.value || "").trim(),
       reviewSpeed: Number.parseFloat(elements.reviewSpeedToggle.querySelector("button.active")?.dataset.value || String(DEFAULTS.reviewSpeed)),
       window: sanitizeWindowValue(elements.windowSize.value),
+      zones: Boolean(elements.showZones.checked),
+      zoneMinTicks: sanitizeIntValue(elements.zoneMinTicks.value, DEFAULTS.zoneMinTicks, 4, 500),
+      zoneMinMs: sanitizeIntValue(elements.zoneMinMs.value, DEFAULTS.zoneMinMs, 100, 300000),
+      zoneOvershoot: sanitizeFloatValue(elements.zoneOvershoot.value, DEFAULTS.zoneOvershoot, 0, 10),
+      zoneBreakTicks: sanitizeIntValue(elements.zoneBreakTicks.value, DEFAULTS.zoneBreakTicks, 1, 64),
+      zoneBreakTolerance: sanitizeFloatValue(elements.zoneBreakTolerance.value, DEFAULTS.zoneBreakTolerance, 0, 10),
       provisional: Boolean(elements.showProvisional.checked),
       table: Boolean(elements.showTable.checked),
     };
@@ -142,6 +185,12 @@
     params.set("series", config.series);
     params.set("window", String(config.window));
     params.set("speed", String(config.reviewSpeed));
+    params.set("zones", config.zones ? "1" : "0");
+    params.set("zoneMinTicks", String(config.zoneMinTicks));
+    params.set("zoneMinMs", String(config.zoneMinMs));
+    params.set("zoneOvershoot", String(config.zoneOvershoot));
+    params.set("zoneBreakTicks", String(config.zoneBreakTicks));
+    params.set("zoneBreakTolerance", String(config.zoneBreakTolerance));
     params.set("provisional", config.provisional ? "1" : "0");
     params.set("table", config.table ? "1" : "0");
     if (config.id) {
@@ -194,6 +243,12 @@
     elements.tickId.value = config.id;
     elements.reviewStart.value = config.reviewStart;
     elements.windowSize.value = String(config.window);
+    elements.showZones.checked = Boolean(config.zones);
+    elements.zoneMinTicks.value = String(config.zoneMinTicks);
+    elements.zoneMinMs.value = String(config.zoneMinMs);
+    elements.zoneOvershoot.value = String(config.zoneOvershoot);
+    elements.zoneBreakTicks.value = String(config.zoneBreakTicks);
+    elements.zoneBreakTolerance.value = String(config.zoneBreakTolerance);
     elements.showProvisional.checked = Boolean(config.provisional);
     elements.showTable.checked = Boolean(config.table);
     elements.tablePanel.hidden = !config.table;
@@ -274,6 +329,9 @@
     const config = currentConfig();
     const finalCount = state.bars.filter((bar) => bar.isFinal).length;
     const provisionalCount = state.bars.filter((bar) => !bar.isFinal).length;
+    const activeZones = state.zones.filter((zone) => zone.status === "active").length;
+    const provisionalZones = state.zones.filter((zone) => zone.status === "provisional").length;
+    const closedZones = state.zones.filter((zone) => zone.status === "closed").length;
     elements.liveMeta.textContent = [
       config.mode.toUpperCase(),
       "Candles",
@@ -282,6 +340,10 @@
       "bars " + state.bars.length,
       "final " + finalCount,
       "active " + provisionalCount,
+      "zones " + state.zones.length,
+      "z-active " + activeZones,
+      "z-prov " + provisionalZones,
+      "z-closed " + closedZones,
       "left " + state.rangeFirstId,
       "right " + state.rangeLastId,
       state.hasMoreLeft ? "more-left yes" : "more-left no",
@@ -342,7 +404,7 @@
       elements.barsTableBody.innerHTML = "";
       return;
     }
-    elements.tableMeta.textContent = state.bars.length + " bar(s) | most recent first";
+    elements.tableMeta.textContent = state.bars.length + " bar(s) | " + state.zones.length + " zone(s) | most recent first";
     const rows = state.bars.slice().reverse().map((bar) => {
       const tr = document.createElement("tr");
       tr.dataset.barId = bar.id;
@@ -410,6 +472,126 @@
     }));
   }
 
+  function zoneSpanFor(zone) {
+    if (!zone || !state.bars.length) {
+      return null;
+    }
+    const rightTickId = zone.rightTickId ?? zone.endTickId ?? zone.startTickId;
+    const startIndex = state.bars.findIndex((bar) => bar.endTickId >= zone.startTickId);
+    if (startIndex < 0) {
+      return null;
+    }
+    let endIndex = startIndex;
+    for (let index = startIndex; index < state.bars.length; index += 1) {
+      if (state.bars[index].startTickId <= rightTickId) {
+        endIndex = index;
+        continue;
+      }
+      break;
+    }
+    return {
+      startIndex: startIndex,
+      endIndex: Math.max(startIndex, endIndex),
+    };
+  }
+
+  function zonesForBarIndex(index) {
+    if (!Number.isInteger(index)) {
+      return [];
+    }
+    return state.zones.filter((zone) => {
+      const span = zoneSpanFor(zone);
+      return span && index >= span.startIndex && index <= span.endIndex;
+    });
+  }
+
+  function zoneStyle(zone) {
+    if (zone.status === "active") {
+      return {
+        fill: "rgba(109, 216, 255, 0.16)",
+        stroke: "rgba(109, 216, 255, 0.52)",
+        lineWidth: 1.1,
+        lineDash: [],
+      };
+    }
+    if (zone.status === "closed") {
+      return {
+        fill: "rgba(255, 194, 102, 0.08)",
+        stroke: "rgba(255, 194, 102, 0.30)",
+        lineWidth: 1,
+        lineDash: [],
+      };
+    }
+    return {
+      fill: "rgba(195, 220, 255, 0.08)",
+      stroke: "rgba(195, 220, 255, 0.32)",
+      lineWidth: 1,
+      lineDash: [5, 4],
+    };
+  }
+
+  function buildZoneSeriesData() {
+    if (!currentConfig().zones || !state.zones.length || !state.bars.length) {
+      return [];
+    }
+    return state.zones.map((zone) => {
+      const span = zoneSpanFor(zone);
+      if (!span) {
+        return null;
+      }
+      return {
+        value: [span.startIndex, span.endIndex, zone.zoneLow, zone.zoneHigh],
+        zone: zone,
+        style: zoneStyle(zone),
+      };
+    }).filter(Boolean);
+  }
+
+  function renderZoneRect(params, api) {
+    const startPoint = api.coord([api.value(0), api.value(2)]);
+    const endPoint = api.coord([api.value(1), api.value(3)]);
+    const x = Math.min(startPoint[0], endPoint[0]) - 7;
+    const y = Math.min(startPoint[1], endPoint[1]);
+    const width = Math.abs(endPoint[0] - startPoint[0]) + 14;
+    const height = Math.abs(endPoint[1] - startPoint[1]);
+    const shape = echarts.graphic.clipRectByRect(
+      { x: x, y: y, width: width, height: Math.max(height, 2) },
+      {
+        x: params.coordSys.x,
+        y: params.coordSys.y,
+        width: params.coordSys.width,
+        height: params.coordSys.height,
+      },
+    );
+    if (!shape) {
+      return null;
+    }
+    const item = params.data || {};
+    return {
+      type: "rect",
+      shape: shape,
+      silent: true,
+      style: item.style || {},
+    };
+  }
+
+  function zoneTooltipHtml(zone) {
+    const breakoutLabel = zone.breakoutDirection ? "break " + zone.breakoutDirection : "break pending";
+    return [
+      "<div class=\"zigcandles-tip-zone\">",
+      "<strong>" + escapeHtml("Zone " + zone.status.toUpperCase()) + "</strong><br>",
+      "box " + formatNumber(zone.zoneLow) + " - " + formatNumber(zone.zoneHigh) + " | h " + formatNumber(zone.zoneHeight) + "<br>",
+      "inside " + escapeHtml(String(zone.tickCountInside)) + " ticks | " + escapeHtml(zone.durationInsideLabel || "") + "<br>",
+      breakoutLabel + " | touches " + escapeHtml(String(zone.touchCount)) + " | revisits " + escapeHtml(String(zone.revisitCount)) + "<br>",
+      "pivots " + escapeHtml(String(zone.parentStartPivotId) + " -> " + String(zone.parentEndPivotId)),
+      "</div>",
+    ].join("");
+  }
+
+  function candleSeriesIndex() {
+    return state.renderedSeries.findIndex((series) => series.id === "zig-candles-main");
+  }
+
   function ensureChart() {
     bindResizeLifecycle();
     if (!chartHostHasSize()) {
@@ -424,11 +606,14 @@
           trigger: "axis",
           axisPointer: { type: "cross" },
           formatter: function (params) {
-            const point = Array.isArray(params) ? params[0] : params;
+            const point = Array.isArray(params)
+              ? params.find((entry) => entry?.seriesId === "zig-candles-main") || params[0]
+              : params;
             const bar = point?.data?.bar;
             if (!bar) {
               return "";
             }
+            const zoneHtml = zonesForBarIndex(Number(point?.dataIndex)).map(zoneTooltipHtml).join("");
             return [
               "<div class=\"zigcandles-tip\">",
               "<strong>" + escapeHtml(bar.symbol + " L" + bar.level + " " + bar.barState.toUpperCase()) + "</strong><br>",
@@ -437,6 +622,7 @@
               "ticks " + escapeHtml(String(bar.tickCount)) + " | range " + formatSignedNumber(bar.priceRange) + " | move " + formatSignedNumber(bar.netMove) + "<br>",
               "dur " + escapeHtml(bar.durationLabel) + " | ids " + escapeHtml(String(bar.startTickId) + "-" + String(bar.endTickId)) + "<br>",
               "pivots " + escapeHtml(String(bar.startPivotId) + " -> " + (bar.endPivotId == null ? "active" : String(bar.endPivotId))),
+              zoneHtml,
               "</div>",
             ].join("");
           },
@@ -467,6 +653,7 @@
           },
         ],
         series: [{
+          id: "zig-candles-main",
           type: "candlestick",
           name: "Zig candles",
           data: [],
@@ -537,7 +724,7 @@
     if (!state.bars.length) {
       chart.setOption({
         xAxis: { data: [] },
-        series: [{ data: [] }],
+        series: [{ id: "zig-candles-main", data: [] }],
       }, { replaceMerge: ["series"], lazyUpdate: true });
       return;
     }
@@ -550,11 +737,32 @@
         { id: "zoom-inside", start: state.zoom.start, end: state.zoom.end },
         { id: "zoom-slider", start: state.zoom.start, end: state.zoom.end },
       ],
-      series: [{
-        type: "candlestick",
-        name: "Zig candles",
-        data: buildChartData(),
-      }],
+      series: (function () {
+        const series = [];
+        const zoneSeriesData = buildZoneSeriesData();
+        if (zoneSeriesData.length) {
+          series.push({
+            id: "zones-overlay",
+            name: "Zones",
+            type: "custom",
+            renderItem: renderZoneRect,
+            data: zoneSeriesData,
+            silent: true,
+            animation: false,
+            z: 1,
+            tooltip: { show: false },
+          });
+        }
+        series.push({
+          id: "zig-candles-main",
+          type: "candlestick",
+          name: "Zig candles",
+          data: buildChartData(),
+          z: 4,
+        });
+        state.renderedSeries = series;
+        return series;
+      })(),
     }, { replaceMerge: ["series"], lazyUpdate: true });
     queueVisibleYAxisUpdate();
   }
@@ -575,6 +783,8 @@
 
   function syncPayload(payload) {
     replaceBars(payload.bars || []);
+    state.zones = Array.isArray(payload.zones) ? payload.zones.slice() : [];
+    state.zoneConfig = payload.zoneConfig || null;
     applyRangePayload(payload);
     state.reviewEndId = payload.reviewEndId || state.reviewEndId || null;
     state.hasMoreLeft = Boolean(payload.hasMoreLeft);
@@ -595,8 +805,11 @@
     if (state.chart) {
       const startValue = Math.max(0, index - 8);
       const endValue = Math.min(state.bars.length - 1, index + 8);
+      const seriesIndex = candleSeriesIndex();
       state.chart.dispatchAction({ type: "dataZoom", startValue: startValue, endValue: endValue });
-      state.chart.dispatchAction({ type: "showTip", seriesIndex: 0, dataIndex: index });
+      if (seriesIndex >= 0) {
+        state.chart.dispatchAction({ type: "showTip", seriesIndex: seriesIndex, dataIndex: index });
+      }
     }
   }
 
@@ -643,6 +856,12 @@
       window: String(config.window),
       level: String(config.level),
       series: config.series,
+      zones: config.zones ? "true" : "false",
+      zoneMinTicks: String(config.zoneMinTicks),
+      zoneMinMs: String(config.zoneMinMs),
+      zoneOvershoot: String(config.zoneOvershoot),
+      zoneBreakTicks: String(config.zoneBreakTicks),
+      zoneBreakTolerance: String(config.zoneBreakTolerance),
       provisional: config.provisional ? "true" : "false",
     });
     if (config.mode === "review" && startId != null) {
@@ -658,6 +877,12 @@
       window: String(config.window),
       level: String(config.level),
       series: config.series,
+      zones: config.zones ? "true" : "false",
+      zoneMinTicks: String(config.zoneMinTicks),
+      zoneMinMs: String(config.zoneMinMs),
+      zoneOvershoot: String(config.zoneOvershoot),
+      zoneBreakTicks: String(config.zoneBreakTicks),
+      zoneBreakTolerance: String(config.zoneBreakTolerance),
       provisional: config.provisional ? "true" : "false",
     });
     if (endId != null) {
@@ -677,6 +902,12 @@
       window: String(config.window),
       level: String(config.level),
       series: config.series,
+      zones: config.zones ? "true" : "false",
+      zoneMinTicks: String(config.zoneMinTicks),
+      zoneMinMs: String(config.zoneMinMs),
+      zoneOvershoot: String(config.zoneOvershoot),
+      zoneBreakTicks: String(config.zoneBreakTicks),
+      zoneBreakTolerance: String(config.zoneBreakTolerance),
       provisional: config.provisional ? "true" : "false",
     }).toString();
   }
@@ -687,7 +918,7 @@
     const payload = await fetchJson(bootstrapUrl(config, state.reviewStartId));
     syncPayload(payload);
     renderChart(Boolean(resetView));
-    status("Loaded " + state.bars.length + " zig candle(s).", false);
+    status("Loaded " + state.bars.length + " zig candle(s) and " + state.zones.length + " zone(s).", false);
     if (config.run === "run") {
       if (config.mode === "live") {
         connectStream(state.rangeLastId || 0);
@@ -709,6 +940,12 @@
       window: String(config.window),
       level: String(config.level),
       series: config.series,
+      zones: config.zones ? "true" : "false",
+      zoneMinTicks: String(config.zoneMinTicks),
+      zoneMinMs: String(config.zoneMinMs),
+      zoneOvershoot: String(config.zoneOvershoot),
+      zoneBreakTicks: String(config.zoneBreakTicks),
+      zoneBreakTolerance: String(config.zoneBreakTolerance),
       provisional: config.provisional ? "true" : "false",
     }).toString());
     state.source = source;
@@ -800,7 +1037,7 @@
     const payload = await fetchJson(previousUrl(currentConfig()));
     syncPayload(payload);
     renderChart(false);
-    status(state.bars.length ? "Older zig candles shifted into view." : "No older data was available.", false);
+    status(state.bars.length ? "Older zig candles and zones shifted into view." : "No older data was available.", false);
     await resumeRunIfNeeded();
   }
 
@@ -857,16 +1094,18 @@
     }
   });
 
-  [elements.tickId, elements.reviewStart, elements.windowSize].forEach((control) => {
+  [elements.tickId, elements.reviewStart, elements.windowSize, elements.zoneMinTicks, elements.zoneMinMs, elements.zoneOvershoot, elements.zoneBreakTicks, elements.zoneBreakTolerance].forEach((control) => {
     control.addEventListener("change", writeQuery);
   });
 
-  [elements.showProvisional, elements.showTable].forEach((control) => {
+  [elements.showZones, elements.showProvisional, elements.showTable].forEach((control) => {
     control.addEventListener("change", function () {
       elements.tablePanel.hidden = !elements.showTable.checked;
       writeQuery();
+      renderMeta();
+      renderChart(false);
       queueChartResize();
-      status("Settings updated. Click Load to refresh derived bars.", false);
+      status("Settings updated. Click Load to refresh bars and zones.", false);
     });
   });
 

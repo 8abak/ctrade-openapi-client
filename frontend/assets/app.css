@@ -648,8 +648,18 @@ select {
   color: #c3dcff;
 }
 
+.zone-settings-grid {
+  margin-top: 0.7rem;
+}
+
 .zigcandles-tip {
   line-height: 1.45;
+}
+
+.zigcandles-tip-zone {
+  margin-top: 0.45rem;
+  padding-top: 0.42rem;
+  border-top: 1px solid rgba(147, 181, 255, 0.16);
 }
 
 .sql-shell {
