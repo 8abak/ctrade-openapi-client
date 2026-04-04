@@ -17,6 +17,7 @@
     zoneBreakTolerance: 0.24,
     provisional: true,
     table: true,
+    zoneDebug: false,
   };
 
   const SERIES_CONFIG = {
@@ -55,6 +56,7 @@
     autoscaleFrame: 0,
     layoutResizeFrame: 0,
     layoutResizeTimeout: 0,
+    zoneOverlayFrame: 0,
     resizeObserver: null,
     resizeBound: false,
     ui: {
@@ -87,6 +89,7 @@
     zoneBreakTicks: document.getElementById("zoneBreakTicks"),
     zoneBreakTolerance: document.getElementById("zoneBreakTolerance"),
     showProvisional: document.getElementById("showProvisional"),
+    zoneDebugOverlay: document.getElementById("zoneDebugOverlay"),
     showTable: document.getElementById("showTable"),
     applyButton: document.getElementById("applyButton"),
     loadMoreLeftButton: document.getElementById("loadMoreLeftButton"),
@@ -121,6 +124,7 @@
       zoneBreakTolerance: sanitizeFloatValue(params.get("zoneBreakTolerance"), DEFAULTS.zoneBreakTolerance, 0, 10),
       provisional: params.get("provisional") !== "0",
       table: params.get("table") !== "0",
+      zoneDebug: params.get("zoneDebug") === "1",
     };
   }
 
@@ -183,6 +187,7 @@
       zoneBreakTolerance: sanitizeFloatValue(elements.zoneBreakTolerance.value, DEFAULTS.zoneBreakTolerance, 0, 10),
       provisional: Boolean(elements.showProvisional.checked),
       table: Boolean(elements.showTable.checked),
+      zoneDebug: Boolean(elements.zoneDebugOverlay.checked),
     };
   }
 
@@ -204,6 +209,7 @@
     params.set("zoneBreakTolerance", String(config.zoneBreakTolerance));
     params.set("provisional", config.provisional ? "1" : "0");
     params.set("table", config.table ? "1" : "0");
+    params.set("zoneDebug", config.zoneDebug ? "1" : "0");
     if (config.id) {
       params.set("id", config.id);
     }
@@ -261,6 +267,7 @@
     elements.zoneBreakTicks.value = String(config.zoneBreakTicks);
     elements.zoneBreakTolerance.value = String(config.zoneBreakTolerance);
     elements.showProvisional.checked = Boolean(config.provisional);
+    elements.zoneDebugOverlay.checked = Boolean(config.zoneDebug);
     elements.showTable.checked = Boolean(config.table);
     elements.tablePanel.hidden = !config.table;
     setSidebarCollapsed(true);
@@ -295,6 +302,7 @@
       if (state.chart && chartHostHasSize()) {
         state.chart.resize();
         queueVisibleYAxisUpdate();
+        queueZoneOverlayRender("resize");
       }
     });
     state.layoutResizeTimeout = window.setTimeout(() => {
@@ -302,6 +310,7 @@
       if (state.chart && chartHostHasSize()) {
         state.chart.resize();
         queueVisibleYAxisUpdate();
+        queueZoneOverlayRender("resize-timeout");
       }
     }, 220);
   }
@@ -541,110 +550,210 @@
     };
   }
 
-  function buildZoneSeriesData() {
-    if (!currentConfig().zones || !state.zones.length || !state.bars.length) {
-      return [];
-    }
-    return state.zones.map((zone) => {
-      const span = zoneSpanFor(zone);
-      if (!span) {
-        return null;
-      }
+  function zoneOverlayStyle(zone, debugOverlay) {
+    if (debugOverlay) {
       return {
-        value: [span.startIndex, span.endIndex, zone.zoneLow, zone.zoneHigh],
-        zone: zone,
-        style: zoneStyle(zone),
+        fill: "rgba(0, 229, 255, 0.22)",
+        stroke: "rgba(0, 229, 255, 0.95)",
+        lineWidth: 2,
+        labelColor: "#00e5ff",
+        labelBg: "rgba(2, 9, 14, 0.7)",
       };
-    }).filter(Boolean);
+    }
+    const base = zoneStyle(zone);
+    return {
+      fill: base.fill,
+      stroke: base.stroke,
+      lineWidth: base.lineWidth,
+      labelColor: base.stroke,
+      labelBg: "rgba(2, 9, 14, 0.6)",
+    };
   }
 
-  function buildZoneMarkAreaData() {
-    if (!currentConfig().zones || !state.zones.length || !state.bars.length) {
+  function zoneCenterStepPx(index) {
+    if (!state.chart || !state.bars.length) {
+      return 12;
+    }
+    const current = state.chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [index, 0]);
+    if (!Array.isArray(current)) {
+      return 12;
+    }
+    let neighbor = null;
+    if (index + 1 < state.bars.length) {
+      neighbor = state.chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [index + 1, 0]);
+    } else if (index > 0) {
+      neighbor = state.chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [index - 1, 0]);
+    }
+    if (!Array.isArray(neighbor)) {
+      return 12;
+    }
+    const step = Math.abs(Number(neighbor[0]) - Number(current[0]));
+    return Number.isFinite(step) && step > 0 ? step : 12;
+  }
+
+  function buildZoneOverlayGraphics(reason) {
+    const chart = state.chart;
+    if (!chart) {
       return [];
     }
-    return state.zones.map((zone) => {
+    const config = currentConfig();
+    if (!config.zones || !state.zones.length || !state.bars.length) {
+      return [];
+    }
+    const grid = chart.getModel()?.getComponent("grid", 0);
+    const rect = grid?.coordinateSystem?.getRect?.();
+    if (!rect) {
+      return [];
+    }
+
+    const debugOverlay = config.zoneDebug;
+    const elements = [];
+    const minWidth = debugOverlay ? 12 : 8;
+    const minHeight = debugOverlay ? 6 : 2;
+    const maxLog = 4;
+    let logged = 0;
+
+    state.zones.forEach((zone, index) => {
       const span = zoneSpanFor(zone);
       if (!span) {
-        return null;
-      }
-      let startIndex = span.startIndex;
-      let endIndex = span.endIndex;
-      if (endIndex === startIndex) {
-        endIndex = Math.min(state.bars.length - 1, startIndex + 1);
-        if (endIndex === startIndex && startIndex > 0) {
-          startIndex = startIndex - 1;
+        if (logged < maxLog) {
+          console.warn("[zones] skip", zone.id || index, "no-span", reason);
+          logged += 1;
         }
+        return;
       }
-      const style = zoneStyle(zone);
-      return [
-        {
-          xAxis: startIndex,
-          yAxis: zone.zoneLow,
-          itemStyle: {
-            color: style.fill,
-            borderColor: style.stroke,
-            borderWidth: style.lineWidth,
-            borderType: style.lineDash && style.lineDash.length ? "dashed" : "solid",
-            opacity: 1,
-          },
+
+      const startIndex = span.startIndex;
+      const endIndex = span.endIndex;
+      const leftPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [startIndex, zone.zoneLow]);
+      const rightPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [endIndex, zone.zoneLow]);
+      const topPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [startIndex, zone.zoneHigh]);
+      const bottomPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [startIndex, zone.zoneLow]);
+
+      if (!Array.isArray(leftPoint) || !Array.isArray(rightPoint) || !Array.isArray(topPoint) || !Array.isArray(bottomPoint)) {
+        if (logged < maxLog) {
+          console.warn("[zones] skip", zone.id || index, "pixel-mapping-failed", reason);
+          logged += 1;
+        }
+        return;
+      }
+
+      const stepStart = zoneCenterStepPx(startIndex);
+      const stepEnd = zoneCenterStepPx(endIndex);
+      let left = Number(leftPoint[0]) - stepStart / 2;
+      let right = Number(rightPoint[0]) + stepEnd / 2;
+      let top = Math.min(Number(topPoint[1]), Number(bottomPoint[1]));
+      let bottom = Math.max(Number(topPoint[1]), Number(bottomPoint[1]));
+
+      if (!Number.isFinite(left) || !Number.isFinite(right) || !Number.isFinite(top) || !Number.isFinite(bottom)) {
+        if (logged < maxLog) {
+          console.warn("[zones] skip", zone.id || index, "non-finite-pixels", reason);
+          logged += 1;
+        }
+        return;
+      }
+
+      if (right - left < minWidth) {
+        const center = (left + right) / 2;
+        left = center - minWidth / 2;
+        right = center + minWidth / 2;
+      }
+      if (bottom - top < minHeight) {
+        const centerY = (top + bottom) / 2;
+        top = centerY - minHeight / 2;
+        bottom = centerY + minHeight / 2;
+      }
+
+      if (right < rect.x || left > rect.x + rect.width || bottom < rect.y || top > rect.y + rect.height) {
+        if (logged < maxLog) {
+          console.warn("[zones] skip", zone.id || index, "outside-viewport", reason);
+          logged += 1;
+        }
+        return;
+      }
+
+      left = Math.max(rect.x, left);
+      right = Math.min(rect.x + rect.width, right);
+      top = Math.max(rect.y, top);
+      bottom = Math.min(rect.y + rect.height, bottom);
+
+      const style = zoneOverlayStyle(zone, debugOverlay);
+      const rectId = "zone-rect-" + (zone.id || index);
+      elements.push({
+        id: rectId,
+        type: "rect",
+        silent: true,
+        z: 1,
+        shape: {
+          x: left,
+          y: top,
+          width: Math.max(1, right - left),
+          height: Math.max(1, bottom - top),
+          r: 2,
         },
-        { xAxis: endIndex, yAxis: zone.zoneHigh },
-      ];
-    }).filter(Boolean);
+        style: {
+          fill: style.fill,
+          stroke: style.stroke,
+          lineWidth: style.lineWidth,
+        },
+      });
+
+      if (debugOverlay) {
+        elements.push({
+          id: rectId + "-label",
+          type: "text",
+          silent: true,
+          z: 2,
+          style: {
+            text: String(index + 1) + " " + String(zone.status || "").toUpperCase(),
+            x: left + 4,
+            y: top + 4,
+            fill: style.labelColor,
+            font: "12px \"IBM Plex Mono\", monospace",
+            backgroundColor: style.labelBg,
+            padding: [2, 4],
+          },
+        });
+      }
+
+      if (logged < maxLog) {
+        console.log("[zones]", zone.id || index, "span", startIndex + "-" + endIndex, "px", {
+          left: Math.round(left),
+          right: Math.round(right),
+          top: Math.round(top),
+          bottom: Math.round(bottom),
+        }, reason);
+        logged += 1;
+      }
+    });
+
+    return elements;
   }
 
-  function renderZoneRect(params, api) {
-    const startPoint = api.coord([api.value(0), api.value(2)]);
-    const endPoint = api.coord([api.value(1), api.value(3)]);
-    const x = Math.min(startPoint[0], endPoint[0]) - 7;
-    const y = Math.min(startPoint[1], endPoint[1]);
-    const width = Math.abs(endPoint[0] - startPoint[0]) + 14;
-    const height = Math.abs(endPoint[1] - startPoint[1]);
-    const shape = echarts.graphic.clipRectByRect(
-      { x: x, y: y, width: width, height: Math.max(height, 2) },
-      {
-        x: params.coordSys.x,
-        y: params.coordSys.y,
-        width: params.coordSys.width,
-        height: params.coordSys.height,
-      },
-    );
-    if (!shape) {
-      return null;
+  function renderZoneOverlay(reason) {
+    if (!state.chart) {
+      return;
     }
-    const item = params.data || {};
-    const rectShape = {
-      x: shape.x,
-      y: shape.y,
-      width: shape.width,
-      height: shape.height,
-      r: 2,
-    };
-    return {
-      type: "group",
-      silent: true,
-      children: [
-        {
-          type: "rect",
-          shape: rectShape,
-          silent: true,
-          style: {
-            fill: item.style?.fill || "rgba(0,0,0,0)",
-          },
-        },
-        {
-          type: "rect",
-          shape: rectShape,
-          silent: true,
-          style: {
-            fill: "rgba(0,0,0,0)",
-            stroke: item.style?.stroke || "rgba(0,0,0,0)",
-            lineWidth: item.style?.lineWidth || 0,
-            lineDash: item.style?.lineDash || [],
-          },
-        },
-      ],
-    };
+    const elements = buildZoneOverlayGraphics(reason);
+    state.chart.setOption({
+      graphic: [{
+        id: "zone-overlay",
+        type: "group",
+        silent: true,
+        z: 1,
+        children: elements,
+      }],
+    }, { replaceMerge: ["graphic"], lazyUpdate: true });
+  }
+
+  function queueZoneOverlayRender(reason) {
+    if (state.zoneOverlayFrame) {
+      window.cancelAnimationFrame(state.zoneOverlayFrame);
+    }
+    state.zoneOverlayFrame = window.requestAnimationFrame(() => {
+      state.zoneOverlayFrame = 0;
+      renderZoneOverlay(reason);
+    });
   }
 
   function zoneTooltipHtml(zone) {
@@ -803,6 +912,7 @@
           ? zoomStateFromIndexRange(indices.startIndex, indices.endIndex, state.bars.length)
           : { start: 0, end: 100 };
         queueVisibleYAxisUpdate();
+        queueZoneOverlayRender("zoom");
       });
     }
     return state.chart;
@@ -861,6 +971,7 @@
         xAxis: { data: [] },
         series: [{ id: "zig-candles-main", data: [] }],
       }, { replaceMerge: ["series"], lazyUpdate: true });
+      queueZoneOverlayRender("clear");
       return;
     }
     if (resetView) {
@@ -884,19 +995,13 @@
           name: "Zig candles",
           data: buildChartData(),
           z: 4,
-          markArea: {
-            silent: true,
-            z: 1,
-            zlevel: 0,
-            emphasis: { disabled: true },
-            data: buildZoneMarkAreaData(),
-          },
         });
         state.renderedSeries = series;
         return series;
       })(),
     }, { replaceMerge: ["series"], lazyUpdate: true });
     queueVisibleYAxisUpdate();
+    queueZoneOverlayRender("render");
   }
 
   function replaceBars(rows) {
@@ -1243,7 +1348,7 @@
     control.addEventListener("change", writeQuery);
   });
 
-  [elements.showZones, elements.showProvisional, elements.showTable].forEach((control) => {
+  [elements.showZones, elements.showProvisional, elements.zoneDebugOverlay, elements.showTable].forEach((control) => {
     control.addEventListener("change", function () {
       elements.tablePanel.hidden = !elements.showTable.checked;
       writeQuery();
