@@ -99,7 +99,7 @@
               </label>
 
               <label>
-                <span>window</span>
+                <span>zig candles</span>
                 <input id="windowSize" type="number" min="1" max="10000" inputmode="numeric" value="2000">
               </label>
 
@@ -111,7 +111,7 @@
 
             <div class="live-inline-actions">
               <button class="primary-button compact-button" id="applyButton" type="button">Load</button>
-              <button class="ghost-button compact-button" id="loadMoreLeftButton" type="button">Load More Left</button>
+              <button class="ghost-button compact-button" id="loadMoreLeftButton" type="button">Load More Zigs Left</button>
             </div>
           </div>
         </section>
@@ -193,7 +193,7 @@
       </div>
     </aside>
 
-    <section class="live-chart-stage zigcandles-stage">
+    <section class="live-chart-stage zigcandles-stage is-table-collapsed" id="chartStage">
       <div class="panel chart-panel live-chart-panel">
         <div id="zigCandlesChart" class="chart-host"></div>
       </div>
@@ -201,6 +201,7 @@
       <div class="panel zigcandles-table-panel" id="tablePanel">
         <div class="zigcandles-table-toolbar">
           <div class="meta-strip" id="tableMeta">No bars loaded.</div>
+          <button class="ghost-button compact-button" id="tableToggle" type="button" aria-controls="tablePanel" aria-expanded="false">Expand Table</button>
         </div>
         <div class="zigcandles-table-host">
           <table class="result-table zigcandles-table">

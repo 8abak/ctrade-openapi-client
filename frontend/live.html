@@ -67,10 +67,19 @@
 
               <div class="live-control-field live-control-field-wide">
                 <span>display</span>
-                <div class="segmented" id="displayToggle">
-                  <button type="button" data-value="ticks">Ticks</button>
-                  <button type="button" data-value="ticks-zig">Ticks + Zig</button>
-                  <button type="button" data-value="zig">Zig Only</button>
+                <div class="live-check-grid">
+                  <label class="compact-check">
+                    <input id="showTicks" type="checkbox" checked>
+                    <span>Ticks</span>
+                  </label>
+                  <label class="compact-check">
+                    <input id="showZigs" type="checkbox" checked>
+                    <span>Zigs</span>
+                  </label>
+                  <label class="compact-check">
+                    <input id="showZones" type="checkbox">
+                    <span>Zones</span>
+                  </label>
                 </div>
               </div>
 

@@ -43,6 +43,8 @@
     resultsHost: document.getElementById("resultsHost"),
   };
 
+  let runInFlight = false;
+
   function setInspectorCollapsed(collapsed) {
     const isCollapsed = Boolean(collapsed);
     elements.inspectorSection.classList.toggle("is-collapsed", isCollapsed);
@@ -259,22 +261,38 @@
   }
 
   async function runQuery() {
+    if (runInFlight) {
+      return;
+    }
+    runInFlight = true;
     clearError();
     const sql = editor.getValue().trim();
     if (!sql) {
       setStatus("SQL text is required.", "error");
+      runInFlight = false;
       return;
     }
-    const payload = await fetchJson("/api/sql/query", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sql: sql }),
+    try {
+      const payload = await fetchJson("/api/sql/query", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sql: sql }),
+      });
+      renderConnectionMeta(payload.context);
+      state.activePreview = false;
+      elements.resultsMeta.textContent = payload.elapsedMs + " ms | " + payload.statementCount + " statement(s)";
+      renderQueryResults(payload.results || []);
+      setStatus("Admin SQL statement(s) completed.", "success");
+    } finally {
+      runInFlight = false;
+    }
+  }
+
+  function triggerRunQuery() {
+    runQuery().catch((error) => {
+      showError(error);
+      setStatus(error.message || "Query failed.", "error");
     });
-    renderConnectionMeta(payload.context);
-    state.activePreview = false;
-    elements.resultsMeta.textContent = payload.elapsedMs + " ms | " + payload.statementCount + " statement(s)";
-    renderQueryResults(payload.results || []);
-    setStatus("Admin SQL statement(s) completed.", "success");
   }
 
   elements.refreshSchemaButton.addEventListener("click", function () {
@@ -305,10 +323,7 @@
   });
 
   elements.runQueryButton.addEventListener("click", function () {
-    runQuery().catch((error) => {
-      showError(error);
-      setStatus(error.message || "Query failed.", "error");
-    });
+    triggerRunQuery();
   });
 
   elements.previewPrevButton.addEventListener("click", function () {
@@ -339,6 +354,24 @@
         showError(error);
         setStatus(error.message || "Object load failed.", "error");
       });
+  });
+
+  editor.addKeyMap({
+    "Ctrl-Enter": function () {
+      triggerRunQuery();
+    },
+    "Cmd-Enter": function () {
+      triggerRunQuery();
+    },
+  });
+
+  editor.getWrapperElement().addEventListener("click", function (event) {
+    if (!event.ctrlKey && !event.metaKey) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    triggerRunQuery();
   });
 
   editor.on("cursorActivity", function () {

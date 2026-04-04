@@ -609,6 +609,10 @@ select {
   gap: 0.48rem;
 }
 
+.page-zigcandles .zigcandles-stage.is-table-collapsed {
+  grid-template-rows: minmax(0, 1fr) 56px;
+}
+
 .page-zigcandles .zigcandles-table-panel {
   min-height: 0;
   display: flex;
@@ -622,6 +626,14 @@ select {
   justify-content: space-between;
   gap: 0.5rem;
   align-items: center;
+}
+
+.page-zigcandles .zigcandles-stage.is-table-collapsed .zigcandles-table-panel {
+  padding-bottom: 0.38rem;
+}
+
+.page-zigcandles .zigcandles-stage.is-table-collapsed .zigcandles-table-host {
+  display: none;
 }
 
 .zigcandles-table-host {
@@ -666,6 +678,10 @@ select {
   grid-template-rows: minmax(0, 1fr) minmax(220px, 0.62fr);
 }
 
+.page-zones .zones-stage.is-table-collapsed {
+  grid-template-rows: minmax(0, 1fr) 56px;
+}
+
 .page-zones .zones-table-panel {
   min-height: 0;
   display: flex;
@@ -679,6 +695,14 @@ select {
   justify-content: space-between;
   gap: 0.6rem;
   align-items: center;
+}
+
+.page-zones .zones-stage.is-table-collapsed .zones-table-panel {
+  padding-bottom: 0.42rem;
+}
+
+.page-zones .zones-stage.is-table-collapsed .zones-table-host {
+  display: none;
 }
 
 .zones-table-host {
@@ -917,8 +941,16 @@ select {
     grid-template-rows: minmax(0, 1fr) minmax(200px, 40%);
   }
 
+  .page-zigcandles .zigcandles-stage.is-table-collapsed {
+    grid-template-rows: minmax(0, 1fr) 56px;
+  }
+
   .page-zones .zones-stage {
     grid-template-rows: minmax(0, 1fr) minmax(200px, 44%);
+  }
+
+  .page-zones .zones-stage.is-table-collapsed {
+    grid-template-rows: minmax(0, 1fr) 56px;
   }
 
   .editor-toolbar {

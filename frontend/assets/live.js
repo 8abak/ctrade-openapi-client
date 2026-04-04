@@ -2,7 +2,9 @@
   const DEFAULTS = {
     mode: "live",
     run: "run",
-    display: "ticks",
+    showTicks: true,
+    showZigs: true,
+    showZones: false,
     series: "mid",
     id: "",
     reviewStart: "",
@@ -12,8 +14,12 @@
 
   const DISPLAY_CONFIG = {
     ticks: { label: "Ticks", maxWindow: 10000 },
-    "ticks-zig": { label: "Ticks + Zig", maxWindow: 10000 },
-    zig: { label: "Zig Only", maxWindow: 100000 },
+    "ticks-zig": { label: "Ticks + Zigs", maxWindow: 10000 },
+    "ticks-zones": { label: "Ticks + Zones", maxWindow: 10000 },
+    "ticks-zig-zones": { label: "Ticks + Zigs + Zones", maxWindow: 10000 },
+    zig: { label: "Zigs Only", maxWindow: 100000 },
+    "zig-zones": { label: "Zigs + Zones", maxWindow: 100000 },
+    zones: { label: "Zones Only", maxWindow: 100000 },
   };
 
   const SERIES_CONFIG = {
@@ -31,6 +37,7 @@
     chart: null,
     rows: [],
     zigRows: [],
+    zoneRows: [],
     loadedWindow: DEFAULTS.window,
     renderedSeries: [],
     source: null,
@@ -44,6 +51,7 @@
     lastDatasetBounds: null,
     applyingViewport: false,
     autoscaleFrame: 0,
+    zoneOverlayFrame: 0,
     layoutResizeFrame: 0,
     layoutResizeTimeout: 0,
     resizeObserver: null,
@@ -68,7 +76,9 @@
     settingsToggleState: document.getElementById("settingsToggleState"),
     modeToggle: document.getElementById("modeToggle"),
     runToggle: document.getElementById("runToggle"),
-    displayToggle: document.getElementById("displayToggle"),
+    showTicks: document.getElementById("showTicks"),
+    showZigs: document.getElementById("showZigs"),
+    showZones: document.getElementById("showZones"),
     seriesToggle: document.getElementById("seriesToggle"),
     tickId: document.getElementById("tickId"),
     reviewStart: document.getElementById("reviewStart"),
@@ -86,21 +96,57 @@
   function parseQuery() {
     const params = new URLSearchParams(window.location.search);
     const reviewSpeed = Number.parseFloat(params.get("speed") || String(DEFAULTS.reviewSpeed));
-    const display = params.get("display");
+    const legacyDisplay = params.get("display") || "ticks-zig";
     return {
       mode: params.get("mode") === "review" ? "review" : DEFAULTS.mode,
       run: params.get("run") === "stop" ? "stop" : DEFAULTS.run,
-      display: Object.prototype.hasOwnProperty.call(DISPLAY_CONFIG, display) ? display : DEFAULTS.display,
+      showTicks: params.has("showTicks") ? params.get("showTicks") !== "0" : (legacyDisplay === "ticks" || legacyDisplay === "ticks-zig"),
+      showZigs: params.has("showZigs") ? params.get("showZigs") !== "0" : (legacyDisplay === "ticks-zig" || legacyDisplay === "zig"),
+      showZones: params.get("showZones") === "1",
       series: Object.prototype.hasOwnProperty.call(SERIES_CONFIG, params.get("series")) ? params.get("series") : DEFAULTS.series,
       id: params.get("id") || DEFAULTS.id,
       reviewStart: params.get("reviewStart") || DEFAULTS.reviewStart,
       reviewSpeed: REVIEW_SPEEDS.includes(reviewSpeed) ? reviewSpeed : DEFAULTS.reviewSpeed,
-      window: sanitizeWindowValue(params.get("window"), Object.prototype.hasOwnProperty.call(DISPLAY_CONFIG, display) ? display : DEFAULTS.display),
+      window: sanitizeWindowValue(params.get("window"), displayKeyFromLayers(
+        params.has("showTicks") ? params.get("showTicks") !== "0" : (legacyDisplay === "ticks" || legacyDisplay === "ticks-zig"),
+        params.has("showZigs") ? params.get("showZigs") !== "0" : (legacyDisplay === "ticks-zig" || legacyDisplay === "zig"),
+        params.get("showZones") === "1",
+      )),
     };
   }
 
-  function sanitizeWindowValue(rawValue, displayMode) {
-    const config = DISPLAY_CONFIG[displayMode] || DISPLAY_CONFIG[DEFAULTS.display];
+  function displayKeyFromLayers(showTicks, showZigs, showZones) {
+    const enabled = {
+      ticks: Boolean(showTicks),
+      zigs: Boolean(showZigs),
+      zones: Boolean(showZones),
+    };
+    if (!enabled.ticks && !enabled.zigs && !enabled.zones) {
+      enabled.ticks = true;
+    }
+    if (enabled.ticks && enabled.zigs && enabled.zones) {
+      return "ticks-zig-zones";
+    }
+    if (enabled.ticks && enabled.zigs) {
+      return "ticks-zig";
+    }
+    if (enabled.ticks && enabled.zones) {
+      return "ticks-zones";
+    }
+    if (enabled.zigs && enabled.zones) {
+      return "zig-zones";
+    }
+    if (enabled.ticks) {
+      return "ticks";
+    }
+    if (enabled.zigs) {
+      return "zig";
+    }
+    return "zones";
+  }
+
+  function sanitizeWindowValue(rawValue, displayKey) {
+    const config = DISPLAY_CONFIG[displayKey] || DISPLAY_CONFIG.ticks;
     return Math.max(1, Math.min(config.maxWindow, Number.parseInt(rawValue || String(DEFAULTS.window), 10) || DEFAULTS.window));
   }
 
@@ -109,7 +155,9 @@
     const params = new URLSearchParams();
     params.set("mode", config.mode);
     params.set("run", config.run);
-    params.set("display", config.display);
+    params.set("showTicks", config.showTicks ? "1" : "0");
+    params.set("showZigs", config.showZigs ? "1" : "0");
+    params.set("showZones", config.showZones ? "1" : "0");
     params.set("series", config.series);
     params.set("window", String(config.window));
     if (config.id) {
@@ -135,11 +183,21 @@
   }
 
   function currentConfig() {
-    const display = elements.displayToggle.querySelector("button.active")?.dataset.value || DEFAULTS.display;
+    let showTicks = Boolean(elements.showTicks.checked);
+    let showZigs = Boolean(elements.showZigs.checked);
+    let showZones = Boolean(elements.showZones.checked);
+    if (!showTicks && !showZigs && !showZones) {
+      showTicks = true;
+      elements.showTicks.checked = true;
+    }
+    const display = displayKeyFromLayers(showTicks, showZigs, showZones);
     return {
       mode: elements.modeToggle.querySelector("button.active")?.dataset.value || DEFAULTS.mode,
       run: elements.runToggle.querySelector("button.active")?.dataset.value || DEFAULTS.run,
       display,
+      showTicks,
+      showZigs,
+      showZones,
       series: elements.seriesToggle.querySelector("button.active")?.dataset.value || DEFAULTS.series,
       id: (elements.tickId.value || "").trim(),
       reviewStart: (elements.reviewStart.value || "").trim(),
@@ -149,21 +207,25 @@
   }
 
   function displayUsesTicks(displayMode) {
-    return displayMode === "ticks" || displayMode === "ticks-zig";
+    return displayMode === "ticks" || displayMode === "ticks-zig" || displayMode === "ticks-zones" || displayMode === "ticks-zig-zones";
   }
 
   function displayUsesZig(displayMode) {
-    return displayMode === "ticks-zig" || displayMode === "zig";
+    return displayMode === "ticks-zig" || displayMode === "ticks-zig-zones" || displayMode === "zig" || displayMode === "zig-zones";
+  }
+
+  function displayUsesZones(displayMode) {
+    return displayMode === "ticks-zones" || displayMode === "ticks-zig-zones" || displayMode === "zig-zones" || displayMode === "zones";
   }
 
   function updateWindowConstraints() {
-    const display = currentConfig().display;
-    elements.windowSize.max = String(DISPLAY_CONFIG[display].maxWindow);
-    elements.windowSize.value = String(sanitizeWindowValue(elements.windowSize.value, display));
+    const displayKey = currentConfig().display;
+    elements.windowSize.max = String(DISPLAY_CONFIG[displayKey].maxWindow);
+    elements.windowSize.value = String(sanitizeWindowValue(elements.windowSize.value, displayKey));
   }
 
   function maxLoadedWindow(displayMode) {
-    return (DISPLAY_CONFIG[displayMode] || DISPLAY_CONFIG[DEFAULTS.display]).maxWindow;
+    return (DISPLAY_CONFIG[displayMode] || DISPLAY_CONFIG.ticks).maxWindow;
   }
 
   function currentLoadedWindow(config) {
@@ -172,13 +234,15 @@
   }
 
   function updateSeriesAvailability() {
-    elements.seriesToggle.closest(".live-control-field").hidden = !displayUsesTicks(currentConfig().display);
+    elements.seriesToggle.closest(".live-control-field").hidden = !currentConfig().showTicks;
   }
 
   function applyInitialConfig(config) {
     setSegment(elements.modeToggle, config.mode);
     setSegment(elements.runToggle, config.run);
-    setSegment(elements.displayToggle, config.display);
+    elements.showTicks.checked = Boolean(config.showTicks);
+    elements.showZigs.checked = Boolean(config.showZigs);
+    elements.showZones.checked = Boolean(config.showZones);
     setSegment(elements.seriesToggle, config.series);
     setSegment(elements.reviewSpeedToggle, config.reviewSpeed);
     elements.tickId.value = config.id;
@@ -228,6 +292,7 @@
     if (state.chart && chartHostHasSize()) {
       state.chart.resize();
       queueVisibleYAxisUpdate(state.viewport || captureViewportFromChart(getDatasetBounds()) || getDatasetBounds());
+      queueZoneOverlayRender();
     }
   }
 
@@ -315,23 +380,30 @@
     const level2Count = state.zigRows.filter((row) => (row.level ?? 0) >= 2).length;
     const level3Count = state.zigRows.filter((row) => (row.level ?? 0) >= 3).length;
     const candidateCount = state.zigRows.filter((row) => row.state === "candidate").length;
+    const activeZones = state.zoneRows.filter((row) => row.status === "active").length;
+    const closedZones = state.zoneRows.filter((row) => row.status === "closed").length;
     const parts = [
       config.mode.toUpperCase(),
       DISPLAY_CONFIG[config.display].label,
+      "ticks " + state.rows.length + "/" + config.window,
       "left " + state.rangeFirstId,
       "right " + state.rangeLastId,
-      "zig L0 " + level0Count,
-      "L1 " + level1Count,
-      "L2 " + level2Count,
-      "L3 " + level3Count,
-      "cand " + candidateCount,
       state.hasMoreLeft ? "more-left yes" : "more-left no",
     ];
-    if (displayUsesTicks(config.display)) {
-      parts.splice(2, 0, "ticks " + state.rows.length + "/" + config.window);
+    if (config.showZigs) {
+      parts.push("zig L0 " + level0Count);
+      parts.push("L1 " + level1Count);
+      parts.push("L2 " + level2Count);
+      parts.push("L3 " + level3Count);
+      parts.push("cand " + candidateCount);
+    }
+    if (config.showZones) {
+      parts.push("zones " + state.zoneRows.length);
+      parts.push("z-active " + activeZones);
+      parts.push("z-closed " + closedZones);
+    }
+    if (config.showTicks) {
       parts.push("series " + config.series);
-    } else {
-      parts.splice(2, 0, "tick-window " + config.window);
     }
     elements.liveMeta.textContent = parts.join(" | ");
   }
@@ -368,8 +440,27 @@
         tooltip: {
           trigger: "axis",
           axisPointer: { type: "cross" },
-          valueFormatter: function (value) {
-            return typeof value === "number" ? value.toFixed(2) : value;
+          formatter: function (params) {
+            const entries = Array.isArray(params) ? params : [params];
+            const point = entries[0];
+            const timestampMs = Number(point?.axisValue ?? point?.value?.[0]);
+            const lines = entries
+              .filter((entry) => typeof entry?.value?.[1] === "number")
+              .map((entry) => {
+                return "<div>" + String(entry.marker || "") + String(entry.seriesName || "") + ": " + Number(entry.value[1]).toFixed(2) + "</div>";
+              });
+            const zoneHtml = Number.isFinite(timestampMs) && displayUsesZones(currentConfig().display)
+              ? zoneRowsAtTimestamp(timestampMs).map(zoneTooltipHtml).join("")
+              : "";
+            if (!lines.length && !zoneHtml) {
+              return "";
+            }
+            return [
+              "<div class=\"zigcandles-tip\">",
+              lines.join(""),
+              zoneHtml,
+              "</div>",
+            ].join("");
           },
         },
         xAxis: {
@@ -405,6 +496,7 @@
           || captureViewportFromChart(bounds)
           || normalizeViewport(state.viewport, bounds);
         queueVisibleYAxisUpdate(state.viewport);
+        queueZoneOverlayRender();
       });
     }
 
@@ -470,6 +562,12 @@
     if (state.rangeFirstTimestampMs != null && state.rangeLastTimestampMs != null) {
       return { startValue: state.rangeFirstTimestampMs, endValue: state.rangeLastTimestampMs };
     }
+    if (state.zoneRows.length) {
+      return {
+        startValue: state.zoneRows[0].startTimestampMs,
+        endValue: Math.max(...state.zoneRows.map((row) => Number(row.rightTimestampMs ?? row.endTimestampMs ?? row.startTimestampMs))),
+      };
+    }
     return null;
   }
 
@@ -524,8 +622,20 @@
     return { startValue, endValue, span };
   }
 
+  function viewportNearRightEdge(viewport, bounds) {
+    if (!viewport || !bounds) {
+      return false;
+    }
+    const gap = Number(bounds.endValue) - Number(viewport.endValue);
+    const span = Math.max(1, Number(viewport.span) || (Number(viewport.endValue) - Number(viewport.startValue)));
+    if (!Number.isFinite(gap) || !Number.isFinite(span)) {
+      return false;
+    }
+    return gap <= Math.max(span * 0.04, 1000);
+  }
+
   function shiftViewportForward(viewport, previousBounds, nextBounds, shouldAdvance) {
-    if (!shouldAdvance || !viewport || !previousBounds || !nextBounds) {
+    if (!shouldAdvance || !viewport || !previousBounds || !nextBounds || !viewportNearRightEdge(viewport, previousBounds)) {
       return viewport;
     }
     const delta = nextBounds.endValue - previousBounds.endValue;
@@ -647,6 +757,20 @@
       }
     });
 
+    if (displayUsesZones(currentConfig().display) && state.zoneRows.length && viewport) {
+      const startX = Number(viewport.startValue);
+      const endX = Number(viewport.endValue);
+      state.zoneRows.forEach((zone) => {
+        const zoneStart = Number(zone.startTimestampMs);
+        const zoneEnd = Number(zone.rightTimestampMs ?? zone.endTimestampMs ?? zone.startTimestampMs);
+        if (!Number.isFinite(zoneStart) || !Number.isFinite(zoneEnd) || zoneEnd < startX || zoneStart > endX) {
+          return;
+        }
+        minValue = Math.min(minValue, Number(zone.zoneLow));
+        maxValue = Math.max(maxValue, Number(zone.zoneHigh));
+      });
+    }
+
     if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) {
       return null;
     }
@@ -715,6 +839,137 @@
 
   function zigToSeriesData(level, stateName) {
     return zigSeriesRows(level, stateName).map((row) => [row.timestampMs, row.price]);
+  }
+
+  function zoneRowsAtTimestamp(timestampMs) {
+    const seen = new Set();
+    return state.zoneRows.filter((zone) => {
+      if (!zone || seen.has(zone.id)) {
+        return false;
+      }
+      const start = Number(zone.startTimestampMs);
+      const end = Number(zone.rightTimestampMs ?? zone.endTimestampMs ?? zone.startTimestampMs);
+      if (!Number.isFinite(start) || !Number.isFinite(end) || timestampMs < start || timestampMs > end) {
+        return false;
+      }
+      seen.add(zone.id);
+      return true;
+    });
+  }
+
+  function zoneStyle(zone) {
+    const palette = [
+      { fill: "rgba(109, 216, 255, 0.13)", stroke: "rgba(176, 238, 255, 0.72)" },
+      { fill: "rgba(255, 200, 87, 0.12)", stroke: "rgba(255, 214, 138, 0.7)" },
+      { fill: "rgba(255, 140, 66, 0.11)", stroke: "rgba(255, 185, 145, 0.68)" },
+      { fill: "rgba(248, 250, 252, 0.08)", stroke: "rgba(229, 236, 246, 0.62)" },
+    ][Math.max(0, Math.min(3, Number(zone.selectedLevel) || 0))];
+    if (zone.status === "closed") {
+      return {
+        fill: palette.fill.replace("0.13", "0.06").replace("0.12", "0.06").replace("0.11", "0.05").replace("0.08", "0.05"),
+        stroke: palette.stroke.replace("0.72", "0.38").replace("0.7", "0.38").replace("0.68", "0.36").replace("0.62", "0.34"),
+        lineWidth: 1.0,
+      };
+    }
+    return {
+      fill: palette.fill,
+      stroke: palette.stroke,
+      lineWidth: zone.status === "active" ? 1.45 : 1.15,
+    };
+  }
+
+  function zoneTooltipHtml(zone) {
+    return [
+      "<div class=\"zones-tip-zone\">",
+      "<strong>" + String(zone.symbol) + " L" + String(zone.selectedLevel) + " " + String(zone.status || "").toUpperCase() + "</strong><br>",
+      "pattern " + String(zone.patternType || "") + " | start " + String(zone.startTickId ?? "") + " | end " + String(zone.endTickId ?? "") + "<br>",
+      "current " + Number(zone.zoneLow).toFixed(2) + " - " + Number(zone.zoneHigh).toFixed(2) + " | h " + Number(zone.zoneHeight).toFixed(2) + "<br>",
+      "inside " + String(zone.tickCountInside ?? "") + " | duration " + String(zone.durationInsideLabel || zone.durationInsideMs || ""),
+      "</div>",
+    ].join("");
+  }
+
+  function buildZoneOverlayGraphics() {
+    const chart = state.chart;
+    if (!chart || !displayUsesZones(currentConfig().display) || !state.zoneRows.length) {
+      return [];
+    }
+    const grid = chart.getModel()?.getComponent("grid", 0);
+    const rect = grid?.coordinateSystem?.getRect?.();
+    if (!rect) {
+      return [];
+    }
+    const children = [];
+    state.zoneRows.forEach((zone, index) => {
+      const startTs = Number(zone.startTimestampMs);
+      const endTs = Number(zone.rightTimestampMs ?? zone.endTimestampMs ?? zone.startTimestampMs);
+      const leftPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [startTs, zone.zoneLow]);
+      const rightPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [endTs, zone.zoneLow]);
+      const topPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [startTs, zone.zoneHigh]);
+      const bottomPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [startTs, zone.zoneLow]);
+      if (!Array.isArray(leftPoint) || !Array.isArray(rightPoint) || !Array.isArray(topPoint) || !Array.isArray(bottomPoint)) {
+        return;
+      }
+      let left = Number(leftPoint[0]);
+      let right = Number(rightPoint[0]);
+      let top = Math.min(Number(topPoint[1]), Number(bottomPoint[1]));
+      let bottom = Math.max(Number(topPoint[1]), Number(bottomPoint[1]));
+      if (!Number.isFinite(left) || !Number.isFinite(right) || !Number.isFinite(top) || !Number.isFinite(bottom)) {
+        return;
+      }
+      if (right < rect.x || left > rect.x + rect.width || bottom < rect.y || top > rect.y + rect.height) {
+        return;
+      }
+      left = Math.max(rect.x, left);
+      right = Math.min(rect.x + rect.width, right);
+      top = Math.max(rect.y, top);
+      bottom = Math.min(rect.y + rect.height, bottom);
+      const style = zoneStyle(zone);
+      children.push({
+        id: "live-zone-" + String(zone.id || index),
+        type: "rect",
+        silent: true,
+        z: 2,
+        shape: {
+          x: left,
+          y: top,
+          width: Math.max(2, right - left),
+          height: Math.max(2, bottom - top),
+          r: 2,
+        },
+        style: {
+          fill: style.fill,
+          stroke: style.stroke,
+          lineWidth: style.lineWidth,
+        },
+      });
+    });
+    return children;
+  }
+
+  function renderZoneOverlay() {
+    if (!state.chart) {
+      return;
+    }
+    state.chart.setOption({
+      graphic: [{
+        id: "live-zone-overlay",
+        type: "group",
+        silent: true,
+        z: 2,
+        children: buildZoneOverlayGraphics(),
+      }],
+    }, { replaceMerge: ["graphic"], lazyUpdate: true });
+  }
+
+  function queueZoneOverlayRender() {
+    if (state.zoneOverlayFrame) {
+      window.cancelAnimationFrame(state.zoneOverlayFrame);
+    }
+    state.zoneOverlayFrame = window.requestAnimationFrame(() => {
+      state.zoneOverlayFrame = 0;
+      renderZoneOverlay();
+    });
   }
 
   function buildChartSeries(config) {
@@ -830,6 +1085,7 @@
       state.applyingViewport = false;
       state.viewport = captureViewportFromChart(datasetBounds) || nextViewport;
       queueVisibleYAxisUpdate(state.viewport);
+      queueZoneOverlayRender();
     });
   }
 
@@ -910,6 +1166,24 @@
     if (displayUsesTicks(currentConfig().display)) {
       trimZigRowsToCurrentRange();
     }
+  }
+
+  function replaceZoneRows(rows) {
+    const byId = new Map();
+    (Array.isArray(rows) ? rows : []).forEach((row) => {
+      if (!row || row.id == null) {
+        return;
+      }
+      byId.set(row.id, row);
+    });
+    state.zoneRows = Array.from(byId.values()).sort((left, right) => {
+      const leftStart = Number(left?.startTimestampMs || 0);
+      const rightStart = Number(right?.startTimestampMs || 0);
+      if (leftStart !== rightStart) {
+        return leftStart - rightStart;
+      }
+      return Number(left?.id || 0) - Number(right?.id || 0);
+    });
   }
 
   function dedupeAppend(rows) {
@@ -1006,6 +1280,9 @@
       mode: config.mode,
       window: String(config.window),
       display: config.display,
+      showTicks: config.showTicks ? "1" : "0",
+      showZigs: config.showZigs ? "1" : "0",
+      showZones: config.showZones ? "1" : "0",
     });
     if (config.mode === "review" && startId != null) {
       params.set("id", String(startId));
@@ -1017,7 +1294,11 @@
     const params = new URLSearchParams({
       afterId: String(afterId),
       limit: String(limit),
+      window: String(currentLoadedWindow(config)),
       display: config.display,
+      showTicks: config.showTicks ? "1" : "0",
+      showZigs: config.showZigs ? "1" : "0",
+      showZones: config.showZones ? "1" : "0",
     });
     if (endId != null) {
       params.set("endId", String(endId));
@@ -1031,29 +1312,34 @@
       currentLastId: String(state.rangeLastId || state.rangeFirstId || 1),
       limit: String(limit),
       display: config.display,
+      showTicks: config.showTicks ? "1" : "0",
+      showZigs: config.showZigs ? "1" : "0",
+      showZones: config.showZones ? "1" : "0",
     }).toString();
   }
 
   async function loadBootstrap(resetView) {
     const config = currentConfig();
     const startId = config.mode === "review" ? await resolveReviewStartId(config) : null;
+    const preservedViewport = resetView ? null : (captureViewportFromChart(getDatasetBounds()) || state.viewport);
     const payload = await fetchJson(bootstrapUrl(config, startId));
-    state.loadedWindow = config.window;
+    state.loadedWindow = Number(payload.window) || config.window;
     replaceRows(payload.rows || []);
     replaceZigRows(payload.zigRows || []);
+    replaceZoneRows(payload.zoneRows || []);
     applyRangePayload(payload);
     state.reviewEndId = payload.reviewEndId || null;
     state.hasMoreLeft = Boolean(payload.hasMoreLeft);
     state.lastMetrics = payload.metrics || null;
     state.lastDatasetBounds = null;
-    state.viewport = null;
+    state.viewport = preservedViewport;
     renderMeta();
     renderPerf();
     renderChart({ resetView: Boolean(resetView) });
 
     const message = displayUsesTicks(config.display)
-      ? "Loaded " + state.rows.length + " tick(s) and " + state.zigRows.length + " zig point(s)."
-      : "Loaded " + state.zigRows.length + " zig point(s) over tick range " + state.rangeFirstId + "-" + state.rangeLastId + ".";
+      ? "Loaded " + state.rows.length + " tick(s)."
+      : "Loaded tick range " + state.rangeFirstId + "-" + state.rangeLastId + ".";
     status(message, false);
 
     if (config.run === "run") {
@@ -1071,7 +1357,11 @@
     const source = new EventSource("/api/live/stream?" + new URLSearchParams({
       afterId: String(afterId || 0),
       limit: "250",
+      window: String(currentLoadedWindow(config)),
       display: config.display,
+      showTicks: config.showTicks ? "1" : "0",
+      showZigs: config.showZigs ? "1" : "0",
+      showZones: config.showZones ? "1" : "0",
     }).toString());
     state.source = source;
 
@@ -1086,12 +1376,15 @@
       state.lastMetrics = payload;
       const tickAppended = displayUsesTicks(config.display) ? dedupeAppend(payload.rows || []) : 0;
       const zigChanged = displayUsesZig(config.display) ? mergeZigChanges(payload.zigChanges || []) : 0;
+      if (displayUsesZones(config.display)) {
+        replaceZoneRows(payload.zoneRows || []);
+      }
       if (!displayUsesTicks(config.display) && payload.lastId != null) {
         state.rangeLastId = payload.lastId;
       }
       renderMeta();
       renderPerf();
-      if (tickAppended || zigChanged) {
+      if (tickAppended || zigChanged || displayUsesZones(config.display)) {
         renderChart({ shiftWithRun: currentConfig().run === "run" });
       }
     };
@@ -1128,12 +1421,15 @@
     state.lastMetrics = payload.metrics || null;
     const tickAppended = displayUsesTicks(config.display) ? dedupeAppend(payload.rows || []) : 0;
     const zigChanged = displayUsesZig(config.display) ? mergeZigChanges(payload.zigChanges || []) : 0;
+    if (displayUsesZones(config.display)) {
+      replaceZoneRows(payload.zoneRows || []);
+    }
     if (!displayUsesTicks(config.display) && payload.lastId != null) {
       state.rangeLastId = payload.lastId;
     }
     renderMeta();
     renderPerf();
-    if (tickAppended || zigChanged) {
+    if (tickAppended || zigChanged || displayUsesZones(config.display)) {
       renderChart({ shiftWithRun: true });
     }
     status(payload.endReached ? "Review reached the current end snapshot." : "Review running.", false);
@@ -1210,6 +1506,9 @@
     if (displayUsesZig(config.display)) {
       replaceZigRows(payload.zigRows || []);
     }
+    if (displayUsesZones(config.display)) {
+      replaceZoneRows(payload.zoneRows || []);
+    }
     state.hasMoreLeft = Boolean(payload.hasMoreLeft);
     state.viewport = preservedViewport;
     renderMeta();
@@ -1260,14 +1559,17 @@
     status("Run state updated.", false);
   });
 
-  bindSegment(elements.displayToggle, function (value) {
-    setSegment(elements.displayToggle, value);
-    updateWindowConstraints();
-    updateSeriesAvailability();
-    writeQuery();
-    renderMeta();
-    renderChart({ shiftWithRun: false });
-    status("Display mode updated. Click Load to refresh the range.", false);
+  [elements.showTicks, elements.showZigs, elements.showZones].forEach((control) => {
+    control.addEventListener("change", function () {
+      currentConfig();
+      updateWindowConstraints();
+      updateSeriesAvailability();
+      writeQuery();
+      loadAll(false).catch((error) => {
+        status(error.message || "Display refresh failed.", true);
+      });
+      status("Display layers updated.", false);
+    });
   });
 
   bindSegment(elements.seriesToggle, function (value) {

@@ -68,6 +68,7 @@
     ui: {
       sidebarCollapsed: true,
       settingsCollapsed: true,
+      tableCollapsed: true,
     },
   };
 
@@ -103,7 +104,9 @@
     liveMeta: document.getElementById("liveMeta"),
     livePerf: document.getElementById("livePerf"),
     chartHost: document.getElementById("zigCandlesChart"),
+    chartStage: document.getElementById("chartStage"),
     tablePanel: document.getElementById("tablePanel"),
+    tableToggle: document.getElementById("tableToggle"),
     tableMeta: document.getElementById("tableMeta"),
     barsTableBody: document.getElementById("barsTableBody"),
   };
@@ -256,6 +259,14 @@
     queueChartResize();
   }
 
+  function setTableCollapsed(collapsed) {
+    state.ui.tableCollapsed = Boolean(collapsed);
+    elements.chartStage.classList.toggle("is-table-collapsed", state.ui.tableCollapsed);
+    elements.tableToggle.setAttribute("aria-expanded", String(!state.ui.tableCollapsed));
+    elements.tableToggle.textContent = state.ui.tableCollapsed ? "Expand Table" : "Collapse Table";
+    queueChartResize();
+  }
+
   function updateReviewFields() {
     const reviewMode = currentConfig().mode === "review";
     elements.tickId.disabled = !reviewMode;
@@ -287,6 +298,7 @@
     elements.tablePanel.hidden = !config.table;
     setSidebarCollapsed(true);
     setSettingsCollapsed(true);
+    setTableCollapsed(true);
     updateReviewFields();
     renderMeta();
     renderPerf();
@@ -372,9 +384,9 @@
       DISPLAY_CONFIG[config.display].label,
       "L" + config.level,
       config.series,
-      "bars " + state.bars.length,
+      "zig candles " + state.bars.length + "/" + config.window,
       "final " + finalCount,
-      "active " + provisionalCount,
+      "provisional " + provisionalCount,
       "zones " + state.zones.length,
       "z-active " + activeZones,
       "z-prov " + provisionalZones,
@@ -435,11 +447,11 @@
 
   function renderTable() {
     if (!state.bars.length) {
-      elements.tableMeta.textContent = "No bars loaded.";
+      elements.tableMeta.textContent = "No zig candles loaded.";
       elements.barsTableBody.innerHTML = "";
       return;
     }
-    elements.tableMeta.textContent = state.bars.length + " bar(s) | " + state.zones.length + " zone(s) | most recent first";
+    elements.tableMeta.textContent = state.bars.length + " zig candle(s) | " + state.zones.length + " zone(s) | most recent first";
     const rows = state.bars.slice().reverse().map((bar) => {
       const tr = document.createElement("tr");
       tr.dataset.barId = bar.id;
@@ -868,6 +880,53 @@
     return true;
   }
 
+  function visibleIndexRange() {
+    if (!state.bars.length) {
+      return null;
+    }
+    return zoomIndicesFromState(state.zoom, state.bars.length);
+  }
+
+  function indexIsVisible(index) {
+    const range = visibleIndexRange();
+    if (!range) {
+      return false;
+    }
+    return index >= range.startIndex && index <= range.endIndex;
+  }
+
+  function softFocusIndex(index) {
+    if (!state.bars.length || !Number.isInteger(index)) {
+      return false;
+    }
+    const range = visibleIndexRange();
+    if (!range || indexIsVisible(index)) {
+      return false;
+    }
+    const width = Math.max(0, range.endIndex - range.startIndex);
+    let nextStart = index < range.startIndex ? index : index - width;
+    nextStart = Math.max(0, Math.min(state.bars.length - 1, nextStart));
+    const nextEnd = Math.max(nextStart, Math.min(state.bars.length - 1, nextStart + width));
+    state.zoom = zoomStateFromIndexRange(nextStart, nextEnd, state.bars.length);
+    return true;
+  }
+
+  function showTipForBar(index) {
+    if (!state.chart || !Number.isInteger(index) || !indexIsVisible(index)) {
+      return;
+    }
+    const seriesIndex = candleSeriesIndex();
+    if (seriesIndex < 0) {
+      return;
+    }
+    window.requestAnimationFrame(() => {
+      if (!state.chart) {
+        return;
+      }
+      state.chart.dispatchAction({ type: "showTip", seriesIndex: seriesIndex, dataIndex: index });
+    });
+  }
+
   function ensureChart() {
     bindResizeLifecycle();
     if (!chartHostHasSize()) {
@@ -950,6 +1009,16 @@
         queueVisibleYAxisUpdate();
         queueZoneOverlayRender("zoom");
       });
+
+      state.chart.on("click", function (params) {
+        if (params?.seriesId !== "zig-candles-main") {
+          return;
+        }
+        const bar = params?.data?.bar || state.bars[Number(params?.dataIndex)];
+        if (bar?.id) {
+          focusBar(bar.id);
+        }
+      });
     }
     return state.chart;
   }
@@ -958,7 +1027,7 @@
     if (!state.bars.length) {
       return [];
     }
-    const indices = zoomIndicesFromState(state.zoom, state.bars.length);
+    const indices = visibleIndexRange();
     if (!indices) {
       return state.bars.slice();
     }
@@ -1074,16 +1143,9 @@
     }
     state.selectedBarId = barId;
     renderTable();
+    softFocusIndex(index);
     renderChart(false);
-    if (state.chart) {
-      const startValue = Math.max(0, index - 8);
-      const endValue = Math.min(state.bars.length - 1, index + 8);
-      const seriesIndex = candleSeriesIndex();
-      state.chart.dispatchAction({ type: "dataZoom", startValue: startValue, endValue: endValue });
-      if (seriesIndex >= 0) {
-        state.chart.dispatchAction({ type: "showTip", seriesIndex: seriesIndex, dataIndex: index });
-      }
-    }
+    showTipForBar(index);
   }
 
   function clearActivity() {
@@ -1192,8 +1254,10 @@
     const config = currentConfig();
     state.reviewStartId = config.mode === "review" ? await resolveReviewStartId(config) : null;
     const payload = await fetchJson(bootstrapUrl(config, state.reviewStartId));
+    const preservedViewport = resetView ? null : captureVisibleBarWindow();
     state.loadedWindow = clampLoadedWindow(payload.window || config.window);
     syncPayload(payload);
+    restoreVisibleBarWindow(preservedViewport);
     renderChart(Boolean(resetView));
     status("Loaded " + state.bars.length + " zig candle(s) and " + state.zones.length + " persisted zone(s).", false);
     if (config.run === "run") {
@@ -1233,7 +1297,9 @@
 
     source.onmessage = function (event) {
       const payload = JSON.parse(event.data);
+      const preservedViewport = captureVisibleBarWindow();
       syncPayload(payload);
+      restoreVisibleBarWindow(preservedViewport);
       renderChart(false);
     };
 
@@ -1264,7 +1330,9 @@
       return;
     }
     const payload = await fetchJson(nextUrl(config, state.rangeLastId, state.reviewEndId));
+    const preservedViewport = captureVisibleBarWindow();
     syncPayload(payload);
+    restoreVisibleBarWindow(preservedViewport);
     renderChart(false);
     status(payload.endReached ? "Review reached the current end snapshot." : "Review running.", false);
     if (!payload.endReached && currentConfig().run === "run") {
@@ -1327,7 +1395,7 @@
     syncPayload(payload);
     restoreVisibleBarWindow(preservedViewport);
     renderChart(false);
-    status(state.bars.length && didExpandLeft ? "Older zig candles and zones were added off-screen to the left." : "No older data was available.", false);
+    status(state.bars.length && didExpandLeft ? "Older zig candles were added off-screen to the left." : "No older zig candles were available.", false);
     await resumeRunIfNeeded();
   }
 
@@ -1400,6 +1468,9 @@
   [elements.showProvisional, elements.zoneDebugOverlay, elements.showTable].forEach((control) => {
     control.addEventListener("change", function () {
       elements.tablePanel.hidden = !elements.showTable.checked;
+      if (elements.showTable.checked) {
+        setTableCollapsed(true);
+      }
       writeQuery();
       renderMeta();
       renderChart(false);
@@ -1428,6 +1499,10 @@
     loadMoreLeft().catch((error) => {
       status(error.message || "Load More Left failed.", true);
     });
+  });
+
+  elements.tableToggle.addEventListener("click", function () {
+    setTableCollapsed(!state.ui.tableCollapsed);
   });
 
   applyInitialConfig(parseQuery());

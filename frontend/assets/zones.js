@@ -60,6 +60,7 @@
     ui: {
       sidebarCollapsed: true,
       settingsCollapsed: true,
+      tableCollapsed: true,
     },
   };
 
@@ -89,7 +90,9 @@
     zoneStateMeta: document.getElementById("zoneStateMeta"),
     livePerf: document.getElementById("livePerf"),
     chartHost: document.getElementById("zonesChart"),
+    chartStage: document.getElementById("chartStage"),
     tablePanel: document.getElementById("tablePanel"),
+    tableToggle: document.getElementById("tableToggle"),
     tableMeta: document.getElementById("tableMeta"),
     zonesTableBody: document.getElementById("zonesTableBody"),
   };
@@ -201,6 +204,14 @@
     queueChartResize();
   }
 
+  function setTableCollapsed(collapsed) {
+    state.ui.tableCollapsed = Boolean(collapsed);
+    elements.chartStage.classList.toggle("is-table-collapsed", state.ui.tableCollapsed);
+    elements.tableToggle.setAttribute("aria-expanded", String(!state.ui.tableCollapsed));
+    elements.tableToggle.textContent = state.ui.tableCollapsed ? "Expand Table" : "Collapse Table";
+    queueChartResize();
+  }
+
   function updateReviewFields() {
     const reviewMode = currentConfig().mode === "review";
     elements.tickId.disabled = !reviewMode;
@@ -225,6 +236,7 @@
     elements.tablePanel.hidden = !config.table;
     setSidebarCollapsed(true);
     setSettingsCollapsed(true);
+    setTableCollapsed(true);
     updateReviewFields();
     renderMeta();
     renderZoneStateMeta();
@@ -309,7 +321,7 @@
       DISPLAY_CONFIG[config.display].label,
       "L" + config.level,
       config.series,
-      "zones " + state.zones.length,
+      "zones " + state.zones.length + "/" + config.window,
       "z-active " + activeZones,
       "z-prov " + provisionalZones,
       "z-closed " + closedZones,
@@ -505,9 +517,17 @@
     if (!Number.isInteger(index)) {
       return [];
     }
+    const seen = new Set();
     return state.zones.filter((zone) => {
+      if (seen.has(zone.id)) {
+        return false;
+      }
       const span = zoneSpanFor(zone);
-      return span && index >= span.startIndex && index <= span.endIndex;
+      if (!span || index < span.startIndex || index > span.endIndex) {
+        return false;
+      }
+      seen.add(zone.id);
+      return true;
     });
   }
 
@@ -742,6 +762,42 @@
     return true;
   }
 
+  function indexIsVisible(index) {
+    const range = visibleIndexRange();
+    if (!range) {
+      return false;
+    }
+    return index >= range.startIndex && index <= range.endIndex;
+  }
+
+  function softFocusIndex(index) {
+    if (!state.bars.length || !Number.isInteger(index)) {
+      return false;
+    }
+    const range = visibleIndexRange();
+    if (!range || indexIsVisible(index)) {
+      return false;
+    }
+    const width = Math.max(0, range.endIndex - range.startIndex);
+    let nextStart = index < range.startIndex ? index : index - width;
+    nextStart = Math.max(0, Math.min(state.bars.length - 1, nextStart));
+    const nextEnd = Math.max(nextStart, Math.min(state.bars.length - 1, nextStart + width));
+    state.zoom = zoomStateFromIndexRange(nextStart, nextEnd, state.bars.length);
+    return true;
+  }
+
+  function showTipForIndex(index) {
+    if (!state.chart || !Number.isInteger(index) || !indexIsVisible(index)) {
+      return;
+    }
+    window.requestAnimationFrame(() => {
+      if (!state.chart) {
+        return;
+      }
+      state.chart.dispatchAction({ type: "showTip", seriesIndex: 0, dataIndex: index });
+    });
+  }
+
   function ensureChart() {
     bindResizeLifecycle();
     if (!chartHostHasSize()) {
@@ -816,6 +872,16 @@
           : { start: 0, end: 100 };
         queueVisibleYAxisUpdate();
         queueZoneOverlayRender();
+      });
+
+      state.chart.on("click", function (params) {
+        if (params?.seriesId !== "zones-candles-main") {
+          return;
+        }
+        const zones = zonesForBarIndex(Number(params?.dataIndex));
+        if (zones.length) {
+          focusZone(zones[0].id);
+        }
       });
     }
     return state.chart;
@@ -917,7 +983,22 @@
   }
 
   function replaceZones(rows) {
-    state.zones = Array.isArray(rows) ? rows.slice() : [];
+    const nextRows = Array.isArray(rows) ? rows : [];
+    const byId = new Map();
+    nextRows.forEach((row) => {
+      if (!row || row.id == null) {
+        return;
+      }
+      byId.set(row.id, row);
+    });
+    state.zones = Array.from(byId.values()).sort((left, right) => {
+      const leftStart = Number(left?.startTickId || 0);
+      const rightStart = Number(right?.startTickId || 0);
+      if (leftStart !== rightStart) {
+        return leftStart - rightStart;
+      }
+      return Number(left?.id || 0) - Number(right?.id || 0);
+    });
     if (!state.zones.some((zone) => zone.id === state.selectedZoneId)) {
       const activeZone = state.zones.find((zone) => zone.status === "active");
       state.selectedZoneId = activeZone ? activeZone.id : (state.zones[state.zones.length - 1]?.id ?? null);
@@ -950,16 +1031,15 @@
     }
     state.selectedZoneId = zoneId;
     renderTable();
-    renderChart(false);
     const span = zoneSpanFor(zone);
-    if (!span || !state.chart) {
+    if (!span) {
+      renderChart(false);
       return;
     }
-    const startValue = Math.max(0, span.startIndex - 2);
-    const endValue = Math.min(state.bars.length - 1, span.endIndex + 2);
-    state.chart.dispatchAction({ type: "dataZoom", startValue: startValue, endValue: endValue });
-    const focusIndex = Math.max(startValue, Math.min(endValue, Math.round((span.startIndex + span.endIndex) / 2)));
-    state.chart.dispatchAction({ type: "showTip", seriesIndex: 0, dataIndex: focusIndex });
+    const focusIndex = Math.max(span.startIndex, Math.min(span.endIndex, Math.round((span.startIndex + span.endIndex) / 2)));
+    softFocusIndex(focusIndex);
+    renderChart(false);
+    showTipForIndex(focusIndex);
   }
 
   function clearActivity() {
@@ -1058,9 +1138,11 @@
     const config = currentConfig();
     state.reviewStartId = config.mode === "review" ? await resolveReviewStartId(config) : null;
     const payload = await fetchJson(bootstrapUrl(config, state.reviewStartId));
+    const preservedViewport = resetView ? null : captureVisibleBarWindow();
     state.loadedWindow = clampLoadedWindow(payload.window || config.window);
     syncPayload(payload);
     await refreshZoneState(config.level);
+    restoreVisibleBarWindow(preservedViewport);
     renderChart(Boolean(resetView));
     status("Loaded " + state.zones.length + " persisted zone(s).", false);
     if (config.run === "run") {
@@ -1094,7 +1176,9 @@
 
     source.onmessage = function (event) {
       const payload = JSON.parse(event.data);
+      const preservedViewport = captureVisibleBarWindow();
       syncPayload(payload);
+      restoreVisibleBarWindow(preservedViewport);
       renderChart(false);
       refreshZoneState(currentConfig().level).catch(() => {});
     };
@@ -1126,8 +1210,10 @@
       return;
     }
     const payload = await fetchJson(nextUrl(config, state.rangeLastId, state.reviewEndId));
+    const preservedViewport = captureVisibleBarWindow();
     syncPayload(payload);
     await refreshZoneState(config.level);
+    restoreVisibleBarWindow(preservedViewport);
     renderChart(false);
     status(payload.endReached ? "Review reached the current end snapshot." : "Review running.", false);
     if (!payload.endReached && currentConfig().run === "run") {
@@ -1192,7 +1278,7 @@
     await refreshZoneState(config.level);
     restoreVisibleBarWindow(preservedViewport);
     renderChart(false);
-    status(state.zones.length && didExpandLeft ? "Older persisted zones were added off-screen to the left." : "No older data was available.", false);
+    status(state.zones.length && didExpandLeft ? "Older zones were added off-screen to the left." : "No older zones were available.", false);
     await resumeRunIfNeeded();
   }
 
@@ -1265,6 +1351,9 @@
   [elements.showProvisional, elements.showTable].forEach((control) => {
     control.addEventListener("change", function () {
       elements.tablePanel.hidden = !elements.showTable.checked;
+      if (elements.showTable.checked) {
+        setTableCollapsed(true);
+      }
       writeQuery();
       renderMeta();
       renderChart(false);
@@ -1293,6 +1382,10 @@
     loadMoreLeft().catch((error) => {
       status(error.message || "Load More Left failed.", true);
     });
+  });
+
+  elements.tableToggle.addEventListener("click", function () {
+    setTableCollapsed(!state.ui.tableCollapsed);
   });
 
   applyInitialConfig(parseQuery());

@@ -305,6 +305,33 @@ def includes_zig(display_mode: str) -> bool:
     return display_mode in {"ticks-zig", "zig"}
 
 
+def resolve_live_layers(
+    *,
+    display_mode: str,
+    show_ticks: Optional[bool],
+    show_zigs: Optional[bool],
+    show_zones: Optional[bool],
+) -> Dict[str, bool]:
+    flags = {
+        "ticks": includes_ticks(display_mode) if show_ticks is None else bool(show_ticks),
+        "zigs": includes_zig(display_mode) if show_zigs is None else bool(show_zigs),
+        "zones": False if show_zones is None else bool(show_zones),
+    }
+    if not any(flags.values()):
+        flags["ticks"] = True
+    return flags
+
+
+def clamp_live_window(value: int, layers: Dict[str, bool]) -> int:
+    maximum = MAX_TICK_WINDOW if layers.get("ticks") else MAX_ZIG_WINDOW
+    return clamp_int(value, 1, maximum)
+
+
+def clamp_live_history_limit(value: int, layers: Dict[str, bool]) -> int:
+    maximum = MAX_TICK_HISTORY_LIMIT if layers.get("ticks") else MAX_ZIG_HISTORY_LIMIT
+    return clamp_int(value, 1, maximum)
+
+
 def clamp_window(value: int, display_mode: str) -> int:
     maximum = MAX_ZIG_WINDOW if display_mode == "zig" else MAX_TICK_WINDOW
     return clamp_int(value, 1, maximum)
@@ -2096,6 +2123,29 @@ def fetch_persisted_zone_rows(
     return [serialize_zonebox_row(dict(row)) for row in cur.fetchall()]
 
 
+def fetch_persisted_zone_rows_all_levels(
+    cur: Any,
+    *,
+    enabled: bool,
+    range_start_id: Optional[int],
+    cursor_id: Optional[int],
+) -> List[Dict[str, Any]]:
+    if not enabled or range_start_id is None or cursor_id is None or cursor_id < range_start_id:
+        return []
+    cur.execute(
+        """
+        SELECT *
+        FROM public.zonebox
+        WHERE symbol = %s
+          AND lasttickid >= %s
+          AND starttickid <= %s
+        ORDER BY level ASC, starttickid ASC, id ASC
+        """,
+        (TICK_SYMBOL, range_start_id, cursor_id),
+    )
+    return [serialize_zonebox_row(dict(row)) for row in cur.fetchall()]
+
+
 def serialize_zoneboxstate_row(row: Dict[str, Any]) -> Dict[str, Any]:
     updated_at = row.get("updated_at")
     return {
@@ -2504,10 +2554,12 @@ def build_live_range_payload(
     *,
     mode: str,
     display_mode: str,
+    live_layers: Dict[str, bool],
     window: int,
     range_rows: List[Dict[str, Any]],
     rows: List[Dict[str, Any]],
     zig_rows: List[Dict[str, Any]],
+    zone_rows: List[Dict[str, Any]],
     review_end_id: Optional[int],
     review_end_timestamp: Optional[datetime],
     bounds: Dict[str, Any],
@@ -2523,6 +2575,8 @@ def build_live_range_payload(
         "rowCount": len(rows),
         "zigRows": zig_rows,
         "zigCount": len(zig_rows),
+        "zoneRows": zone_rows,
+        "zoneCount": len(zone_rows),
         "firstId": first_row_id,
         "lastId": last_row_id,
         "firstTimestamp": serialize_value(first_row.get("timestamp") if first_row else None),
@@ -2532,6 +2586,7 @@ def build_live_range_payload(
         "mode": mode,
         "window": window,
         "displayMode": display_mode,
+        "layers": live_layers,
         "symbol": TICK_SYMBOL,
         "reviewEndId": review_end_id,
         "reviewEndTimestamp": serialize_value(review_end_timestamp),
@@ -2551,8 +2606,17 @@ def load_bootstrap_payload(
     start_id: Optional[int],
     window: int,
     display_mode: str,
+    show_ticks: Optional[bool] = None,
+    show_zigs: Optional[bool] = None,
+    show_zones: Optional[bool] = None,
 ) -> Dict[str, Any]:
-    effective_window = clamp_window(window, display_mode)
+    live_layers = resolve_live_layers(
+        display_mode=display_mode,
+        show_ticks=show_ticks,
+        show_zigs=show_zigs,
+        show_zones=show_zones,
+    )
+    effective_window = clamp_live_window(window, live_layers)
     fetch_started = time.perf_counter()
     with db_connection(readonly=True) as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -2565,8 +2629,9 @@ def load_bootstrap_payload(
             }
             review_end_id = bounds["lastId"] if mode == "review" else None
             review_end_timestamp = bounds["lastTimestamp"] if mode == "review" else None
-            include_tick_rows = includes_ticks(display_mode)
-            zig_ready = includes_zig(display_mode) and zig_storage_ready(cur)
+            include_tick_rows = live_layers["ticks"]
+            zig_ready = live_layers["zigs"] and zig_storage_ready(cur)
+            zone_ready = live_layers["zones"] and zone_storage_ready(cur)
             range_rows = fetch_bootstrap_tick_rows(
                 cur,
                 mode=mode,
@@ -2597,15 +2662,27 @@ def load_bootstrap_payload(
                 if zig_ready
                 else []
             )
+            zone_rows = (
+                fetch_persisted_zone_rows_all_levels(
+                    cur,
+                    enabled=True,
+                    range_start_id=range_first_id,
+                    cursor_id=range_last_id,
+                )
+                if zone_ready
+                else []
+            )
     fetch_ms = elapsed_ms(fetch_started)
     serialize_started = time.perf_counter()
     payload = build_live_range_payload(
         mode=mode,
         display_mode=display_mode,
+        live_layers=live_layers,
         window=effective_window,
         range_rows=range_rows,
         rows=[],
         zig_rows=zig_rows,
+        zone_rows=zone_rows,
         review_end_id=review_end_id,
         review_end_timestamp=review_end_timestamp,
         bounds=bounds,
@@ -2616,6 +2693,8 @@ def load_bootstrap_payload(
     payload["rowCount"] = len(payload["rows"])
     payload["zigRows"] = serialize_zig_rows(zig_rows)
     payload["zigCount"] = len(payload["zigRows"])
+    payload["zoneRows"] = zone_rows
+    payload["zoneCount"] = len(zone_rows)
     payload["metrics"]["serializeLatencyMs"] = elapsed_ms(serialize_started)
     return payload
 
@@ -2624,19 +2703,47 @@ def load_next_payload(
     *,
     after_id: int,
     limit: int,
+    window: int,
     display_mode: str,
     end_id: Optional[int],
+    show_ticks: Optional[bool] = None,
+    show_zigs: Optional[bool] = None,
+    show_zones: Optional[bool] = None,
 ) -> Dict[str, Any]:
+    live_layers = resolve_live_layers(
+        display_mode=display_mode,
+        show_ticks=show_ticks,
+        show_zigs=show_zigs,
+        show_zones=show_zones,
+    )
+    effective_window = clamp_live_window(window, live_layers)
     fetch_started = time.perf_counter()
-    include_tick_rows = includes_ticks(display_mode)
+    include_tick_rows = live_layers["ticks"]
     with db_connection(readonly=True) as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            zig_ready = includes_zig(display_mode) and zig_storage_ready(cur)
+            zig_ready = live_layers["zigs"] and zig_storage_ready(cur)
+            zone_ready = live_layers["zones"] and zone_storage_ready(cur)
             tick_rows = query_rows_after(cur, after_id, limit, end_id=end_id, include_rows=include_tick_rows)
             last_seen_id = tick_rows[-1]["id"] if tick_rows else after_id
             zig_changes = (
                 fetch_zig_changes(cur, after_tick_id=after_id, upto_tick_id=last_seen_id)
                 if zig_ready
+                else []
+            )
+            range_rows = query_tick_window_before_cursor(
+                cur,
+                cursor_id=last_seen_id,
+                window=effective_window,
+            ) if (zone_ready and last_seen_id) else []
+            range_first_id = range_rows[0]["id"] if range_rows else None
+            zone_rows = (
+                fetch_persisted_zone_rows_all_levels(
+                    cur,
+                    enabled=True,
+                    range_start_id=range_first_id,
+                    cursor_id=last_seen_id,
+                )
+                if zone_ready and range_first_id is not None
                 else []
             )
     fetch_ms = elapsed_ms(fetch_started)
@@ -2649,9 +2756,12 @@ def load_next_payload(
         "rowCount": len(rows),
         "zigChanges": zig_rows,
         "zigChangeCount": len(zig_rows),
+        "zoneRows": zone_rows,
+        "zoneCount": len(zone_rows),
         "lastId": last_seen_id,
         "endId": end_id,
         "displayMode": display_mode,
+        "layers": live_layers,
         "endReached": bool(end_id is not None and last_seen_id >= end_id),
         "metrics": serialize_metrics_payload(
             fetch_ms=fetch_ms,
@@ -2667,13 +2777,23 @@ def load_previous_payload(
     limit: int,
     display_mode: str,
     current_last_id: Optional[int],
+    show_ticks: Optional[bool] = None,
+    show_zigs: Optional[bool] = None,
+    show_zones: Optional[bool] = None,
 ) -> Dict[str, Any]:
-    effective_limit = clamp_history_limit(limit, display_mode)
+    live_layers = resolve_live_layers(
+        display_mode=display_mode,
+        show_ticks=show_ticks,
+        show_zigs=show_zigs,
+        show_zones=show_zones,
+    )
+    effective_limit = clamp_live_history_limit(limit, live_layers)
     fetch_started = time.perf_counter()
-    include_tick_rows = includes_ticks(display_mode)
+    include_tick_rows = live_layers["ticks"]
     with db_connection(readonly=True) as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            zig_ready = includes_zig(display_mode) and zig_storage_ready(cur)
+            zig_ready = live_layers["zigs"] and zig_storage_ready(cur)
+            zone_ready = live_layers["zones"] and zone_storage_ready(cur)
             bounds_row = query_tick_bounds(cur)
             bounds = {
                 "firstId": bounds_row.get("first_id"),
@@ -2695,6 +2815,16 @@ def load_previous_payload(
                 if zig_ready
                 else []
             )
+            zone_rows = (
+                fetch_persisted_zone_rows_all_levels(
+                    cur,
+                    enabled=True,
+                    range_start_id=first_row["id"] if first_row else None,
+                    cursor_id=range_end_id,
+                )
+                if zone_ready
+                else []
+            )
     fetch_ms = elapsed_ms(fetch_started)
     serialize_started = time.perf_counter()
     rows = serialize_tick_rows(previous_rows) if include_tick_rows else []
@@ -2706,10 +2836,13 @@ def load_previous_payload(
         "rowCount": len(rows),
         "zigRows": zig_payload,
         "zigCount": len(zig_payload),
+        "zoneRows": zone_rows,
+        "zoneCount": len(zone_rows),
         "firstId": first_row_id,
         "lastId": range_end_id,
         "beforeId": before_id,
         "displayMode": display_mode,
+        "layers": live_layers,
         "hasMoreLeft": bool(bounds.get("firstId") and first_row_id and first_row_id > bounds["firstId"]),
         "metrics": serialize_metrics_payload(
             fetch_ms=fetch_ms,
@@ -2719,17 +2852,34 @@ def load_previous_payload(
     }
 
 
-def stream_events(after_id: int, limit: int, display_mode: str) -> Generator[str, None, None]:
+def stream_events(
+    after_id: int,
+    limit: int,
+    display_mode: str,
+    *,
+    window: int,
+    show_ticks: Optional[bool] = None,
+    show_zigs: Optional[bool] = None,
+    show_zones: Optional[bool] = None,
+) -> Generator[str, None, None]:
     last_id = max(0, after_id)
     limit = clamp_int(limit, 1, MAX_STREAM_BATCH)
-    include_tick_rows = includes_ticks(display_mode)
+    live_layers = resolve_live_layers(
+        display_mode=display_mode,
+        show_ticks=show_ticks,
+        show_zigs=show_zigs,
+        show_zones=show_zones,
+    )
+    effective_window = clamp_live_window(window, live_layers)
+    include_tick_rows = live_layers["ticks"]
     last_heartbeat = time.monotonic()
     idle_sleep = STREAM_POLL_SECONDS
 
     try:
         with db_connection(readonly=True, autocommit=True) as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                include_zig_rows = includes_zig(display_mode) and zig_storage_ready(cur)
+                include_zig_rows = live_layers["zigs"] and zig_storage_ready(cur)
+                include_zone_rows = live_layers["zones"] and zone_storage_ready(cur)
                 while True:
                     fetch_started = time.perf_counter()
                     tick_rows = query_rows_after(cur, last_id, limit, include_rows=include_tick_rows)
@@ -2740,9 +2890,25 @@ def stream_events(after_id: int, limit: int, display_mode: str) -> Generator[str
                         if include_zig_rows
                         else []
                     )
+                    range_rows = query_tick_window_before_cursor(
+                        cur,
+                        cursor_id=next_last_id,
+                        window=effective_window,
+                    ) if (include_zone_rows and next_last_id) else []
+                    range_first_id = range_rows[0]["id"] if range_rows else None
+                    zone_rows = (
+                        fetch_persisted_zone_rows_all_levels(
+                            cur,
+                            enabled=True,
+                            range_start_id=range_first_id,
+                            cursor_id=next_last_id,
+                        )
+                        if include_zone_rows and range_first_id is not None
+                        else []
+                    )
                     fetch_ms = elapsed_ms(fetch_started)
 
-                    should_emit = (include_tick_rows and bool(tick_rows)) or bool(zig_changes)
+                    should_emit = (include_tick_rows and bool(tick_rows)) or bool(zig_changes) or (include_zone_rows and next_last_id > last_id)
                     if should_emit:
                         serialize_started = time.perf_counter()
                         payload_rows = serialize_tick_rows(tick_rows) if include_tick_rows else []
@@ -2754,8 +2920,11 @@ def stream_events(after_id: int, limit: int, display_mode: str) -> Generator[str
                             "rowCount": len(payload_rows),
                             "zigChanges": payload_zig,
                             "zigChangeCount": len(payload_zig),
+                            "zoneRows": zone_rows,
+                            "zoneCount": len(zone_rows),
                             "lastId": last_id,
                             "displayMode": display_mode,
+                            "layers": live_layers,
                             "streamMode": "delta",
                             **serialize_metrics_payload(
                                 fetch_ms=fetch_ms,
@@ -2779,8 +2948,11 @@ def stream_events(after_id: int, limit: int, display_mode: str) -> Generator[str
                             "rowCount": 0,
                             "zigChanges": [],
                             "zigChangeCount": 0,
+                            "zoneRows": [],
+                            "zoneCount": 0,
                             "lastId": last_id,
                             "displayMode": display_mode,
+                            "layers": live_layers,
                             "streamMode": "heartbeat",
                             "pollSleepMs": round(idle_sleep * 1000.0, 2),
                             **serialize_metrics_payload(
@@ -2897,8 +3069,19 @@ def live_bootstrap(
     id: Optional[int] = Query(None, ge=1),
     window: int = Query(DEFAULT_WINDOW, ge=1, le=MAX_ZIG_WINDOW),
     display: str = Query(DEFAULT_DISPLAY_MODE, pattern=DISPLAY_MODE_RE),
+    showTicks: Optional[bool] = Query(None),
+    showZigs: Optional[bool] = Query(None),
+    showZones: Optional[bool] = Query(None),
 ) -> Dict[str, Any]:
-    return load_bootstrap_payload(mode=mode, start_id=id, window=window, display_mode=display)
+    return load_bootstrap_payload(
+        mode=mode,
+        start_id=id,
+        window=window,
+        display_mode=display,
+        show_ticks=showTicks,
+        show_zigs=showZigs,
+        show_zones=showZones,
+    )
 
 
 @app.get("/api/live/next")
@@ -2906,9 +3089,22 @@ def live_next(
     afterId: int = Query(..., ge=0),
     limit: int = Query(250, ge=1, le=MAX_STREAM_BATCH),
     endId: Optional[int] = Query(None, ge=1),
+    window: int = Query(DEFAULT_WINDOW, ge=1, le=MAX_ZIG_WINDOW),
     display: str = Query(DEFAULT_DISPLAY_MODE, pattern=DISPLAY_MODE_RE),
+    showTicks: Optional[bool] = Query(None),
+    showZigs: Optional[bool] = Query(None),
+    showZones: Optional[bool] = Query(None),
 ) -> Dict[str, Any]:
-    return load_next_payload(after_id=afterId, limit=limit, display_mode=display, end_id=endId)
+    return load_next_payload(
+        after_id=afterId,
+        limit=limit,
+        window=window,
+        display_mode=display,
+        end_id=endId,
+        show_ticks=showTicks,
+        show_zigs=showZigs,
+        show_zones=showZones,
+    )
 
 
 @app.get("/api/live/previous")
@@ -2917,18 +3113,41 @@ def live_previous(
     limit: int = Query(DEFAULT_HISTORY_LIMIT, ge=1, le=MAX_ZIG_HISTORY_LIMIT),
     currentLastId: Optional[int] = Query(None, ge=1),
     display: str = Query(DEFAULT_DISPLAY_MODE, pattern=DISPLAY_MODE_RE),
+    showTicks: Optional[bool] = Query(None),
+    showZigs: Optional[bool] = Query(None),
+    showZones: Optional[bool] = Query(None),
 ) -> Dict[str, Any]:
-    return load_previous_payload(before_id=beforeId, limit=limit, display_mode=display, current_last_id=currentLastId)
+    return load_previous_payload(
+        before_id=beforeId,
+        limit=limit,
+        display_mode=display,
+        current_last_id=currentLastId,
+        show_ticks=showTicks,
+        show_zigs=showZigs,
+        show_zones=showZones,
+    )
 
 
 @app.get("/api/live/stream")
 def live_stream(
     afterId: int = Query(0, ge=0),
     limit: int = Query(250, ge=1, le=MAX_STREAM_BATCH),
+    window: int = Query(DEFAULT_WINDOW, ge=1, le=MAX_ZIG_WINDOW),
     display: str = Query(DEFAULT_DISPLAY_MODE, pattern=DISPLAY_MODE_RE),
+    showTicks: Optional[bool] = Query(None),
+    showZigs: Optional[bool] = Query(None),
+    showZones: Optional[bool] = Query(None),
 ) -> StreamingResponse:
     return StreamingResponse(
-        stream_events(afterId, limit, display),
+        stream_events(
+            afterId,
+            limit,
+            display,
+            window=window,
+            show_ticks=showTicks,
+            show_zigs=showZigs,
+            show_zones=showZones,
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
