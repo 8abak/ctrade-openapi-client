@@ -32,15 +32,16 @@ The deploy workflow runs `git reset --hard origin/main` and `git clean -fd`, so 
 The deploy script:
 - activates `/home/ec2-user/venvs/datavis/bin/activate`
 - runs `pip install -r requirements.txt`
-- installs the repo-managed systemd unit files for `datavis`, `tickcollector`, and `fastzig`
+- installs the repo-managed systemd unit files for `datavis`, `tickcollector`, `fastzig`, and `zonebuilder`
 - runs `systemctl daemon-reload`
 - loads `/etc/datavis.env` when present and applies `deploy/sql/20260403_fast_zig.sql`
 - applies `deploy/sql/20260404_fast_zig_levels.sql` for level/state upgrades on partial fast-zig deployments
+- applies `deploy/sql/20260405_zonebox.sql` for persisted mini-zone storage
 - disables and removes legacy processor services: `ottprocessor`, `envelopeprocessor`, `zigzag`, `envelopezigprocessor`, and `marketprofile`
-- enables `datavis`, `tickcollector`, and `fastzig`
-- restarts `datavis` and `fastzig`
+- enables `datavis`, `tickcollector`, `fastzig`, and `zonebuilder`
+- restarts `datavis`, `fastzig`, and `zonebuilder`
 - never restarts `tickcollector`
-- verifies `datavis` and `fastzig` are active with `systemctl is-active --quiet`
+- verifies `datavis`, `fastzig`, and `zonebuilder` are active with `systemctl is-active --quiet`
 - prints `systemctl status <service> --no-pager -l` on failure
 - performs a local `curl` to `http://127.0.0.1:8000/api/health` when `curl` is available
 

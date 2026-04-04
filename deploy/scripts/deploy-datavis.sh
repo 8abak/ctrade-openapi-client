@@ -5,10 +5,10 @@ APP_DIR="/home/ec2-user/cTrade"
 VENV_ACTIVATE="/home/ec2-user/venvs/datavis/bin/activate"
 ENV_FILE="/etc/datavis.env"
 DEFAULT_DATABASE_URL="postgresql://babak:babak33044@localhost:5432/trading"
-UNIT_FILES=("datavis" "tickcollector" "fastzig")
-RESTART_SERVICES=("datavis" "fastzig")
+UNIT_FILES=("datavis" "tickcollector" "fastzig" "zonebuilder")
+RESTART_SERVICES=("datavis" "fastzig" "zonebuilder")
 LEGACY_SERVICES=("ottprocessor" "envelopeprocessor" "zigzag" "envelopezigprocessor" "marketprofile")
-MIGRATION_FILES=("deploy/sql/20260403_fast_zig.sql" "deploy/sql/20260404_fast_zig_levels.sql")
+MIGRATION_FILES=("deploy/sql/20260403_fast_zig.sql" "deploy/sql/20260404_fast_zig_levels.sql" "deploy/sql/20260405_zonebox.sql")
 HEALTH_URL="http://127.0.0.1:8000/api/health"
 
 log() {

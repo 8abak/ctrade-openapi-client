@@ -26,6 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from datavis.db import db_connect as shared_db_connect
+from datavis.zonebox import serialize_zonebox_row
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
@@ -119,6 +120,34 @@ SQL_EXPOSED_TABLES = {
         "default_order_dir": "asc",
         "select_sql": "SELECT symbol, last_processed_tick_id, last_pivot_id, updated_at\nFROM public.fast_zig_state\nORDER BY symbol ASC\nLIMIT 100;",
     },
+    ("public", "zonebox"): {
+        "schema": "public",
+        "name": "zonebox",
+        "kind": "table",
+        "default_order_by": "id",
+        "default_order_dir": "desc",
+        "select_sql": (
+            "SELECT id, symbol, level, state, pattern, starttickid, endtickid, starttime, endtime,\n"
+            "       initialzonelow, initialzonehigh, zonelow, zonehigh, tickcountinside, durationms,\n"
+            "       breakdirection, breaktickid, lasttickid, updated_at\n"
+            "FROM public.zonebox\n"
+            "ORDER BY id DESC\n"
+            "LIMIT 100;"
+        ),
+    },
+    ("public", "zoneboxstate"): {
+        "schema": "public",
+        "name": "zoneboxstate",
+        "kind": "table",
+        "default_order_by": "id",
+        "default_order_dir": "desc",
+        "select_sql": (
+            "SELECT id, symbol, level, lastprocessedtickid, lastprocessedpivotid, activezoneid, updated_at\n"
+            "FROM public.zoneboxstate\n"
+            "ORDER BY id DESC\n"
+            "LIMIT 100;"
+        ),
+    },
 }
 ZIG_REQUIRED_PIVOT_COLUMNS = {
     "level",
@@ -129,6 +158,45 @@ ZIG_REQUIRED_STATE_COLUMNS = {
     "symbol",
     "last_processed_tick_id",
     "last_pivot_id",
+    "updated_at",
+}
+ZONEBOX_REQUIRED_COLUMNS = {
+    "id",
+    "symbol",
+    "level",
+    "state",
+    "pattern",
+    "starttickid",
+    "endtickid",
+    "starttime",
+    "endtime",
+    "initialzonelow",
+    "initialzonehigh",
+    "zonelow",
+    "zonehigh",
+    "zoneheight",
+    "samesidedistance",
+    "samesidetoleranceused",
+    "tickcountinside",
+    "durationms",
+    "continuationovershootused",
+    "breakticksused",
+    "breaktoleranceused",
+    "breakdirection",
+    "breaktickid",
+    "lasttickid",
+    "lasttime",
+    "touchcount",
+    "revisitcount",
+    "updated_at",
+}
+ZONEBOXSTATE_REQUIRED_COLUMNS = {
+    "id",
+    "symbol",
+    "level",
+    "lastprocessedtickid",
+    "lastprocessedpivotid",
+    "activezoneid",
     "updated_at",
 }
 
@@ -1574,18 +1642,29 @@ def load_zig_candle_bootstrap_payload(
                 if zig_storage_ready(cur)
                 else []
             )
-            zone_rows = (
-                build_zig_zone_rows(
+            if zone_storage_ready(cur):
+                zone_rows = fetch_persisted_zone_rows(
                     cur,
+                    enabled=bool(zone_settings.get("enabled")),
                     range_start_id=range_first_id,
                     cursor_id=range_last_id,
                     selected_level=effective_level,
-                    series=series,
-                    zone_settings=zone_settings,
                 )
-                if zig_storage_ready(cur)
-                else []
-            )
+                effective_zone_settings = persisted_zone_settings(enabled=bool(zone_settings.get("enabled")))
+            else:
+                zone_rows = (
+                    build_zig_zone_rows(
+                        cur,
+                        range_start_id=range_first_id,
+                        cursor_id=range_last_id,
+                        selected_level=effective_level,
+                        series=series,
+                        zone_settings=zone_settings,
+                    )
+                    if zig_storage_ready(cur)
+                    else []
+                )
+                effective_zone_settings = zone_settings
     fetch_ms = elapsed_ms(fetch_started)
     serialize_started = time.perf_counter()
     payload = build_zig_candle_range_payload(
@@ -1596,7 +1675,7 @@ def load_zig_candle_bootstrap_payload(
         range_rows=range_rows,
         candle_rows=candle_rows,
         zone_rows=zone_rows,
-        zone_settings=zone_settings,
+        zone_settings=effective_zone_settings,
         review_end_id=review_end_id,
         review_end_timestamp=review_end_timestamp,
         bounds=bounds,
@@ -1653,18 +1732,29 @@ def load_zig_candle_next_payload(
                 if zig_storage_ready(cur)
                 else []
             )
-            zone_rows = (
-                build_zig_zone_rows(
+            if zone_storage_ready(cur):
+                zone_rows = fetch_persisted_zone_rows(
                     cur,
+                    enabled=bool(zone_settings.get("enabled")),
                     range_start_id=range_first_id,
                     cursor_id=range_last_id,
                     selected_level=effective_level,
-                    series=series,
-                    zone_settings=zone_settings,
                 )
-                if zig_storage_ready(cur)
-                else []
-            )
+                effective_zone_settings = persisted_zone_settings(enabled=bool(zone_settings.get("enabled")))
+            else:
+                zone_rows = (
+                    build_zig_zone_rows(
+                        cur,
+                        range_start_id=range_first_id,
+                        cursor_id=range_last_id,
+                        selected_level=effective_level,
+                        series=series,
+                        zone_settings=zone_settings,
+                    )
+                    if zig_storage_ready(cur)
+                    else []
+                )
+                effective_zone_settings = zone_settings
     fetch_ms = elapsed_ms(fetch_started)
     serialize_started = time.perf_counter()
     payload = build_zig_candle_range_payload(
@@ -1675,7 +1765,7 @@ def load_zig_candle_next_payload(
         range_rows=range_rows,
         candle_rows=candle_rows,
         zone_rows=zone_rows,
-        zone_settings=zone_settings,
+        zone_settings=effective_zone_settings,
         review_end_id=end_id,
         review_end_timestamp=bounds.get("lastTimestamp") if review_start_id is not None else None,
         bounds=bounds,
@@ -1731,18 +1821,29 @@ def load_zig_candle_previous_payload(
                 if zig_storage_ready(cur)
                 else []
             )
-            zone_rows = (
-                build_zig_zone_rows(
+            if zone_storage_ready(cur):
+                zone_rows = fetch_persisted_zone_rows(
                     cur,
+                    enabled=bool(zone_settings.get("enabled")),
                     range_start_id=range_first_id,
                     cursor_id=range_last_id,
                     selected_level=effective_level,
-                    series=series,
-                    zone_settings=zone_settings,
                 )
-                if zig_storage_ready(cur)
-                else []
-            )
+                effective_zone_settings = persisted_zone_settings(enabled=bool(zone_settings.get("enabled")))
+            else:
+                zone_rows = (
+                    build_zig_zone_rows(
+                        cur,
+                        range_start_id=range_first_id,
+                        cursor_id=range_last_id,
+                        selected_level=effective_level,
+                        series=series,
+                        zone_settings=zone_settings,
+                    )
+                    if zig_storage_ready(cur)
+                    else []
+                )
+                effective_zone_settings = zone_settings
     fetch_ms = elapsed_ms(fetch_started)
     serialize_started = time.perf_counter()
     payload = build_zig_candle_range_payload(
@@ -1753,7 +1854,7 @@ def load_zig_candle_previous_payload(
         range_rows=range_rows,
         candle_rows=candle_rows,
         zone_rows=zone_rows,
-        zone_settings=zone_settings,
+        zone_settings=effective_zone_settings,
         review_end_id=None,
         review_end_timestamp=None,
         bounds=bounds,
@@ -1819,18 +1920,29 @@ def stream_zig_candle_events(
                             if zig_ready
                             else []
                         )
-                        zone_rows = (
-                            build_zig_zone_rows(
+                        if zone_storage_ready(cur):
+                            zone_rows = fetch_persisted_zone_rows(
                                 cur,
+                                enabled=bool(zone_settings.get("enabled")),
                                 range_start_id=range_first_id,
                                 cursor_id=range_last_id,
                                 selected_level=effective_level,
-                                series=series,
-                                zone_settings=zone_settings,
                             )
-                            if zig_ready
-                            else []
-                        )
+                            effective_zone_settings = persisted_zone_settings(enabled=bool(zone_settings.get("enabled")))
+                        else:
+                            zone_rows = (
+                                build_zig_zone_rows(
+                                    cur,
+                                    range_start_id=range_first_id,
+                                    cursor_id=range_last_id,
+                                    selected_level=effective_level,
+                                    series=series,
+                                    zone_settings=zone_settings,
+                                )
+                                if zig_ready
+                                else []
+                            )
+                            effective_zone_settings = zone_settings
                         fetch_ms = elapsed_ms(fetch_started)
                         serialize_started = time.perf_counter()
                         payload = build_zig_candle_range_payload(
@@ -1841,7 +1953,7 @@ def stream_zig_candle_events(
                             range_rows=range_rows,
                             candle_rows=candle_rows,
                             zone_rows=zone_rows,
-                            zone_settings=zone_settings,
+                            zone_settings=effective_zone_settings,
                             review_end_id=None,
                             review_end_timestamp=None,
                             bounds=bounds,
@@ -1912,6 +2024,76 @@ def zig_storage_ready(cur: Any) -> bool:
         ZIG_REQUIRED_PIVOT_COLUMNS.issubset(columns.get("fast_zig_pivots", set()))
         and ZIG_REQUIRED_STATE_COLUMNS.issubset(columns.get("fast_zig_state", set()))
     )
+
+
+def zone_storage_ready(cur: Any) -> bool:
+    cur.execute(
+        """
+        SELECT
+            to_regclass('public.zonebox') AS zonebox_table,
+            to_regclass('public.zoneboxstate') AS zoneboxstate_table
+        """
+    )
+    row = cur.fetchone() or {}
+    if not row.get("zonebox_table") or not row.get("zoneboxstate_table"):
+        return False
+    cur.execute(
+        """
+        SELECT table_name, column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name IN ('zonebox', 'zoneboxstate')
+        """
+    )
+    columns: Dict[str, set[str]] = {
+        "zonebox": set(),
+        "zoneboxstate": set(),
+    }
+    for info in cur.fetchall():
+        columns.setdefault(info["table_name"], set()).add(info["column_name"])
+    return (
+        ZONEBOX_REQUIRED_COLUMNS.issubset(columns.get("zonebox", set()))
+        and ZONEBOXSTATE_REQUIRED_COLUMNS.issubset(columns.get("zoneboxstate", set()))
+    )
+
+
+def persisted_zone_settings(*, enabled: bool) -> Dict[str, Any]:
+    return build_zone_settings(
+        enabled=enabled,
+        min_dwell_ticks=DEFAULT_ZONE_MIN_DWELL_TICKS,
+        min_dwell_ms=DEFAULT_ZONE_MIN_DWELL_MS,
+        same_side_tolerance=DEFAULT_ZONE_SAME_SIDE_TOLERANCE,
+        allowed_overshoot=DEFAULT_ZONE_ALLOWED_OVERSHOOT,
+        breakout_ticks=DEFAULT_ZONE_BREAKOUT_TICKS,
+        breakout_tolerance=DEFAULT_ZONE_BREAKOUT_TOLERANCE,
+        min_height=DEFAULT_ZONE_MIN_HEIGHT,
+        max_height=DEFAULT_ZONE_MAX_HEIGHT,
+    )
+
+
+def fetch_persisted_zone_rows(
+    cur: Any,
+    *,
+    enabled: bool,
+    range_start_id: Optional[int],
+    cursor_id: Optional[int],
+    selected_level: int,
+) -> List[Dict[str, Any]]:
+    if not enabled or range_start_id is None or cursor_id is None or cursor_id < range_start_id:
+        return []
+    cur.execute(
+        """
+        SELECT *
+        FROM public.zonebox
+        WHERE symbol = %s
+          AND level = %s
+          AND lasttickid >= %s
+          AND starttickid <= %s
+        ORDER BY starttickid ASC, id ASC
+        """,
+        (TICK_SYMBOL, selected_level, range_start_id, cursor_id),
+    )
+    return [serialize_zonebox_row(dict(row)) for row in cur.fetchall()]
 
 
 def split_sql_script(sql_text: str) -> List[str]:
