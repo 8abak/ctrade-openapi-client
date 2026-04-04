@@ -558,6 +558,41 @@
     }).filter(Boolean);
   }
 
+  function buildZoneMarkAreaData() {
+    if (!currentConfig().zones || !state.zones.length || !state.bars.length) {
+      return [];
+    }
+    return state.zones.map((zone) => {
+      const span = zoneSpanFor(zone);
+      if (!span) {
+        return null;
+      }
+      let startIndex = span.startIndex;
+      let endIndex = span.endIndex;
+      if (endIndex === startIndex) {
+        endIndex = Math.min(state.bars.length - 1, startIndex + 1);
+        if (endIndex === startIndex && startIndex > 0) {
+          startIndex = startIndex - 1;
+        }
+      }
+      const style = zoneStyle(zone);
+      return [
+        {
+          xAxis: startIndex,
+          yAxis: zone.zoneLow,
+          itemStyle: {
+            color: style.fill,
+            borderColor: style.stroke,
+            borderWidth: style.lineWidth,
+            borderType: style.lineDash && style.lineDash.length ? "dashed" : "solid",
+            opacity: 1,
+          },
+        },
+        { xAxis: endIndex, yAxis: zone.zoneHigh },
+      ];
+    }).filter(Boolean);
+  }
+
   function renderZoneRect(params, api) {
     const startPoint = api.coord([api.value(0), api.value(2)]);
     const endPoint = api.coord([api.value(1), api.value(3)]);
@@ -843,26 +878,19 @@
       })),
       series: (function () {
         const series = [];
-        const zoneSeriesData = buildZoneSeriesData();
-        if (zoneSeriesData.length) {
-          series.push({
-            id: "zones-overlay",
-            name: "Zones",
-            type: "custom",
-            renderItem: renderZoneRect,
-            data: zoneSeriesData,
-            silent: true,
-            animation: false,
-            z: 1,
-            tooltip: { show: false },
-          });
-        }
         series.push({
           id: "zig-candles-main",
           type: "candlestick",
           name: "Zig candles",
           data: buildChartData(),
           z: 4,
+          markArea: {
+            silent: true,
+            z: 1,
+            zlevel: 0,
+            emphasis: { disabled: true },
+            data: buildZoneMarkAreaData(),
+          },
         });
         state.renderedSeries = series;
         return series;
