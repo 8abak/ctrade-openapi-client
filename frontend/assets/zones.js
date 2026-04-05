@@ -208,7 +208,7 @@
     state.ui.tableCollapsed = Boolean(collapsed);
     elements.chartStage.classList.toggle("is-table-collapsed", state.ui.tableCollapsed);
     elements.tableToggle.setAttribute("aria-expanded", String(!state.ui.tableCollapsed));
-    elements.tableToggle.textContent = state.ui.tableCollapsed ? "Expand Table" : "Collapse Table";
+    elements.tableToggle.textContent = state.ui.tableCollapsed ? "Expand Strip" : "Collapse Strip";
     queueChartResize();
   }
 
@@ -513,22 +513,70 @@
     };
   }
 
+  function logicalZoneKey(zone) {
+    if (!zone) {
+      return "zone:none";
+    }
+    const anchorIds = [
+      zone.anchorStartPivotId ?? zone.parentStartPivotId ?? zone.startTickId ?? "",
+      zone.anchorMiddlePivotId ?? "",
+      zone.anchorEndPivotId ?? zone.parentEndPivotId ?? zone.endTickId ?? zone.rightTickId ?? "",
+    ];
+    return [
+      zone.symbol ?? "",
+      zone.selectedLevel ?? "",
+      zone.patternType ?? "",
+      anchorIds.join(":"),
+    ].join("|");
+  }
+
+  function logicalZoneScore(zone) {
+    const statusScore = {
+      active: 3,
+      provisional: 2,
+      closed: 1,
+    }[String(zone?.status || "").toLowerCase()] || 0;
+    return [
+      statusScore,
+      Number(zone?.rightTickId ?? zone?.endTickId ?? zone?.startTickId ?? 0),
+      Number(zone?.tickCountInside ?? 0),
+      Number(zone?.id ?? 0),
+    ];
+  }
+
+  function preferLogicalZone(nextZone, currentZone) {
+    if (!currentZone) {
+      return true;
+    }
+    const nextScore = logicalZoneScore(nextZone);
+    const currentScore = logicalZoneScore(currentZone);
+    for (let index = 0; index < nextScore.length; index += 1) {
+      if (nextScore[index] !== currentScore[index]) {
+        return nextScore[index] > currentScore[index];
+      }
+    }
+    return false;
+  }
+
+  function dedupeLogicalZones(zones) {
+    const byKey = new Map();
+    (zones || []).forEach((zone) => {
+      const key = logicalZoneKey(zone);
+      if (preferLogicalZone(zone, byKey.get(key))) {
+        byKey.set(key, zone);
+      }
+    });
+    return Array.from(byKey.values());
+  }
+
   function zonesForBarIndex(index) {
     if (!Number.isInteger(index)) {
       return [];
     }
-    const seen = new Set();
-    return state.zones.filter((zone) => {
-      if (seen.has(zone.id)) {
-        return false;
-      }
+    return dedupeLogicalZones(state.zones.filter((zone) => {
       const span = zoneSpanFor(zone);
-      if (!span || index < span.startIndex || index > span.endIndex) {
-        return false;
-      }
-      seen.add(zone.id);
-      return true;
-    });
+      return span && index >= span.startIndex && index <= span.endIndex;
+    }));
   }
 
   function zoneStyle(zone) {
@@ -743,9 +791,13 @@
     if (!indices) {
       return null;
     }
+    const width = Math.max(0, indices.endIndex - indices.startIndex);
+    const rightGap = Math.max(0, state.bars.length - 1 - indices.endIndex);
     return {
       startBarId: state.bars[indices.startIndex]?.id ?? null,
       endBarId: state.bars[indices.endIndex]?.id ?? null,
+      width: width,
+      anchoredRight: rightGap <= Math.max(1, Math.min(4, Math.ceil((width + 1) * 0.08))),
     };
   }
 
@@ -753,13 +805,30 @@
     if (!windowState || !state.bars.length) {
       return false;
     }
+    const width = Math.max(0, Number(windowState.width) || 0);
     const startIndex = state.bars.findIndex((bar) => bar.id === windowState.startBarId);
     const endIndex = state.bars.findIndex((bar) => bar.id === windowState.endBarId);
-    if (startIndex < 0 || endIndex < 0) {
-      return false;
+    if (startIndex >= 0 && endIndex >= 0) {
+      state.zoom = zoomStateFromIndexRange(startIndex, endIndex, state.bars.length);
+      return true;
     }
-    state.zoom = zoomStateFromIndexRange(startIndex, endIndex, state.bars.length);
-    return true;
+    if (windowState.anchoredRight) {
+      const nextEnd = state.bars.length - 1;
+      const nextStart = Math.max(0, nextEnd - width);
+      state.zoom = zoomStateFromIndexRange(nextStart, nextEnd, state.bars.length);
+      return true;
+    }
+    if (endIndex >= 0) {
+      const nextStart = Math.max(0, endIndex - width);
+      state.zoom = zoomStateFromIndexRange(nextStart, endIndex, state.bars.length);
+      return true;
+    }
+    if (startIndex >= 0) {
+      const nextEnd = Math.min(state.bars.length - 1, startIndex + width);
+      state.zoom = zoomStateFromIndexRange(startIndex, nextEnd, state.bars.length);
+      return true;
+    }
+    return false;
   }
 
   function indexIsVisible(index) {
@@ -1037,7 +1106,6 @@
       return;
     }
     const focusIndex = Math.max(span.startIndex, Math.min(span.endIndex, Math.round((span.startIndex + span.endIndex) / 2)));
-    softFocusIndex(focusIndex);
     renderChart(false);
     showTipForIndex(focusIndex);
   }

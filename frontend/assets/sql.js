@@ -365,14 +365,21 @@
     },
   });
 
-  editor.getWrapperElement().addEventListener("click", function (event) {
+  function handleModifiedEditorClick(event) {
     if (!event.ctrlKey && !event.metaKey) {
+      return;
+    }
+    if (typeof event.button === "number" && event.button !== 0) {
       return;
     }
     event.preventDefault();
     event.stopPropagation();
     triggerRunQuery();
-  });
+  }
+
+  const editorWrapper = editor.getWrapperElement();
+  editorWrapper.addEventListener("mousedown", handleModifiedEditorClick, true);
+  editorWrapper.addEventListener("click", handleModifiedEditorClick, true);
 
   editor.on("cursorActivity", function () {
     const value = editor.getValue();

@@ -60,6 +60,7 @@
     rangeLastId: null,
     rangeFirstTimestampMs: null,
     rangeLastTimestampMs: null,
+    rightEdgeAnchored: true,
     ui: {
       sidebarCollapsed: true,
       settingsCollapsed: true,
@@ -495,6 +496,7 @@
         state.viewport = viewportFromZoomState(resolveZoomSource(event), bounds)
           || captureViewportFromChart(bounds)
           || normalizeViewport(state.viewport, bounds);
+        updateRightEdgeAnchor(state.viewport, bounds);
         queueVisibleYAxisUpdate(state.viewport);
         queueZoneOverlayRender();
       });
@@ -631,7 +633,12 @@
     if (!Number.isFinite(gap) || !Number.isFinite(span)) {
       return false;
     }
-    return gap <= Math.max(span * 0.04, 1000);
+    return gap <= Math.max(Math.min(span * 0.04, 4000), 500);
+  }
+
+  function updateRightEdgeAnchor(viewport, bounds) {
+    state.rightEdgeAnchored = viewportNearRightEdge(viewport, bounds);
+    return state.rightEdgeAnchored;
   }
 
   function shiftViewportForward(viewport, previousBounds, nextBounds, shouldAdvance) {
@@ -841,20 +848,71 @@
     return zigSeriesRows(level, stateName).map((row) => [row.timestampMs, row.price]);
   }
 
+  function logicalZoneKey(zone) {
+    if (!zone) {
+      return "zone:none";
+    }
+    const anchorIds = [
+      zone.anchorStartPivotId ?? zone.parentStartPivotId ?? zone.startTickId ?? "",
+      zone.anchorMiddlePivotId ?? "",
+      zone.anchorEndPivotId ?? zone.parentEndPivotId ?? zone.endTickId ?? zone.rightTickId ?? "",
+    ];
+    return [
+      zone.symbol ?? "",
+      zone.selectedLevel ?? "",
+      zone.patternType ?? "",
+      anchorIds.join(":"),
+    ].join("|");
+  }
+
+  function logicalZoneScore(zone) {
+    const statusScore = {
+      active: 3,
+      provisional: 2,
+      closed: 1,
+    }[String(zone?.status || "").toLowerCase()] || 0;
+    return [
+      statusScore,
+      Number(zone?.rightTimestampMs ?? zone?.endTimestampMs ?? zone?.startTimestampMs ?? 0),
+      Number(zone?.rightTickId ?? zone?.endTickId ?? zone?.startTickId ?? 0),
+      Number(zone?.id ?? 0),
+    ];
+  }
+
+  function preferLogicalZone(nextZone, currentZone) {
+    if (!currentZone) {
+      return true;
+    }
+    const nextScore = logicalZoneScore(nextZone);
+    const currentScore = logicalZoneScore(currentZone);
+    for (let index = 0; index < nextScore.length; index += 1) {
+      if (nextScore[index] !== currentScore[index]) {
+        return nextScore[index] > currentScore[index];
+      }
+    }
+    return false;
+  }
+
+  function dedupeLogicalZones(zones) {
+    const byKey = new Map();
+    (zones || []).forEach((zone) => {
+      const key = logicalZoneKey(zone);
+      if (preferLogicalZone(zone, byKey.get(key))) {
+        byKey.set(key, zone);
+      }
+    });
+    return Array.from(byKey.values());
+  }
+
   function zoneRowsAtTimestamp(timestampMs) {
-    const seen = new Set();
-    return state.zoneRows.filter((zone) => {
-      if (!zone || seen.has(zone.id)) {
+    return dedupeLogicalZones(state.zoneRows.filter((zone) => {
+      if (!zone) {
         return false;
       }
       const start = Number(zone.startTimestampMs);
       const end = Number(zone.rightTimestampMs ?? zone.endTimestampMs ?? zone.startTimestampMs);
-      if (!Number.isFinite(start) || !Number.isFinite(end) || timestampMs < start || timestampMs > end) {
-        return false;
-      }
-      seen.add(zone.id);
-      return true;
-    });
+      return Number.isFinite(start) && Number.isFinite(end) && timestampMs >= start && timestampMs <= end;
+    }));
   }
 
   function zoneStyle(zone) {
@@ -1062,7 +1120,12 @@
       nextViewport = fullViewport(datasetBounds);
     } else {
       nextViewport = normalizeViewport(
-        shiftViewportForward(state.viewport, previousBounds, datasetBounds, Boolean(settings.shiftWithRun)),
+        shiftViewportForward(
+          state.viewport,
+          previousBounds,
+          datasetBounds,
+          Boolean(settings.shiftWithRun) && state.rightEdgeAnchored
+        ),
         datasetBounds,
       );
     }
@@ -1084,6 +1147,7 @@
     window.requestAnimationFrame(() => {
       state.applyingViewport = false;
       state.viewport = captureViewportFromChart(datasetBounds) || nextViewport;
+      updateRightEdgeAnchor(state.viewport, datasetBounds);
       queueVisibleYAxisUpdate(state.viewport);
       queueZoneOverlayRender();
     });
