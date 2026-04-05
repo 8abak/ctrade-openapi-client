@@ -201,6 +201,7 @@ def serialize_zonebox_row(row: Dict[str, Any]) -> Dict[str, Any]:
         "id": row["id"],
         "symbol": row["symbol"],
         "selectedLevel": row["level"],
+        "priceSource": row.get("pricesource"),
         "status": row["state"],
         "startTickId": row["starttickid"],
         "endTickId": row["endtickid"],

@@ -26,7 +26,12 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from datavis.db import db_connect as shared_db_connect
-from datavis.zonebox import serialize_zonebox_row
+from datavis.zonebox import (
+    ZONE_STATE_ACTIVE,
+    ZONE_STATE_CLOSED,
+    ZONE_STATE_PROVISIONAL,
+    serialize_zonebox_row,
+)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
@@ -2146,6 +2151,751 @@ def fetch_persisted_zone_rows_all_levels(
     return [serialize_zonebox_row(dict(row)) for row in cur.fetchall()]
 
 
+def query_tick_at_or_before(cur: Any, tick_id: int) -> Optional[Dict[str, Any]]:
+    if tick_id <= 0:
+        return None
+    cur.execute(
+        """
+        SELECT id, symbol, timestamp, bid, ask, mid, spread
+        FROM public.ticks
+        WHERE symbol = %s
+          AND id <= %s
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (TICK_SYMBOL, tick_id),
+    )
+    row = cur.fetchone()
+    return dict(row) if row else None
+
+
+def fetch_tick_rows_by_ids(cur: Any, tick_ids: List[int]) -> Dict[int, Dict[str, Any]]:
+    if not tick_ids:
+        return {}
+    unique_ids = sorted({int(tick_id) for tick_id in tick_ids if tick_id is not None and int(tick_id) > 0})
+    if not unique_ids:
+        return {}
+    cur.execute(
+        """
+        SELECT id, symbol, timestamp, bid, ask, mid, spread
+        FROM public.ticks
+        WHERE symbol = %s
+          AND id = ANY(%s)
+        ORDER BY id ASC
+        """,
+        (TICK_SYMBOL, unique_ids),
+    )
+    return {int(row["id"]): dict(row) for row in cur.fetchall()}
+
+
+def fetch_zone_rows_starting_from(
+    cur: Any,
+    *,
+    start_id: int,
+    window: int,
+    selected_level: int,
+) -> List[Dict[str, Any]]:
+    cur.execute(
+        """
+        SELECT *
+        FROM public.zonebox
+        WHERE symbol = %s
+          AND level = %s
+          AND lasttickid >= %s
+        ORDER BY starttickid ASC, id ASC
+        LIMIT %s
+        """,
+        (TICK_SYMBOL, selected_level, start_id, window),
+    )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def fetch_zone_rows_visible_before_cursor(
+    cur: Any,
+    *,
+    cursor_id: int,
+    window: int,
+    selected_level: int,
+    minimum_overlap_id: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    if cursor_id <= 0:
+        return []
+    where_parts = [
+        "symbol = %s",
+        "level = %s",
+        "starttickid <= %s",
+    ]
+    parameters: List[Any] = [TICK_SYMBOL, selected_level, cursor_id]
+    if minimum_overlap_id is not None:
+        where_parts.append("lasttickid >= %s")
+        parameters.append(minimum_overlap_id)
+    parameters.append(window)
+    cur.execute(
+        """
+        SELECT *
+        FROM (
+            SELECT *
+            FROM public.zonebox
+            WHERE {where_sql}
+            ORDER BY starttickid DESC, id DESC
+            LIMIT %s
+        ) recent
+        ORDER BY starttickid ASC, id ASC
+        """.format(where_sql=" AND ".join(where_parts)),
+        tuple(parameters),
+    )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def has_persisted_zone_rows_before(
+    cur: Any,
+    *,
+    first_row: Optional[Dict[str, Any]],
+    selected_level: int,
+    minimum_overlap_id: Optional[int] = None,
+) -> bool:
+    if not first_row:
+        return False
+    where_parts = [
+        "symbol = %s",
+        "level = %s",
+        "(starttickid < %s OR (starttickid = %s AND id < %s))",
+    ]
+    parameters: List[Any] = [
+        TICK_SYMBOL,
+        selected_level,
+        int(first_row["starttickid"]),
+        int(first_row["starttickid"]),
+        int(first_row["id"]),
+    ]
+    if minimum_overlap_id is not None:
+        where_parts.append("lasttickid >= %s")
+        parameters.append(minimum_overlap_id)
+    cur.execute(
+        """
+        SELECT 1
+        FROM public.zonebox
+        WHERE {where_sql}
+        LIMIT 1
+        """.format(where_sql=" AND ".join(where_parts)),
+        tuple(parameters),
+    )
+    return cur.fetchone() is not None
+
+
+def capped_zone_payload_from_row(
+    cur: Any,
+    *,
+    row: Dict[str, Any],
+    cursor_id: int,
+    series: str,
+) -> Dict[str, Any]:
+    base_payload = serialize_zonebox_row(dict(row))
+    tick_rows = fetch_ticks_for_zig_candle_range(
+        cur,
+        start_id=int(row["starttickid"]),
+        end_id=int(cursor_id),
+    )
+    priced_rows: List[Dict[str, Any]] = []
+    for tick_row in tick_rows:
+        price_value = price_series_value(tick_row, series)
+        if price_value is None:
+            continue
+        priced_rows.append(
+            {
+                "id": int(tick_row["id"]),
+                "timestamp": tick_row["timestamp"],
+                "price": float(price_value),
+            }
+        )
+    if not priced_rows:
+        base_payload["status"] = ZONE_STATE_PROVISIONAL
+        base_payload["endTickId"] = None
+        base_payload["endTimestamp"] = None
+        base_payload["endTimestampMs"] = None
+        base_payload["rightTickId"] = int(row["starttickid"])
+        base_payload["rightTimestamp"] = row["starttime"].isoformat() if row.get("starttime") else None
+        base_payload["rightTimestampMs"] = dt_to_ms(row.get("starttime"))
+        base_payload["tickCountInside"] = 0
+        base_payload["durationInsideMs"] = 0
+        base_payload["durationInsideLabel"] = format_duration_ms(0)
+        base_payload["episodeDurationMs"] = 0
+        base_payload["episodeDurationLabel"] = format_duration_ms(0)
+        base_payload["closeTimestamp"] = None
+        base_payload["touchCount"] = 0
+        base_payload["revisitCount"] = 0
+        base_payload["breakoutDirection"] = None
+        base_payload["breakoutTickId"] = None
+        base_payload["breakoutTimestamp"] = None
+        base_payload["breakoutTimestampMs"] = None
+        return base_payload
+
+    start_ms = dt_to_ms(row.get("starttime")) or 0
+    last_tick = priced_rows[-1]
+    last_inside_tick = priced_rows[0]
+    tick_count_inside = 0
+    touch_count = 0
+    revisit_count = 0
+    outside_streak = 0
+    last_touch_side: Optional[str] = None
+    continuation_tolerance = float(row.get("continuationovershootused") or 0.0)
+    touch_tolerance = max(continuation_tolerance * 0.6, 0.01)
+    zone_low = float(row["zonelow"])
+    zone_high = float(row["zonehigh"])
+
+    for priced_row in priced_rows:
+        if zone_contains_with_tolerance(
+            priced_row["price"],
+            zone_low,
+            zone_high,
+            continuation_tolerance,
+        ):
+            if outside_streak > 0:
+                revisit_count += 1
+            outside_streak = 0
+            tick_count_inside += 1
+            last_inside_tick = priced_row
+            touch_side = zone_touch_side(
+                priced_row["price"],
+                zone_low,
+                zone_high,
+                touch_tolerance,
+            )
+            if touch_side and touch_side != last_touch_side:
+                touch_count += 1
+            last_touch_side = touch_side
+            continue
+        outside_streak += 1
+        last_touch_side = None
+
+    last_inside_ms = dt_to_ms(last_inside_tick["timestamp"]) or start_ms
+    right_ms = dt_to_ms(last_tick["timestamp"]) or start_ms
+    status = (
+        ZONE_STATE_ACTIVE
+        if tick_count_inside >= DEFAULT_ZONE_MIN_DWELL_TICKS
+        and last_inside_ms - start_ms >= DEFAULT_ZONE_MIN_DWELL_MS
+        else ZONE_STATE_PROVISIONAL
+    )
+    base_payload["status"] = status
+    base_payload["endTickId"] = None
+    base_payload["endTimestamp"] = None
+    base_payload["endTimestampMs"] = None
+    base_payload["rightTickId"] = int(last_tick["id"])
+    base_payload["rightTimestamp"] = last_tick["timestamp"].isoformat()
+    base_payload["rightTimestampMs"] = dt_to_ms(last_tick["timestamp"])
+    base_payload["tickCountInside"] = tick_count_inside
+    base_payload["durationInsideMs"] = max(0, last_inside_ms - start_ms)
+    base_payload["durationInsideLabel"] = format_duration_ms(base_payload["durationInsideMs"])
+    base_payload["episodeDurationMs"] = max(0, right_ms - start_ms)
+    base_payload["episodeDurationLabel"] = format_duration_ms(base_payload["episodeDurationMs"])
+    base_payload["closeTimestamp"] = None
+    base_payload["touchCount"] = touch_count
+    base_payload["revisitCount"] = revisit_count
+    base_payload["breakoutDirection"] = None
+    base_payload["breakoutTickId"] = None
+    base_payload["breakoutTimestamp"] = None
+    base_payload["breakoutTimestampMs"] = None
+    return base_payload
+
+
+def build_zone_candle_row(
+    *,
+    zone_payload: Dict[str, Any],
+    start_tick: Dict[str, Any],
+    close_tick: Dict[str, Any],
+    series: str,
+) -> Optional[Dict[str, Any]]:
+    open_price = price_series_value(start_tick, series)
+    close_price = price_series_value(close_tick, series)
+    if open_price is None or close_price is None:
+        return None
+    direction = "flat"
+    if close_price > open_price:
+        direction = "up"
+    elif close_price < open_price:
+        direction = "down"
+    close_tick_id = (
+        int(zone_payload["endTickId"])
+        if zone_payload["status"] == ZONE_STATE_CLOSED and zone_payload.get("endTickId") is not None
+        else int(zone_payload["rightTickId"])
+    )
+    close_timestamp = (
+        zone_payload["endTimestamp"]
+        if zone_payload["status"] == ZONE_STATE_CLOSED and zone_payload.get("endTimestamp")
+        else zone_payload["rightTimestamp"]
+    )
+    close_timestamp_ms = (
+        zone_payload["endTimestampMs"]
+        if zone_payload["status"] == ZONE_STATE_CLOSED and zone_payload.get("endTimestampMs") is not None
+        else zone_payload["rightTimestampMs"]
+    )
+    return {
+        "id": "zone-candle:{0}".format(zone_payload["id"]),
+        "zoneId": zone_payload["id"],
+        "symbol": zone_payload["symbol"],
+        "level": zone_payload["selectedLevel"],
+        "series": series,
+        "barState": zone_payload["status"],
+        "isFinal": zone_payload["status"] == ZONE_STATE_CLOSED,
+        "isProvisional": zone_payload["status"] != ZONE_STATE_CLOSED,
+        "direction": direction,
+        "open": round(float(open_price), 6),
+        "high": round(float(zone_payload["zoneHigh"]), 6),
+        "low": round(float(zone_payload["zoneLow"]), 6),
+        "close": round(float(close_price), 6),
+        "startTickId": int(zone_payload["startTickId"]),
+        "endTickId": close_tick_id,
+        "rightTickId": int(zone_payload["rightTickId"]),
+        "startTimestamp": zone_payload["startTimestamp"],
+        "endTimestamp": close_timestamp,
+        "startTimestampMs": zone_payload["startTimestampMs"],
+        "endTimestampMs": close_timestamp_ms,
+        "durationMs": int(zone_payload["episodeDurationMs"]),
+        "durationLabel": zone_payload["episodeDurationLabel"],
+        "tickCount": int(zone_payload["tickCountInside"]),
+        "priceRange": round(float(zone_payload["zoneHigh"]) - float(zone_payload["zoneLow"]), 6),
+        "netMove": round(float(close_price) - float(open_price), 6),
+        "labelTimestampMs": close_timestamp_ms,
+    }
+
+
+def build_zone_episode_rows(
+    cur: Any,
+    *,
+    zonebox_rows: List[Dict[str, Any]],
+    cursor_id: int,
+    series: str,
+    include_provisional: bool,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    if not zonebox_rows:
+        return [], []
+
+    visible_zone_rows: List[Dict[str, Any]] = []
+    tick_ids: List[int] = []
+    for row in zonebox_rows:
+        start_tick_id = int(row["starttickid"])
+        visible_until_id = int(row.get("endtickid") or row.get("lasttickid") or start_tick_id)
+        if cursor_id < start_tick_id:
+            continue
+        if cursor_id < visible_until_id:
+            zone_payload = capped_zone_payload_from_row(
+                cur,
+                row=row,
+                cursor_id=cursor_id,
+                series=series,
+            )
+        else:
+            zone_payload = serialize_zonebox_row(dict(row))
+        if not include_provisional and zone_payload["status"] != ZONE_STATE_CLOSED:
+            continue
+        visible_zone_rows.append(zone_payload)
+        close_tick_id = (
+            int(zone_payload["endTickId"])
+            if zone_payload["status"] == ZONE_STATE_CLOSED and zone_payload.get("endTickId") is not None
+            else int(zone_payload["rightTickId"])
+        )
+        tick_ids.extend([int(zone_payload["startTickId"]), close_tick_id])
+
+    tick_rows_by_id = fetch_tick_rows_by_ids(cur, tick_ids)
+    bars: List[Dict[str, Any]] = []
+    filtered_zone_rows: List[Dict[str, Any]] = []
+    for zone_payload in visible_zone_rows:
+        close_tick_id = (
+            int(zone_payload["endTickId"])
+            if zone_payload["status"] == ZONE_STATE_CLOSED and zone_payload.get("endTickId") is not None
+            else int(zone_payload["rightTickId"])
+        )
+        start_tick = tick_rows_by_id.get(int(zone_payload["startTickId"]))
+        close_tick = tick_rows_by_id.get(close_tick_id)
+        if not start_tick or not close_tick:
+            continue
+        candle_row = build_zone_candle_row(
+            zone_payload=zone_payload,
+            start_tick=start_tick,
+            close_tick=close_tick,
+            series=series,
+        )
+        if candle_row is None:
+            continue
+        bars.append(candle_row)
+        filtered_zone_rows.append(zone_payload)
+    return filtered_zone_rows, bars
+
+
+def build_zone_range_payload(
+    *,
+    mode: str,
+    window: int,
+    selected_level: int,
+    series: str,
+    cursor_row: Optional[Dict[str, Any]],
+    zone_rows: List[Dict[str, Any]],
+    candle_rows: List[Dict[str, Any]],
+    review_end_id: Optional[int],
+    review_end_timestamp: Optional[datetime],
+    has_more_left: bool,
+    fetch_ms: float,
+    serialize_ms: float,
+) -> Dict[str, Any]:
+    first_zone = zone_rows[0] if zone_rows else None
+    last_zone = zone_rows[-1] if zone_rows else None
+    cursor_id = cursor_row.get("id") if cursor_row else None
+    cursor_timestamp = cursor_row.get("timestamp") if cursor_row else None
+    return {
+        "bars": candle_rows,
+        "barCount": len(candle_rows),
+        "zones": zone_rows,
+        "zoneCount": len(zone_rows),
+        "mode": mode,
+        "window": window,
+        "symbol": TICK_SYMBOL,
+        "level": selected_level,
+        "series": series,
+        "firstId": first_zone.get("startTickId") if first_zone else None,
+        "lastId": cursor_id,
+        "firstZoneId": first_zone.get("id") if first_zone else None,
+        "lastZoneId": last_zone.get("id") if last_zone else None,
+        "firstTimestamp": first_zone.get("startTimestamp") if first_zone else None,
+        "lastTimestamp": last_zone.get("rightTimestamp") if last_zone else None,
+        "firstTimestampMs": first_zone.get("startTimestampMs") if first_zone else None,
+        "lastTimestampMs": last_zone.get("rightTimestampMs") if last_zone else None,
+        "cursorId": cursor_id,
+        "cursorTimestamp": serialize_value(cursor_timestamp),
+        "cursorTimestampMs": dt_to_ms(cursor_timestamp),
+        "reviewEndId": review_end_id,
+        "reviewEndTimestamp": serialize_value(review_end_timestamp),
+        "hasMoreLeft": has_more_left,
+        "endReached": bool(mode == "review" and review_end_id is not None and cursor_id is not None and cursor_id >= review_end_id),
+        "metrics": serialize_metrics_payload(
+            fetch_ms=fetch_ms,
+            serialize_ms=serialize_ms,
+            latest_row=cursor_row,
+        ),
+    }
+
+
+def load_zone_bootstrap_payload(
+    *,
+    mode: str,
+    start_id: Optional[int],
+    window: int,
+    selected_level: int,
+    series: str,
+    include_provisional: bool,
+) -> Dict[str, Any]:
+    effective_window = clamp_zig_candle_window(window)
+    effective_level = clamp_zig_level(selected_level)
+    fetch_started = time.perf_counter()
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            if not zone_storage_ready(cur):
+                raise HTTPException(status_code=503, detail="Persisted zone storage is not ready.")
+            bounds_row = query_tick_bounds(cur)
+            bounds = {
+                "firstId": bounds_row.get("first_id"),
+                "lastId": bounds_row.get("last_id"),
+                "firstTimestamp": bounds_row.get("first_timestamp"),
+                "lastTimestamp": bounds_row.get("last_timestamp"),
+            }
+            review_end_id = bounds["lastId"] if mode == "review" else None
+            review_end_timestamp = bounds["lastTimestamp"] if mode == "review" else None
+
+            if mode == "review":
+                if start_id is None:
+                    raise HTTPException(status_code=400, detail="Review mode requires an id value.")
+                seed_zone_rows = fetch_zone_rows_starting_from(
+                    cur,
+                    start_id=int(start_id),
+                    window=effective_window,
+                    selected_level=effective_level,
+                )
+                cursor_id = max(int(start_id), int(seed_zone_rows[-1]["starttickid"])) if seed_zone_rows else int(start_id)
+                cursor_row = query_tick_at_or_before(cur, cursor_id)
+                cursor_id = int(cursor_row["id"]) if cursor_row else int(start_id)
+                zonebox_rows = fetch_zone_rows_visible_before_cursor(
+                    cur,
+                    cursor_id=cursor_id,
+                    window=effective_window,
+                    selected_level=effective_level,
+                    minimum_overlap_id=int(start_id),
+                )
+                has_more_left = has_persisted_zone_rows_before(
+                    cur,
+                    first_row=zonebox_rows[0] if zonebox_rows else None,
+                    selected_level=effective_level,
+                )
+            else:
+                cursor_row = query_latest_tick(cur)
+                cursor_id = int(cursor_row["id"]) if cursor_row else 0
+                zonebox_rows = fetch_zone_rows_visible_before_cursor(
+                    cur,
+                    cursor_id=cursor_id,
+                    window=effective_window,
+                    selected_level=effective_level,
+                )
+                has_more_left = has_persisted_zone_rows_before(
+                    cur,
+                    first_row=zonebox_rows[0] if zonebox_rows else None,
+                    selected_level=effective_level,
+                )
+            zone_rows, candle_rows = build_zone_episode_rows(
+                cur,
+                zonebox_rows=zonebox_rows,
+                cursor_id=cursor_id,
+                series=series,
+                include_provisional=include_provisional,
+            )
+    fetch_ms = elapsed_ms(fetch_started)
+    serialize_started = time.perf_counter()
+    payload = build_zone_range_payload(
+        mode=mode,
+        window=effective_window,
+        selected_level=effective_level,
+        series=series,
+        cursor_row=cursor_row,
+        zone_rows=zone_rows,
+        candle_rows=candle_rows,
+        review_end_id=review_end_id,
+        review_end_timestamp=review_end_timestamp,
+        has_more_left=has_more_left,
+        fetch_ms=fetch_ms,
+        serialize_ms=0.0,
+    )
+    payload["metrics"]["serializeLatencyMs"] = elapsed_ms(serialize_started)
+    return payload
+
+
+def load_zone_next_payload(
+    *,
+    after_id: int,
+    limit: int,
+    end_id: Optional[int],
+    window: int,
+    selected_level: int,
+    series: str,
+    include_provisional: bool,
+    review_start_id: Optional[int],
+) -> Dict[str, Any]:
+    effective_window = clamp_zig_candle_window(window)
+    effective_level = clamp_zig_level(selected_level)
+    effective_limit = clamp_int(limit, 1, MAX_STREAM_BATCH)
+    fetch_started = time.perf_counter()
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            if not zone_storage_ready(cur):
+                raise HTTPException(status_code=503, detail="Persisted zone storage is not ready.")
+            bounds_row = query_tick_bounds(cur)
+            bounds = {
+                "firstId": bounds_row.get("first_id"),
+                "lastId": bounds_row.get("last_id"),
+                "firstTimestamp": bounds_row.get("first_timestamp"),
+                "lastTimestamp": bounds_row.get("last_timestamp"),
+            }
+            step_rows = query_rows_after(cur, after_id, effective_limit, end_id=end_id, include_rows=False)
+            next_cursor_id = int(step_rows[-1]["id"]) if step_rows else max(0, after_id)
+            cursor_row = query_tick_at_or_before(cur, next_cursor_id)
+            cursor_id = int(cursor_row["id"]) if cursor_row else next_cursor_id
+            zonebox_rows = fetch_zone_rows_visible_before_cursor(
+                cur,
+                cursor_id=cursor_id,
+                window=effective_window,
+                selected_level=effective_level,
+                minimum_overlap_id=int(review_start_id) if review_start_id is not None else None,
+            )
+            has_more_left = has_persisted_zone_rows_before(
+                cur,
+                first_row=zonebox_rows[0] if zonebox_rows else None,
+                selected_level=effective_level,
+            )
+            zone_rows, candle_rows = build_zone_episode_rows(
+                cur,
+                zonebox_rows=zonebox_rows,
+                cursor_id=cursor_id,
+                series=series,
+                include_provisional=include_provisional,
+            )
+    fetch_ms = elapsed_ms(fetch_started)
+    serialize_started = time.perf_counter()
+    payload = build_zone_range_payload(
+        mode="review" if review_start_id is not None else "live",
+        window=effective_window,
+        selected_level=effective_level,
+        series=series,
+        cursor_row=cursor_row,
+        zone_rows=zone_rows,
+        candle_rows=candle_rows,
+        review_end_id=end_id,
+        review_end_timestamp=bounds.get("lastTimestamp") if review_start_id is not None else None,
+        has_more_left=has_more_left,
+        fetch_ms=fetch_ms,
+        serialize_ms=0.0,
+    )
+    payload["lastId"] = cursor_id
+    payload["endId"] = end_id
+    payload["metrics"]["serializeLatencyMs"] = elapsed_ms(serialize_started)
+    return payload
+
+
+def load_zone_previous_payload(
+    *,
+    current_last_id: int,
+    limit: int,
+    window: int,
+    selected_level: int,
+    series: str,
+    include_provisional: bool,
+) -> Dict[str, Any]:
+    effective_window = clamp_zig_candle_window(window)
+    effective_limit = clamp_zig_candle_history_limit(limit)
+    effective_level = clamp_zig_level(selected_level)
+    expanded_window = clamp_zig_candle_window(effective_window + effective_limit)
+    fetch_started = time.perf_counter()
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            if not zone_storage_ready(cur):
+                raise HTTPException(status_code=503, detail="Persisted zone storage is not ready.")
+            cursor_row = query_tick_at_or_before(cur, current_last_id)
+            cursor_id = int(cursor_row["id"]) if cursor_row else int(current_last_id)
+            zonebox_rows = fetch_zone_rows_visible_before_cursor(
+                cur,
+                cursor_id=cursor_id,
+                window=expanded_window,
+                selected_level=effective_level,
+            )
+            has_more_left = has_persisted_zone_rows_before(
+                cur,
+                first_row=zonebox_rows[0] if zonebox_rows else None,
+                selected_level=effective_level,
+            )
+            zone_rows, candle_rows = build_zone_episode_rows(
+                cur,
+                zonebox_rows=zonebox_rows,
+                cursor_id=cursor_id,
+                series=series,
+                include_provisional=include_provisional,
+            )
+    fetch_ms = elapsed_ms(fetch_started)
+    serialize_started = time.perf_counter()
+    payload = build_zone_range_payload(
+        mode="live",
+        window=expanded_window,
+        selected_level=effective_level,
+        series=series,
+        cursor_row=cursor_row,
+        zone_rows=zone_rows,
+        candle_rows=candle_rows,
+        review_end_id=None,
+        review_end_timestamp=None,
+        has_more_left=has_more_left,
+        fetch_ms=fetch_ms,
+        serialize_ms=0.0,
+    )
+    payload["beforeId"] = zone_rows[0]["startTickId"] if zone_rows else None
+    payload["metrics"]["serializeLatencyMs"] = elapsed_ms(serialize_started)
+    return payload
+
+
+def stream_zone_events(
+    *,
+    after_id: int,
+    limit: int,
+    window: int,
+    selected_level: int,
+    series: str,
+    include_provisional: bool,
+) -> Generator[str, None, None]:
+    last_id = max(0, after_id)
+    effective_window = clamp_zig_candle_window(window)
+    effective_limit = clamp_int(limit, 1, MAX_STREAM_BATCH)
+    effective_level = clamp_zig_level(selected_level)
+    last_heartbeat = time.monotonic()
+    idle_sleep = STREAM_POLL_SECONDS
+
+    try:
+        with db_connection(readonly=True, autocommit=True) as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                if not zone_storage_ready(cur):
+                    raise HTTPException(status_code=503, detail="Persisted zone storage is not ready.")
+                while True:
+                    fetch_started = time.perf_counter()
+                    step_rows = query_rows_after(cur, last_id, effective_limit, include_rows=False)
+                    latest_tick_row = step_rows[-1] if step_rows else None
+                    next_cursor_id = int(latest_tick_row["id"]) if latest_tick_row else last_id
+
+                    if next_cursor_id > last_id:
+                        cursor_row = query_tick_at_or_before(cur, next_cursor_id)
+                        cursor_id = int(cursor_row["id"]) if cursor_row else next_cursor_id
+                        zonebox_rows = fetch_zone_rows_visible_before_cursor(
+                            cur,
+                            cursor_id=cursor_id,
+                            window=effective_window,
+                            selected_level=effective_level,
+                        )
+                        has_more_left = has_persisted_zone_rows_before(
+                            cur,
+                            first_row=zonebox_rows[0] if zonebox_rows else None,
+                            selected_level=effective_level,
+                        )
+                        zone_rows, candle_rows = build_zone_episode_rows(
+                            cur,
+                            zonebox_rows=zonebox_rows,
+                            cursor_id=cursor_id,
+                            series=series,
+                            include_provisional=include_provisional,
+                        )
+                        fetch_ms = elapsed_ms(fetch_started)
+                        serialize_started = time.perf_counter()
+                        payload = build_zone_range_payload(
+                            mode="live",
+                            window=effective_window,
+                            selected_level=effective_level,
+                            series=series,
+                            cursor_row=cursor_row,
+                            zone_rows=zone_rows,
+                            candle_rows=candle_rows,
+                            review_end_id=None,
+                            review_end_timestamp=None,
+                            has_more_left=has_more_left,
+                            fetch_ms=fetch_ms,
+                            serialize_ms=0.0,
+                        )
+                        payload["streamMode"] = "delta"
+                        payload["metrics"]["serializeLatencyMs"] = elapsed_ms(serialize_started)
+                        last_id = cursor_id
+                        yield format_sse(payload)
+                        last_heartbeat = time.monotonic()
+                        idle_sleep = STREAM_POLL_SECONDS
+                        continue
+
+                    now = time.monotonic()
+                    fetch_ms = elapsed_ms(fetch_started)
+                    if now - last_heartbeat >= STREAM_HEARTBEAT_SECONDS:
+                        latest_row = query_latest_tick(cur)
+                        payload = {
+                            "bars": [],
+                            "barCount": 0,
+                            "zones": [],
+                            "zoneCount": 0,
+                            "lastId": last_id,
+                            "window": effective_window,
+                            "level": effective_level,
+                            "series": series,
+                            "streamMode": "heartbeat",
+                            "pollSleepMs": round(idle_sleep * 1000.0, 2),
+                            **serialize_metrics_payload(
+                                fetch_ms=fetch_ms,
+                                serialize_ms=0.0,
+                                latest_row=latest_row,
+                            ),
+                        }
+                        yield format_sse(payload, event_name="heartbeat")
+                        last_heartbeat = now
+                    time.sleep(idle_sleep)
+                    idle_sleep = STREAM_IDLE_POLL_SECONDS
+    except GeneratorExit:
+        return
+
+
 def serialize_zoneboxstate_row(row: Dict[str, Any]) -> Dict[str, Any]:
     updated_at = row.get("updated_at")
     return {
@@ -3061,6 +3811,94 @@ def zones_state(
         "level": clamp_zig_level(level),
         "state": fetch_zoneboxstate_snapshot(level),
     }
+
+
+@app.get("/api/zones/bootstrap")
+def zones_bootstrap(
+    mode: str = Query("live", pattern="^(live|review)$"),
+    id: Optional[int] = Query(None, ge=1),
+    window: int = Query(DEFAULT_WINDOW, ge=1, le=MAX_ZIG_CANDLE_WINDOW),
+    level: int = Query(0, ge=0, le=MAX_ZIG_LEVEL),
+    series: str = Query("mid", pattern=PRICE_SERIES_RE),
+    provisional: bool = Query(True),
+) -> Dict[str, Any]:
+    return load_zone_bootstrap_payload(
+        mode=mode,
+        start_id=id,
+        window=window,
+        selected_level=level,
+        series=series,
+        include_provisional=provisional,
+    )
+
+
+@app.get("/api/zones/next")
+def zones_next(
+    afterId: int = Query(..., ge=0),
+    limit: int = Query(250, ge=1, le=MAX_STREAM_BATCH),
+    endId: Optional[int] = Query(None, ge=1),
+    window: int = Query(DEFAULT_WINDOW, ge=1, le=MAX_ZIG_CANDLE_WINDOW),
+    level: int = Query(0, ge=0, le=MAX_ZIG_LEVEL),
+    series: str = Query("mid", pattern=PRICE_SERIES_RE),
+    provisional: bool = Query(True),
+    reviewStartId: Optional[int] = Query(None, ge=1),
+) -> Dict[str, Any]:
+    return load_zone_next_payload(
+        after_id=afterId,
+        limit=limit,
+        end_id=endId,
+        window=window,
+        selected_level=level,
+        series=series,
+        include_provisional=provisional,
+        review_start_id=reviewStartId,
+    )
+
+
+@app.get("/api/zones/previous")
+def zones_previous(
+    currentLastId: int = Query(..., ge=1),
+    limit: int = Query(DEFAULT_HISTORY_LIMIT, ge=1, le=MAX_ZIG_CANDLE_HISTORY_LIMIT),
+    window: int = Query(DEFAULT_WINDOW, ge=1, le=MAX_ZIG_CANDLE_WINDOW),
+    level: int = Query(0, ge=0, le=MAX_ZIG_LEVEL),
+    series: str = Query("mid", pattern=PRICE_SERIES_RE),
+    provisional: bool = Query(True),
+) -> Dict[str, Any]:
+    return load_zone_previous_payload(
+        current_last_id=currentLastId,
+        limit=limit,
+        window=window,
+        selected_level=level,
+        series=series,
+        include_provisional=provisional,
+    )
+
+
+@app.get("/api/zones/stream")
+def zones_stream(
+    afterId: int = Query(0, ge=0),
+    limit: int = Query(250, ge=1, le=MAX_STREAM_BATCH),
+    window: int = Query(DEFAULT_WINDOW, ge=1, le=MAX_ZIG_CANDLE_WINDOW),
+    level: int = Query(0, ge=0, le=MAX_ZIG_LEVEL),
+    series: str = Query("mid", pattern=PRICE_SERIES_RE),
+    provisional: bool = Query(True),
+) -> StreamingResponse:
+    return StreamingResponse(
+        stream_zone_events(
+            after_id=afterId,
+            limit=limit,
+            window=window,
+            selected_level=level,
+            series=series,
+            include_provisional=provisional,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/api/live/bootstrap")

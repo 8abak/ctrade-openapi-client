@@ -40,7 +40,7 @@
         <header class="live-sidebar-header">
           <a class="back-link" href="/">datavis.au</a>
           <h1>Zones</h1>
-          <p class="live-sidebar-copy">Persisted zone review over the same tick-backed zig candle range. Active and closed zones stay primary, with optional zig-candle overlay for context.</p>
+          <p class="live-sidebar-copy">Persisted zone review rendered as zone episodes. Switch between raw zone boxes, one-candle-per-zone compression, or the combined overlay without resetting your viewport.</p>
           <div class="meta-strip" id="liveMeta">Waiting for persisted zones...</div>
           <div class="meta-strip" id="zoneStateMeta">Zone state pending.</div>
           <div class="meta-strip" id="livePerf">Stream down.</div>
@@ -69,8 +69,9 @@
               <div class="live-control-field live-control-field-wide">
                 <span>display</span>
                 <div class="segmented single-select" id="displayToggle" aria-label="Display mode">
-                  <button type="button" class="active" data-value="zones">Zones Only</button>
-                  <button type="button" data-value="zones-candles">Zones + Zig Candles</button>
+                  <button type="button" class="active" data-value="zones">Zones</button>
+                  <button type="button" data-value="zone-candles">Zone Candles</button>
+                  <button type="button" data-value="zones-zone-candles">Zones + Zone Candles</button>
                 </div>
               </div>
 

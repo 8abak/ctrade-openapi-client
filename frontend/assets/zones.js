@@ -14,8 +14,9 @@
   };
 
   const DISPLAY_CONFIG = {
-    zones: { label: "Zones Only", showsCandles: false },
-    "zones-candles": { label: "Zones + Zig Candles", showsCandles: true },
+    zones: { label: "Zones", showsCandles: false },
+    "zone-candles": { label: "Zone Candles", showsCandles: true },
+    "zones-zone-candles": { label: "Zones + Zone Candles", showsCandles: true },
   };
 
   const SERIES_CONFIG = {
@@ -321,13 +322,13 @@
       DISPLAY_CONFIG[config.display].label,
       "L" + config.level,
       config.series,
-      "zones " + state.zones.length + "/" + config.window,
+      "zones " + state.zones.length + "/" + currentLoadedWindow(),
       "z-active " + activeZones,
       "z-prov " + provisionalZones,
       "z-closed " + closedZones,
-      "bars " + state.bars.length,
+      "candles " + state.bars.length,
       "left " + state.rangeFirstId,
-      "right " + state.rangeLastId,
+      "cursor " + state.rangeLastId,
       state.hasMoreLeft ? "more-left yes" : "more-left no",
     ].join(" | ");
   }
@@ -443,14 +444,23 @@
   }
 
   function candleAxisLabel(bar) {
-    const date = new Date(bar.endTimestampMs || bar.endTimestamp);
-    const options = state.bars.length > 48
+    const timestampValue = bar?.labelTimestampMs || bar?.endTimestampMs || bar?.endTimestamp;
+    if (!timestampValue) {
+      return "";
+    }
+    const date = new Date(timestampValue);
+    const options = state.bars.length > 72
       ? { hour: "2-digit", minute: "2-digit" }
       : { hour: "2-digit", minute: "2-digit", second: "2-digit" };
     return date.toLocaleTimeString("en-AU", options);
   }
 
+  function displayShowsZones(display) {
+    return display === "zones" || display === "zones-zone-candles";
+  }
+
   function candleItemStyle(bar) {
+    const isSelected = bar?.zoneId === state.selectedZoneId;
     if (!displayShowsCandles(currentConfig().display)) {
       return {
         color: "rgba(0, 0, 0, 0)",
@@ -460,25 +470,25 @@
         borderWidth: 0,
       };
     }
-    const up = bar.close >= bar.open;
+    const up = Number(bar?.close) >= Number(bar?.open);
     const palette = up
-      ? { color: "rgba(126, 240, 199, 0.34)", border: "rgba(188, 255, 232, 0.82)" }
-      : { color: "rgba(255, 140, 66, 0.34)", border: "rgba(255, 217, 184, 0.82)" };
-    if (!bar.isFinal) {
+      ? { color: "#7ef0c7", border: "#bcffe8" }
+      : { color: "#ff8c42", border: "#ffd9b8" };
+    if (!bar?.isFinal) {
       return {
-        color: "rgba(109, 216, 255, 0.12)",
-        color0: "rgba(109, 216, 255, 0.12)",
-        borderColor: "rgba(109, 216, 255, 0.56)",
-        borderColor0: "rgba(109, 216, 255, 0.56)",
-        borderWidth: 1,
+        color: "rgba(109, 216, 255, 0.18)",
+        color0: "rgba(109, 216, 255, 0.18)",
+        borderColor: isSelected ? "#f3f6fb" : "#6dd8ff",
+        borderColor0: isSelected ? "#f3f6fb" : "#6dd8ff",
+        borderWidth: isSelected ? 2.2 : 1.35,
       };
     }
     return {
       color: palette.color,
       color0: palette.color,
-      borderColor: palette.border,
-      borderColor0: palette.border,
-      borderWidth: 1,
+      borderColor: isSelected ? "#f3f6fb" : palette.border,
+      borderColor0: isSelected ? "#f3f6fb" : palette.border,
+      borderWidth: isSelected ? 2.2 : 1.1,
     };
   }
 
@@ -490,121 +500,55 @@
     }));
   }
 
+  function findBarIndexByZoneId(zoneId) {
+    return state.bars.findIndex((bar) => bar.zoneId === zoneId);
+  }
+
   function zoneSpanFor(zone) {
-    if (!zone || !state.bars.length) {
-      return null;
-    }
-    const rightTickId = zone.rightTickId ?? zone.endTickId ?? zone.startTickId;
-    const startIndex = state.bars.findIndex((bar) => bar.endTickId >= zone.startTickId);
-    if (startIndex < 0) {
-      return null;
-    }
-    let endIndex = startIndex;
-    for (let index = startIndex; index < state.bars.length; index += 1) {
-      if (state.bars[index].startTickId <= rightTickId) {
-        endIndex = index;
-        continue;
-      }
-      break;
-    }
-    return {
-      startIndex: startIndex,
-      endIndex: Math.max(startIndex, endIndex),
-    };
-  }
-
-  function logicalZoneKey(zone) {
     if (!zone) {
-      return "zone:none";
+      return null;
     }
-    const anchorIds = [
-      zone.anchorStartPivotId ?? zone.parentStartPivotId ?? zone.startTickId ?? "",
-      zone.anchorMiddlePivotId ?? "",
-      zone.anchorEndPivotId ?? zone.parentEndPivotId ?? zone.endTickId ?? zone.rightTickId ?? "",
-    ];
-    return [
-      zone.symbol ?? "",
-      zone.selectedLevel ?? "",
-      zone.patternType ?? "",
-      anchorIds.join(":"),
-    ].join("|");
+    const index = findBarIndexByZoneId(zone.id);
+    if (index < 0) {
+      return null;
+    }
+    return { startIndex: index, endIndex: index };
   }
 
-  function logicalZoneScore(zone) {
-    const statusScore = {
-      active: 3,
-      provisional: 2,
-      closed: 1,
-    }[String(zone?.status || "").toLowerCase()] || 0;
-    return [
-      statusScore,
-      Number(zone?.rightTickId ?? zone?.endTickId ?? zone?.startTickId ?? 0),
-      Number(zone?.tickCountInside ?? 0),
-      Number(zone?.id ?? 0),
-    ];
-  }
-
-  function preferLogicalZone(nextZone, currentZone) {
-    if (!currentZone) {
-      return true;
+  function zoneForBarIndex(index) {
+    if (!Number.isInteger(index) || index < 0 || index >= state.bars.length) {
+      return null;
     }
-    const nextScore = logicalZoneScore(nextZone);
-    const currentScore = logicalZoneScore(currentZone);
-    for (let index = 0; index < nextScore.length; index += 1) {
-      if (nextScore[index] !== currentScore[index]) {
-        return nextScore[index] > currentScore[index];
-      }
-    }
-    return false;
-  }
-
-  function dedupeLogicalZones(zones) {
-    const byKey = new Map();
-    (zones || []).forEach((zone) => {
-      const key = logicalZoneKey(zone);
-      if (preferLogicalZone(zone, byKey.get(key))) {
-        byKey.set(key, zone);
-      }
-    });
-    return Array.from(byKey.values());
-  }
-
-  function zonesForBarIndex(index) {
-    if (!Number.isInteger(index)) {
-      return [];
-    }
-    return dedupeLogicalZones(state.zones.filter((zone) => {
-      const span = zoneSpanFor(zone);
-      return span && index >= span.startIndex && index <= span.endIndex;
-    }));
+    const zoneId = state.bars[index]?.zoneId;
+    return state.zones.find((zone) => zone.id === zoneId) || null;
   }
 
   function zoneStyle(zone) {
     if (zone.id === state.selectedZoneId) {
       return {
-        fill: "rgba(176, 238, 255, 0.2)",
-        stroke: "rgba(243, 246, 251, 0.95)",
+        fill: "rgba(176, 238, 255, 0.18)",
+        stroke: "rgba(243, 246, 251, 0.96)",
         lineWidth: 2,
       };
     }
     if (zone.status === "active") {
       return {
-        fill: "rgba(109, 216, 255, 0.16)",
-        stroke: "rgba(176, 238, 255, 0.84)",
-        lineWidth: 1.5,
+        fill: "rgba(109, 216, 255, 0.14)",
+        stroke: "rgba(176, 238, 255, 0.82)",
+        lineWidth: 1.35,
       };
     }
-    if (zone.status === "closed") {
+    if (zone.status === "provisional") {
       return {
-        fill: "rgba(255, 200, 87, 0.055)",
-        stroke: "rgba(255, 214, 138, 0.38)",
-        lineWidth: 1.05,
+        fill: "rgba(109, 216, 255, 0.08)",
+        stroke: "rgba(170, 230, 255, 0.7)",
+        lineWidth: 1.15,
       };
     }
     return {
-      fill: "rgba(203, 223, 255, 0.08)",
-      stroke: "rgba(216, 231, 255, 0.58)",
-      lineWidth: 1.05,
+      fill: "rgba(255, 200, 87, 0.06)",
+      stroke: "rgba(255, 214, 138, 0.34)",
+      lineWidth: 1,
     };
   }
 
@@ -631,7 +575,7 @@
 
   function buildZoneOverlayGraphics() {
     const chart = state.chart;
-    if (!chart || !state.zones.length || !state.bars.length) {
+    if (!chart || !displayShowsZones(currentConfig().display) || !state.zones.length || !state.bars.length) {
       return [];
     }
     const grid = chart.getModel()?.getComponent("grid", 0);
@@ -646,19 +590,17 @@
       if (!span) {
         return;
       }
-
-      const leftPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [span.startIndex, zone.zoneLow]);
-      const rightPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [span.endIndex, zone.zoneLow]);
-      const topPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [span.startIndex, zone.zoneHigh]);
-      const bottomPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [span.startIndex, zone.zoneLow]);
-      if (!Array.isArray(leftPoint) || !Array.isArray(rightPoint) || !Array.isArray(topPoint) || !Array.isArray(bottomPoint)) {
+      const barIndex = span.startIndex;
+      const leftPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [barIndex, zone.zoneLow]);
+      const topPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [barIndex, zone.zoneHigh]);
+      const bottomPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [barIndex, zone.zoneLow]);
+      if (!Array.isArray(leftPoint) || !Array.isArray(topPoint) || !Array.isArray(bottomPoint)) {
         return;
       }
 
-      const stepStart = zoneCenterStepPx(span.startIndex);
-      const stepEnd = zoneCenterStepPx(span.endIndex);
-      let left = Number(leftPoint[0]) - stepStart / 2;
-      let right = Number(rightPoint[0]) + stepEnd / 2;
+      const step = zoneCenterStepPx(barIndex);
+      let left = Number(leftPoint[0]) - step / 2;
+      let right = Number(leftPoint[0]) + step / 2;
       let top = Math.min(Number(topPoint[1]), Number(bottomPoint[1]));
       let bottom = Math.max(Number(topPoint[1]), Number(bottomPoint[1]));
       if (!Number.isFinite(left) || !Number.isFinite(right) || !Number.isFinite(top) || !Number.isFinite(bottom)) {
@@ -675,7 +617,7 @@
         id: "zone-rect-" + (zone.id || index),
         type: "rect",
         silent: true,
-        z: 2,
+        z: 1,
         shape: {
           x: left,
           y: top,
@@ -690,7 +632,6 @@
         },
       });
     });
-
     return elements;
   }
 
@@ -703,7 +644,7 @@
         id: "zone-overlay",
         type: "group",
         silent: true,
-        z: 2,
+        z: 1,
         children: buildZoneOverlayGraphics(),
       }],
     }, { replaceMerge: ["graphic"], lazyUpdate: true });
@@ -719,32 +660,25 @@
     });
   }
 
-  function zoneTooltipHtml(zone) {
+  function zoneTooltipHtml(zone, bar) {
+    if (!zone) {
+      return "";
+    }
+    const effectiveEndTime = zone.endTimestamp || zone.rightTimestamp || "";
+    const effectiveEndTickId = zone.endTickId ?? zone.rightTickId ?? "";
     return [
       "<div class=\"zones-tip-zone\">",
       "<strong>" + escapeHtml(zone.symbol + " L" + zone.selectedLevel + " " + String(zone.status || "").toUpperCase()) + "</strong><br>",
-      "pattern " + escapeHtml(zone.patternType || "") + " | start " + escapeHtml(String(zone.startTickId ?? "")) + " | end " + escapeHtml(String(zone.endTickId ?? "")) + "<br>",
+      "pattern " + escapeHtml(zone.patternType || "") + " | series " + escapeHtml(bar?.series || currentConfig().series) + "<br>",
       "starttime " + escapeHtml(zone.startTimestamp || "") + "<br>",
-      "endtime " + escapeHtml(zone.endTimestamp || "") + "<br>",
-      "pivots " + escapeHtml(String(zone.anchorStartPivotId ?? "")) + " -> " + escapeHtml(String(zone.anchorMiddlePivotId ?? "")) + " -> " + escapeHtml(String(zone.anchorEndPivotId ?? "")) + "<br>",
-      "initial " + escapeHtml(formatPrice(zone.initialZoneLow)) + " - " + escapeHtml(formatPrice(zone.initialZoneHigh)) + "<br>",
-      "current " + escapeHtml(formatPrice(zone.zoneLow)) + " - " + escapeHtml(formatPrice(zone.zoneHigh)) + " | h " + escapeHtml(formatPrice(zone.zoneHeight)) + "<br>",
-      "same-side " + escapeHtml(formatPrice(zone.sameSideDistance)) + " | inside " + escapeHtml(String(zone.tickCountInside ?? "")) + " | durationms " + escapeHtml(String(zone.durationInsideMs ?? "")) + "<br>",
-      "break " + escapeHtml(zone.breakoutDirection || "-") + " | breaktickid " + escapeHtml(String(zone.breakoutTickId ?? "")),
-      "</div>",
-    ].join("");
-  }
-
-  function candleContextHtml(bar) {
-    if (!bar || !displayShowsCandles(currentConfig().display)) {
-      return "";
-    }
-    return [
-      "<div class=\"zones-tip-candle\">",
-      "<strong>" + escapeHtml("Zig candle " + bar.barState.toUpperCase()) + "</strong><br>",
-      escapeHtml(bar.direction + " | " + bar.series) + "<br>",
-      "O " + escapeHtml(formatPrice(bar.open)) + " | H " + escapeHtml(formatPrice(bar.high)) + " | L " + escapeHtml(formatPrice(bar.low)) + " | C " + escapeHtml(formatPrice(bar.close)) + "<br>",
-      "ticks " + escapeHtml(String(bar.tickCount)) + " | ids " + escapeHtml(String(bar.startTickId) + "-" + String(bar.endTickId)),
+      "endtime " + escapeHtml(effectiveEndTime) + "<br>",
+      "starttickid " + escapeHtml(String(zone.startTickId ?? "")) + " | endtickid " + escapeHtml(String(effectiveEndTickId)) + "<br>",
+      "startpivotid " + escapeHtml(String(zone.anchorStartPivotId ?? "")) + " | middlepivotid " + escapeHtml(String(zone.anchorMiddlePivotId ?? "")) + " | endpivotid " + escapeHtml(String(zone.anchorEndPivotId ?? "")) + "<br>",
+      "O " + escapeHtml(formatPrice(bar?.open)) + " | H " + escapeHtml(formatPrice(bar?.high ?? zone.zoneHigh)) + " | L " + escapeHtml(formatPrice(bar?.low ?? zone.zoneLow)) + " | C " + escapeHtml(formatPrice(bar?.close)) + "<br>",
+      "initialzonelow " + escapeHtml(formatPrice(zone.initialZoneLow)) + " | initialzonehigh " + escapeHtml(formatPrice(zone.initialZoneHigh)) + "<br>",
+      "zonelow " + escapeHtml(formatPrice(zone.zoneLow)) + " | zonehigh " + escapeHtml(formatPrice(zone.zoneHigh)) + " | zoneheight " + escapeHtml(formatPrice(zone.zoneHeight)) + "<br>",
+      "samesidedistance " + escapeHtml(formatPrice(zone.sameSideDistance)) + " | tickcountinside " + escapeHtml(String(zone.tickCountInside ?? "")) + " | durationms " + escapeHtml(String(zone.durationInsideMs ?? "")) + "<br>",
+      "breakdirection " + escapeHtml(zone.breakoutDirection || "-") + " | breaktickid " + escapeHtml(String(zone.breakoutTickId ?? "")),
       "</div>",
     ].join("");
   }
@@ -885,14 +819,13 @@
               ? params.find((entry) => entry?.seriesId === "zones-candles-main") || params[0]
               : params;
             const bar = point?.data?.bar;
-            const zoneHtml = zonesForBarIndex(Number(point?.dataIndex)).map(zoneTooltipHtml).join("");
-            if (!zoneHtml && !bar) {
+            const zone = zoneForBarIndex(Number(point?.dataIndex));
+            if (!zone && !bar) {
               return "";
             }
             return [
               "<div class=\"zones-tip\">",
-              zoneHtml,
-              candleContextHtml(bar),
+              zoneTooltipHtml(zone, bar),
               "</div>",
             ].join("");
           },
@@ -927,7 +860,7 @@
         series: [{
           id: "zones-candles-main",
           type: "candlestick",
-          name: "Zig candles",
+          name: "Zone candles",
           data: [],
         }],
       }, { notMerge: true, lazyUpdate: true });
@@ -947,9 +880,9 @@
         if (params?.seriesId !== "zones-candles-main") {
           return;
         }
-        const zones = zonesForBarIndex(Number(params?.dataIndex));
-        if (zones.length) {
-          focusZone(zones[0].id);
+        const bar = params?.data?.bar || state.bars[Number(params?.dataIndex)];
+        if (bar?.zoneId != null) {
+          focusZone(bar.zoneId);
         }
       });
     }
@@ -1037,9 +970,9 @@
       series: [{
         id: "zones-candles-main",
         type: "candlestick",
-        name: "Zig candles",
+        name: "Zone candles",
         data: buildChartData(),
-        z: 1,
+        z: 4,
       }],
     }, { replaceMerge: ["series"], lazyUpdate: true });
     state.renderedSeries = chart.getOption()?.series || [];
@@ -1100,14 +1033,13 @@
     }
     state.selectedZoneId = zoneId;
     renderTable();
-    const span = zoneSpanFor(zone);
-    if (!span) {
+    const index = findBarIndexByZoneId(zone.id);
+    if (index < 0) {
       renderChart(false);
       return;
     }
-    const focusIndex = Math.max(span.startIndex, Math.min(span.endIndex, Math.round((span.startIndex + span.endIndex) / 2)));
     renderChart(false);
-    showTipForIndex(focusIndex);
+    showTipForIndex(index);
   }
 
   function clearActivity() {
@@ -1161,13 +1093,12 @@
       window: String(config.window),
       level: String(config.level),
       series: config.series,
-      zones: "true",
       provisional: config.provisional ? "true" : "false",
     });
     if (config.mode === "review" && startId != null) {
       params.set("id", String(startId));
     }
-    return "/api/zigcandles/bootstrap?" + params.toString();
+    return "/api/zones/bootstrap?" + params.toString();
   }
 
   function nextUrl(config, afterId, endId) {
@@ -1177,7 +1108,6 @@
       window: String(currentLoadedWindow()),
       level: String(config.level),
       series: config.series,
-      zones: "true",
       provisional: config.provisional ? "true" : "false",
     });
     if (endId != null) {
@@ -1186,18 +1116,16 @@
     if (config.mode === "review" && state.reviewStartId != null) {
       params.set("reviewStartId", String(state.reviewStartId));
     }
-    return "/api/zigcandles/next?" + params.toString();
+    return "/api/zones/next?" + params.toString();
   }
 
   function previousUrl(config, limit) {
-    return "/api/zigcandles/previous?" + new URLSearchParams({
-      beforeId: String(state.rangeFirstId || 1),
+    return "/api/zones/previous?" + new URLSearchParams({
       currentLastId: String(state.rangeLastId || 1),
       limit: String(limit),
       window: String(currentLoadedWindow()),
       level: String(config.level),
       series: config.series,
-      zones: "true",
       provisional: config.provisional ? "true" : "false",
     }).toString();
   }
@@ -1212,7 +1140,7 @@
     await refreshZoneState(config.level);
     restoreVisibleBarWindow(preservedViewport);
     renderChart(Boolean(resetView));
-    status("Loaded " + state.zones.length + " persisted zone(s).", false);
+    status("Loaded " + state.zones.length + " persisted zone episode(s).", false);
     if (config.run === "run") {
       if (config.mode === "live") {
         connectStream(state.rangeLastId || 0);
@@ -1225,13 +1153,12 @@
   function connectStream(afterId) {
     clearActivity();
     const config = currentConfig();
-    const source = new EventSource("/api/zigcandles/stream?" + new URLSearchParams({
+    const source = new EventSource("/api/zones/stream?" + new URLSearchParams({
       afterId: String(afterId || 0),
       limit: "250",
       window: String(currentLoadedWindow()),
       level: String(config.level),
       series: config.series,
-      zones: "true",
       provisional: config.provisional ? "true" : "false",
     }).toString());
     state.source = source;
@@ -1346,7 +1273,7 @@
     await refreshZoneState(config.level);
     restoreVisibleBarWindow(preservedViewport);
     renderChart(false);
-    status(state.zones.length && didExpandLeft ? "Older zones were added off-screen to the left." : "No older zones were available.", false);
+    status(state.zones.length && didExpandLeft ? "Older zone episodes were added off-screen to the left." : "No older zones were available.", false);
     await resumeRunIfNeeded();
   }
 
