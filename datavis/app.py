@@ -26,6 +26,16 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from datavis.db import db_connect as shared_db_connect
+from datavis.supresarea import (
+    AREA_SIDE_BOTTOM,
+    AREA_SIDE_TOP,
+    AREA_SIDES,
+    AREA_STATE_ACTIVE,
+    AREA_STATE_CLOSED,
+    AREA_STATE_USED,
+    AREA_STATES,
+    serialize_supresarea_row,
+)
 from datavis.zonebox import (
     ZONE_STATE_ACTIVE,
     ZONE_STATE_CLOSED,
@@ -61,6 +71,8 @@ MAX_ZONE_ALLOWED_OVERSHOOT = 10.0
 MAX_ZONE_BREAKOUT_TICKS = 64
 MAX_ZONE_BREAKOUT_TOLERANCE = 10.0
 MAX_ZONE_HEIGHT = 25.0
+MAX_AREA_BREAK_TICKS = 64
+MAX_AREA_BREAK_TOLERANCE = 10.0
 MAX_QUERY_ROWS = 1000
 DEFAULT_SQL_PREVIEW_LIMIT = 100
 MAX_SQL_PREVIEW_LIMIT = 500
@@ -153,6 +165,48 @@ SQL_EXPOSED_TABLES = {
             "LIMIT 100;"
         ),
     },
+    ("public", "supresarea"): {
+        "schema": "public",
+        "name": "supresarea",
+        "kind": "table",
+        "default_order_by": "id",
+        "default_order_dir": "desc",
+        "select_sql": (
+            "SELECT id, symbol, side, state, sourcepivotid, birthtickid, birthtime,\n"
+            "       originallow, originalhigh, currentlow, currenthigh, activeheight,\n"
+            "       touchcount, maxpenetration, priorityscore, isl1extreme, isl2extreme, updated_at\n"
+            "FROM public.supresarea\n"
+            "ORDER BY id DESC\n"
+            "LIMIT 100;"
+        ),
+    },
+    ("public", "supresareaevent"): {
+        "schema": "public",
+        "name": "supresareaevent",
+        "kind": "table",
+        "default_order_by": "id",
+        "default_order_dir": "desc",
+        "select_sql": (
+            "SELECT id, areaid, symbol, eventtype, tickid, eventtime, price, penetration,\n"
+            "       statebefore, stateafter, details, created_at\n"
+            "FROM public.supresareaevent\n"
+            "ORDER BY id DESC\n"
+            "LIMIT 100;"
+        ),
+    },
+    ("public", "supresstate"): {
+        "schema": "public",
+        "name": "supresstate",
+        "kind": "table",
+        "default_order_by": "id",
+        "default_order_dir": "desc",
+        "select_sql": (
+            "SELECT id, symbol, lastprocessedtickid, lastprocessedpivotid, updated_at\n"
+            "FROM public.supresstate\n"
+            "ORDER BY id DESC\n"
+            "LIMIT 100;"
+        ),
+    },
 }
 ZIG_REQUIRED_PIVOT_COLUMNS = {
     "level",
@@ -202,6 +256,38 @@ ZONEBOXSTATE_REQUIRED_COLUMNS = {
     "lastprocessedtickid",
     "lastprocessedpivotid",
     "activezoneid",
+    "updated_at",
+}
+SUPRESAREA_REQUIRED_COLUMNS = {
+    "id",
+    "symbol",
+    "side",
+    "state",
+    "sourcepivotid",
+    "birthtickid",
+    "birthtime",
+    "originallow",
+    "originalhigh",
+    "currentlow",
+    "currenthigh",
+    "activeheight",
+    "touchcount",
+    "maxpenetration",
+    "priorityscore",
+    "updated_at",
+}
+SUPRESAREAEVENT_REQUIRED_COLUMNS = {
+    "id",
+    "areaid",
+    "eventtype",
+    "tickid",
+    "eventtime",
+}
+SUPRESSTATE_REQUIRED_COLUMNS = {
+    "id",
+    "symbol",
+    "lastprocessedtickid",
+    "lastprocessedpivotid",
     "updated_at",
 }
 
@@ -316,11 +402,13 @@ def resolve_live_layers(
     show_ticks: Optional[bool],
     show_zigs: Optional[bool],
     show_zones: Optional[bool],
+    show_areas: Optional[bool],
 ) -> Dict[str, bool]:
     flags = {
         "ticks": includes_ticks(display_mode) if show_ticks is None else bool(show_ticks),
         "zigs": includes_zig(display_mode) if show_zigs is None else bool(show_zigs),
         "zones": False if show_zones is None else bool(show_zones),
+        "areas": False if show_areas is None else bool(show_areas),
     }
     if not any(flags.values()):
         flags["ticks"] = True
@@ -345,6 +433,36 @@ def clamp_window(value: int, display_mode: str) -> int:
 def clamp_history_limit(value: int, display_mode: str) -> int:
     maximum = MAX_ZIG_HISTORY_LIMIT if display_mode == "zig" else MAX_TICK_HISTORY_LIMIT
     return clamp_int(value, 1, maximum)
+
+
+def parse_area_states(raw_value: Optional[str]) -> List[str]:
+    if raw_value is None or not raw_value.strip():
+        return [AREA_STATE_ACTIVE]
+    selected = []
+    seen = set()
+    for item in raw_value.split(","):
+        value = item.strip().lower()
+        if value in AREA_STATES and value not in seen:
+            selected.append(value)
+            seen.add(value)
+    if not selected:
+        raise HTTPException(status_code=400, detail="Invalid areaStates filter.")
+    return selected
+
+
+def parse_area_sides(raw_value: Optional[str]) -> List[str]:
+    if raw_value is None or not raw_value.strip():
+        return [AREA_SIDE_TOP, AREA_SIDE_BOTTOM]
+    selected = []
+    seen = set()
+    for item in raw_value.split(","):
+        value = item.strip().lower()
+        if value in AREA_SIDES and value not in seen:
+            selected.append(value)
+            seen.add(value)
+    if not selected:
+        raise HTTPException(status_code=400, detail="Invalid areaSides filter.")
+    return selected
 
 
 def serialize_metrics_payload(
@@ -1588,6 +1706,7 @@ def build_zig_candle_range_payload(
     range_rows: List[Dict[str, Any]],
     candle_rows: List[Dict[str, Any]],
     zone_rows: List[Dict[str, Any]],
+    area_rows: List[Dict[str, Any]],
     zone_settings: Dict[str, Any],
     review_end_id: Optional[int],
     review_end_timestamp: Optional[datetime],
@@ -1604,6 +1723,8 @@ def build_zig_candle_range_payload(
         "barCount": len(candle_rows),
         "zones": zone_rows,
         "zoneCount": len(zone_rows),
+        "areaRows": area_rows,
+        "areaCount": len(area_rows),
         "zoneConfig": zone_settings,
         "firstId": first_row_id,
         "lastId": last_row_id,
@@ -1637,6 +1758,10 @@ def load_zig_candle_bootstrap_payload(
     series: str,
     include_provisional: bool,
     zone_settings: Dict[str, Any],
+    show_areas: bool,
+    area_states: List[str],
+    area_sides: List[str],
+    area_higher_only: bool,
 ) -> Dict[str, Any]:
     effective_window = clamp_zig_candle_window(window)
     effective_level = clamp_zig_level(selected_level)
@@ -1697,6 +1822,19 @@ def load_zig_candle_bootstrap_payload(
                     else []
                 )
                 effective_zone_settings = zone_settings
+            area_rows = (
+                fetch_supres_rows(
+                    cur,
+                    enabled=show_areas and supres_storage_ready(cur),
+                    range_start_id=range_first_id,
+                    cursor_id=range_last_id,
+                    states=area_states,
+                    sides=area_sides,
+                    higher_only=area_higher_only,
+                )
+                if range_first_id is not None and range_last_id is not None
+                else []
+            )
     fetch_ms = elapsed_ms(fetch_started)
     serialize_started = time.perf_counter()
     payload = build_zig_candle_range_payload(
@@ -1707,6 +1845,7 @@ def load_zig_candle_bootstrap_payload(
         range_rows=range_rows,
         candle_rows=candle_rows,
         zone_rows=zone_rows,
+        area_rows=area_rows,
         zone_settings=effective_zone_settings,
         review_end_id=review_end_id,
         review_end_timestamp=review_end_timestamp,
@@ -1729,6 +1868,10 @@ def load_zig_candle_next_payload(
     include_provisional: bool,
     review_start_id: Optional[int],
     zone_settings: Dict[str, Any],
+    show_areas: bool,
+    area_states: List[str],
+    area_sides: List[str],
+    area_higher_only: bool,
 ) -> Dict[str, Any]:
     effective_window = clamp_zig_candle_window(window)
     effective_level = clamp_zig_level(selected_level)
@@ -1787,6 +1930,19 @@ def load_zig_candle_next_payload(
                     else []
                 )
                 effective_zone_settings = zone_settings
+            area_rows = (
+                fetch_supres_rows(
+                    cur,
+                    enabled=show_areas and supres_storage_ready(cur),
+                    range_start_id=range_first_id,
+                    cursor_id=range_last_id,
+                    states=area_states,
+                    sides=area_sides,
+                    higher_only=area_higher_only,
+                )
+                if range_first_id is not None and range_last_id is not None
+                else []
+            )
     fetch_ms = elapsed_ms(fetch_started)
     serialize_started = time.perf_counter()
     payload = build_zig_candle_range_payload(
@@ -1797,6 +1953,7 @@ def load_zig_candle_next_payload(
         range_rows=range_rows,
         candle_rows=candle_rows,
         zone_rows=zone_rows,
+        area_rows=area_rows,
         zone_settings=effective_zone_settings,
         review_end_id=end_id,
         review_end_timestamp=bounds.get("lastTimestamp") if review_start_id is not None else None,
@@ -1819,6 +1976,10 @@ def load_zig_candle_previous_payload(
     series: str,
     include_provisional: bool,
     zone_settings: Dict[str, Any],
+    show_areas: bool,
+    area_states: List[str],
+    area_sides: List[str],
+    area_higher_only: bool,
 ) -> Dict[str, Any]:
     effective_window = clamp_zig_candle_window(window)
     effective_limit = clamp_zig_candle_history_limit(limit)
@@ -1876,6 +2037,19 @@ def load_zig_candle_previous_payload(
                     else []
                 )
                 effective_zone_settings = zone_settings
+            area_rows = (
+                fetch_supres_rows(
+                    cur,
+                    enabled=show_areas and supres_storage_ready(cur),
+                    range_start_id=range_first_id,
+                    cursor_id=range_last_id,
+                    states=area_states,
+                    sides=area_sides,
+                    higher_only=area_higher_only,
+                )
+                if range_first_id is not None and range_last_id is not None
+                else []
+            )
     fetch_ms = elapsed_ms(fetch_started)
     serialize_started = time.perf_counter()
     payload = build_zig_candle_range_payload(
@@ -1886,6 +2060,7 @@ def load_zig_candle_previous_payload(
         range_rows=range_rows,
         candle_rows=candle_rows,
         zone_rows=zone_rows,
+        area_rows=area_rows,
         zone_settings=effective_zone_settings,
         review_end_id=None,
         review_end_timestamp=None,
@@ -1907,6 +2082,10 @@ def stream_zig_candle_events(
     series: str,
     include_provisional: bool,
     zone_settings: Dict[str, Any],
+    show_areas: bool,
+    area_states: List[str],
+    area_sides: List[str],
+    area_higher_only: bool,
 ) -> Generator[str, None, None]:
     last_id = max(0, after_id)
     effective_window = clamp_zig_candle_window(window)
@@ -1975,6 +2154,19 @@ def stream_zig_candle_events(
                                 else []
                             )
                             effective_zone_settings = zone_settings
+                        area_rows = (
+                            fetch_supres_rows(
+                                cur,
+                                enabled=show_areas and supres_storage_ready(cur),
+                                range_start_id=range_first_id,
+                                cursor_id=range_last_id,
+                                states=area_states,
+                                sides=area_sides,
+                                higher_only=area_higher_only,
+                            )
+                            if range_first_id is not None and range_last_id is not None
+                            else []
+                        )
                         fetch_ms = elapsed_ms(fetch_started)
                         serialize_started = time.perf_counter()
                         payload = build_zig_candle_range_payload(
@@ -1985,6 +2177,7 @@ def stream_zig_candle_events(
                             range_rows=range_rows,
                             candle_rows=candle_rows,
                             zone_rows=zone_rows,
+                            area_rows=area_rows,
                             zone_settings=effective_zone_settings,
                             review_end_id=None,
                             review_end_timestamp=None,
@@ -2007,6 +2200,10 @@ def stream_zig_candle_events(
                         payload = {
                             "bars": [],
                             "barCount": 0,
+                            "zones": [],
+                            "zoneCount": 0,
+                            "areaRows": [],
+                            "areaCount": 0,
                             "lastId": last_id,
                             "window": effective_window,
                             "level": effective_level,
@@ -2089,6 +2286,40 @@ def zone_storage_ready(cur: Any) -> bool:
     )
 
 
+def supres_storage_ready(cur: Any) -> bool:
+    cur.execute(
+        """
+        SELECT
+            to_regclass('public.supresarea') AS supresarea_table,
+            to_regclass('public.supresareaevent') AS supresareaevent_table,
+            to_regclass('public.supresstate') AS supresstate_table
+        """
+    )
+    row = cur.fetchone() or {}
+    if not row.get("supresarea_table") or not row.get("supresareaevent_table") or not row.get("supresstate_table"):
+        return False
+    cur.execute(
+        """
+        SELECT table_name, column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name IN ('supresarea', 'supresareaevent', 'supresstate')
+        """
+    )
+    columns: Dict[str, set[str]] = {
+        "supresarea": set(),
+        "supresareaevent": set(),
+        "supresstate": set(),
+    }
+    for info in cur.fetchall():
+        columns.setdefault(info["table_name"], set()).add(info["column_name"])
+    return (
+        SUPRESAREA_REQUIRED_COLUMNS.issubset(columns.get("supresarea", set()))
+        and SUPRESAREAEVENT_REQUIRED_COLUMNS.issubset(columns.get("supresareaevent", set()))
+        and SUPRESSTATE_REQUIRED_COLUMNS.issubset(columns.get("supresstate", set()))
+    )
+
+
 def persisted_zone_settings(*, enabled: bool) -> Dict[str, Any]:
     return build_zone_settings(
         enabled=enabled,
@@ -2149,6 +2380,61 @@ def fetch_persisted_zone_rows_all_levels(
         (TICK_SYMBOL, range_start_id, cursor_id),
     )
     return [serialize_zonebox_row(dict(row)) for row in cur.fetchall()]
+
+
+def fetch_supres_rows(
+    cur: Any,
+    *,
+    enabled: bool,
+    range_start_id: Optional[int],
+    cursor_id: Optional[int],
+    states: List[str],
+    sides: List[str],
+    higher_only: bool,
+) -> List[Dict[str, Any]]:
+    if not enabled or cursor_id is None or range_start_id is None or cursor_id < range_start_id:
+        return []
+    cursor_row = query_tick_at_or_before(cur, cursor_id)
+    cursor_timestamp = cursor_row.get("timestamp") if cursor_row else None
+    cur.execute(
+        """
+        SELECT *
+        FROM public.supresarea
+        WHERE symbol = %s
+          AND birthtickid <= %s
+          AND (%s = false OR isl1extreme OR isl2extreme)
+          AND state = ANY(%s)
+          AND side = ANY(%s)
+          AND (
+                closetickid IS NULL
+                OR closetickid >= %s
+          )
+        ORDER BY birthtickid ASC, priorityscore DESC, id ASC
+        LIMIT %s
+        """,
+        (
+            TICK_SYMBOL,
+            cursor_id,
+            bool(higher_only),
+            states,
+            sides,
+            range_start_id,
+            MAX_QUERY_ROWS,
+        ),
+    )
+    payload_rows = []
+    for row in cur.fetchall():
+        payload = serialize_supresarea_row(dict(row))
+        if payload.get("closeTickId") is not None:
+            payload["rightTickId"] = payload["closeTickId"]
+            payload["rightTime"] = payload.get("closeTime")
+            payload["rightTimeMs"] = payload.get("closeTimeMs")
+        else:
+            payload["rightTickId"] = cursor_id
+            payload["rightTime"] = cursor_timestamp.isoformat() if cursor_timestamp else None
+            payload["rightTimeMs"] = dt_to_ms(cursor_timestamp)
+        payload_rows.append(payload)
+    return payload_rows
 
 
 def query_tick_at_or_before(cur: Any, tick_id: int) -> Optional[Dict[str, Any]]:
@@ -2531,6 +2817,7 @@ def build_zone_range_payload(
     cursor_row: Optional[Dict[str, Any]],
     zone_rows: List[Dict[str, Any]],
     candle_rows: List[Dict[str, Any]],
+    area_rows: List[Dict[str, Any]],
     review_end_id: Optional[int],
     review_end_timestamp: Optional[datetime],
     has_more_left: bool,
@@ -2546,6 +2833,8 @@ def build_zone_range_payload(
         "barCount": len(candle_rows),
         "zones": zone_rows,
         "zoneCount": len(zone_rows),
+        "areaRows": area_rows,
+        "areaCount": len(area_rows),
         "mode": mode,
         "window": window,
         "symbol": TICK_SYMBOL,
@@ -2582,6 +2871,10 @@ def load_zone_bootstrap_payload(
     selected_level: int,
     series: str,
     include_provisional: bool,
+    show_areas: bool,
+    area_states: List[str],
+    area_sides: List[str],
+    area_higher_only: bool,
 ) -> Dict[str, Any]:
     effective_window = clamp_zig_candle_window(window)
     effective_level = clamp_zig_level(selected_level)
@@ -2645,6 +2938,15 @@ def load_zone_bootstrap_payload(
                 series=series,
                 include_provisional=include_provisional,
             )
+            area_rows = fetch_supres_rows(
+                cur,
+                enabled=show_areas and supres_storage_ready(cur),
+                range_start_id=zone_rows[0]["startTickId"] if zone_rows else None,
+                cursor_id=cursor_id,
+                states=area_states,
+                sides=area_sides,
+                higher_only=area_higher_only,
+            ) if cursor_id else []
     fetch_ms = elapsed_ms(fetch_started)
     serialize_started = time.perf_counter()
     payload = build_zone_range_payload(
@@ -2655,6 +2957,7 @@ def load_zone_bootstrap_payload(
         cursor_row=cursor_row,
         zone_rows=zone_rows,
         candle_rows=candle_rows,
+        area_rows=area_rows,
         review_end_id=review_end_id,
         review_end_timestamp=review_end_timestamp,
         has_more_left=has_more_left,
@@ -2675,6 +2978,10 @@ def load_zone_next_payload(
     series: str,
     include_provisional: bool,
     review_start_id: Optional[int],
+    show_areas: bool,
+    area_states: List[str],
+    area_sides: List[str],
+    area_higher_only: bool,
 ) -> Dict[str, Any]:
     effective_window = clamp_zig_candle_window(window)
     effective_level = clamp_zig_level(selected_level)
@@ -2714,6 +3021,15 @@ def load_zone_next_payload(
                 series=series,
                 include_provisional=include_provisional,
             )
+            area_rows = fetch_supres_rows(
+                cur,
+                enabled=show_areas and supres_storage_ready(cur),
+                range_start_id=zone_rows[0]["startTickId"] if zone_rows else None,
+                cursor_id=cursor_id,
+                states=area_states,
+                sides=area_sides,
+                higher_only=area_higher_only,
+            ) if cursor_id else []
     fetch_ms = elapsed_ms(fetch_started)
     serialize_started = time.perf_counter()
     payload = build_zone_range_payload(
@@ -2724,6 +3040,7 @@ def load_zone_next_payload(
         cursor_row=cursor_row,
         zone_rows=zone_rows,
         candle_rows=candle_rows,
+        area_rows=area_rows,
         review_end_id=end_id,
         review_end_timestamp=bounds.get("lastTimestamp") if review_start_id is not None else None,
         has_more_left=has_more_left,
@@ -2744,6 +3061,10 @@ def load_zone_previous_payload(
     selected_level: int,
     series: str,
     include_provisional: bool,
+    show_areas: bool,
+    area_states: List[str],
+    area_sides: List[str],
+    area_higher_only: bool,
 ) -> Dict[str, Any]:
     effective_window = clamp_zig_candle_window(window)
     effective_limit = clamp_zig_candle_history_limit(limit)
@@ -2774,6 +3095,15 @@ def load_zone_previous_payload(
                 series=series,
                 include_provisional=include_provisional,
             )
+            area_rows = fetch_supres_rows(
+                cur,
+                enabled=show_areas and supres_storage_ready(cur),
+                range_start_id=zone_rows[0]["startTickId"] if zone_rows else None,
+                cursor_id=cursor_id,
+                states=area_states,
+                sides=area_sides,
+                higher_only=area_higher_only,
+            ) if cursor_id else []
     fetch_ms = elapsed_ms(fetch_started)
     serialize_started = time.perf_counter()
     payload = build_zone_range_payload(
@@ -2784,6 +3114,7 @@ def load_zone_previous_payload(
         cursor_row=cursor_row,
         zone_rows=zone_rows,
         candle_rows=candle_rows,
+        area_rows=area_rows,
         review_end_id=None,
         review_end_timestamp=None,
         has_more_left=has_more_left,
@@ -2803,6 +3134,10 @@ def stream_zone_events(
     selected_level: int,
     series: str,
     include_provisional: bool,
+    show_areas: bool,
+    area_states: List[str],
+    area_sides: List[str],
+    area_higher_only: bool,
 ) -> Generator[str, None, None]:
     last_id = max(0, after_id)
     effective_window = clamp_zig_candle_window(window)
@@ -2843,6 +3178,15 @@ def stream_zone_events(
                             series=series,
                             include_provisional=include_provisional,
                         )
+                        area_rows = fetch_supres_rows(
+                            cur,
+                            enabled=show_areas and supres_storage_ready(cur),
+                            range_start_id=zone_rows[0]["startTickId"] if zone_rows else None,
+                            cursor_id=cursor_id,
+                            states=area_states,
+                            sides=area_sides,
+                            higher_only=area_higher_only,
+                        ) if cursor_id else []
                         fetch_ms = elapsed_ms(fetch_started)
                         serialize_started = time.perf_counter()
                         payload = build_zone_range_payload(
@@ -2853,6 +3197,7 @@ def stream_zone_events(
                             cursor_row=cursor_row,
                             zone_rows=zone_rows,
                             candle_rows=candle_rows,
+                            area_rows=area_rows,
                             review_end_id=None,
                             review_end_timestamp=None,
                             has_more_left=has_more_left,
@@ -2876,6 +3221,8 @@ def stream_zone_events(
                             "barCount": 0,
                             "zones": [],
                             "zoneCount": 0,
+                            "areaRows": [],
+                            "areaCount": 0,
                             "lastId": last_id,
                             "window": effective_window,
                             "level": effective_level,
@@ -3310,6 +3657,7 @@ def build_live_range_payload(
     rows: List[Dict[str, Any]],
     zig_rows: List[Dict[str, Any]],
     zone_rows: List[Dict[str, Any]],
+    area_rows: List[Dict[str, Any]],
     review_end_id: Optional[int],
     review_end_timestamp: Optional[datetime],
     bounds: Dict[str, Any],
@@ -3327,6 +3675,8 @@ def build_live_range_payload(
         "zigCount": len(zig_rows),
         "zoneRows": zone_rows,
         "zoneCount": len(zone_rows),
+        "areaRows": area_rows,
+        "areaCount": len(area_rows),
         "firstId": first_row_id,
         "lastId": last_row_id,
         "firstTimestamp": serialize_value(first_row.get("timestamp") if first_row else None),
@@ -3359,12 +3709,17 @@ def load_bootstrap_payload(
     show_ticks: Optional[bool] = None,
     show_zigs: Optional[bool] = None,
     show_zones: Optional[bool] = None,
+    show_areas: Optional[bool] = None,
+    area_states: Optional[List[str]] = None,
+    area_sides: Optional[List[str]] = None,
+    area_higher_only: bool = False,
 ) -> Dict[str, Any]:
     live_layers = resolve_live_layers(
         display_mode=display_mode,
         show_ticks=show_ticks,
         show_zigs=show_zigs,
         show_zones=show_zones,
+        show_areas=show_areas,
     )
     effective_window = clamp_live_window(window, live_layers)
     fetch_started = time.perf_counter()
@@ -3382,6 +3737,7 @@ def load_bootstrap_payload(
             include_tick_rows = live_layers["ticks"]
             zig_ready = live_layers["zigs"] and zig_storage_ready(cur)
             zone_ready = live_layers["zones"] and zone_storage_ready(cur)
+            area_ready = live_layers["areas"] and supres_storage_ready(cur)
             range_rows = fetch_bootstrap_tick_rows(
                 cur,
                 mode=mode,
@@ -3422,6 +3778,19 @@ def load_bootstrap_payload(
                 if zone_ready
                 else []
             )
+            area_rows = (
+                fetch_supres_rows(
+                    cur,
+                    enabled=area_ready,
+                    range_start_id=range_first_id,
+                    cursor_id=range_last_id,
+                    states=area_states or [AREA_STATE_ACTIVE],
+                    sides=area_sides or [AREA_SIDE_TOP, AREA_SIDE_BOTTOM],
+                    higher_only=area_higher_only,
+                )
+                if area_ready and range_first_id is not None and range_last_id is not None
+                else []
+            )
     fetch_ms = elapsed_ms(fetch_started)
     serialize_started = time.perf_counter()
     payload = build_live_range_payload(
@@ -3433,6 +3802,7 @@ def load_bootstrap_payload(
         rows=[],
         zig_rows=zig_rows,
         zone_rows=zone_rows,
+        area_rows=area_rows,
         review_end_id=review_end_id,
         review_end_timestamp=review_end_timestamp,
         bounds=bounds,
@@ -3445,6 +3815,8 @@ def load_bootstrap_payload(
     payload["zigCount"] = len(payload["zigRows"])
     payload["zoneRows"] = zone_rows
     payload["zoneCount"] = len(zone_rows)
+    payload["areaRows"] = area_rows
+    payload["areaCount"] = len(area_rows)
     payload["metrics"]["serializeLatencyMs"] = elapsed_ms(serialize_started)
     return payload
 
@@ -3459,12 +3831,17 @@ def load_next_payload(
     show_ticks: Optional[bool] = None,
     show_zigs: Optional[bool] = None,
     show_zones: Optional[bool] = None,
+    show_areas: Optional[bool] = None,
+    area_states: Optional[List[str]] = None,
+    area_sides: Optional[List[str]] = None,
+    area_higher_only: bool = False,
 ) -> Dict[str, Any]:
     live_layers = resolve_live_layers(
         display_mode=display_mode,
         show_ticks=show_ticks,
         show_zigs=show_zigs,
         show_zones=show_zones,
+        show_areas=show_areas,
     )
     effective_window = clamp_live_window(window, live_layers)
     fetch_started = time.perf_counter()
@@ -3473,6 +3850,7 @@ def load_next_payload(
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             zig_ready = live_layers["zigs"] and zig_storage_ready(cur)
             zone_ready = live_layers["zones"] and zone_storage_ready(cur)
+            area_ready = live_layers["areas"] and supres_storage_ready(cur)
             tick_rows = query_rows_after(cur, after_id, limit, end_id=end_id, include_rows=include_tick_rows)
             last_seen_id = tick_rows[-1]["id"] if tick_rows else after_id
             zig_changes = (
@@ -3496,6 +3874,19 @@ def load_next_payload(
                 if zone_ready and range_first_id is not None
                 else []
             )
+            area_rows = (
+                fetch_supres_rows(
+                    cur,
+                    enabled=area_ready,
+                    range_start_id=range_first_id,
+                    cursor_id=last_seen_id,
+                    states=area_states or [AREA_STATE_ACTIVE],
+                    sides=area_sides or [AREA_SIDE_TOP, AREA_SIDE_BOTTOM],
+                    higher_only=area_higher_only,
+                )
+                if area_ready and range_first_id is not None and last_seen_id is not None
+                else []
+            )
     fetch_ms = elapsed_ms(fetch_started)
     serialize_started = time.perf_counter()
     rows = serialize_tick_rows(tick_rows) if include_tick_rows else []
@@ -3508,6 +3899,8 @@ def load_next_payload(
         "zigChangeCount": len(zig_rows),
         "zoneRows": zone_rows,
         "zoneCount": len(zone_rows),
+        "areaRows": area_rows,
+        "areaCount": len(area_rows),
         "lastId": last_seen_id,
         "endId": end_id,
         "displayMode": display_mode,
@@ -3530,12 +3923,17 @@ def load_previous_payload(
     show_ticks: Optional[bool] = None,
     show_zigs: Optional[bool] = None,
     show_zones: Optional[bool] = None,
+    show_areas: Optional[bool] = None,
+    area_states: Optional[List[str]] = None,
+    area_sides: Optional[List[str]] = None,
+    area_higher_only: bool = False,
 ) -> Dict[str, Any]:
     live_layers = resolve_live_layers(
         display_mode=display_mode,
         show_ticks=show_ticks,
         show_zigs=show_zigs,
         show_zones=show_zones,
+        show_areas=show_areas,
     )
     effective_limit = clamp_live_history_limit(limit, live_layers)
     fetch_started = time.perf_counter()
@@ -3544,6 +3942,7 @@ def load_previous_payload(
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             zig_ready = live_layers["zigs"] and zig_storage_ready(cur)
             zone_ready = live_layers["zones"] and zone_storage_ready(cur)
+            area_ready = live_layers["areas"] and supres_storage_ready(cur)
             bounds_row = query_tick_bounds(cur)
             bounds = {
                 "firstId": bounds_row.get("first_id"),
@@ -3575,6 +3974,19 @@ def load_previous_payload(
                 if zone_ready
                 else []
             )
+            area_rows = (
+                fetch_supres_rows(
+                    cur,
+                    enabled=area_ready,
+                    range_start_id=first_row["id"] if first_row else None,
+                    cursor_id=range_end_id,
+                    states=area_states or [AREA_STATE_ACTIVE],
+                    sides=area_sides or [AREA_SIDE_TOP, AREA_SIDE_BOTTOM],
+                    higher_only=area_higher_only,
+                )
+                if area_ready and first_row and range_end_id is not None
+                else []
+            )
     fetch_ms = elapsed_ms(fetch_started)
     serialize_started = time.perf_counter()
     rows = serialize_tick_rows(previous_rows) if include_tick_rows else []
@@ -3588,6 +4000,8 @@ def load_previous_payload(
         "zigCount": len(zig_payload),
         "zoneRows": zone_rows,
         "zoneCount": len(zone_rows),
+        "areaRows": area_rows,
+        "areaCount": len(area_rows),
         "firstId": first_row_id,
         "lastId": range_end_id,
         "beforeId": before_id,
@@ -3611,6 +4025,10 @@ def stream_events(
     show_ticks: Optional[bool] = None,
     show_zigs: Optional[bool] = None,
     show_zones: Optional[bool] = None,
+    show_areas: Optional[bool] = None,
+    area_states: Optional[List[str]] = None,
+    area_sides: Optional[List[str]] = None,
+    area_higher_only: bool = False,
 ) -> Generator[str, None, None]:
     last_id = max(0, after_id)
     limit = clamp_int(limit, 1, MAX_STREAM_BATCH)
@@ -3619,6 +4037,7 @@ def stream_events(
         show_ticks=show_ticks,
         show_zigs=show_zigs,
         show_zones=show_zones,
+        show_areas=show_areas,
     )
     effective_window = clamp_live_window(window, live_layers)
     include_tick_rows = live_layers["ticks"]
@@ -3630,6 +4049,7 @@ def stream_events(
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 include_zig_rows = live_layers["zigs"] and zig_storage_ready(cur)
                 include_zone_rows = live_layers["zones"] and zone_storage_ready(cur)
+                include_area_rows = live_layers["areas"] and supres_storage_ready(cur)
                 while True:
                     fetch_started = time.perf_counter()
                     tick_rows = query_rows_after(cur, last_id, limit, include_rows=include_tick_rows)
@@ -3656,9 +4076,27 @@ def stream_events(
                         if include_zone_rows and range_first_id is not None
                         else []
                     )
+                    area_rows = (
+                        fetch_supres_rows(
+                            cur,
+                            enabled=include_area_rows,
+                            range_start_id=range_first_id,
+                            cursor_id=next_last_id,
+                            states=area_states or [AREA_STATE_ACTIVE],
+                            sides=area_sides or [AREA_SIDE_TOP, AREA_SIDE_BOTTOM],
+                            higher_only=area_higher_only,
+                        )
+                        if include_area_rows and range_first_id is not None and next_last_id is not None
+                        else []
+                    )
                     fetch_ms = elapsed_ms(fetch_started)
 
-                    should_emit = (include_tick_rows and bool(tick_rows)) or bool(zig_changes) or (include_zone_rows and next_last_id > last_id)
+                    should_emit = (
+                        (include_tick_rows and bool(tick_rows))
+                        or bool(zig_changes)
+                        or (include_zone_rows and next_last_id > last_id)
+                        or (include_area_rows and next_last_id > last_id)
+                    )
                     if should_emit:
                         serialize_started = time.perf_counter()
                         payload_rows = serialize_tick_rows(tick_rows) if include_tick_rows else []
@@ -3672,6 +4110,8 @@ def stream_events(
                             "zigChangeCount": len(payload_zig),
                             "zoneRows": zone_rows,
                             "zoneCount": len(zone_rows),
+                            "areaRows": area_rows,
+                            "areaCount": len(area_rows),
                             "lastId": last_id,
                             "displayMode": display_mode,
                             "layers": live_layers,
@@ -3700,6 +4140,8 @@ def stream_events(
                             "zigChangeCount": 0,
                             "zoneRows": [],
                             "zoneCount": 0,
+                            "areaRows": [],
+                            "areaCount": 0,
                             "lastId": last_id,
                             "displayMode": display_mode,
                             "layers": live_layers,
@@ -3821,6 +4263,10 @@ def zones_bootstrap(
     level: int = Query(0, ge=0, le=MAX_ZIG_LEVEL),
     series: str = Query("mid", pattern=PRICE_SERIES_RE),
     provisional: bool = Query(True),
+    showAreas: bool = Query(False),
+    areaStates: Optional[str] = Query(None),
+    areaSides: Optional[str] = Query(None),
+    areaHigherOnly: bool = Query(False),
 ) -> Dict[str, Any]:
     return load_zone_bootstrap_payload(
         mode=mode,
@@ -3829,6 +4275,10 @@ def zones_bootstrap(
         selected_level=level,
         series=series,
         include_provisional=provisional,
+        show_areas=showAreas,
+        area_states=parse_area_states(areaStates),
+        area_sides=parse_area_sides(areaSides),
+        area_higher_only=areaHigherOnly,
     )
 
 
@@ -3842,6 +4292,10 @@ def zones_next(
     series: str = Query("mid", pattern=PRICE_SERIES_RE),
     provisional: bool = Query(True),
     reviewStartId: Optional[int] = Query(None, ge=1),
+    showAreas: bool = Query(False),
+    areaStates: Optional[str] = Query(None),
+    areaSides: Optional[str] = Query(None),
+    areaHigherOnly: bool = Query(False),
 ) -> Dict[str, Any]:
     return load_zone_next_payload(
         after_id=afterId,
@@ -3852,6 +4306,10 @@ def zones_next(
         series=series,
         include_provisional=provisional,
         review_start_id=reviewStartId,
+        show_areas=showAreas,
+        area_states=parse_area_states(areaStates),
+        area_sides=parse_area_sides(areaSides),
+        area_higher_only=areaHigherOnly,
     )
 
 
@@ -3863,6 +4321,10 @@ def zones_previous(
     level: int = Query(0, ge=0, le=MAX_ZIG_LEVEL),
     series: str = Query("mid", pattern=PRICE_SERIES_RE),
     provisional: bool = Query(True),
+    showAreas: bool = Query(False),
+    areaStates: Optional[str] = Query(None),
+    areaSides: Optional[str] = Query(None),
+    areaHigherOnly: bool = Query(False),
 ) -> Dict[str, Any]:
     return load_zone_previous_payload(
         current_last_id=currentLastId,
@@ -3871,6 +4333,10 @@ def zones_previous(
         selected_level=level,
         series=series,
         include_provisional=provisional,
+        show_areas=showAreas,
+        area_states=parse_area_states(areaStates),
+        area_sides=parse_area_sides(areaSides),
+        area_higher_only=areaHigherOnly,
     )
 
 
@@ -3882,6 +4348,10 @@ def zones_stream(
     level: int = Query(0, ge=0, le=MAX_ZIG_LEVEL),
     series: str = Query("mid", pattern=PRICE_SERIES_RE),
     provisional: bool = Query(True),
+    showAreas: bool = Query(False),
+    areaStates: Optional[str] = Query(None),
+    areaSides: Optional[str] = Query(None),
+    areaHigherOnly: bool = Query(False),
 ) -> StreamingResponse:
     return StreamingResponse(
         stream_zone_events(
@@ -3891,6 +4361,10 @@ def zones_stream(
             selected_level=level,
             series=series,
             include_provisional=provisional,
+            show_areas=showAreas,
+            area_states=parse_area_states(areaStates),
+            area_sides=parse_area_sides(areaSides),
+            area_higher_only=areaHigherOnly,
         ),
         media_type="text/event-stream",
         headers={
@@ -3910,6 +4384,10 @@ def live_bootstrap(
     showTicks: Optional[bool] = Query(None),
     showZigs: Optional[bool] = Query(None),
     showZones: Optional[bool] = Query(None),
+    showAreas: bool = Query(False),
+    areaStates: Optional[str] = Query(None),
+    areaSides: Optional[str] = Query(None),
+    areaHigherOnly: bool = Query(False),
 ) -> Dict[str, Any]:
     return load_bootstrap_payload(
         mode=mode,
@@ -3919,6 +4397,10 @@ def live_bootstrap(
         show_ticks=showTicks,
         show_zigs=showZigs,
         show_zones=showZones,
+        show_areas=showAreas,
+        area_states=parse_area_states(areaStates),
+        area_sides=parse_area_sides(areaSides),
+        area_higher_only=areaHigherOnly,
     )
 
 
@@ -3932,6 +4414,10 @@ def live_next(
     showTicks: Optional[bool] = Query(None),
     showZigs: Optional[bool] = Query(None),
     showZones: Optional[bool] = Query(None),
+    showAreas: bool = Query(False),
+    areaStates: Optional[str] = Query(None),
+    areaSides: Optional[str] = Query(None),
+    areaHigherOnly: bool = Query(False),
 ) -> Dict[str, Any]:
     return load_next_payload(
         after_id=afterId,
@@ -3942,6 +4428,10 @@ def live_next(
         show_ticks=showTicks,
         show_zigs=showZigs,
         show_zones=showZones,
+        show_areas=showAreas,
+        area_states=parse_area_states(areaStates),
+        area_sides=parse_area_sides(areaSides),
+        area_higher_only=areaHigherOnly,
     )
 
 
@@ -3954,6 +4444,10 @@ def live_previous(
     showTicks: Optional[bool] = Query(None),
     showZigs: Optional[bool] = Query(None),
     showZones: Optional[bool] = Query(None),
+    showAreas: bool = Query(False),
+    areaStates: Optional[str] = Query(None),
+    areaSides: Optional[str] = Query(None),
+    areaHigherOnly: bool = Query(False),
 ) -> Dict[str, Any]:
     return load_previous_payload(
         before_id=beforeId,
@@ -3963,6 +4457,10 @@ def live_previous(
         show_ticks=showTicks,
         show_zigs=showZigs,
         show_zones=showZones,
+        show_areas=showAreas,
+        area_states=parse_area_states(areaStates),
+        area_sides=parse_area_sides(areaSides),
+        area_higher_only=areaHigherOnly,
     )
 
 
@@ -3975,6 +4473,10 @@ def live_stream(
     showTicks: Optional[bool] = Query(None),
     showZigs: Optional[bool] = Query(None),
     showZones: Optional[bool] = Query(None),
+    showAreas: bool = Query(False),
+    areaStates: Optional[str] = Query(None),
+    areaSides: Optional[str] = Query(None),
+    areaHigherOnly: bool = Query(False),
 ) -> StreamingResponse:
     return StreamingResponse(
         stream_events(
@@ -3985,6 +4487,10 @@ def live_stream(
             show_ticks=showTicks,
             show_zigs=showZigs,
             show_zones=showZones,
+            show_areas=showAreas,
+            area_states=parse_area_states(areaStates),
+            area_sides=parse_area_sides(areaSides),
+            area_higher_only=areaHigherOnly,
         ),
         media_type="text/event-stream",
         headers={
@@ -4010,6 +4516,10 @@ def zig_candles_bootstrap(
     zoneOvershoot: float = Query(DEFAULT_ZONE_ALLOWED_OVERSHOOT, ge=0.0, le=MAX_ZONE_ALLOWED_OVERSHOOT),
     zoneBreakTicks: int = Query(DEFAULT_ZONE_BREAKOUT_TICKS, ge=1, le=MAX_ZONE_BREAKOUT_TICKS),
     zoneBreakTolerance: float = Query(DEFAULT_ZONE_BREAKOUT_TOLERANCE, ge=0.0, le=MAX_ZONE_BREAKOUT_TOLERANCE),
+    showAreas: bool = Query(False),
+    areaStates: Optional[str] = Query(None),
+    areaSides: Optional[str] = Query(None),
+    areaHigherOnly: bool = Query(False),
 ) -> Dict[str, Any]:
     zone_settings = build_zone_settings(
         enabled=zones,
@@ -4030,6 +4540,10 @@ def zig_candles_bootstrap(
         series=series,
         include_provisional=provisional,
         zone_settings=zone_settings,
+        show_areas=showAreas,
+        area_states=parse_area_states(areaStates),
+        area_sides=parse_area_sides(areaSides),
+        area_higher_only=areaHigherOnly,
     )
 
 
@@ -4050,6 +4564,10 @@ def zig_candles_next(
     zoneOvershoot: float = Query(DEFAULT_ZONE_ALLOWED_OVERSHOOT, ge=0.0, le=MAX_ZONE_ALLOWED_OVERSHOOT),
     zoneBreakTicks: int = Query(DEFAULT_ZONE_BREAKOUT_TICKS, ge=1, le=MAX_ZONE_BREAKOUT_TICKS),
     zoneBreakTolerance: float = Query(DEFAULT_ZONE_BREAKOUT_TOLERANCE, ge=0.0, le=MAX_ZONE_BREAKOUT_TOLERANCE),
+    showAreas: bool = Query(False),
+    areaStates: Optional[str] = Query(None),
+    areaSides: Optional[str] = Query(None),
+    areaHigherOnly: bool = Query(False),
 ) -> Dict[str, Any]:
     zone_settings = build_zone_settings(
         enabled=zones,
@@ -4072,6 +4590,10 @@ def zig_candles_next(
         include_provisional=provisional,
         review_start_id=reviewStartId,
         zone_settings=zone_settings,
+        show_areas=showAreas,
+        area_states=parse_area_states(areaStates),
+        area_sides=parse_area_sides(areaSides),
+        area_higher_only=areaHigherOnly,
     )
 
 
@@ -4091,6 +4613,10 @@ def zig_candles_previous(
     zoneOvershoot: float = Query(DEFAULT_ZONE_ALLOWED_OVERSHOOT, ge=0.0, le=MAX_ZONE_ALLOWED_OVERSHOOT),
     zoneBreakTicks: int = Query(DEFAULT_ZONE_BREAKOUT_TICKS, ge=1, le=MAX_ZONE_BREAKOUT_TICKS),
     zoneBreakTolerance: float = Query(DEFAULT_ZONE_BREAKOUT_TOLERANCE, ge=0.0, le=MAX_ZONE_BREAKOUT_TOLERANCE),
+    showAreas: bool = Query(False),
+    areaStates: Optional[str] = Query(None),
+    areaSides: Optional[str] = Query(None),
+    areaHigherOnly: bool = Query(False),
 ) -> Dict[str, Any]:
     zone_settings = build_zone_settings(
         enabled=zones,
@@ -4111,6 +4637,10 @@ def zig_candles_previous(
         series=series,
         include_provisional=provisional,
         zone_settings=zone_settings,
+        show_areas=showAreas,
+        area_states=parse_area_states(areaStates),
+        area_sides=parse_area_sides(areaSides),
+        area_higher_only=areaHigherOnly,
     )
 
 
@@ -4129,6 +4659,10 @@ def zig_candles_stream(
     zoneOvershoot: float = Query(DEFAULT_ZONE_ALLOWED_OVERSHOOT, ge=0.0, le=MAX_ZONE_ALLOWED_OVERSHOOT),
     zoneBreakTicks: int = Query(DEFAULT_ZONE_BREAKOUT_TICKS, ge=1, le=MAX_ZONE_BREAKOUT_TICKS),
     zoneBreakTolerance: float = Query(DEFAULT_ZONE_BREAKOUT_TOLERANCE, ge=0.0, le=MAX_ZONE_BREAKOUT_TOLERANCE),
+    showAreas: bool = Query(False),
+    areaStates: Optional[str] = Query(None),
+    areaSides: Optional[str] = Query(None),
+    areaHigherOnly: bool = Query(False),
 ) -> StreamingResponse:
     zone_settings = build_zone_settings(
         enabled=zones,
@@ -4150,6 +4684,10 @@ def zig_candles_stream(
             series=series,
             include_provisional=provisional,
             zone_settings=zone_settings,
+            show_areas=showAreas,
+            area_states=parse_area_states(areaStates),
+            area_sides=parse_area_sides(areaSides),
+            area_higher_only=areaHigherOnly,
         ),
         media_type="text/event-stream",
         headers={

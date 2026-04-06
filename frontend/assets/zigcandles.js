@@ -18,6 +18,8 @@
     provisional: true,
     table: true,
     zoneDebug: false,
+    showAreas: false,
+    areaHigherOnly: false,
   };
 
   const DISPLAY_CONFIG = {
@@ -42,6 +44,7 @@
     chart: null,
     bars: [],
     zones: [],
+    areaRows: [],
     zoneConfig: null,
     loadedWindow: DEFAULTS.window,
     renderedSeries: [],
@@ -59,6 +62,7 @@
     rangeLastTimestampMs: null,
     selectedBarId: null,
     zoom: { start: 0, end: 100 },
+    applyingZoom: false,
     autoscaleFrame: 0,
     layoutResizeFrame: 0,
     layoutResizeTimeout: 0,
@@ -98,6 +102,13 @@
     showProvisional: document.getElementById("showProvisional"),
     zoneDebugOverlay: document.getElementById("zoneDebugOverlay"),
     showTable: document.getElementById("showTable"),
+    showAreas: document.getElementById("showAreas"),
+    areaStateActive: document.getElementById("areaStateActive"),
+    areaStateUsed: document.getElementById("areaStateUsed"),
+    areaStateClosed: document.getElementById("areaStateClosed"),
+    areaSideTop: document.getElementById("areaSideTop"),
+    areaSideBottom: document.getElementById("areaSideBottom"),
+    areaHigherOnly: document.getElementById("areaHigherOnly"),
     applyButton: document.getElementById("applyButton"),
     loadMoreLeftButton: document.getElementById("loadMoreLeftButton"),
     statusLine: document.getElementById("statusLine"),
@@ -116,6 +127,8 @@
     const reviewSpeed = Number.parseFloat(params.get("speed") || String(DEFAULTS.reviewSpeed));
     const display = params.get("display");
     const level = Number.parseInt(params.get("level") || String(DEFAULTS.level), 10);
+    const areaStates = parseFilterList(params.get("areaStates"), ["active"]);
+    const areaSides = parseFilterList(params.get("areaSides"), ["top", "bottom"]);
     return {
       mode: params.get("mode") === "review" ? "review" : DEFAULTS.mode,
       run: params.get("run") === "stop" ? "stop" : DEFAULTS.run,
@@ -135,7 +148,22 @@
       provisional: params.get("provisional") !== "0",
       table: params.get("table") !== "0",
       zoneDebug: params.get("zoneDebug") === "1",
+      showAreas: params.get("showAreas") === "1",
+      areaStates: areaStates,
+      areaSides: areaSides,
+      areaHigherOnly: params.get("areaHigherOnly") === "1",
     };
+  }
+
+  function parseFilterList(rawValue, defaultValues) {
+    if (!rawValue) {
+      return defaultValues.slice();
+    }
+    const values = rawValue
+      .split(",")
+      .map((item) => item.trim().toLowerCase())
+      .filter(Boolean);
+    return values.length ? Array.from(new Set(values)) : defaultValues.slice();
   }
 
   function sanitizeWindowValue(rawValue) {
@@ -206,6 +234,10 @@
       provisional: Boolean(elements.showProvisional.checked),
       table: Boolean(elements.showTable.checked),
       zoneDebug: Boolean(elements.zoneDebugOverlay.checked),
+      showAreas: Boolean(elements.showAreas.checked),
+      areaStates: selectedAreaStates(),
+      areaSides: selectedAreaSides(),
+      areaHigherOnly: Boolean(elements.areaHigherOnly.checked),
     };
   }
 
@@ -228,6 +260,10 @@
     params.set("provisional", config.provisional ? "1" : "0");
     params.set("table", config.table ? "1" : "0");
     params.set("zoneDebug", config.zoneDebug ? "1" : "0");
+    params.set("showAreas", config.showAreas ? "1" : "0");
+    params.set("areaStates", config.areaStates.join(","));
+    params.set("areaSides", config.areaSides.join(","));
+    params.set("areaHigherOnly", config.areaHigherOnly ? "1" : "0");
     if (config.id) {
       params.set("id", config.id);
     }
@@ -295,6 +331,13 @@
     elements.showProvisional.checked = Boolean(config.provisional);
     elements.zoneDebugOverlay.checked = Boolean(config.zoneDebug);
     elements.showTable.checked = Boolean(config.table);
+    elements.showAreas.checked = Boolean(config.showAreas);
+    elements.areaStateActive.checked = config.areaStates.includes("active");
+    elements.areaStateUsed.checked = config.areaStates.includes("used");
+    elements.areaStateClosed.checked = config.areaStates.includes("closed");
+    elements.areaSideTop.checked = config.areaSides.includes("top");
+    elements.areaSideBottom.checked = config.areaSides.includes("bottom");
+    elements.areaHigherOnly.checked = Boolean(config.areaHigherOnly);
     elements.tablePanel.hidden = !config.table;
     setSidebarCollapsed(true);
     setSettingsCollapsed(true);
@@ -303,6 +346,40 @@
     renderMeta();
     renderPerf();
     writeQuery();
+  }
+
+  function selectedAreaStates() {
+    const values = [];
+    if (elements.areaStateActive.checked) {
+      values.push("active");
+    }
+    if (elements.areaStateUsed.checked) {
+      values.push("used");
+    }
+    if (elements.areaStateClosed.checked) {
+      values.push("closed");
+    }
+    if (values.length) {
+      return values;
+    }
+    elements.areaStateActive.checked = true;
+    return ["active"];
+  }
+
+  function selectedAreaSides() {
+    const values = [];
+    if (elements.areaSideTop.checked) {
+      values.push("top");
+    }
+    if (elements.areaSideBottom.checked) {
+      values.push("bottom");
+    }
+    if (values.length) {
+      return values;
+    }
+    elements.areaSideTop.checked = true;
+    elements.areaSideBottom.checked = true;
+    return ["top", "bottom"];
   }
 
   function chartHostRect() {
@@ -379,6 +456,9 @@
     const activeZones = state.zones.filter((zone) => zone.status === "active").length;
     const provisionalZones = state.zones.filter((zone) => zone.status === "provisional").length;
     const closedZones = state.zones.filter((zone) => zone.status === "closed").length;
+    const activeAreas = state.areaRows.filter((area) => area.state === "active").length;
+    const usedAreas = state.areaRows.filter((area) => area.state === "used").length;
+    const closedAreas = state.areaRows.filter((area) => area.state === "closed").length;
     elements.liveMeta.textContent = [
       config.mode.toUpperCase(),
       DISPLAY_CONFIG[config.display].label,
@@ -391,10 +471,14 @@
       "z-active " + activeZones,
       "z-prov " + provisionalZones,
       "z-closed " + closedZones,
+      config.showAreas ? "areas " + state.areaRows.length : null,
+      config.showAreas ? "a-active " + activeAreas : null,
+      config.showAreas ? "a-used " + usedAreas : null,
+      config.showAreas ? "a-closed " + closedAreas : null,
       "left " + state.rangeFirstId,
       "right " + state.rangeLastId,
       state.hasMoreLeft ? "more-left yes" : "more-left no",
-    ].join(" | ");
+    ].filter(Boolean).join(" | ");
   }
 
   function renderPerf() {
@@ -617,6 +701,39 @@
     }));
   }
 
+  function areaSpanFor(area) {
+    if (!area || !state.bars.length) {
+      return null;
+    }
+    const rightTickId = area.rightTickId ?? area.closeTickId ?? area.birthTickId;
+    const startIndex = state.bars.findIndex((bar) => Number(bar.endTickId) >= Number(area.birthTickId));
+    if (startIndex < 0) {
+      return null;
+    }
+    let endIndex = startIndex;
+    for (let index = startIndex; index < state.bars.length; index += 1) {
+      if (Number(state.bars[index].startTickId) <= Number(rightTickId)) {
+        endIndex = index;
+        continue;
+      }
+      break;
+    }
+    return {
+      startIndex: startIndex,
+      endIndex: Math.max(startIndex, endIndex),
+    };
+  }
+
+  function areasForBarIndex(index) {
+    if (!Number.isInteger(index)) {
+      return [];
+    }
+    return state.areaRows.filter((area) => {
+      const span = areaSpanFor(area);
+      return span && index >= span.startIndex && index <= span.endIndex;
+    });
+  }
+
   function zoneStyle(zone) {
     if (zone.status === "active") {
       return {
@@ -822,11 +939,78 @@
     return elements;
   }
 
+  function buildAreaOverlayGraphics() {
+    const chart = state.chart;
+    if (!chart || !currentConfig().showAreas || !state.areaRows.length || !state.bars.length) {
+      return [];
+    }
+    const grid = chart.getModel()?.getComponent("grid", 0);
+    const rect = grid?.coordinateSystem?.getRect?.();
+    if (!rect) {
+      return [];
+    }
+    const elements = [];
+    state.areaRows.forEach((area, index) => {
+      const span = areaSpanFor(area);
+      if (!span) {
+        return;
+      }
+      const leftPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [span.startIndex, area.displayLow]);
+      const rightPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [span.endIndex, area.displayLow]);
+      const topPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [span.startIndex, area.displayHigh]);
+      const bottomPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [span.startIndex, area.displayLow]);
+      if (!Array.isArray(leftPoint) || !Array.isArray(rightPoint) || !Array.isArray(topPoint) || !Array.isArray(bottomPoint)) {
+        return;
+      }
+
+      const stepStart = zoneCenterStepPx(span.startIndex);
+      const stepEnd = zoneCenterStepPx(span.endIndex);
+      let left = Number(leftPoint[0]) - stepStart / 2;
+      let right = Number(rightPoint[0]) + stepEnd / 2;
+      let top = Math.min(Number(topPoint[1]), Number(bottomPoint[1]));
+      let bottom = Math.max(Number(topPoint[1]), Number(bottomPoint[1]));
+
+      if (!Number.isFinite(left) || !Number.isFinite(right) || !Number.isFinite(top) || !Number.isFinite(bottom)) {
+        return;
+      }
+      if (right < rect.x || left > rect.x + rect.width || bottom < rect.y || top > rect.y + rect.height) {
+        return;
+      }
+
+      left = Math.max(rect.x, left);
+      right = Math.min(rect.x + rect.width, right);
+      top = Math.max(rect.y, top);
+      bottom = Math.min(rect.y + rect.height, bottom);
+
+      const style = areaStyle(area);
+      elements.push({
+        id: "area-rect-" + (area.id || index),
+        type: "rect",
+        silent: true,
+        z: 0,
+        shape: {
+          x: left,
+          y: top,
+          width: Math.max(1, right - left),
+          height: Math.max(2, bottom - top),
+          r: 2,
+        },
+        style: {
+          fill: style.fill,
+          stroke: style.stroke,
+          lineWidth: style.lineWidth,
+          lineDash: style.lineDash,
+        },
+      });
+    });
+    return elements;
+  }
+
   function renderZoneOverlay(reason) {
     if (!state.chart) {
       return;
     }
-    const elements = buildZoneOverlayGraphics(reason);
+    const elements = buildAreaOverlayGraphics().concat(buildZoneOverlayGraphics(reason));
     state.chart.setOption({
       graphic: [{
         id: "zone-overlay",
@@ -867,6 +1051,49 @@
       "inside " + escapeHtml(String(zone.tickCountInside)) + " ticks | " + escapeHtml(zone.durationInsideLabel || "") + "<br>",
       "touches " + escapeHtml(String(zone.touchCount)) + " | revisits " + escapeHtml(String(zone.revisitCount)) + "<br>",
       "anchor ids " + escapeHtml(String(zone.anchorStartPivotId ?? zone.parentStartPivotId) + " -> " + String(zone.anchorMiddlePivotId ?? "?") + " -> " + String(zone.anchorEndPivotId ?? zone.parentEndPivotId)),
+      "</div>",
+    ].join("");
+  }
+
+  function areaStyle(area) {
+    const isTop = area.side === "top";
+    const base = isTop
+      ? { fill: "rgba(255, 140, 102, 0.12)", stroke: "rgba(255, 184, 163, 0.82)" }
+      : { fill: "rgba(90, 208, 186, 0.12)", stroke: "rgba(181, 248, 232, 0.82)" };
+    if (area.state === "used") {
+      return {
+        fill: base.fill.replace("0.12", "0.06"),
+        stroke: base.stroke.replace("0.82", "0.5"),
+        lineWidth: area.isLevel2Extreme ? 2.1 : (area.isLevel1Extreme ? 1.75 : 1.2),
+        lineDash: [6, 4],
+      };
+    }
+    if (area.state === "closed") {
+      return {
+        fill: base.fill.replace("0.12", "0.035"),
+        stroke: base.stroke.replace("0.82", "0.28"),
+        lineWidth: area.isLevel2Extreme ? 1.9 : (area.isLevel1Extreme ? 1.5 : 1.0),
+        lineDash: [4, 4],
+      };
+    }
+    return {
+      fill: base.fill.replace("0.12", area.isLevel2Extreme ? "0.18" : "0.14"),
+      stroke: base.stroke,
+      lineWidth: area.isLevel2Extreme ? 2.3 : (area.isLevel1Extreme ? 1.85 : 1.35),
+      lineDash: [],
+    };
+  }
+
+  function areaTooltipHtml(area) {
+    return [
+      "<div class=\"zigcandles-tip-zone\">",
+      "<strong>" + escapeHtml(String(area.side || "").toUpperCase() + " " + String(area.state || "").toUpperCase()) + "</strong><br>",
+      "birth " + escapeHtml(String(area.birthTime || "")) + " | pivot " + escapeHtml(String(area.sourcePivotId ?? "")) + "<br>",
+      "original " + formatNumber(area.originalLow) + " - " + formatNumber(area.originalHigh) + "<br>",
+      "active " + formatNumber(area.currentLow) + " - " + formatNumber(area.currentHigh) + "<br>",
+      "L1/L2 " + escapeHtml((area.isLevel1Extreme ? "yes" : "no") + "/" + (area.isLevel2Extreme ? "yes" : "no")) + " | priority " + escapeHtml(String(area.priorityScore ?? "")) + "<br>",
+      "touches " + escapeHtml(String(area.touchCount ?? 0)) + " | first touch " + escapeHtml(String(area.firstTouchTime || "-")) + "<br>",
+      "break " + escapeHtml(String(area.firstBreakTime || "-")) + " | close " + escapeHtml(String(area.closeReason || "-")),
       "</div>",
     ].join("");
   }
@@ -1028,6 +1255,9 @@
             const zoneHtml = displayShowsZones(currentConfig().display)
               ? zonesForBarIndex(Number(point?.dataIndex)).map(zoneTooltipHtml).join("")
               : "";
+            const areaHtml = currentConfig().showAreas
+              ? areasForBarIndex(Number(point?.dataIndex)).map(areaTooltipHtml).join("")
+              : "";
             return [
               "<div class=\"zigcandles-tip\">",
               "<strong>" + escapeHtml(bar.symbol + " L" + bar.level + " " + bar.barState.toUpperCase()) + "</strong><br>",
@@ -1037,6 +1267,7 @@
               "dur " + escapeHtml(bar.durationLabel) + " | ids " + escapeHtml(String(bar.startTickId) + "-" + String(bar.endTickId)) + "<br>",
               "pivots " + escapeHtml(String(bar.startPivotId) + " -> " + (bar.endPivotId == null ? "active" : String(bar.endPivotId))),
               zoneHtml,
+              areaHtml,
               "</div>",
             ].join("");
           },
@@ -1077,6 +1308,9 @@
       }, { notMerge: true, lazyUpdate: true });
 
       state.chart.on("dataZoom", function () {
+        if (state.applyingZoom) {
+          return;
+        }
         const option = state.chart.getOption();
         const zoom = option?.dataZoom?.[0] || state.zoom;
         const indices = zoomIndicesFromState(zoom, state.bars.length);
@@ -1128,6 +1362,17 @@
         minValue = Math.min(minValue, bar.low);
         maxValue = Math.max(maxValue, bar.high);
       });
+      if (currentConfig().showAreas) {
+        const range = visibleIndexRange();
+        state.areaRows.forEach((area) => {
+          const span = areaSpanFor(area);
+          if (!span || !range || span.endIndex < range.startIndex || span.startIndex > range.endIndex) {
+            return;
+          }
+          minValue = Math.min(minValue, Number(area.displayLow));
+          maxValue = Math.max(maxValue, Number(area.displayHigh));
+        });
+      }
       if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) {
         return;
       }
@@ -1159,6 +1404,7 @@
     if (resetView) {
       state.zoom = { start: 0, end: 100 };
     }
+    state.applyingZoom = true;
     chart.setOption({
       xAxis: { data: state.bars.map(candleAxisLabel) },
       dataZoom: ZOOM_COMPONENT_IDS.map((id) => ({
@@ -1182,8 +1428,17 @@
         return series;
       })(),
     }, { replaceMerge: ["series"], lazyUpdate: true });
-    queueVisibleYAxisUpdate();
-    queueZoneOverlayRender("render");
+    window.requestAnimationFrame(() => {
+      const option = chart.getOption();
+      const zoom = option?.dataZoom?.[0] || state.zoom;
+      const indices = zoomIndicesFromState(zoom, state.bars.length);
+      state.zoom = indices
+        ? zoomStateFromIndexRange(indices.startIndex, indices.endIndex, state.bars.length)
+        : state.zoom;
+      state.applyingZoom = false;
+      queueVisibleYAxisUpdate();
+      queueZoneOverlayRender("render");
+    });
   }
 
   function replaceBars(rows) {
@@ -1203,6 +1458,7 @@
   function syncPayload(payload) {
     replaceBars(payload.bars || []);
     state.zones = Array.isArray(payload.zones) ? payload.zones.slice() : [];
+    replaceAreaRows(payload.areaRows || []);
     state.zoneConfig = payload.zoneConfig || null;
     applyRangePayload(payload);
     state.reviewEndId = payload.reviewEndId || state.reviewEndId || null;
@@ -1211,6 +1467,21 @@
     renderMeta();
     renderPerf();
     renderTable();
+  }
+
+  function replaceAreaRows(rows) {
+    state.areaRows = (Array.isArray(rows) ? rows.slice() : []).sort((left, right) => {
+      const leftBirth = Number(left?.birthTickId || 0);
+      const rightBirth = Number(right?.birthTickId || 0);
+      if (leftBirth !== rightBirth) {
+        return leftBirth - rightBirth;
+      }
+      const priorityDiff = Number(right?.priorityScore || 0) - Number(left?.priorityScore || 0);
+      if (priorityDiff !== 0) {
+        return priorityDiff;
+      }
+      return Number(left?.id || 0) - Number(right?.id || 0);
+    });
   }
 
   function focusBar(barId) {
@@ -1275,6 +1546,10 @@
       zoneBreakTicks: String(config.zoneBreakTicks),
       zoneBreakTolerance: String(config.zoneBreakTolerance),
       provisional: config.provisional ? "true" : "false",
+      showAreas: config.showAreas ? "1" : "0",
+      areaStates: config.areaStates.join(","),
+      areaSides: config.areaSides.join(","),
+      areaHigherOnly: config.areaHigherOnly ? "1" : "0",
     });
     if (config.mode === "review" && startId != null) {
       params.set("id", String(startId));
@@ -1297,6 +1572,10 @@
       zoneBreakTicks: String(config.zoneBreakTicks),
       zoneBreakTolerance: String(config.zoneBreakTolerance),
       provisional: config.provisional ? "true" : "false",
+      showAreas: config.showAreas ? "1" : "0",
+      areaStates: config.areaStates.join(","),
+      areaSides: config.areaSides.join(","),
+      areaHigherOnly: config.areaHigherOnly ? "1" : "0",
     });
     if (endId != null) {
       params.set("endId", String(endId));
@@ -1323,6 +1602,10 @@
       zoneBreakTicks: String(config.zoneBreakTicks),
       zoneBreakTolerance: String(config.zoneBreakTolerance),
       provisional: config.provisional ? "true" : "false",
+      showAreas: config.showAreas ? "1" : "0",
+      areaStates: config.areaStates.join(","),
+      areaSides: config.areaSides.join(","),
+      areaHigherOnly: config.areaHigherOnly ? "1" : "0",
     }).toString();
   }
 
@@ -1362,6 +1645,10 @@
       zoneBreakTicks: String(config.zoneBreakTicks),
       zoneBreakTolerance: String(config.zoneBreakTolerance),
       provisional: config.provisional ? "true" : "false",
+      showAreas: config.showAreas ? "1" : "0",
+      areaStates: config.areaStates.join(","),
+      areaSides: config.areaSides.join(","),
+      areaHigherOnly: config.areaHigherOnly ? "1" : "0",
     }).toString());
     state.source = source;
 
@@ -1541,7 +1828,11 @@
     control.addEventListener("change", writeQuery);
   });
 
-  [elements.showProvisional, elements.zoneDebugOverlay, elements.showTable].forEach((control) => {
+  [
+    elements.showProvisional,
+    elements.zoneDebugOverlay,
+    elements.showTable,
+  ].forEach((control) => {
     control.addEventListener("change", function () {
       elements.tablePanel.hidden = !elements.showTable.checked;
       if (elements.showTable.checked) {
@@ -1552,6 +1843,25 @@
       renderChart(false);
       queueChartResize();
       status("Settings updated. Click Load to refresh bars and zones.", false);
+    });
+  });
+
+  [
+    elements.showAreas,
+    elements.areaStateActive,
+    elements.areaStateUsed,
+    elements.areaStateClosed,
+    elements.areaSideTop,
+    elements.areaSideBottom,
+    elements.areaHigherOnly,
+  ].forEach((control) => {
+    control.addEventListener("change", function () {
+      currentConfig();
+      writeQuery();
+      loadAll(false).catch((error) => {
+        status(error.message || "Area refresh failed.", true);
+      });
+      status("Unused area filters updated.", false);
     });
   });
 
