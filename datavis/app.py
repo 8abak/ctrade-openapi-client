@@ -416,13 +416,11 @@ def resolve_live_layers(
 
 
 def clamp_live_window(value: int, layers: Dict[str, bool]) -> int:
-    maximum = MAX_TICK_WINDOW if layers.get("ticks") else MAX_ZIG_WINDOW
-    return clamp_int(value, 1, maximum)
+    return clamp_int(value, 1, MAX_TICK_WINDOW)
 
 
 def clamp_live_history_limit(value: int, layers: Dict[str, bool]) -> int:
-    maximum = MAX_TICK_HISTORY_LIMIT if layers.get("ticks") else MAX_ZIG_HISTORY_LIMIT
-    return clamp_int(value, 1, maximum)
+    return clamp_int(value, 1, MAX_TICK_HISTORY_LIMIT)
 
 
 def clamp_window(value: int, display_mode: str) -> int:

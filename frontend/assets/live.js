@@ -19,9 +19,9 @@
     "ticks-zig": { label: "Ticks + Zigs", maxWindow: 10000 },
     "ticks-zones": { label: "Ticks + Zones", maxWindow: 10000 },
     "ticks-zig-zones": { label: "Ticks + Zigs + Zones", maxWindow: 10000 },
-    zig: { label: "Zigs Only", maxWindow: 100000 },
-    "zig-zones": { label: "Zigs + Zones", maxWindow: 100000 },
-    zones: { label: "Zones Only", maxWindow: 100000 },
+    zig: { label: "Zigs Only", maxWindow: 10000 },
+    "zig-zones": { label: "Zigs + Zones", maxWindow: 10000 },
+    zones: { label: "Zones Only", maxWindow: 10000 },
   };
 
   const SERIES_CONFIG = {
@@ -34,6 +34,7 @@
   const ZOOM_COMPONENT_IDS = ["zoom-inside", "zoom-slider"];
   const MIN_CHART_WIDTH = 180;
   const MIN_CHART_HEIGHT = 180;
+  const DEBUG_VIEWPORT = new URLSearchParams(window.location.search).get("debugViewport") === "1";
 
   const state = {
     chart: null,
@@ -446,6 +447,13 @@
     elements.statusLine.classList.toggle("error", Boolean(isError));
   }
 
+  function debugViewport(message, details) {
+    if (!DEBUG_VIEWPORT) {
+      return;
+    }
+    console.debug("[live-viewport] " + message, details || {});
+  }
+
   function renderMeta() {
     if (state.rangeLastId == null) {
       elements.liveMeta.textContent = "No chart range loaded.";
@@ -529,23 +537,28 @@
           formatter: function (params) {
             const entries = Array.isArray(params) ? params : [params];
             const point = entries[0];
-            const timestampMs = Number(point?.axisValue ?? point?.value?.[0]);
+            const tickId = Number(point?.axisValue ?? point?.value?.[0]);
             const lines = entries
               .filter((entry) => typeof entry?.value?.[1] === "number")
               .map((entry) => {
                 return "<div>" + String(entry.marker || "") + String(entry.seriesName || "") + ": " + Number(entry.value[1]).toFixed(2) + "</div>";
               });
-            const zoneHtml = Number.isFinite(timestampMs) && displayUsesZones(currentConfig().display)
-              ? zoneRowsAtTimestamp(timestampMs).map(zoneTooltipHtml).join("")
+            const row = Number.isFinite(tickId) ? rowAtTickId(tickId) : null;
+            const headerHtml = Number.isFinite(tickId)
+              ? "<div>tick " + String(Math.round(tickId)) + (row?.timestamp ? " | " + String(row.timestamp) : "") + "</div>"
               : "";
-            const areaHtml = Number.isFinite(timestampMs) && currentConfig().showAreas
-              ? areaRowsAtTimestamp(timestampMs).map(areaTooltipHtml).join("")
+            const zoneHtml = Number.isFinite(tickId) && displayUsesZones(currentConfig().display)
+              ? zoneRowsAtTickId(tickId).map(zoneTooltipHtml).join("")
+              : "";
+            const areaHtml = Number.isFinite(tickId) && currentConfig().showAreas
+              ? areaRowsAtTickId(tickId).map(areaTooltipHtml).join("")
               : "";
             if (!lines.length && !zoneHtml && !areaHtml) {
               return "";
             }
             return [
               "<div class=\"zigcandles-tip\">",
+              headerHtml,
               lines.join(""),
               zoneHtml,
               areaHtml,
@@ -554,8 +567,9 @@
           },
         },
         xAxis: {
-          type: "time",
-          boundaryGap: [0.01, 0.02],
+          type: "value",
+          scale: true,
+          boundaryGap: ["1%", "1%"],
           axisLabel: { color: "#9eadc5" },
         },
         yAxis: { type: "value", scale: true, axisLabel: { color: "#9eadc5" } },
@@ -613,17 +627,22 @@
       return null;
     }
     const fullSpan = Math.max(0, bounds.endValue - bounds.startValue);
+    const directStartValue = Number(zoomState.startValue);
+    const directEndValue = Number(zoomState.endValue);
     const startPercent = Number(zoomState.start);
     const endPercent = Number(zoomState.end);
     let startValue;
     let endValue;
 
-    if (Number.isFinite(startPercent) && Number.isFinite(endPercent)) {
+    if (Number.isFinite(directStartValue) && Number.isFinite(directEndValue)) {
+      startValue = directStartValue;
+      endValue = directEndValue;
+    } else if (Number.isFinite(startPercent) && Number.isFinite(endPercent)) {
       startValue = bounds.startValue + (Math.max(0, Math.min(100, startPercent)) / 100) * fullSpan;
       endValue = bounds.startValue + (Math.max(0, Math.min(100, endPercent)) / 100) * fullSpan;
     } else {
-      startValue = Number(zoomState.startValue);
-      endValue = Number(zoomState.endValue);
+      startValue = directStartValue;
+      endValue = directEndValue;
     }
 
     if (!Number.isFinite(startValue) || !Number.isFinite(endValue)) {
@@ -645,25 +664,30 @@
 
   function getDatasetBounds() {
     if (state.rows.length) {
-      return { startValue: state.rows[0].timestampMs, endValue: state.rows[state.rows.length - 1].timestampMs };
+      return { startValue: Number(state.rows[0].id), endValue: Number(state.rows[state.rows.length - 1].id) };
+    }
+    if (state.rangeFirstId != null && state.rangeLastId != null) {
+      return { startValue: Number(state.rangeFirstId), endValue: Number(state.rangeLastId) };
     }
     if (state.zigRows.length) {
-      return { startValue: state.zigRows[0].timestampMs, endValue: state.zigRows[state.zigRows.length - 1].timestampMs };
-    }
-    if (state.rangeFirstTimestampMs != null && state.rangeLastTimestampMs != null) {
-      return { startValue: state.rangeFirstTimestampMs, endValue: state.rangeLastTimestampMs };
+      const values = state.zigRows.map((row) => Number(row.sourceTickId)).filter(Number.isFinite);
+      return values.length ? { startValue: Math.min(...values), endValue: Math.max(...values) } : null;
     }
     if (state.zoneRows.length) {
-      return {
-        startValue: state.zoneRows[0].startTimestampMs,
-        endValue: Math.max(...state.zoneRows.map((row) => Number(row.rightTimestampMs ?? row.endTimestampMs ?? row.startTimestampMs))),
-      };
+      const starts = state.zoneRows.map((row) => Number(row.startTickId)).filter(Number.isFinite);
+      const ends = state.zoneRows.map((row) => Number(row.rightTickId ?? row.endTickId ?? row.startTickId)).filter(Number.isFinite);
+      return starts.length && ends.length ? {
+        startValue: Math.min(...starts),
+        endValue: Math.max(...ends),
+      } : null;
     }
     if (state.areaRows.length) {
-      return {
-        startValue: Math.min(...state.areaRows.map((row) => Number(row.birthTimeMs ?? row.rightTimeMs ?? 0))),
-        endValue: Math.max(...state.areaRows.map((row) => Number(row.rightTimeMs ?? row.birthTimeMs ?? 0))),
-      };
+      const starts = state.areaRows.map((row) => Number(row.birthTickId)).filter(Number.isFinite);
+      const ends = state.areaRows.map((row) => Number(row.rightTickId ?? row.closeTickId ?? row.birthTickId)).filter(Number.isFinite);
+      return starts.length && ends.length ? {
+        startValue: Math.min(...starts),
+        endValue: Math.max(...ends),
+      } : null;
     }
     return null;
   }
@@ -728,7 +752,7 @@
     if (!Number.isFinite(gap) || !Number.isFinite(span)) {
       return false;
     }
-    return gap <= Math.max(Math.min(span * 0.04, 4000), 500);
+    return gap <= Math.max(2, Math.min(span * 0.04, 25));
   }
 
   function updateRightEdgeAnchor(viewport, bounds) {
@@ -863,8 +887,8 @@
       const startX = Number(viewport.startValue);
       const endX = Number(viewport.endValue);
       state.zoneRows.forEach((zone) => {
-        const zoneStart = Number(zone.startTimestampMs);
-        const zoneEnd = Number(zone.rightTimestampMs ?? zone.endTimestampMs ?? zone.startTimestampMs);
+        const zoneStart = Number(zone.startTickId);
+        const zoneEnd = Number(zone.rightTickId ?? zone.endTickId ?? zone.startTickId);
         if (!Number.isFinite(zoneStart) || !Number.isFinite(zoneEnd) || zoneEnd < startX || zoneStart > endX) {
           return;
         }
@@ -876,8 +900,8 @@
       const startX = Number(viewport.startValue);
       const endX = Number(viewport.endValue);
       state.areaRows.forEach((area) => {
-        const areaStart = Number(area.birthTimeMs);
-        const areaEnd = Number(area.rightTimeMs ?? area.birthTimeMs);
+        const areaStart = Number(area.birthTickId);
+        const areaEnd = Number(area.rightTickId ?? area.closeTickId ?? area.birthTickId);
         if (!Number.isFinite(areaStart) || !Number.isFinite(areaEnd) || areaEnd < startX || areaStart > endX) {
           return;
         }
@@ -925,7 +949,29 @@
   }
 
   function rowsToSeriesData(rows, valueKey) {
-    return rows.map((row) => [row.timestampMs, row[valueKey]]);
+    return rows.map((row) => [row.id, row[valueKey]]);
+  }
+
+  function rowAtTickId(tickId) {
+    const roundedTickId = Math.round(Number(tickId));
+    if (!Number.isFinite(roundedTickId) || !state.rows.length) {
+      return null;
+    }
+    let low = 0;
+    let high = state.rows.length - 1;
+    while (low <= high) {
+      const mid = Math.floor((low + high) / 2);
+      const rowId = Number(state.rows[mid].id);
+      if (rowId === roundedTickId) {
+        return state.rows[mid];
+      }
+      if (rowId < roundedTickId) {
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+    return null;
   }
 
   function zigRowsAtLevel(level) {
@@ -953,7 +999,7 @@
   }
 
   function zigToSeriesData(level, stateName) {
-    return zigSeriesRows(level, stateName).map((row) => [row.timestampMs, row.price]);
+    return zigSeriesRows(level, stateName).map((row) => [row.sourceTickId, row.price]);
   }
 
   function logicalZoneKey(zone) {
@@ -1012,14 +1058,14 @@
     return Array.from(byKey.values());
   }
 
-  function zoneRowsAtTimestamp(timestampMs) {
+  function zoneRowsAtTickId(tickId) {
     return dedupeLogicalZones(state.zoneRows.filter((zone) => {
       if (!zone) {
         return false;
       }
-      const start = Number(zone.startTimestampMs);
-      const end = Number(zone.rightTimestampMs ?? zone.endTimestampMs ?? zone.startTimestampMs);
-      return Number.isFinite(start) && Number.isFinite(end) && timestampMs >= start && timestampMs <= end;
+      const start = Number(zone.startTickId);
+      const end = Number(zone.rightTickId ?? zone.endTickId ?? zone.startTickId);
+      return Number.isFinite(start) && Number.isFinite(end) && tickId >= start && tickId <= end;
     }));
   }
 
@@ -1063,14 +1109,14 @@
       .replaceAll("\"", "&quot;");
   }
 
-  function areaRowsAtTimestamp(timestampMs) {
+  function areaRowsAtTickId(tickId) {
     return state.areaRows.filter((area) => {
       if (!area) {
         return false;
       }
-      const start = Number(area.birthTimeMs);
-      const end = Number(area.rightTimeMs ?? area.birthTimeMs);
-      return Number.isFinite(start) && Number.isFinite(end) && timestampMs >= start && timestampMs <= end;
+      const start = Number(area.birthTickId);
+      const end = Number(area.rightTickId ?? area.closeTickId ?? area.birthTickId);
+      return Number.isFinite(start) && Number.isFinite(end) && tickId >= start && tickId <= end;
     });
   }
 
@@ -1129,14 +1175,14 @@
     }
     const children = [];
     state.areaRows.forEach((area, index) => {
-      const startTs = Number(area.birthTimeMs);
-      const endTs = Number(area.rightTimeMs ?? area.birthTimeMs);
+      const startTickId = Number(area.birthTickId);
+      const endTickId = Number(area.rightTickId ?? area.closeTickId ?? area.birthTickId);
       const low = Number(area.displayLow);
       const high = Number(area.displayHigh);
-      const leftPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [startTs, low]);
-      const rightPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [endTs, low]);
-      const topPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [startTs, high]);
-      const bottomPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [startTs, low]);
+      const leftPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [startTickId, low]);
+      const rightPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [endTickId, low]);
+      const topPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [startTickId, high]);
+      const bottomPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [startTickId, low]);
       if (!Array.isArray(leftPoint) || !Array.isArray(rightPoint) || !Array.isArray(topPoint) || !Array.isArray(bottomPoint)) {
         return;
       }
@@ -1190,12 +1236,12 @@
     }
     const children = [];
     state.zoneRows.forEach((zone, index) => {
-      const startTs = Number(zone.startTimestampMs);
-      const endTs = Number(zone.rightTimestampMs ?? zone.endTimestampMs ?? zone.startTimestampMs);
-      const leftPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [startTs, zone.zoneLow]);
-      const rightPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [endTs, zone.zoneLow]);
-      const topPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [startTs, zone.zoneHigh]);
-      const bottomPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [startTs, zone.zoneLow]);
+      const startTickId = Number(zone.startTickId);
+      const endTickId = Number(zone.rightTickId ?? zone.endTickId ?? zone.startTickId);
+      const leftPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [startTickId, zone.zoneLow]);
+      const rightPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [endTickId, zone.zoneLow]);
+      const topPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [startTickId, zone.zoneHigh]);
+      const bottomPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [startTickId, zone.zoneLow]);
       if (!Array.isArray(leftPoint) || !Array.isArray(rightPoint) || !Array.isArray(topPoint) || !Array.isArray(bottomPoint)) {
         return;
       }
@@ -1363,6 +1409,14 @@
     const nextSeries = buildChartSeries(currentConfig());
     const nextYAxisBounds = visibleYBounds(nextViewport, nextSeries);
     state.renderedSeries = nextSeries;
+    debugViewport("render", {
+      rows: state.rows.length,
+      zigs: state.zigRows.length,
+      zones: state.zoneRows.length,
+      bounds: datasetBounds,
+      viewport: nextViewport,
+      followRight: Boolean(settings.shiftWithRun) && state.rightEdgeAnchored,
+    });
 
     state.applyingViewport = true;
     chart.setOption({
@@ -1393,8 +1447,8 @@
     });
   }
 
-  function trimRowsToWindow(anchor) {
-    const windowSize = currentLoadedWindow();
+  function trimRowsToWindow(anchor, windowSizeOverride) {
+    const windowSize = Math.max(1, Number(windowSizeOverride) || currentLoadedWindow());
     if (state.rows.length <= windowSize) {
       return;
     }
@@ -1430,6 +1484,25 @@
     state.rangeLastId = state.rows[state.rows.length - 1].id;
     state.rangeFirstTimestampMs = state.rows[0].timestampMs;
     state.rangeLastTimestampMs = state.rows[state.rows.length - 1].timestampMs;
+  }
+
+  function syncRangeFromCursorWindow(config) {
+    if (state.rows.length) {
+      syncRangeFromRows();
+      return;
+    }
+    if (state.rangeLastId == null) {
+      return;
+    }
+    const windowSize = currentLoadedWindow(config);
+    const right = Number(state.rangeLastId);
+    if (!Number.isFinite(right)) {
+      return;
+    }
+    const left = Math.max(1, right - windowSize + 1);
+    if (state.rangeFirstId == null || Number(state.rangeFirstId) < left || Number(state.rangeFirstId) > right) {
+      state.rangeFirstId = left;
+    }
   }
 
   function applyRangePayload(payload) {
@@ -1515,7 +1588,7 @@
     return appended;
   }
 
-  function dedupePrepend(rows) {
+  function dedupePrepend(rows, windowSizeOverride) {
     if (!rows.length) {
       return 0;
     }
@@ -1525,7 +1598,7 @@
       return 0;
     }
     state.rows = older.concat(state.rows);
-    trimRowsToWindow("left");
+    trimRowsToWindow("left", windowSizeOverride);
     syncRangeFromRows();
     return older.length;
   }
@@ -1711,6 +1784,10 @@
       }
       if (!displayUsesTicks(config.display) && payload.lastId != null) {
         state.rangeLastId = payload.lastId;
+        syncRangeFromCursorWindow(config);
+        if (displayUsesZig(config.display)) {
+          trimZigRowsToCurrentRange();
+        }
       }
       renderMeta();
       renderPerf();
@@ -1759,6 +1836,10 @@
     }
     if (!displayUsesTicks(config.display) && payload.lastId != null) {
       state.rangeLastId = payload.lastId;
+      syncRangeFromCursorWindow(config);
+      if (displayUsesZig(config.display)) {
+        trimZigRowsToCurrentRange();
+      }
     }
     renderMeta();
     renderPerf();
@@ -1825,10 +1906,11 @@
     const preservedViewport = captureViewportFromChart(getDatasetBounds()) || state.viewport;
     const payload = await fetchJson(previousUrl(config, batchSize));
     state.lastMetrics = payload.metrics || null;
-    const prepended = displayUsesTicks(config.display) ? dedupePrepend(payload.rows || []) : 0;
     const didExpandLeft = payload.firstId != null && previousFirstId != null && payload.firstId < previousFirstId;
+    const targetLoadedWindow = Math.min(maxLoadedWindow(config.display), previousLoadedWindow + batchSize);
+    const prepended = displayUsesTicks(config.display) ? dedupePrepend(payload.rows || [], targetLoadedWindow) : 0;
     state.loadedWindow = prepended || didExpandLeft
-      ? previousLoadedWindow + batchSize
+      ? targetLoadedWindow
       : previousLoadedWindow;
     if (!displayUsesTicks(config.display)) {
       state.rangeFirstId = payload.firstId;
