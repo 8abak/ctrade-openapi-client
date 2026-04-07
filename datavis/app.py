@@ -88,7 +88,7 @@ STREAM_HEARTBEAT_SECONDS = max(
     float(os.getenv("DATAVIS_STREAM_HEARTBEAT_SECONDS", "5.0")),
 )
 DEFAULT_DISPLAY_MODE = "ticks"
-DISPLAY_MODE_RE = "^(ticks|ticks-zig|zig)$"
+DISPLAY_MODE_RE = "^(ticks|ticks-zig|ticks-zones|ticks-zig-zones|zig|zig-zones|zones)$"
 PRICE_SERIES_RE = "^(mid|ask|bid)$"
 MAX_ZIG_LEVEL = 3
 LEVEL_ZERO_PROVING_TICKS = 4
@@ -389,11 +389,15 @@ def serialize_zig_row(row: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def includes_ticks(display_mode: str) -> bool:
-    return display_mode in {"ticks", "ticks-zig"}
+    return display_mode in {"ticks", "ticks-zig", "ticks-zones", "ticks-zig-zones"}
 
 
 def includes_zig(display_mode: str) -> bool:
-    return display_mode in {"ticks-zig", "zig"}
+    return display_mode in {"ticks-zig", "ticks-zig-zones", "zig", "zig-zones"}
+
+
+def includes_zones(display_mode: str) -> bool:
+    return display_mode in {"ticks-zones", "ticks-zig-zones", "zig-zones", "zones"}
 
 
 def resolve_live_layers(
@@ -407,7 +411,7 @@ def resolve_live_layers(
     flags = {
         "ticks": includes_ticks(display_mode) if show_ticks is None else bool(show_ticks),
         "zigs": includes_zig(display_mode) if show_zigs is None else bool(show_zigs),
-        "zones": False if show_zones is None else bool(show_zones),
+        "zones": includes_zones(display_mode) if show_zones is None else bool(show_zones),
         "areas": False if show_areas is None else bool(show_areas),
     }
     if not any(flags.values()):

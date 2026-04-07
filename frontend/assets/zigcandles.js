@@ -1154,11 +1154,18 @@
     };
   }
 
-  function restoreVisibleBarWindow(windowState) {
+  function restoreVisibleBarWindow(windowState, options) {
     if (!windowState || !state.bars.length) {
       return false;
     }
+    const settings = options || {};
     const width = Math.max(0, Number(windowState.width) || 0);
+    if (settings.followRight && windowState.anchoredRight) {
+      const nextEnd = state.bars.length - 1;
+      const nextStart = Math.max(0, nextEnd - width);
+      state.zoom = zoomStateFromIndexRange(nextStart, nextEnd, state.bars.length);
+      return true;
+    }
     const startIndex = state.bars.findIndex((bar) => bar.id === windowState.startBarId);
     const endIndex = state.bars.findIndex((bar) => bar.id === windowState.endBarId);
     if (startIndex >= 0 && endIndex >= 0) {
@@ -1662,7 +1669,7 @@
       const payload = JSON.parse(event.data);
       const preservedViewport = captureVisibleBarWindow();
       syncPayload(payload);
-      restoreVisibleBarWindow(preservedViewport);
+      restoreVisibleBarWindow(preservedViewport, { followRight: true });
       renderChart(false);
     };
 
@@ -1695,7 +1702,7 @@
     const payload = await fetchJson(nextUrl(config, state.rangeLastId, state.reviewEndId));
     const preservedViewport = captureVisibleBarWindow();
     syncPayload(payload);
-    restoreVisibleBarWindow(preservedViewport);
+    restoreVisibleBarWindow(preservedViewport, { followRight: true });
     renderChart(false);
     status(payload.endReached ? "Review reached the current end snapshot." : "Review running.", false);
     if (!payload.endReached && currentConfig().run === "run") {
