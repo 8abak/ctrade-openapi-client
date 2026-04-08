@@ -38,6 +38,8 @@ if DATABASE_URL.startswith("postgresql+psycopg2://"):
 TICK_SYMBOL = os.getenv("DATAVIS_SYMBOL", "XAUUSD")
 DEFAULT_WINDOW = int(os.getenv("DATAVIS_WINDOW", "2000"))
 MAX_TICK_WINDOW = int(os.getenv("DATAVIS_MAX_WINDOW", "10000"))
+DEFAULT_STRUCTURE_WINDOW = int(os.getenv("DATAVIS_STRUCTURE_WINDOW", "50000"))
+MAX_STRUCTURE_WINDOW = int(os.getenv("DATAVIS_STRUCTURE_MAX_WINDOW", "200000"))
 DEFAULT_HISTORY_LIMIT = 2000
 MAX_STREAM_BATCH = 1000
 MAX_QUERY_ROWS = int(os.getenv("DATAVIS_SQL_MAX_ROWS", "1000"))
@@ -669,6 +671,63 @@ def build_range_payload(
     return payload
 
 
+def build_structure_view_payload(
+    *,
+    mode: str,
+    window: int,
+    replay_rows: List[Dict[str, Any]],
+    review_end_id: Optional[int],
+    review_end_timestamp: Optional[datetime],
+    bounds: Dict[str, Any],
+    fetch_ms: float,
+    show_events: bool,
+    show_structure: bool,
+    show_ranges: bool,
+) -> Dict[str, Any]:
+    serialize_started = time.perf_counter()
+    first_row = replay_rows[0] if replay_rows else None
+    last_row = replay_rows[-1] if replay_rows else None
+    first_row_id = first_row["id"] if first_row else None
+    last_row_id = last_row["id"] if last_row else None
+    duration_ms = 0
+    if first_row and last_row:
+        first_timestamp = first_row.get("timestamp")
+        last_timestamp = last_row.get("timestamp")
+        if first_timestamp is not None and last_timestamp is not None:
+            duration_ms = max(0, int((last_timestamp - first_timestamp).total_seconds() * 1000))
+    snapshot = apply_structure_flags(
+        structure_snapshot(replay_rows, enabled=show_events or show_structure or show_ranges),
+        show_events=show_events,
+        show_structure=show_structure,
+        show_ranges=show_ranges,
+    )
+    payload = {
+        "sourceTickCount": len(replay_rows),
+        "tickSpan": max(0, (int(last_row_id) - int(first_row_id) + 1)) if first_row_id and last_row_id else 0,
+        "durationMs": duration_ms,
+        "firstId": first_row_id,
+        "lastId": last_row_id,
+        "firstTimestamp": serialize_value(first_row.get("timestamp") if first_row else None),
+        "lastTimestamp": serialize_value(last_row.get("timestamp") if last_row else None),
+        "firstTimestampMs": dt_to_ms(first_row.get("timestamp") if first_row else None),
+        "lastTimestampMs": dt_to_ms(last_row.get("timestamp") if last_row else None),
+        "mode": mode,
+        "window": window,
+        "symbol": TICK_SYMBOL,
+        "reviewEndId": review_end_id,
+        "reviewEndTimestamp": serialize_value(review_end_timestamp),
+        "hasMoreLeft": bool(bounds.get("firstId") and first_row_id and first_row_id > bounds["firstId"]),
+        "endReached": bool(mode == "review" and review_end_id is not None and last_row_id is not None and last_row_id >= review_end_id),
+        **snapshot,
+    }
+    payload["metrics"] = serialize_metrics_payload(
+        fetch_ms=fetch_ms,
+        serialize_ms=elapsed_ms(serialize_started),
+        latest_row=last_row,
+    )
+    return payload
+
+
 def load_bootstrap_payload(
     *,
     mode: str,
@@ -709,6 +768,49 @@ def load_bootstrap_payload(
         bounds=bounds,
         fetch_ms=elapsed_ms(fetch_started),
         show_ticks=show_ticks,
+        show_events=show_events,
+        show_structure=show_structure,
+        show_ranges=show_ranges,
+    )
+
+
+def load_structure_bootstrap_payload(
+    *,
+    mode: str,
+    start_id: Optional[int],
+    window: int,
+    show_events: bool,
+    show_structure: bool,
+    show_ranges: bool,
+) -> Dict[str, Any]:
+    effective_window = clamp_int(window, 1, MAX_STRUCTURE_WINDOW)
+    fetch_started = time.perf_counter()
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            bounds_row = query_tick_bounds(cur)
+            bounds = {
+                "firstId": bounds_row.get("first_id"),
+                "lastId": bounds_row.get("last_id"),
+                "firstTimestamp": bounds_row.get("first_timestamp"),
+                "lastTimestamp": bounds_row.get("last_timestamp"),
+            }
+            review_end_id = bounds["lastId"] if mode == "review" else None
+            review_end_timestamp = bounds["lastTimestamp"] if mode == "review" else None
+            replay_rows = query_bootstrap_rows(
+                cur,
+                mode=mode,
+                start_id=start_id,
+                window=effective_window,
+                end_id=review_end_id,
+            )
+    return build_structure_view_payload(
+        mode=mode,
+        window=effective_window,
+        replay_rows=replay_rows,
+        review_end_id=review_end_id,
+        review_end_timestamp=review_end_timestamp,
+        bounds=bounds,
+        fetch_ms=elapsed_ms(fetch_started),
         show_events=show_events,
         show_structure=show_structure,
         show_ranges=show_ranges,
@@ -760,6 +862,46 @@ def load_next_payload(
     }
 
 
+def load_structure_next_payload(
+    *,
+    after_id: int,
+    limit: int,
+    end_id: Optional[int],
+    window: int,
+    show_events: bool,
+    show_structure: bool,
+    show_ranges: bool,
+) -> Dict[str, Any]:
+    effective_limit = clamp_int(limit, 1, MAX_STREAM_BATCH)
+    effective_window = clamp_int(window, 1, MAX_STRUCTURE_WINDOW)
+    fetch_started = time.perf_counter()
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            tick_rows = query_rows_after(cur, after_id, effective_limit, end_id=end_id)
+            last_seen_id = int(tick_rows[-1]["id"]) if tick_rows else after_id
+            replay_rows = query_window_ending_at(cur, last_seen_id, effective_window) if last_seen_id else []
+            bounds_row = query_tick_bounds(cur)
+            bounds = {
+                "firstId": bounds_row.get("first_id"),
+                "lastId": bounds_row.get("last_id"),
+            }
+    payload = build_structure_view_payload(
+        mode="review" if end_id is not None else "live",
+        window=effective_window,
+        replay_rows=replay_rows,
+        review_end_id=end_id,
+        review_end_timestamp=None,
+        bounds=bounds,
+        fetch_ms=elapsed_ms(fetch_started),
+        show_events=show_events,
+        show_structure=show_structure,
+        show_ranges=show_ranges,
+    )
+    payload["endId"] = end_id
+    payload["endReached"] = bool(end_id is not None and last_seen_id >= end_id)
+    return payload
+
+
 def load_previous_payload(
     *,
     before_id: int,
@@ -807,6 +949,49 @@ def load_previous_payload(
     }
 
 
+def load_structure_previous_payload(
+    *,
+    before_id: int,
+    current_last_id: Optional[int],
+    window: int,
+    show_events: bool,
+    show_structure: bool,
+    show_ranges: bool,
+) -> Dict[str, Any]:
+    effective_window = clamp_int(window, 1, MAX_STRUCTURE_WINDOW)
+    fetch_started = time.perf_counter()
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            bounds_row = query_tick_bounds(cur)
+            bounds = {
+                "firstId": bounds_row.get("first_id"),
+                "lastId": bounds_row.get("last_id"),
+                "firstTimestamp": bounds_row.get("first_timestamp"),
+                "lastTimestamp": bounds_row.get("last_timestamp"),
+            }
+            previous_rows = query_rows_before(cur, before_id, effective_window)
+            first_row = previous_rows[0] if previous_rows else None
+            range_end_id = current_last_id or (previous_rows[-1]["id"] if previous_rows else None)
+            if first_row and range_end_id:
+                replay_rows = query_rows_between(cur, int(first_row["id"]), int(range_end_id), effective_window)
+            else:
+                replay_rows = []
+    payload = build_structure_view_payload(
+        mode="review",
+        window=effective_window,
+        replay_rows=replay_rows,
+        review_end_id=None,
+        review_end_timestamp=None,
+        bounds=bounds,
+        fetch_ms=elapsed_ms(fetch_started),
+        show_events=show_events,
+        show_structure=show_structure,
+        show_ranges=show_ranges,
+    )
+    payload["beforeId"] = before_id
+    return payload
+
+
 def stream_events(
     *,
     after_id: int,
@@ -816,10 +1001,11 @@ def stream_events(
     show_events: bool,
     show_structure: bool,
     show_ranges: bool,
+    max_window: int = MAX_TICK_WINDOW,
 ) -> Generator[str, None, None]:
     last_id = max(0, after_id)
     effective_limit = clamp_int(limit, 1, MAX_STREAM_BATCH)
-    effective_window = clamp_int(window, 1, MAX_TICK_WINDOW)
+    effective_window = clamp_int(window, 1, max_window)
     last_heartbeat = time.monotonic()
     idle_sleep = STREAM_POLL_SECONDS
     structure_enabled = show_events or show_structure or show_ranges
@@ -912,6 +1098,11 @@ def live_page() -> FileResponse:
     return FileResponse(FRONTEND_DIR / "live.html")
 
 
+@app.get("/structure", include_in_schema=False)
+def structure_page() -> FileResponse:
+    return FileResponse(FRONTEND_DIR / "structure.html")
+
+
 @app.get("/sql", include_in_schema=False)
 def sql_page(_: Optional[str] = Depends(require_sql_admin)) -> FileResponse:
     return FileResponse(FRONTEND_DIR / "sql.html")
@@ -968,6 +1159,14 @@ def live_review_start(
         "resolvedTimestamp": resolved["timestamp"].isoformat(),
         "resolvedLocal": resolved_local.isoformat(),
     }
+
+
+@app.get("/api/structure/review-start")
+def structure_review_start(
+    timestamp: str = Query(..., min_length=1),
+    timezoneName: str = Query(DEFAULT_REVIEW_TIMEZONE, min_length=1),
+) -> Dict[str, Any]:
+    return live_review_start(timestamp=timestamp, timezoneName=timezoneName)
 
 
 @app.get("/api/live/bootstrap")
@@ -1054,6 +1253,94 @@ def live_stream(
             show_events=showEvents,
             show_structure=showStructure,
             show_ranges=showRanges,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.get("/api/structure/bootstrap")
+def structure_bootstrap(
+    mode: str = Query("live", pattern="^(live|review)$"),
+    id: Optional[int] = Query(None, ge=1),
+    window: int = Query(DEFAULT_STRUCTURE_WINDOW, ge=1, le=MAX_STRUCTURE_WINDOW),
+    showEvents: bool = Query(False),
+    showStructure: bool = Query(True),
+    showRanges: bool = Query(True),
+) -> Dict[str, Any]:
+    return load_structure_bootstrap_payload(
+        mode=mode,
+        start_id=id,
+        window=window,
+        show_events=showEvents,
+        show_structure=showStructure,
+        show_ranges=showRanges,
+    )
+
+
+@app.get("/api/structure/next")
+def structure_next(
+    afterId: int = Query(..., ge=0),
+    limit: int = Query(250, ge=1, le=MAX_STREAM_BATCH),
+    endId: Optional[int] = Query(None, ge=1),
+    window: int = Query(DEFAULT_STRUCTURE_WINDOW, ge=1, le=MAX_STRUCTURE_WINDOW),
+    showEvents: bool = Query(False),
+    showStructure: bool = Query(True),
+    showRanges: bool = Query(True),
+) -> Dict[str, Any]:
+    return load_structure_next_payload(
+        after_id=afterId,
+        limit=limit,
+        end_id=endId,
+        window=window,
+        show_events=showEvents,
+        show_structure=showStructure,
+        show_ranges=showRanges,
+    )
+
+
+@app.get("/api/structure/previous")
+def structure_previous(
+    beforeId: int = Query(..., ge=1),
+    currentLastId: Optional[int] = Query(None, ge=1),
+    window: int = Query(DEFAULT_STRUCTURE_WINDOW, ge=1, le=MAX_STRUCTURE_WINDOW),
+    showEvents: bool = Query(False),
+    showStructure: bool = Query(True),
+    showRanges: bool = Query(True),
+) -> Dict[str, Any]:
+    return load_structure_previous_payload(
+        before_id=beforeId,
+        current_last_id=currentLastId,
+        window=window,
+        show_events=showEvents,
+        show_structure=showStructure,
+        show_ranges=showRanges,
+    )
+
+
+@app.get("/api/structure/stream")
+def structure_stream(
+    afterId: int = Query(0, ge=0),
+    limit: int = Query(250, ge=1, le=MAX_STREAM_BATCH),
+    window: int = Query(DEFAULT_STRUCTURE_WINDOW, ge=1, le=MAX_STRUCTURE_WINDOW),
+    showEvents: bool = Query(False),
+    showStructure: bool = Query(True),
+    showRanges: bool = Query(True),
+) -> StreamingResponse:
+    return StreamingResponse(
+        stream_events(
+            after_id=afterId,
+            limit=limit,
+            window=window,
+            show_ticks=False,
+            show_events=showEvents,
+            show_structure=showStructure,
+            show_ranges=showRanges,
+            max_window=MAX_STRUCTURE_WINDOW,
         ),
         media_type="text/event-stream",
         headers={

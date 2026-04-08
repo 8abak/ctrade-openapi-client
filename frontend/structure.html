@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>datavis.au | Structure Map</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body class="page-live page-structure">
+  <div class="live-workspace is-sidebar-collapsed" id="structureWorkspace">
+    <button
+      class="ghost-button live-sidebar-toggle"
+      id="sidebarToggle"
+      type="button"
+      aria-controls="structureSidebar"
+      aria-expanded="false"
+      aria-label="Open structure map controls"
+    >
+      <span class="live-sidebar-toggle-bars" aria-hidden="true">
+        <span></span>
+        <span></span>
+        <span></span>
+      </span>
+      <span class="sr-only">Toggle structure map controls</span>
+    </button>
+
+    <button
+      class="live-sidebar-backdrop"
+      id="sidebarBackdrop"
+      type="button"
+      aria-hidden="true"
+      tabindex="-1"
+    ></button>
+
+    <aside class="panel live-sidebar" id="structureSidebar">
+      <div class="live-sidebar-scroll">
+        <header class="live-sidebar-header">
+          <a class="back-link" href="/">datavis.au</a>
+          <h1>Structure Map</h1>
+          <p class="live-sidebar-copy">Bigger-picture market phases using the current structure and range layers only. Width follows real elapsed time, height stays on real price, and active segments keep updating live.</p>
+          <div class="meta-strip" id="structureMeta">Waiting for structure...</div>
+          <div class="meta-strip" id="structurePerf">Stream down.</div>
+          <div class="status-line live-status" id="statusLine">Ready.</div>
+        </header>
+
+        <section class="live-sidebar-section">
+          <div class="live-form-grid">
+            <div class="live-control-field live-control-field-wide">
+              <span>mode</span>
+              <div class="segmented" id="modeToggle">
+                <button type="button" data-value="live">Live</button>
+                <button type="button" data-value="review">Review</button>
+              </div>
+            </div>
+
+            <div class="live-control-field live-control-field-wide">
+              <span>run state</span>
+              <div class="segmented" id="runToggle">
+                <button type="button" data-value="run">Run</button>
+                <button type="button" data-value="stop">Stop</button>
+              </div>
+            </div>
+
+            <div class="live-control-field live-control-field-wide">
+              <span>display</span>
+              <div class="live-check-grid">
+                <label class="compact-check">
+                  <input id="showStructure" type="checkbox" checked>
+                  <span>Structure</span>
+                </label>
+                <label class="compact-check">
+                  <input id="showRanges" type="checkbox" checked>
+                  <span>Ranges</span>
+                </label>
+                <label class="compact-check">
+                  <input id="showEvents" type="checkbox">
+                  <span>Events</span>
+                </label>
+              </div>
+            </div>
+
+            <label>
+              <span>review start id</span>
+              <input id="tickId" type="number" min="1" inputmode="numeric" placeholder="start id">
+            </label>
+
+            <label>
+              <span>tick span</span>
+              <input id="windowSize" type="number" min="1" max="200000" inputmode="numeric" value="50000">
+            </label>
+
+            <label class="live-control-field-wide review-start-field">
+              <span>review start (Sydney)</span>
+              <input id="reviewStart" type="datetime-local" step="1">
+            </label>
+
+            <div class="live-control-field live-control-field-wide review-speed-control">
+              <span>review speed</span>
+              <div class="segmented single-select" id="reviewSpeedToggle" aria-label="Review speed">
+                <button type="button" data-value="0.5">0.5x</button>
+                <button type="button" data-value="1">1x</button>
+                <button type="button" data-value="2">2x</button>
+                <button type="button" data-value="3">3x</button>
+                <button type="button" data-value="5">5x</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="live-inline-actions">
+            <button class="primary-button compact-button" id="applyButton" type="button">Load</button>
+            <button class="ghost-button compact-button" id="loadMoreLeftButton" type="button">Load More Left</button>
+          </div>
+        </section>
+      </div>
+    </aside>
+
+    <section class="live-chart-stage">
+      <div class="panel chart-panel live-chart-panel" id="chartPanel">
+        <div id="structureChart" class="chart-host"></div>
+      </div>
+    </section>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+  <script src="/assets/structure.js"></script>
+</body>
+</html>
