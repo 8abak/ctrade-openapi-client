@@ -264,7 +264,8 @@
     const row = rowAtTickId(tickId);
     const lines = [];
     if (row) {
-      lines.push("tick " + row.id + " | " + row.timestamp);
+      lines.push("tick " + row.id);
+      lines.push("date " + new Date(row.timestamp).toLocaleDateString());
       lines.push("time " + new Date(row.timestamp).toLocaleTimeString());
       lines.push("bid " + formatPrice(row.bid));
       lines.push("ask " + formatPrice(row.ask));
