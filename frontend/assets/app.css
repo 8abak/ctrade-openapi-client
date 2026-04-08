@@ -339,9 +339,65 @@ input {
 
 .chart-tip {
   font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
-  color: var(--text);
-  font-size: 0.78rem;
+  min-width: 220px;
+  padding: 0.72rem 0.8rem;
+  border: 1px solid rgba(147, 181, 255, 0.18);
+  border-radius: 10px;
+  background: rgba(5, 9, 15, 0.97);
+  color: #f5fbff;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.42);
+  font-size: 0.76rem;
   line-height: 1.45;
+}
+
+.chart-tip-section + .chart-tip-section {
+  margin-top: 0.55rem;
+  padding-top: 0.55rem;
+  border-top: 1px solid rgba(147, 181, 255, 0.12);
+}
+
+.chart-tip-title {
+  margin-bottom: 0.4rem;
+  color: var(--accent-strong);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.chart-tip-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.9rem;
+  align-items: baseline;
+}
+
+.chart-tip-row + .chart-tip-row {
+  margin-top: 0.18rem;
+}
+
+.chart-tip-label {
+  color: #98abc6;
+}
+
+.chart-tip-value {
+  color: #f5fbff;
+  text-align: right;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.chart-tip-value.is-negative {
+  color: #ff9fb2;
+}
+
+.chart-tip-value.is-positive {
+  color: #baf7df;
+}
+
+.chart-tip-note {
+  margin-top: 0.35rem;
+  color: #b7c8dd;
 }
 
 .page-sql {

@@ -8,7 +8,7 @@
     id: "",
     reviewStart: "",
     reviewSpeed: 1,
-    window: 50000,
+    window: 50,
   };
   const MAX_WINDOW = 200000;
   const REVIEW_SPEEDS = [0.5, 1, 2, 3, 5];
@@ -217,9 +217,10 @@
     const activeRanges = state.rangeBoxes.filter(function (box) { return box.status === "active"; }).length;
     const durationMs = state.spanStartMs != null && state.spanEndMs != null ? Math.max(0, state.spanEndMs - state.spanStartMs) : 0;
     const tickSpan = state.spanFirstId != null && state.spanLastId != null ? Math.max(0, Number(state.spanLastId) - Number(state.spanFirstId) + 1) : 0;
+    const itemCount = state.structureBars.length + state.rangeBoxes.length;
     elements.structureMeta.textContent = [
       currentConfig().mode.toUpperCase(),
-      "loaded " + state.loadedWindow,
+      "items " + itemCount + "/" + state.loadedWindow,
       "tick-span " + tickSpan,
       "time-span " + formatDuration(durationMs),
       "bars " + state.structureBars.length + " active " + activeBars,
@@ -255,44 +256,100 @@
       .replaceAll("\"", "&quot;");
   }
 
+  function tooltipRow(label, value, tone) {
+    if (value == null || value === "") {
+      return "";
+    }
+    const toneClass = tone ? " is-" + tone : "";
+    return "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">" + escapeHtml(label) + "</span><span class=\"chart-tip-value" + toneClass + "\">" + escapeHtml(value) + "</span></div>";
+  }
+
+  function tooltipSection(title, rows, note) {
+    const content = rows.filter(Boolean).join("");
+    if (!content && !note) {
+      return "";
+    }
+    return "<div class=\"chart-tip-section\"><div class=\"chart-tip-title\">" + escapeHtml(title) + "</div>" + content + (note ? "<div class=\"chart-tip-note\">" + escapeHtml(note) + "</div>" : "") + "</div>";
+  }
+
+  function formatSignedPrice(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) {
+      return "-";
+    }
+    const fixed = number.toFixed(2);
+    return number > 0 ? "+" + fixed : fixed;
+  }
+
+  function priceTone(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number) || number === 0) {
+      return "";
+    }
+    return number > 0 ? "positive" : "negative";
+  }
+
+  function structureDirection(bar) {
+    if (bar?.type === "up") {
+      return "up";
+    }
+    if (bar?.type === "down") {
+      return "down";
+    }
+    return "sideways";
+  }
+
   function tooltipHtml(param) {
-    const lines = [];
+    const sections = [];
     if (param?.seriesId === "structure-bars" && param.data?.bar) {
       const bar = param.data.bar;
-      lines.push("structure " + String(bar.type) + " " + String(bar.status));
-      lines.push("start " + formatTimestamp(bar.startTimestampMs));
-      lines.push("end " + formatTimestamp(bar.endTimestampMs));
-      lines.push("duration " + formatDuration(Number(bar.endTimestampMs) - Number(bar.startTimestampMs)));
-      lines.push("tick span " + Math.max(0, Number(bar.endTickId) - Number(bar.startTickId) + 1));
-      lines.push("open " + formatNumber(bar.open, 2));
-      lines.push("high " + formatNumber(bar.high, 2));
-      lines.push("low " + formatNumber(bar.low, 2));
-      lines.push("close " + formatNumber(bar.close, 2));
+      const move = Number(bar.close) - Number(bar.open);
+      const span = Number(bar.high) - Number(bar.low);
+      sections.push(tooltipSection("Structure", [
+        tooltipRow("Type", "structure / " + String(bar.type)),
+        tooltipRow("Item id", bar.id),
+        tooltipRow("Status", bar.status),
+        tooltipRow("Direction", structureDirection(bar)),
+        tooltipRow("Start id", bar.startTickId),
+        tooltipRow("End id", bar.endTickId),
+        tooltipRow("Start time", formatTimestamp(bar.startTimestampMs)),
+        tooltipRow("End time", formatTimestamp(bar.endTimestampMs)),
+        tooltipRow("Duration", formatDuration(Number(bar.endTimestampMs) - Number(bar.startTimestampMs))),
+        tooltipRow("From price", formatNumber(bar.open, 2)),
+        tooltipRow("To price", formatNumber(bar.close, 2)),
+        tooltipRow("High", formatNumber(bar.high, 2)),
+        tooltipRow("Low", formatNumber(bar.low, 2)),
+        tooltipRow("Price span", formatSignedPrice(span), priceTone(span)),
+        tooltipRow("Move", formatSignedPrice(move), priceTone(move)),
+      ]));
     } else if (param?.seriesId === "range-boxes" && param.data?.box) {
       const box = param.data.box;
-      lines.push("range " + String(box.status));
-      lines.push("start " + formatTimestamp(box.startTimestampMs));
-      lines.push("end " + formatTimestamp(box.endTimestampMs));
-      lines.push("duration " + formatDuration(Number(box.endTimestampMs) - Number(box.startTimestampMs)));
-      lines.push("tick span " + Math.max(0, Number(box.endTickId) - Number(box.startTickId) + 1));
-      lines.push("bottom " + formatNumber(box.bottom, 2));
-      lines.push("top " + formatNumber(box.top, 2));
-      if (box.breakDirection) {
-        lines.push("break " + String(box.breakDirection));
-      }
+      const span = Number(box.top) - Number(box.bottom);
+      sections.push(tooltipSection("Range", [
+        tooltipRow("Type", "range"),
+        tooltipRow("Item id", box.id),
+        tooltipRow("Status", box.status),
+        tooltipRow("Direction", box.breakDirection ? "break " + String(box.breakDirection) : "sideways"),
+        tooltipRow("Start id", box.startTickId),
+        tooltipRow("End id", box.endTickId),
+        tooltipRow("Start time", formatTimestamp(box.startTimestampMs)),
+        tooltipRow("End time", formatTimestamp(box.endTimestampMs)),
+        tooltipRow("Duration", formatDuration(Number(box.endTimestampMs) - Number(box.startTimestampMs))),
+        tooltipRow("High", formatNumber(box.top, 2)),
+        tooltipRow("Low", formatNumber(box.bottom, 2)),
+        tooltipRow("Price span", formatSignedPrice(span), priceTone(span)),
+      ], box.breakDirection ? "Break direction: " + String(box.breakDirection) : ""));
     } else if (param?.seriesId === "structure-events" && param.data?.event) {
       const event = param.data.event;
-      lines.push("event " + String(event.type));
-      lines.push("time " + formatTimestamp(event.timestampMs));
-      lines.push("price " + formatNumber(event.price, 2));
-      if (event.fromState) {
-        lines.push("from " + String(event.fromState));
-      }
-      if (event.toState) {
-        lines.push("to " + String(event.toState));
-      }
+      sections.push(tooltipSection("Event", [
+        tooltipRow("Type", event.type),
+        tooltipRow("Time", formatTimestamp(event.timestampMs)),
+        tooltipRow("Price", formatNumber(event.price, 2)),
+        tooltipRow("From", event.fromState),
+        tooltipRow("To", event.toState),
+      ]));
     }
-    return lines.length ? "<div class=\"chart-tip\">" + lines.map(escapeHtml).join("<br>") + "</div>" : "";
+    return sections.length ? "<div class=\"chart-tip\">" + sections.join("") + "</div>" : "";
   }
 
   function ensureChart() {
@@ -305,7 +362,15 @@
       state.chart.setOption({
         animation: false,
         grid: { left: 60, right: 18, top: 16, bottom: 58 },
-        tooltip: { trigger: "item", confine: true, formatter: tooltipHtml },
+        tooltip: {
+          trigger: "item",
+          confine: true,
+          formatter: tooltipHtml,
+          backgroundColor: "transparent",
+          borderWidth: 0,
+          padding: 0,
+          extraCssText: "box-shadow:none;",
+        },
         xAxis: {
           type: "time",
           scale: true,
@@ -811,7 +876,7 @@
     renderMeta();
     renderPerf();
     renderChart({ resetView: Boolean(resetView) });
-    status("Loaded " + state.structureBars.length + " structure segment(s).", false);
+    status("Loaded " + (state.structureBars.length + state.rangeBoxes.length) + " structure item(s).", false);
     if (config.run === "run") {
       if (config.mode === "live") {
         connectStream(state.spanLastId || 0);
@@ -864,7 +929,7 @@
       return;
     }
     if (state.spanLastId == null || !state.reviewEndId) {
-      status("Review is waiting for a loaded range.", true);
+      status("Review is waiting for loaded structure items.", true);
       return;
     }
     if (state.spanLastId >= state.reviewEndId) {
@@ -932,7 +997,7 @@
     renderMeta();
     renderPerf();
     renderChart({ shiftWithRun: false });
-    status("Extended structure history to " + state.loadedWindow + " ticks of source replay.", false);
+    status("Extended structure history to about " + state.loadedWindow + " structure item(s).", false);
     await resumeRunIfNeeded();
   }
 

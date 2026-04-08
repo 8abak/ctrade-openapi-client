@@ -228,6 +228,22 @@
       .replaceAll("\"", "&quot;");
   }
 
+  function tooltipRow(label, value, tone) {
+    if (value == null || value === "") {
+      return "";
+    }
+    const toneClass = tone ? " is-" + tone : "";
+    return "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">" + escapeHtml(label) + "</span><span class=\"chart-tip-value" + toneClass + "\">" + escapeHtml(value) + "</span></div>";
+  }
+
+  function tooltipSection(title, rows) {
+    const content = rows.filter(Boolean).join("");
+    if (!content) {
+      return "";
+    }
+    return "<div class=\"chart-tip-section\"><div class=\"chart-tip-title\">" + escapeHtml(title) + "</div>" + content + "</div>";
+  }
+
   function formatPrice(value) {
     const number = Number(value);
     return Number.isFinite(number) ? number.toFixed(2) : "-";
@@ -262,20 +278,34 @@
     const point = entries[0];
     const tickId = Number(point?.axisValue ?? point?.value?.[0]);
     const row = rowAtTickId(tickId);
-    const lines = [];
+    const sections = [];
     if (row) {
-      lines.push("tick " + row.id);
-      lines.push("date " + new Date(row.timestamp).toLocaleDateString());
-      lines.push("time " + new Date(row.timestamp).toLocaleTimeString());
-      lines.push("bid " + formatPrice(row.bid));
-      lines.push("ask " + formatPrice(row.ask));
-      lines.push("mid " + formatPrice(row.mid));
+      const timestamp = new Date(row.timestamp);
+      sections.push(tooltipSection("Tick", [
+        tooltipRow("Id", row.id),
+        tooltipRow("Date", timestamp.toLocaleDateString()),
+        tooltipRow("Time", timestamp.toLocaleTimeString()),
+        tooltipRow("Bid", formatPrice(row.bid)),
+        tooltipRow("Ask", formatPrice(row.ask)),
+        tooltipRow("Mid", formatPrice(row.mid)),
+      ]));
     } else if (Number.isFinite(tickId)) {
-      lines.push("tick " + Math.round(tickId));
+      sections.push(tooltipSection("Tick", [
+        tooltipRow("Id", Math.round(tickId)),
+      ]));
     }
-    eventsAtTickId(tickId).forEach((event) => lines.push(String(event.type) + " " + formatPrice(event.price)));
-    boxesAtTickId(tickId).forEach((box) => lines.push("range " + formatPrice(box.bottom) + " - " + formatPrice(box.top) + " " + box.status));
-    return lines.length ? "<div class=\"chart-tip\">" + lines.map(escapeHtml).join("<br>") + "</div>" : "";
+    const events = eventsAtTickId(tickId);
+    if (events.length) {
+      sections.push(tooltipSection("Events", events.map((event) => tooltipRow(event.type, formatPrice(event.price)))));
+    }
+    const boxes = boxesAtTickId(tickId);
+    if (boxes.length) {
+      sections.push(tooltipSection("Ranges", boxes.map((box) => tooltipRow(
+        "Range #" + String(box.id),
+        formatPrice(box.bottom) + " - " + formatPrice(box.top) + " (" + String(box.status) + ")"
+      ))));
+    }
+    return sections.length ? "<div class=\"chart-tip\">" + sections.join("") + "</div>" : "";
   }
 
   function ensureChart() {
@@ -288,7 +318,15 @@
       state.chart.setOption({
         animation: false,
         grid: { left: 54, right: 16, top: 14, bottom: 54 },
-        tooltip: { trigger: "axis", axisPointer: { type: "cross" }, formatter: tooltipHtml },
+        tooltip: {
+          trigger: "axis",
+          axisPointer: { type: "cross" },
+          formatter: tooltipHtml,
+          backgroundColor: "transparent",
+          borderWidth: 0,
+          padding: 0,
+          extraCssText: "box-shadow:none;",
+        },
         xAxis: { type: "value", scale: true, boundaryGap: ["1%", "1%"], axisLabel: { color: "#9eadc5" } },
         yAxis: { type: "value", scale: true, axisLabel: { color: "#9eadc5" } },
         dataZoom: [

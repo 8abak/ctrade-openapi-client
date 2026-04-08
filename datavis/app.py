@@ -38,8 +38,9 @@ if DATABASE_URL.startswith("postgresql+psycopg2://"):
 TICK_SYMBOL = os.getenv("DATAVIS_SYMBOL", "XAUUSD")
 DEFAULT_WINDOW = int(os.getenv("DATAVIS_WINDOW", "2000"))
 MAX_TICK_WINDOW = int(os.getenv("DATAVIS_MAX_WINDOW", "10000"))
-DEFAULT_STRUCTURE_WINDOW = int(os.getenv("DATAVIS_STRUCTURE_WINDOW", "50000"))
+DEFAULT_STRUCTURE_WINDOW = int(os.getenv("DATAVIS_STRUCTURE_WINDOW", "50"))
 MAX_STRUCTURE_WINDOW = int(os.getenv("DATAVIS_STRUCTURE_MAX_WINDOW", "200000"))
+MAX_STRUCTURE_SOURCE_TICKS = int(os.getenv("DATAVIS_STRUCTURE_SOURCE_MAX_TICKS", "200000"))
 DEFAULT_HISTORY_LIMIT = 2000
 MAX_STREAM_BATCH = 1000
 MAX_QUERY_ROWS = int(os.getenv("DATAVIS_SQL_MAX_ROWS", "1000"))
@@ -619,6 +620,171 @@ def apply_structure_flags(payload: Dict[str, Any], *, show_events: bool, show_st
     return payload
 
 
+def structure_item_entries(snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
+    entries: List[Dict[str, Any]] = []
+    for bar in snapshot.get("structureBars", []):
+        entries.append(
+            {
+                "kind": "structure",
+                "id": bar.get("id"),
+                "startTickId": bar.get("startTickId"),
+                "endTickId": bar.get("endTickId"),
+                "startTimestamp": bar.get("startTimestamp"),
+                "endTimestamp": bar.get("endTimestamp"),
+                "startTimestampMs": bar.get("startTimestampMs"),
+                "endTimestampMs": bar.get("endTimestampMs"),
+            }
+        )
+    for box in snapshot.get("rangeBoxes", []):
+        entries.append(
+            {
+                "kind": "range",
+                "id": box.get("id"),
+                "startTickId": box.get("startTickId"),
+                "endTickId": box.get("endTickId"),
+                "startTimestamp": box.get("startTimestamp"),
+                "endTimestamp": box.get("endTimestamp"),
+                "startTimestampMs": box.get("startTimestampMs"),
+                "endTimestampMs": box.get("endTimestampMs"),
+            }
+        )
+    return sorted(
+        entries,
+        key=lambda item: (
+            int(item.get("endTickId") or 0),
+            int(item.get("startTickId") or 0),
+            0 if item.get("kind") == "structure" else 1,
+            int(item.get("id") or 0),
+        ),
+    )
+
+
+def structure_item_count(snapshot: Dict[str, Any]) -> int:
+    return len(snapshot.get("structureBars", [])) + len(snapshot.get("rangeBoxes", []))
+
+
+def trim_structure_snapshot(snapshot: Dict[str, Any], item_window: int, *, side: str) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    entries = structure_item_entries(snapshot)
+    if not entries:
+        return empty_structure_payload(), {
+            "itemCount": 0,
+            "firstId": None,
+            "lastId": None,
+            "firstTimestamp": None,
+            "lastTimestamp": None,
+            "firstTimestampMs": None,
+            "lastTimestampMs": None,
+        }
+
+    kept_entries = entries[:item_window] if side == "head" else entries[-item_window:]
+    kept_structure_ids = {entry["id"] for entry in kept_entries if entry.get("kind") == "structure"}
+    kept_range_ids = {entry["id"] for entry in kept_entries if entry.get("kind") == "range"}
+    trimmed = {
+        "structureBars": [bar for bar in snapshot.get("structureBars", []) if bar.get("id") in kept_structure_ids],
+        "rangeBoxes": [box for box in snapshot.get("rangeBoxes", []) if box.get("id") in kept_range_ids],
+        "structureEvents": [],
+    }
+
+    first_id = min(int(entry.get("startTickId") or 0) for entry in kept_entries) if kept_entries else None
+    last_id = max(int(entry.get("endTickId") or 0) for entry in kept_entries) if kept_entries else None
+    first_entry = min(
+        kept_entries,
+        key=lambda entry: (
+            int(entry.get("startTimestampMs") or 0),
+            int(entry.get("startTickId") or 0),
+        ),
+    )
+    last_entry = max(
+        kept_entries,
+        key=lambda entry: (
+            int(entry.get("endTimestampMs") or 0),
+            int(entry.get("endTickId") or 0),
+        ),
+    )
+    if first_id is not None and last_id is not None:
+        trimmed["structureEvents"] = [
+            event
+            for event in snapshot.get("structureEvents", [])
+            if first_id <= int(event.get("tickId") or 0) <= last_id
+        ]
+
+    return trimmed, {
+        "itemCount": len(kept_entries),
+        "firstId": first_id,
+        "lastId": last_id,
+        "firstTimestamp": first_entry.get("startTimestamp"),
+        "lastTimestamp": last_entry.get("endTimestamp"),
+        "firstTimestampMs": first_entry.get("startTimestampMs"),
+        "lastTimestampMs": last_entry.get("endTimestampMs"),
+    }
+
+
+def structure_scan_batch_size(item_window: int) -> int:
+    return max(2000, min(20000, max(1, item_window) * 200))
+
+
+def collect_structure_rows_ending_at(
+    cur: Any,
+    *,
+    end_id: int,
+    item_window: int,
+    lower_bound_id: Optional[int] = None,
+) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    batch_size = structure_scan_batch_size(item_window)
+    max_rows = min(MAX_STRUCTURE_SOURCE_TICKS, max(batch_size, item_window * 4000))
+    rows = query_window_ending_at(cur, end_id, min(batch_size, max_rows))
+    if lower_bound_id is not None:
+        rows = [row for row in rows if int(row["id"]) >= lower_bound_id]
+    snapshot = structure_snapshot(rows, enabled=True)
+
+    while structure_item_count(snapshot) < item_window and rows and len(rows) < max_rows:
+        first_id = int(rows[0]["id"])
+        if lower_bound_id is not None and first_id <= lower_bound_id:
+            break
+        fetch_limit = min(batch_size, max_rows - len(rows))
+        older_rows = query_rows_before(cur, first_id, fetch_limit)
+        if lower_bound_id is not None:
+            older_rows = [row for row in older_rows if int(row["id"]) >= lower_bound_id]
+        if not older_rows:
+            break
+        rows = older_rows + rows
+        snapshot = structure_snapshot(rows, enabled=True)
+
+    return rows, snapshot
+
+
+def collect_structure_rows_starting_at(
+    cur: Any,
+    *,
+    start_id: int,
+    item_window: int,
+    end_id: Optional[int],
+) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    batch_size = structure_scan_batch_size(item_window)
+    max_rows = min(MAX_STRUCTURE_SOURCE_TICKS, max(batch_size, item_window * 4000))
+    rows = query_bootstrap_rows(
+        cur,
+        mode="review",
+        start_id=start_id,
+        window=min(batch_size, max_rows),
+        end_id=end_id,
+    )
+    snapshot = structure_snapshot(rows, enabled=True)
+
+    while structure_item_count(snapshot) < item_window and rows and len(rows) < max_rows:
+        last_id = int(rows[-1]["id"])
+        if end_id is not None and last_id >= end_id:
+            break
+        fetch_limit = min(batch_size, max_rows - len(rows))
+        newer_rows = query_rows_after(cur, last_id, fetch_limit, end_id=end_id)
+        if not newer_rows:
+            break
+        rows.extend(newer_rows)
+        snapshot = structure_snapshot(rows, enabled=True)
+
+    return rows, snapshot
+
+
 def build_range_payload(
     *,
     mode: str,
@@ -676,6 +842,8 @@ def build_structure_view_payload(
     mode: str,
     window: int,
     replay_rows: List[Dict[str, Any]],
+    snapshot: Dict[str, Any],
+    trim_side: str,
     review_end_id: Optional[int],
     review_end_timestamp: Optional[datetime],
     bounds: Dict[str, Any],
@@ -685,32 +853,29 @@ def build_structure_view_payload(
     show_ranges: bool,
 ) -> Dict[str, Any]:
     serialize_started = time.perf_counter()
-    first_row = replay_rows[0] if replay_rows else None
-    last_row = replay_rows[-1] if replay_rows else None
-    first_row_id = first_row["id"] if first_row else None
-    last_row_id = last_row["id"] if last_row else None
+    trimmed_snapshot, trimmed_meta = trim_structure_snapshot(snapshot, window, side=trim_side)
+    first_row_id = trimmed_meta["firstId"]
+    last_row_id = trimmed_meta["lastId"]
     duration_ms = 0
-    if first_row and last_row:
-        first_timestamp = first_row.get("timestamp")
-        last_timestamp = last_row.get("timestamp")
-        if first_timestamp is not None and last_timestamp is not None:
-            duration_ms = max(0, int((last_timestamp - first_timestamp).total_seconds() * 1000))
-    snapshot = apply_structure_flags(
-        structure_snapshot(replay_rows, enabled=show_events or show_structure or show_ranges),
+    if trimmed_meta["firstTimestampMs"] is not None and trimmed_meta["lastTimestampMs"] is not None:
+        duration_ms = max(0, int(trimmed_meta["lastTimestampMs"]) - int(trimmed_meta["firstTimestampMs"]))
+    display_snapshot = apply_structure_flags(
+        trimmed_snapshot,
         show_events=show_events,
         show_structure=show_structure,
         show_ranges=show_ranges,
     )
     payload = {
         "sourceTickCount": len(replay_rows),
+        "itemCount": trimmed_meta["itemCount"],
         "tickSpan": max(0, (int(last_row_id) - int(first_row_id) + 1)) if first_row_id and last_row_id else 0,
         "durationMs": duration_ms,
         "firstId": first_row_id,
         "lastId": last_row_id,
-        "firstTimestamp": serialize_value(first_row.get("timestamp") if first_row else None),
-        "lastTimestamp": serialize_value(last_row.get("timestamp") if last_row else None),
-        "firstTimestampMs": dt_to_ms(first_row.get("timestamp") if first_row else None),
-        "lastTimestampMs": dt_to_ms(last_row.get("timestamp") if last_row else None),
+        "firstTimestamp": trimmed_meta["firstTimestamp"],
+        "lastTimestamp": trimmed_meta["lastTimestamp"],
+        "firstTimestampMs": trimmed_meta["firstTimestampMs"],
+        "lastTimestampMs": trimmed_meta["lastTimestampMs"],
         "mode": mode,
         "window": window,
         "symbol": TICK_SYMBOL,
@@ -718,12 +883,12 @@ def build_structure_view_payload(
         "reviewEndTimestamp": serialize_value(review_end_timestamp),
         "hasMoreLeft": bool(bounds.get("firstId") and first_row_id and first_row_id > bounds["firstId"]),
         "endReached": bool(mode == "review" and review_end_id is not None and last_row_id is not None and last_row_id >= review_end_id),
-        **snapshot,
+        **display_snapshot,
     }
     payload["metrics"] = serialize_metrics_payload(
         fetch_ms=fetch_ms,
         serialize_ms=elapsed_ms(serialize_started),
-        latest_row=last_row,
+        latest_row=replay_rows[-1] if replay_rows else None,
     )
     return payload
 
@@ -796,17 +961,28 @@ def load_structure_bootstrap_payload(
             }
             review_end_id = bounds["lastId"] if mode == "review" else None
             review_end_timestamp = bounds["lastTimestamp"] if mode == "review" else None
-            replay_rows = query_bootstrap_rows(
-                cur,
-                mode=mode,
-                start_id=start_id,
-                window=effective_window,
-                end_id=review_end_id,
-            )
+            if mode == "review":
+                if start_id is None:
+                    raise HTTPException(status_code=400, detail="Review mode requires an id value.")
+                replay_rows, snapshot = collect_structure_rows_starting_at(
+                    cur,
+                    start_id=start_id,
+                    item_window=effective_window,
+                    end_id=review_end_id,
+                )
+            else:
+                live_end_id = int(bounds["lastId"] or 0)
+                replay_rows, snapshot = collect_structure_rows_ending_at(
+                    cur,
+                    end_id=live_end_id,
+                    item_window=effective_window,
+                )
     return build_structure_view_payload(
         mode=mode,
         window=effective_window,
         replay_rows=replay_rows,
+        snapshot=snapshot,
+        trim_side="head" if mode == "review" else "tail",
         review_end_id=review_end_id,
         review_end_timestamp=review_end_timestamp,
         bounds=bounds,
@@ -879,7 +1055,11 @@ def load_structure_next_payload(
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             tick_rows = query_rows_after(cur, after_id, effective_limit, end_id=end_id)
             last_seen_id = int(tick_rows[-1]["id"]) if tick_rows else after_id
-            replay_rows = query_window_ending_at(cur, last_seen_id, effective_window) if last_seen_id else []
+            replay_rows, snapshot = (
+                collect_structure_rows_ending_at(cur, end_id=last_seen_id, item_window=effective_window)
+                if last_seen_id
+                else ([], empty_structure_payload())
+            )
             bounds_row = query_tick_bounds(cur)
             bounds = {
                 "firstId": bounds_row.get("first_id"),
@@ -889,6 +1069,8 @@ def load_structure_next_payload(
         mode="review" if end_id is not None else "live",
         window=effective_window,
         replay_rows=replay_rows,
+        snapshot=snapshot,
+        trim_side="tail",
         review_end_id=end_id,
         review_end_timestamp=None,
         bounds=bounds,
@@ -969,17 +1151,21 @@ def load_structure_previous_payload(
                 "firstTimestamp": bounds_row.get("first_timestamp"),
                 "lastTimestamp": bounds_row.get("last_timestamp"),
             }
-            previous_rows = query_rows_before(cur, before_id, effective_window)
-            first_row = previous_rows[0] if previous_rows else None
-            range_end_id = current_last_id or (previous_rows[-1]["id"] if previous_rows else None)
-            if first_row and range_end_id:
-                replay_rows = query_rows_between(cur, int(first_row["id"]), int(range_end_id), effective_window)
+            range_end_id = current_last_id
+            if range_end_id:
+                replay_rows, snapshot = collect_structure_rows_ending_at(
+                    cur,
+                    end_id=int(range_end_id),
+                    item_window=effective_window,
+                )
             else:
-                replay_rows = []
+                replay_rows, snapshot = [], empty_structure_payload()
     payload = build_structure_view_payload(
         mode="review",
         window=effective_window,
         replay_rows=replay_rows,
+        snapshot=snapshot,
+        trim_side="tail",
         review_end_id=None,
         review_end_timestamp=None,
         bounds=bounds,
@@ -1002,6 +1188,7 @@ def stream_events(
     show_structure: bool,
     show_ranges: bool,
     max_window: int = MAX_TICK_WINDOW,
+    seed_by_item_window: bool = False,
 ) -> Generator[str, None, None]:
     last_id = max(0, after_id)
     effective_limit = clamp_int(limit, 1, MAX_STREAM_BATCH)
@@ -1015,7 +1202,12 @@ def stream_events(
         with db_connection(readonly=True, autocommit=True) as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 if engine is not None and last_id:
-                    for row in query_window_ending_at(cur, last_id, effective_window):
+                    seed_rows = (
+                        collect_structure_rows_ending_at(cur, end_id=last_id, item_window=effective_window)[0]
+                        if seed_by_item_window
+                        else query_window_ending_at(cur, last_id, effective_window)
+                    )
+                    for row in seed_rows:
                         try:
                             engine.process_tick(row)
                         except Exception:
@@ -1341,6 +1533,7 @@ def structure_stream(
             show_structure=showStructure,
             show_ranges=showRanges,
             max_window=MAX_STRUCTURE_WINDOW,
+            seed_by_item_window=True,
         ),
         media_type="text/event-stream",
         headers={
