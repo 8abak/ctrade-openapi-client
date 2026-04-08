@@ -265,7 +265,10 @@
     const lines = [];
     if (row) {
       lines.push("tick " + row.id + " | " + row.timestamp);
-      lines.push("bid " + formatPrice(row.bid) + " | ask " + formatPrice(row.ask) + " | mid " + formatPrice(row.mid));
+      lines.push("time " + new Date(row.timestamp).toLocaleTimeString());
+      lines.push("bid " + formatPrice(row.bid));
+      lines.push("ask " + formatPrice(row.ask));
+      lines.push("mid " + formatPrice(row.mid));
     } else if (Number.isFinite(tickId)) {
       lines.push("tick " + Math.round(tickId));
     }
