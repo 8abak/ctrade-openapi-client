@@ -5,10 +5,18 @@ APP_DIR="/home/ec2-user/cTrade"
 VENV_ACTIVATE="/home/ec2-user/venvs/datavis/bin/activate"
 ENV_FILE="/etc/datavis.env"
 DEFAULT_DATABASE_URL="postgresql://babak:babak33044@localhost:5432/trading"
-UNIT_FILES=("datavis" "tickcollector" "fastzig" "zonebuilder")
-RESTART_SERVICES=("datavis" "fastzig" "zonebuilder")
-LEGACY_SERVICES=("ottprocessor" "envelopeprocessor" "zigzag" "envelopezigprocessor" "marketprofile")
-MIGRATION_FILES=("deploy/sql/20260403_fast_zig.sql" "deploy/sql/20260404_fast_zig_levels.sql" "deploy/sql/20260405_zonebox.sql")
+UNIT_FILES=("datavis" "tickcollector")
+RESTART_SERVICES=("datavis")
+LEGACY_SERVICES=(
+  "ottprocessor"
+  "envelopeprocessor"
+  "zigzag"
+  "envelopezigprocessor"
+  "marketprofile"
+  "fastzig"
+  "zonebuilder"
+)
+MIGRATION_FILES=("deploy/sql/20260408_layer_zero_structure.sql")
 HEALTH_URL="http://127.0.0.1:8000/api/health"
 
 log() {
@@ -28,13 +36,6 @@ install_systemd_units() {
   sudo systemctl daemon-reload
 }
 
-on_error() {
-  log "Deployment failed"
-  for service_name in "${RESTART_SERVICES[@]}"; do
-    show_service_status "$service_name"
-  done
-}
-
 disable_legacy_services() {
   for service_name in "${LEGACY_SERVICES[@]}"; do
     log "Disabling legacy service ${service_name}"
@@ -49,6 +50,13 @@ apply_sql_migrations() {
   for migration_path in "${MIGRATION_FILES[@]}"; do
     log "Applying ${migration_path}"
     psql "$database_url" -v ON_ERROR_STOP=1 -f "$migration_path"
+  done
+}
+
+on_error() {
+  log "Deployment failed"
+  for service_name in "${RESTART_SERVICES[@]}"; do
+    show_service_status "$service_name"
   done
 }
 

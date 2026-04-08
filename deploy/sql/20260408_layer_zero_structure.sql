@@ -1,5 +1,15 @@
 BEGIN;
 
+DROP TABLE IF EXISTS public.supresareaevent;
+DROP TABLE IF EXISTS public.supresarea;
+DROP TABLE IF EXISTS public.supresstate;
+
+DROP TABLE IF EXISTS public.zoneboxstate;
+DROP TABLE IF EXISTS public.zonebox;
+
+DROP TABLE IF EXISTS public.fast_zig_pivots;
+DROP TABLE IF EXISTS public.fast_zig_state;
+
 DROP TABLE IF EXISTS public.marketprofilebin;
 DROP TABLE IF EXISTS public.marketprofile;
 DROP TABLE IF EXISTS public.marketprofilestate;

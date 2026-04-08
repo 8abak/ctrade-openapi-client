@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>datavis.au | Layer 0 Live</title>
+  <title>datavis.au | Layer Zero</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -39,141 +39,83 @@
       <div class="live-sidebar-scroll">
         <header class="live-sidebar-header">
           <a class="back-link" href="/">datavis.au</a>
-          <h1>Layer 0</h1>
-          <p class="live-sidebar-copy">Raw ticks stay primary. Fast zig runs separately from the collector path, with confirmed L0 pivots plus faster L1-L3 candidate and final structure overlaid only when requested.</p>
+          <h1>Layer Zero</h1>
+          <p class="live-sidebar-copy">Raw ticks first. Structure is a lightweight live replay of tick expansion, pullback, reversal, and range breaks.</p>
           <div class="meta-strip" id="liveMeta">Waiting for ticks...</div>
           <div class="meta-strip" id="livePerf">Stream down.</div>
           <div class="status-line live-status" id="statusLine">Ready.</div>
         </header>
 
         <section class="live-sidebar-section">
-          <div class="live-section-body" id="controlSectionBody">
-            <div class="live-form-grid">
-              <div class="live-control-field live-control-field-wide">
-                <span>mode</span>
-                <div class="segmented" id="modeToggle">
-                  <button type="button" data-value="live">Live</button>
-                  <button type="button" data-value="review">Review</button>
-                </div>
+          <div class="live-form-grid">
+            <div class="live-control-field live-control-field-wide">
+              <span>mode</span>
+              <div class="segmented" id="modeToggle">
+                <button type="button" data-value="live">Live</button>
+                <button type="button" data-value="review">Review</button>
               </div>
-
-              <div class="live-control-field live-control-field-wide">
-                <span>run state</span>
-                <div class="segmented" id="runToggle">
-                  <button type="button" data-value="run">Run</button>
-                  <button type="button" data-value="stop">Stop</button>
-                </div>
-              </div>
-
-              <div class="live-control-field live-control-field-wide">
-                <span>display</span>
-                <div class="live-check-grid">
-                  <label class="compact-check">
-                    <input id="showTicks" type="checkbox" checked>
-                    <span>Ticks</span>
-                  </label>
-                  <label class="compact-check">
-                    <input id="showZigs" type="checkbox" checked>
-                    <span>Zigs</span>
-                  </label>
-                  <label class="compact-check">
-                    <input id="showZones" type="checkbox">
-                    <span>Zones</span>
-                  </label>
-                </div>
-              </div>
-
-              <label>
-                <span>review start id</span>
-                <input id="tickId" type="number" min="1" inputmode="numeric" placeholder="start id">
-              </label>
-
-              <label>
-                <span>window</span>
-                <input id="windowSize" type="number" min="1" max="10000" inputmode="numeric" value="2000">
-              </label>
-
-              <label class="live-control-field-wide review-start-field">
-                <span>review start (Sydney)</span>
-                <input id="reviewStart" type="datetime-local" step="1">
-              </label>
             </div>
 
-            <div class="live-inline-actions">
-              <button class="primary-button compact-button" id="applyButton" type="button">Load</button>
-              <button class="ghost-button compact-button" id="loadMoreLeftButton" type="button">Load More Left</button>
+            <div class="live-control-field live-control-field-wide">
+              <span>run state</span>
+              <div class="segmented" id="runToggle">
+                <button type="button" data-value="run">Run</button>
+                <button type="button" data-value="stop">Stop</button>
+              </div>
+            </div>
+
+            <div class="live-control-field live-control-field-wide">
+              <span>display</span>
+              <div class="live-check-grid">
+                <label class="compact-check">
+                  <input id="showTicks" type="checkbox" checked>
+                  <span>Ticks</span>
+                </label>
+                <label class="compact-check">
+                  <input id="showEvents" type="checkbox" checked>
+                  <span>Events</span>
+                </label>
+                <label class="compact-check">
+                  <input id="showStructure" type="checkbox" checked>
+                  <span>Structure candles</span>
+                </label>
+                <label class="compact-check">
+                  <input id="showRanges" type="checkbox" checked>
+                  <span>Range boxes</span>
+                </label>
+              </div>
+            </div>
+
+            <label>
+              <span>review start id</span>
+              <input id="tickId" type="number" min="1" inputmode="numeric" placeholder="start id">
+            </label>
+
+            <label>
+              <span>window</span>
+              <input id="windowSize" type="number" min="1" max="10000" inputmode="numeric" value="2000">
+            </label>
+
+            <label class="live-control-field-wide review-start-field">
+              <span>review start (Sydney)</span>
+              <input id="reviewStart" type="datetime-local" step="1">
+            </label>
+
+            <div class="live-control-field live-control-field-wide review-speed-control">
+              <span>review speed</span>
+              <div class="segmented single-select" id="reviewSpeedToggle" aria-label="Review speed">
+                <button type="button" data-value="0.5">0.5x</button>
+                <button type="button" data-value="1">1x</button>
+                <button type="button" data-value="2">2x</button>
+                <button type="button" data-value="3">3x</button>
+                <button type="button" data-value="5">5x</button>
+              </div>
             </div>
           </div>
-        </section>
 
-        <section class="live-sidebar-section">
-          <button
-            class="ghost-button live-section-toggle"
-            id="settingsToggle"
-            type="button"
-            aria-controls="settingsSectionBody"
-            aria-expanded="false"
-          >
-            <span class="live-section-title">Settings</span>
-            <span class="live-section-state" id="settingsToggleState">collapsed</span>
-          </button>
-
-          <div class="live-section-body is-collapsed" id="settingsSectionBody">
-            <div class="live-form-grid">
-              <div class="live-control-field live-control-field-wide">
-                <span>price series</span>
-                <div class="segmented" id="seriesToggle">
-                  <button type="button" data-value="mid">Mid</button>
-                  <button type="button" data-value="ask">Ask</button>
-                  <button type="button" data-value="bid">Bid</button>
-                </div>
-              </div>
-
-              <div class="live-control-field live-control-field-wide review-speed-control">
-                <span>review speed</span>
-                <div class="segmented single-select" id="reviewSpeedToggle" aria-label="Review speed">
-                  <button type="button" data-value="0.5">0.5x</button>
-                  <button type="button" data-value="1">1x</button>
-                  <button type="button" data-value="2">2x</button>
-                  <button type="button" data-value="3">3x</button>
-                  <button type="button" data-value="5">5x</button>
-                </div>
-              </div>
-
-              <div class="live-control-field live-control-field-wide">
-                <span>unused areas</span>
-                <div class="live-check-grid">
-                  <label class="compact-check">
-                    <input id="showAreas" type="checkbox">
-                    <span>Show</span>
-                  </label>
-                  <label class="compact-check">
-                    <input id="areaStateActive" type="checkbox" checked>
-                    <span>Active</span>
-                  </label>
-                  <label class="compact-check">
-                    <input id="areaStateUsed" type="checkbox">
-                    <span>Used</span>
-                  </label>
-                  <label class="compact-check">
-                    <input id="areaStateClosed" type="checkbox">
-                    <span>Closed</span>
-                  </label>
-                  <label class="compact-check">
-                    <input id="areaSideTop" type="checkbox" checked>
-                    <span>Top</span>
-                  </label>
-                  <label class="compact-check">
-                    <input id="areaSideBottom" type="checkbox" checked>
-                    <span>Bottom</span>
-                  </label>
-                  <label class="compact-check">
-                    <input id="areaHigherOnly" type="checkbox">
-                    <span>Higher-level only</span>
-                  </label>
-                </div>
-              </div>
-            </div>
+          <div class="live-inline-actions">
+            <button class="primary-button compact-button" id="applyButton" type="button">Load</button>
+            <button class="ghost-button compact-button" id="loadMoreLeftButton" type="button">Load More Left</button>
           </div>
         </section>
       </div>

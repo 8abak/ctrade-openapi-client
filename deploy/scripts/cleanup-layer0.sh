@@ -4,8 +4,16 @@ set -euo pipefail
 APP_DIR="/home/ec2-user/cTrade"
 ENV_FILE="/etc/datavis.env"
 BACKUP_DIR="/home/ec2-user/backups/datavis"
-CLEANUP_SQL="${APP_DIR}/deploy/sql/20260402_layer0_cleanup.sql"
-LEGACY_SERVICES=("ottprocessor" "envelopeprocessor" "zigzag" "envelopezigprocessor" "marketprofile")
+CLEANUP_SQL="${APP_DIR}/deploy/sql/20260408_layer_zero_structure.sql"
+LEGACY_SERVICES=(
+  "ottprocessor"
+  "envelopeprocessor"
+  "zigzag"
+  "envelopezigprocessor"
+  "marketprofile"
+  "fastzig"
+  "zonebuilder"
+)
 DEFAULT_DATABASE_URL="postgresql://babak:babak33044@localhost:5432/trading"
 
 log() {
@@ -24,7 +32,7 @@ fi
 
 DATABASE_URL="${DATABASE_URL:-$DEFAULT_DATABASE_URL}"
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-BACKUP_PATH="${BACKUP_DIR}/public-pre-layer0-${TIMESTAMP}.sql.gz"
+BACKUP_PATH="${BACKUP_DIR}/public-pre-layer-zero-${TIMESTAMP}.sql.gz"
 
 mkdir -p "$BACKUP_DIR"
 
@@ -42,5 +50,5 @@ done
 
 sudo systemctl daemon-reload
 
-log "Layer 0 cleanup complete"
+log "Layer Zero cleanup complete"
 log "Backup written to ${BACKUP_PATH}"
