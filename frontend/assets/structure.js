@@ -10,6 +10,8 @@
     reviewSpeed: 1,
     window: 50,
   };
+  const INITIAL_LIVE_ITEM_WINDOW = 1;
+  const BACKFILL_CHUNK_ITEMS = 4;
   const MAX_WINDOW = 200000;
   const REVIEW_SPEEDS = [0.5, 1, 2, 3, 5];
   const EVENT_COLORS = {
@@ -40,7 +42,8 @@
     lastMetrics: null,
     streamConnected: false,
     hasMoreLeft: false,
-    loadedWindow: DEFAULTS.window,
+    loadedWindow: 0,
+    targetWindow: DEFAULTS.window,
     spanFirstId: null,
     spanLastId: null,
     spanStartMs: null,
@@ -49,6 +52,8 @@
     zoom: null,
     applyingZoom: false,
     resizeObserver: null,
+    backfillTimer: 0,
+    backfillToken: 0,
     ui: { sidebarCollapsed: true },
   };
 
@@ -220,7 +225,7 @@
     const itemCount = state.structureBars.length + state.rangeBoxes.length;
     elements.structureMeta.textContent = [
       currentConfig().mode.toUpperCase(),
-      "items " + itemCount + "/" + state.loadedWindow,
+      "items " + itemCount + "/" + state.targetWindow,
       "tick-span " + tickSpan,
       "time-span " + formatDuration(durationMs),
       "bars " + state.structureBars.length + " active " + activeBars,
@@ -524,7 +529,6 @@
             lineWidth: active ? 1.4 : 1.0,
             opacity: active ? 1 : 0.72,
           },
-          silent: true,
         },
         buildVerticalLine(
           left,
@@ -582,7 +586,6 @@
           type: "rect",
           shape: rect,
           style: { fill: fill, stroke: stroke, lineWidth: active ? 1.4 : 1.0 },
-          silent: true,
         },
         buildVerticalLine(left, topY, bottomY, stroke, 1.0, active ? 0.5 : 0.22),
         buildVerticalLine(right, topY, bottomY, stroke, active ? 1.3 : 1.0, active ? 0.75 : 0.26, active ? [5, 4] : []),
@@ -718,6 +721,59 @@
     }
   }
 
+  function structureItemCount() {
+    return state.structureBars.length + state.rangeBoxes.length;
+  }
+
+  function trimToTargetWindow() {
+    const target = Math.max(1, Number(state.targetWindow) || DEFAULTS.window);
+    const entries = [];
+    state.structureBars.forEach(function (bar) {
+      entries.push({
+        kind: "structure",
+        id: Number(bar.id),
+        startTickId: Number(bar.startTickId),
+        endTickId: Number(bar.endTickId),
+      });
+    });
+    state.rangeBoxes.forEach(function (box) {
+      entries.push({
+        kind: "range",
+        id: Number(box.id),
+        startTickId: Number(box.startTickId),
+        endTickId: Number(box.endTickId),
+      });
+    });
+    if (entries.length <= target) {
+      state.loadedWindow = entries.length;
+      syncSpanFromStructure();
+      return;
+    }
+    entries.sort(function (left, right) {
+      return Number(left.endTickId) - Number(right.endTickId)
+        || Number(left.startTickId) - Number(right.startTickId)
+        || (left.kind === right.kind ? 0 : (left.kind === "structure" ? -1 : 1))
+        || Number(left.id) - Number(right.id);
+    });
+    const kept = entries.slice(entries.length - target);
+    const structureIds = new Set(kept.filter(function (entry) { return entry.kind === "structure"; }).map(function (entry) { return entry.id; }));
+    const rangeIds = new Set(kept.filter(function (entry) { return entry.kind === "range"; }).map(function (entry) { return entry.id; }));
+    const firstId = Math.min.apply(null, kept.map(function (entry) { return entry.startTickId; }));
+    const lastId = Math.max.apply(null, kept.map(function (entry) { return entry.endTickId; }));
+    state.structureBars = state.structureBars.filter(function (bar) {
+      return structureIds.has(Number(bar.id));
+    });
+    state.rangeBoxes = state.rangeBoxes.filter(function (box) {
+      return rangeIds.has(Number(box.id));
+    });
+    state.structureEvents = state.structureEvents.filter(function (event) {
+      const tickId = Number(event.tickId);
+      return tickId >= firstId && tickId <= lastId;
+    });
+    state.loadedWindow = kept.length;
+    syncSpanFromStructure();
+  }
+
   function replaceStructure(payload) {
     state.structureBars = Array.isArray(payload.structureBars) ? payload.structureBars.slice().sort(function (left, right) {
       return Number(left.id) - Number(right.id);
@@ -728,7 +784,7 @@
     state.structureEvents = Array.isArray(payload.structureEvents) ? payload.structureEvents.slice().sort(function (left, right) {
       return Number(left.tickId) - Number(right.tickId) || Number(left.id) - Number(right.id);
     }) : [];
-    syncSpanFromStructure();
+    trimToTargetWindow();
   }
 
   function applySpanPayload(payload) {
@@ -763,6 +819,23 @@
     });
   }
 
+  function mergeOlderOnly(items, olderItems) {
+    const byId = new Map();
+    items.forEach(function (item) {
+      if (item && item.id != null) {
+        byId.set(item.id, item);
+      }
+    });
+    (olderItems || []).forEach(function (item) {
+      if (item && item.id != null && !byId.has(item.id)) {
+        byId.set(item.id, item);
+      }
+    });
+    return Array.from(byId.values()).sort(function (left, right) {
+      return Number(left.id) - Number(right.id);
+    });
+  }
+
   function mergeEvents(items, updates) {
     const byKey = new Map();
     items.concat(updates || []).forEach(function (event) {
@@ -779,11 +852,20 @@
     state.structureBars = mergeById(state.structureBars, payload.structureBarUpdates || []);
     state.rangeBoxes = mergeById(state.rangeBoxes, payload.rangeBoxUpdates || []);
     state.structureEvents = mergeEvents(state.structureEvents, payload.structureEvents || []);
-    syncSpanFromStructure();
+    trimToTargetWindow();
     if (payload.lastId != null) {
       state.spanLastId = payload.lastId;
     }
     return (payload.structureBarUpdates || []).length || (payload.rangeBoxUpdates || []).length || (payload.structureEvents || []).length;
+  }
+
+  function applyBackfillPayload(payload) {
+    state.structureBars = mergeOlderOnly(state.structureBars, payload.structureBars || []);
+    state.rangeBoxes = mergeOlderOnly(state.rangeBoxes, payload.rangeBoxes || []);
+    state.structureEvents = mergeEvents(payload.structureEvents || [], state.structureEvents);
+    state.hasMoreLeft = Boolean(payload.hasMoreLeft);
+    trimToTargetWindow();
+    return structureItemCount();
   }
 
   function clearActivity() {
@@ -795,6 +877,11 @@
       window.clearTimeout(state.reviewTimer);
       state.reviewTimer = 0;
     }
+    if (state.backfillTimer) {
+      window.clearTimeout(state.backfillTimer);
+      state.backfillTimer = 0;
+    }
+    state.backfillToken += 1;
     state.streamConnected = false;
     renderPerf();
   }
@@ -825,10 +912,10 @@
     throw new Error("Review mode requires a start id or Sydney review start time.");
   }
 
-  function bootstrapUrl(config, startId) {
+  function bootstrapUrl(config, startId, windowOverride) {
     const params = new URLSearchParams({
       mode: config.mode,
-      window: String(config.window),
+      window: String(windowOverride || config.window),
       ...visibilityParams(config),
     });
     if (config.mode === "review" && startId != null) {
@@ -859,16 +946,56 @@
     }).toString();
   }
 
+  function scheduleBackfill() {
+    if (state.backfillTimer) {
+      window.clearTimeout(state.backfillTimer);
+    }
+    const token = state.backfillToken;
+    state.backfillTimer = window.setTimeout(function () {
+      state.backfillTimer = 0;
+      backfillStep(token).catch(function (error) {
+        if (token === state.backfillToken) {
+          status(error.message || "Structure backfill failed.", true);
+        }
+      });
+    }, 60);
+  }
+
+  async function backfillStep(token) {
+    if (token !== state.backfillToken) {
+      return;
+    }
+    const config = currentConfig();
+    if (config.mode !== "live" || state.loadedWindow >= state.targetWindow || !state.hasMoreLeft || state.spanLastId == null) {
+      return;
+    }
+    const nextTarget = Math.min(state.targetWindow, Math.max(state.loadedWindow + BACKFILL_CHUNK_ITEMS, INITIAL_LIVE_ITEM_WINDOW + BACKFILL_CHUNK_ITEMS));
+    const payload = await fetchJson(previousUrl(config, nextTarget));
+    if (token !== state.backfillToken) {
+      return;
+    }
+    state.lastMetrics = payload.metrics || state.lastMetrics;
+    applyBackfillPayload(payload);
+    renderMeta();
+    renderPerf();
+    renderChart({ shiftWithRun: false });
+    if (state.loadedWindow < state.targetWindow && state.hasMoreLeft) {
+      scheduleBackfill();
+    }
+  }
+
   async function loadBootstrap(resetView) {
     const config = currentConfig();
     const startId = config.mode === "review" ? await resolveReviewStartId(config) : null;
-    const payload = await fetchJson(bootstrapUrl(config, startId));
-    state.loadedWindow = Number(payload.window) || config.window;
+    state.targetWindow = config.window;
+    const initialWindow = config.mode === "live" ? Math.min(config.window, INITIAL_LIVE_ITEM_WINDOW) : config.window;
+    const payload = await fetchJson(bootstrapUrl(config, startId, initialWindow));
     replaceStructure(payload);
     applySpanPayload(payload);
     state.reviewEndId = payload.reviewEndId || null;
     state.hasMoreLeft = Boolean(payload.hasMoreLeft);
     state.lastMetrics = payload.metrics || null;
+    state.loadedWindow = structureItemCount();
     if (resetView) {
       state.zoom = null;
       state.rightEdgeAnchored = true;
@@ -877,6 +1004,9 @@
     renderPerf();
     renderChart({ resetView: Boolean(resetView) });
     status("Loaded " + (state.structureBars.length + state.rangeBoxes.length) + " structure item(s).", false);
+    if (config.mode === "live" && state.loadedWindow < state.targetWindow && state.hasMoreLeft) {
+      scheduleBackfill();
+    }
     if (config.run === "run") {
       if (config.mode === "live") {
         connectStream(state.spanLastId || 0);
@@ -980,19 +1110,25 @@
       status("Load the structure map first.", true);
       return;
     }
-    clearActivity();
     const config = currentConfig();
-    const targetWindow = Math.min(MAX_WINDOW, (Number(state.loadedWindow) || config.window) + config.window);
-    if (targetWindow <= state.loadedWindow) {
+    const targetWindow = Math.min(MAX_WINDOW, Math.max(state.targetWindow, structureItemCount()) + config.window);
+    if (targetWindow <= state.targetWindow) {
       status("Loaded history is already at the structure map cap.", false);
-      await resumeRunIfNeeded();
       return;
     }
+    state.targetWindow = targetWindow;
+    renderMeta();
+    if (config.mode === "live") {
+      scheduleBackfill();
+      status("Expanding structure history toward about " + state.targetWindow + " item(s).", false);
+      return;
+    }
+    clearActivity();
     const payload = await fetchJson(previousUrl(config, targetWindow));
     state.lastMetrics = payload.metrics || null;
     replaceStructure(payload);
     applySpanPayload(payload);
-    state.loadedWindow = Number(payload.window) || targetWindow;
+    state.loadedWindow = structureItemCount();
     state.hasMoreLeft = Boolean(payload.hasMoreLeft);
     renderMeta();
     renderPerf();
@@ -1025,6 +1161,7 @@
     elements.tickId.value = config.id;
     elements.reviewStart.value = config.reviewStart;
     elements.windowSize.value = String(config.window);
+    state.targetWindow = config.window;
     setSidebarCollapsed(true);
     updateReviewFields();
     renderMeta();
