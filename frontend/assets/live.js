@@ -3,9 +3,9 @@
     mode: "live",
     run: "run",
     showTicks: true,
-    showEvents: true,
-    showStructure: true,
-    showRanges: true,
+    showEvents: false,
+    showStructure: false,
+    showRanges: false,
     id: "",
     reviewStart: "",
     reviewSpeed: 1,
@@ -47,6 +47,7 @@
     rangeLastId: null,
     rightEdgeAnchored: true,
     zoom: null,
+    applyingZoom: false,
     overlayFrame: 0,
     resizeObserver: null,
     ui: { sidebarCollapsed: true },
@@ -304,6 +305,9 @@
         series: [],
       }, { notMerge: true, lazyUpdate: true });
       state.chart.on("dataZoom", () => {
+        if (state.applyingZoom) {
+          return;
+        }
         const option = state.chart.getOption();
         const zoom = option?.dataZoom?.[0] || null;
         state.zoom = zoom ? { start: zoom.start, end: zoom.end, startValue: zoom.startValue, endValue: zoom.endValue } : null;
@@ -429,17 +433,24 @@
   }
 
   function yBounds() {
+    const config = currentConfig();
     const values = [];
     state.rows.forEach((row) => values.push(Number(row.mid)));
-    state.structureBars.forEach((bar) => {
-      values.push(Number(bar.high));
-      values.push(Number(bar.low));
-    });
-    state.rangeBoxes.forEach((box) => {
-      values.push(Number(box.top));
-      values.push(Number(box.bottom));
-    });
-    state.structureEvents.forEach((event) => values.push(Number(event.price)));
+    if (config.showStructure) {
+      state.structureBars.forEach((bar) => {
+        values.push(Number(bar.high));
+        values.push(Number(bar.low));
+      });
+    }
+    if (config.showRanges) {
+      state.rangeBoxes.forEach((box) => {
+        values.push(Number(box.top));
+        values.push(Number(box.bottom));
+      });
+    }
+    if (config.showEvents) {
+      state.structureEvents.forEach((event) => values.push(Number(event.price)));
+    }
     const finite = values.filter(Number.isFinite);
     if (!finite.length) {
       return {};
@@ -468,6 +479,7 @@
       zoom.startValue = state.zoom.startValue;
       zoom.endValue = state.zoom.endValue;
     }
+    state.applyingZoom = true;
     chart.setOption({
       series: buildSeries(config),
       yAxis: yBounds(),
@@ -476,7 +488,10 @@
         { id: "zoom-slider", ...zoom },
       ],
     }, { replaceMerge: ["series"], lazyUpdate: true });
-    queueOverlayRender();
+    requestAnimationFrame(() => {
+      state.applyingZoom = false;
+      queueOverlayRender();
+    });
   }
 
   function rangeBoxStyle(box) {
@@ -656,6 +671,9 @@
   }
 
   function applyStreamPayload(payload) {
+    if (payload.lastId != null) {
+      state.rangeLastId = payload.lastId;
+    }
     const appended = dedupeAppend(payload.rows || []);
     state.structureBars = mergeById(state.structureBars, payload.structureBarUpdates || []);
     state.rangeBoxes = mergeById(state.rangeBoxes, payload.rangeBoxUpdates || []);

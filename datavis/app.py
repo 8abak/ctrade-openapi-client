@@ -375,8 +375,21 @@ def resolve_tick_at_timestamp(timestamp_value: datetime) -> Dict[str, Any]:
     return {"id": int(resolved["id"]), "timestamp": resolved["timestamp"]}
 
 
-def structure_snapshot(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    return replay_ticks(TICK_SYMBOL, rows)
+def empty_structure_payload() -> Dict[str, Any]:
+    return {
+        "structureBars": [],
+        "rangeBoxes": [],
+        "structureEvents": [],
+    }
+
+
+def structure_snapshot(rows: List[Dict[str, Any]], *, enabled: bool) -> Dict[str, Any]:
+    if not enabled or not rows:
+        return empty_structure_payload()
+    try:
+        return replay_ticks(TICK_SYMBOL, rows)
+    except Exception:
+        return empty_structure_payload()
 
 
 def apply_structure_flags(payload: Dict[str, Any], *, show_events: bool, show_structure: bool, show_ranges: bool) -> Dict[str, Any]:
@@ -410,7 +423,7 @@ def build_range_payload(
     first_row_id = first_row["id"] if first_row else None
     last_row_id = last_row["id"] if last_row else None
     snapshot = apply_structure_flags(
-        structure_snapshot(replay_rows),
+        structure_snapshot(replay_rows, enabled=show_events or show_structure or show_ranges),
         show_events=show_events,
         show_structure=show_structure,
         show_ranges=show_ranges,
@@ -505,10 +518,14 @@ def load_next_payload(
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             tick_rows = query_rows_after(cur, after_id, effective_limit, end_id=end_id)
             last_seen_id = int(tick_rows[-1]["id"]) if tick_rows else after_id
-            replay_rows = query_window_ending_at(cur, last_seen_id, effective_window) if last_seen_id else []
+            replay_rows = (
+                query_window_ending_at(cur, last_seen_id, effective_window)
+                if (show_events or show_structure or show_ranges) and last_seen_id
+                else []
+            )
     serialize_started = time.perf_counter()
     snapshot = apply_structure_flags(
-        structure_snapshot(replay_rows),
+        structure_snapshot(replay_rows, enabled=show_events or show_structure or show_ranges),
         show_events=show_events,
         show_structure=show_structure,
         show_ranges=show_ranges,
@@ -547,13 +564,13 @@ def load_previous_payload(
             previous_rows = query_rows_before(cur, before_id, effective_limit)
             first_row = previous_rows[0] if previous_rows else None
             range_end_id = current_last_id or (previous_rows[-1]["id"] if previous_rows else None)
-            if first_row and range_end_id:
+            if (show_events or show_structure or show_ranges) and first_row and range_end_id:
                 replay_rows = query_rows_between(cur, int(first_row["id"]), int(range_end_id), MAX_TICK_WINDOW)
             else:
-                replay_rows = previous_rows
+                replay_rows = []
     serialize_started = time.perf_counter()
     snapshot = apply_structure_flags(
-        structure_snapshot(replay_rows),
+        structure_snapshot(replay_rows, enabled=show_events or show_structure or show_ranges),
         show_events=show_events,
         show_structure=show_structure,
         show_ranges=show_ranges,
@@ -570,7 +587,7 @@ def load_previous_payload(
         "metrics": serialize_metrics_payload(
             fetch_ms=elapsed_ms(fetch_started),
             serialize_ms=elapsed_ms(serialize_started),
-            latest_row=replay_rows[-1] if replay_rows else None,
+            latest_row=(replay_rows[-1] if replay_rows else (previous_rows[-1] if previous_rows else None)),
         ),
     }
 
@@ -590,14 +607,19 @@ def stream_events(
     effective_window = clamp_int(window, 1, MAX_TICK_WINDOW)
     last_heartbeat = time.monotonic()
     idle_sleep = STREAM_POLL_SECONDS
-    engine = StructureEngine(symbol=TICK_SYMBOL)
+    structure_enabled = show_events or show_structure or show_ranges
+    engine = StructureEngine(symbol=TICK_SYMBOL) if structure_enabled else None
 
     try:
         with db_connection(readonly=True, autocommit=True) as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                if last_id:
+                if engine is not None and last_id:
                     for row in query_window_ending_at(cur, last_id, effective_window):
-                        engine.process_tick(row)
+                        try:
+                            engine.process_tick(row)
+                        except Exception:
+                            engine = None
+                            break
 
                 while True:
                     fetch_started = time.perf_counter()
@@ -606,17 +628,23 @@ def stream_events(
                     if tick_rows:
                         serialize_started = time.perf_counter()
                         latest_tick_row = tick_rows[-1]
+                        payload_rows = serialize_tick_rows(tick_rows) if show_ticks else []
                         updates = {"bars": [], "rangeBoxes": [], "events": []}
-                        for row in tick_rows:
-                            delta = engine.process_tick(row)
-                            updates["bars"].extend(delta["bars"])
-                            updates["rangeBoxes"].extend(delta["rangeBoxes"])
-                            updates["events"].extend(delta["events"])
+                        if engine is not None:
+                            try:
+                                for row in tick_rows:
+                                    delta = engine.process_tick(row)
+                                    updates["bars"].extend(delta["bars"])
+                                    updates["rangeBoxes"].extend(delta["rangeBoxes"])
+                                    updates["events"].extend(delta["events"])
+                            except Exception:
+                                updates = {"bars": [], "rangeBoxes": [], "events": []}
+                                engine = None
 
                         last_id = int(latest_tick_row["id"])
                         payload = {
-                            "rows": serialize_tick_rows(tick_rows) if show_ticks else [],
-                            "rowCount": len(tick_rows) if show_ticks else 0,
+                            "rows": payload_rows,
+                            "rowCount": len(payload_rows),
                             "structureBarUpdates": updates["bars"] if show_structure else [],
                             "rangeBoxUpdates": updates["rangeBoxes"] if show_ranges else [],
                             "structureEvents": updates["events"] if show_events else [],
