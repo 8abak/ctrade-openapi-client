@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>datavis.au | SQL</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body class="page-sql">
+  <main class="sql-workbench">
+    <aside class="panel sql-sidebar">
+      <div class="sql-sidebar-header">
+        <a class="back-link" href="/">datavis.au</a>
+        <h1>SQL</h1>
+        <div class="sql-muted" id="connectionMeta">Loading tables...</div>
+      </div>
+
+      <label class="sql-table-filter">
+        <span>Public tables</span>
+        <input id="tableFilter" type="search" placeholder="Filter tables">
+      </label>
+
+      <div class="sql-table-list" id="tableList">
+        <div class="sql-empty">Loading public tables...</div>
+      </div>
+    </aside>
+
+    <section class="sql-main-panel">
+      <section class="panel sql-editor-panel">
+        <div class="sql-panel-toolbar">
+          <div>
+            <div class="sql-label">Query</div>
+            <div class="sql-muted">Ctrl+Enter runs SQL. Cmd+Enter works on Mac.</div>
+          </div>
+          <button class="primary-button compact-button" id="runQueryButton" type="button">Run</button>
+        </div>
+        <textarea id="sqlEditor" spellcheck="false">select * from public.ticks order by id desc limit 100</textarea>
+        <div class="status-line" id="queryStatus">Ready.</div>
+      </section>
+
+      <section class="panel sql-results-panel">
+        <div class="sql-panel-toolbar">
+          <div>
+            <div class="sql-label">Results</div>
+            <div class="sql-muted" id="resultsMeta">No query executed yet.</div>
+          </div>
+        </div>
+        <div class="error-panel" id="resultsError" hidden></div>
+        <div class="sql-results-host" id="resultsHost">
+          <div class="sql-empty">Run a query to see rows here.</div>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <script src="/assets/sql.js"></script>
+</body>
+</html>

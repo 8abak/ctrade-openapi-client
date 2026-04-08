@@ -3,19 +3,24 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import psycopg2
 import psycopg2.extras
+import sqlparse
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from datavis.db import db_connect as shared_db_connect
 from datavis.structure import StructureEngine, replay_ticks
@@ -35,6 +40,11 @@ DEFAULT_WINDOW = int(os.getenv("DATAVIS_WINDOW", "2000"))
 MAX_TICK_WINDOW = int(os.getenv("DATAVIS_MAX_WINDOW", "10000"))
 DEFAULT_HISTORY_LIMIT = 2000
 MAX_STREAM_BATCH = 1000
+MAX_QUERY_ROWS = int(os.getenv("DATAVIS_SQL_MAX_ROWS", "1000"))
+STATEMENT_TIMEOUT_MS = int(os.getenv("DATAVIS_SQL_TIMEOUT_MS", "15000"))
+LOCK_TIMEOUT_MS = int(os.getenv("DATAVIS_SQL_LOCK_TIMEOUT_MS", "3000"))
+SQL_ADMIN_USER = os.getenv("DATAVIS_SQL_ADMIN_USER", "").strip()
+SQL_ADMIN_PASSWORD = os.getenv("DATAVIS_SQL_ADMIN_PASSWORD", "")
 STREAM_POLL_SECONDS = max(0.02, float(os.getenv("DATAVIS_STREAM_POLL_SECONDS", "0.05")))
 STREAM_IDLE_POLL_SECONDS = max(
     STREAM_POLL_SECONDS,
@@ -48,6 +58,11 @@ DEFAULT_REVIEW_TIMEZONE = "Australia/Sydney"
 
 app = FastAPI(title="datavis.au", version="3.0.0")
 app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets")
+security = HTTPBasic(auto_error=False)
+
+
+class QueryRequest(BaseModel):
+    sql: str
 
 
 def ensure_database_url() -> str:
@@ -94,6 +109,12 @@ def dt_to_ms(value: Optional[datetime]) -> Optional[int]:
 def serialize_value(value: Any) -> Any:
     if isinstance(value, datetime):
         return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return value.hex()
     return value
 
 
@@ -143,6 +164,200 @@ def format_sse(payload: Dict[str, Any], *, event_name: Optional[str] = None) -> 
     if event_name:
         return "event: {0}\ndata: {1}\n\n".format(event_name, json.dumps(payload))
     return "data: {0}\n\n".format(json.dumps(payload))
+
+
+def require_sql_admin(credentials: Optional[HTTPBasicCredentials] = Depends(security)) -> Optional[str]:
+    if not SQL_ADMIN_USER or not SQL_ADMIN_PASSWORD:
+        return None
+
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="SQL admin authentication is required.",
+            headers={"WWW-Authenticate": 'Basic realm="datavis SQL"'},
+        )
+
+    valid_user = secrets.compare_digest(credentials.username or "", SQL_ADMIN_USER)
+    valid_password = secrets.compare_digest(credentials.password or "", SQL_ADMIN_PASSWORD)
+    if not (valid_user and valid_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid SQL admin credentials.",
+            headers={"WWW-Authenticate": 'Basic realm="datavis SQL"'},
+        )
+
+    return credentials.username
+
+
+def describe_columns(description: Any) -> List[Dict[str, Any]]:
+    if not description:
+        return []
+    return [{"name": item.name, "typeCode": item.type_code} for item in description]
+
+
+def fetch_result_rows(cur: Any, limit: int) -> tuple[List[List[Any]], bool]:
+    fetched = cur.fetchmany(limit + 1)
+    truncated = len(fetched) > limit
+    rows = fetched[:limit]
+    return [[serialize_value(value) for value in row] for row in rows], truncated
+
+
+def split_sql_script(sql_text: str) -> List[str]:
+    text = (sql_text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="SQL text is required.")
+    return [statement.strip() for statement in sqlparse.split(text) if statement.strip()]
+
+
+def statement_head(statement: str) -> str:
+    parsed = sqlparse.parse(statement)
+    if not parsed:
+        return "SQL"
+    for token in parsed[0].tokens:
+        if token.is_whitespace or token.ttype in sqlparse.tokens.Comment:
+            continue
+        normalized = token.normalized.upper().strip()
+        if normalized:
+            return normalized.split(None, 1)[0]
+    return "SQL"
+
+
+def line_column_from_position(sql_text: str, position: Optional[Any]) -> tuple[Optional[int], Optional[int]]:
+    if not position or not str(position).isdigit():
+        return None, None
+    absolute_position = max(1, int(position))
+    prefix = sql_text[: absolute_position - 1]
+    line = prefix.count("\n") + 1
+    column = absolute_position - prefix.rfind("\n")
+    return line, column
+
+
+def serialize_pg_error(exc: Exception, statement: Optional[str] = None) -> Dict[str, Any]:
+    diag = getattr(exc, "diag", None)
+    position = getattr(diag, "statement_position", None) if diag else None
+    line, column = line_column_from_position(statement or "", position)
+    return {
+        "message": getattr(diag, "message_primary", None) or str(exc),
+        "detail": getattr(diag, "message_detail", None) if diag else None,
+        "hint": getattr(diag, "message_hint", None) if diag else None,
+        "position": int(position) if position and str(position).isdigit() else None,
+        "line": line,
+        "column": column,
+        "sqlstate": getattr(exc, "pgcode", None),
+        "statement": statement,
+    }
+
+
+def fetch_sql_context(conn: Any) -> Dict[str, Any]:
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT
+                current_database() AS database_name,
+                current_schema() AS current_schema,
+                current_user AS current_user,
+                current_setting('server_version') AS server_version
+            """
+        )
+        row = cur.fetchone() or {}
+    return {
+        "database": row.get("database_name"),
+        "currentSchema": row.get("current_schema"),
+        "currentUser": row.get("current_user"),
+        "serverVersion": row.get("server_version"),
+    }
+
+
+def list_public_tables() -> Dict[str, Any]:
+    with db_connection(readonly=True) as conn:
+        context = fetch_sql_context(conn)
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                    n.nspname AS schema_name,
+                    c.relname AS table_name,
+                    CASE c.relkind WHEN 'p' THEN 'partitioned table' ELSE 'table' END AS kind,
+                    COALESCE(s.n_live_tup::bigint, c.reltuples::bigint, 0)::bigint AS row_estimate,
+                    EXISTS (
+                        SELECT 1
+                        FROM pg_attribute a
+                        WHERE a.attrelid = c.oid
+                          AND a.attname = 'id'
+                          AND a.attnum > 0
+                          AND NOT a.attisdropped
+                    ) AS has_id
+                FROM pg_class c
+                JOIN pg_namespace n
+                  ON n.oid = c.relnamespace
+                LEFT JOIN pg_stat_user_tables s
+                  ON s.relid = c.oid
+                WHERE n.nspname = 'public'
+                  AND c.relkind IN ('r', 'p')
+                ORDER BY c.relname ASC
+                """
+            )
+            tables = [
+                {
+                    "schema": row["schema_name"],
+                    "name": row["table_name"],
+                    "kind": row["kind"],
+                    "rowEstimate": int(row["row_estimate"] or 0),
+                    "hasId": bool(row["has_id"]),
+                }
+                for row in cur.fetchall()
+            ]
+    return {"context": context, "tables": tables}
+
+
+def execute_query(sql_text: str) -> Dict[str, Any]:
+    statements = split_sql_script(sql_text)
+    started = time.perf_counter()
+    active_statement: Optional[str] = None
+
+    with db_connection(readonly=False, autocommit=False) as conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SET LOCAL statement_timeout = %s", (STATEMENT_TIMEOUT_MS,))
+                cur.execute("SET LOCAL lock_timeout = %s", (LOCK_TIMEOUT_MS,))
+                results = []
+                for index, statement in enumerate(statements, start=1):
+                    active_statement = statement
+                    statement_started = time.perf_counter()
+                    cur.execute(statement)
+                    has_result_set = cur.description is not None
+                    rows, truncated = fetch_result_rows(cur, MAX_QUERY_ROWS) if has_result_set else ([], False)
+                    results.append(
+                        {
+                            "index": index,
+                            "statement": statement,
+                            "statementType": statement_head(statement),
+                            "commandTag": getattr(cur, "statusmessage", None) or statement_head(statement),
+                            "rowCount": len(rows) if has_result_set else max(0, cur.rowcount),
+                            "elapsedMs": elapsed_ms(statement_started),
+                            "columns": describe_columns(cur.description),
+                            "rows": rows,
+                            "truncated": truncated,
+                            "maxRows": MAX_QUERY_ROWS,
+                            "hasResultSet": has_result_set,
+                        }
+                    )
+            context = fetch_sql_context(conn)
+            conn.commit()
+        except Exception as exc:
+            conn.rollback()
+            raise HTTPException(
+                status_code=400,
+                detail=serialize_pg_error(exc, statement=active_statement),
+            ) from exc
+
+    return {
+        "success": True,
+        "statementCount": len(statements),
+        "elapsedMs": elapsed_ms(started),
+        "context": context,
+        "results": results,
+    }
 
 
 def parse_review_timestamp(raw_value: str, timezone_name: str) -> datetime:
@@ -697,6 +912,11 @@ def live_page() -> FileResponse:
     return FileResponse(FRONTEND_DIR / "live.html")
 
 
+@app.get("/sql", include_in_schema=False)
+def sql_page(_: Optional[str] = Depends(require_sql_admin)) -> FileResponse:
+    return FileResponse(FRONTEND_DIR / "sql.html")
+
+
 @app.get("/api/health")
 def api_health() -> Dict[str, Any]:
     with db_connection(readonly=True) as conn:
@@ -718,6 +938,16 @@ def api_health() -> Dict[str, Any]:
         "lastTimestampMs": dt_to_ms(row.get("last_timestamp")),
         "serverTimeMs": now_ms(),
     }
+
+
+@app.get("/api/sql/schema")
+def sql_schema(_: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
+    return list_public_tables()
+
+
+@app.post("/api/sql/query")
+def sql_query(payload: QueryRequest, _: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
+    return execute_query(payload.sql)
 
 
 @app.get("/api/live/review-start")

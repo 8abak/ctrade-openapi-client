@@ -28,7 +28,8 @@ a {
 }
 
 button,
-input {
+input,
+textarea {
   font: inherit;
 }
 
@@ -343,6 +344,209 @@ input {
   line-height: 1.45;
 }
 
+.page-sql {
+  overflow: hidden;
+}
+
+.sql-workbench {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  gap: 0.75rem;
+  height: 100vh;
+  padding: 0.75rem;
+}
+
+.sql-sidebar,
+.sql-main-panel,
+.sql-editor-panel,
+.sql-results-panel {
+  min-width: 0;
+  min-height: 0;
+}
+
+.sql-sidebar {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 0.75rem;
+  overflow: hidden;
+  padding: 1rem;
+}
+
+.sql-sidebar-header h1 {
+  margin: 0.5rem 0 0.25rem;
+  font-size: 1.7rem;
+}
+
+.sql-muted {
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.sql-label,
+.sql-table-filter span {
+  color: var(--accent);
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.76rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.sql-table-filter {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.sql-table-list {
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  align-content: start;
+  gap: 0.35rem;
+  padding-right: 0.15rem;
+}
+
+.sql-table-button {
+  width: 100%;
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0a101a;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.sql-table-button.active {
+  border-color: var(--accent);
+  background: rgba(109, 216, 255, 0.12);
+}
+
+.sql-table-button small {
+  color: var(--muted);
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.7rem;
+}
+
+.sql-main-panel {
+  display: grid;
+  grid-template-rows: minmax(170px, 32vh) minmax(0, 1fr);
+  gap: 0.75rem;
+  overflow: hidden;
+}
+
+.sql-editor-panel,
+.sql-results-panel {
+  display: grid;
+  gap: 0.6rem;
+  overflow: hidden;
+  padding: 0.8rem;
+}
+
+.sql-editor-panel {
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.sql-results-panel {
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
+
+.sql-panel-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+#sqlEditor {
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  resize: none;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #080e17;
+  color: var(--text);
+  padding: 0.75rem;
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.86rem;
+  line-height: 1.5;
+}
+
+.sql-results-host {
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #080e17;
+}
+
+.error-panel {
+  padding: 0.65rem;
+  border: 1px solid rgba(255, 107, 136, 0.38);
+  border-radius: 8px;
+  color: var(--danger);
+  background: rgba(255, 107, 136, 0.08);
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.sql-empty,
+.sql-empty-cell {
+  padding: 0.85rem;
+  color: var(--muted);
+}
+
+.sql-result-block {
+  min-width: max-content;
+}
+
+.sql-result-title {
+  position: sticky;
+  left: 0;
+  padding: 0.55rem 0.7rem;
+  color: var(--muted);
+  background: #080e17;
+  border-bottom: 1px solid var(--line);
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.74rem;
+}
+
+.sql-results-table {
+  min-width: 100%;
+  border-collapse: collapse;
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.78rem;
+}
+
+.sql-results-table th,
+.sql-results-table td {
+  max-width: 420px;
+  padding: 0.45rem 0.55rem;
+  border-bottom: 1px solid rgba(147, 181, 255, 0.1);
+  border-right: 1px solid rgba(147, 181, 255, 0.08);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sql-results-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #0d1420;
+  color: var(--accent);
+  text-align: left;
+}
+
+.null-pill {
+  color: var(--muted);
+  opacity: 0.78;
+}
+
 @media (max-width: 760px) {
   .live-workspace,
   .live-workspace.is-sidebar-collapsed {
@@ -374,5 +578,28 @@ input {
   .live-form-grid,
   .live-check-grid {
     grid-template-columns: 1fr;
+  }
+
+  .page-sql {
+    overflow: auto;
+  }
+
+  .sql-workbench {
+    height: auto;
+    min-height: 100vh;
+    grid-template-columns: 1fr;
+  }
+
+  .sql-sidebar {
+    max-height: 42vh;
+  }
+
+  .sql-main-panel {
+    grid-template-rows: minmax(220px, 34vh) minmax(360px, 1fr);
+  }
+
+  .sql-panel-toolbar {
+    align-items: stretch;
+    flex-direction: column;
   }
 }
