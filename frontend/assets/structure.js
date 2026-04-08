@@ -12,6 +12,7 @@
   };
   const INITIAL_LIVE_ITEM_WINDOW = 1;
   const BACKFILL_CHUNK_ITEMS = 4;
+  const BACKFILL_DEBUG = Boolean(window.__STRUCTURE_DEBUG__);
   const MAX_WINDOW = 200000;
   const REVIEW_SPEEDS = [0.5, 1, 2, 3, 5];
   const EVENT_COLORS = {
@@ -251,6 +252,17 @@
       parts.push("Wire " + Math.max(0, Date.now() - metrics.serverSentAtMs) + "ms");
     }
     elements.structurePerf.textContent = parts.join(" | ");
+  }
+
+  function logBackfill(message, details) {
+    if (!BACKFILL_DEBUG || !window.console || typeof window.console.debug !== "function") {
+      return;
+    }
+    if (details === undefined) {
+      window.console.debug("[structure backfill] " + message);
+      return;
+    }
+    window.console.debug("[structure backfill] " + message, details);
   }
 
   function escapeHtml(value) {
@@ -725,13 +737,71 @@
     return state.structureBars.length + state.rangeBoxes.length;
   }
 
+  function compareNumbers(left, right) {
+    return Number(left || 0) - Number(right || 0);
+  }
+
+  function compareStrings(left, right) {
+    if (left === right) {
+      return 0;
+    }
+    return String(left || "") < String(right || "") ? -1 : 1;
+  }
+
+  function structureBarKey(bar) {
+    if (!bar) {
+      return "";
+    }
+    return ["structure", Number(bar.startTickId || 0), String(bar.type || "")].join(":");
+  }
+
+  function rangeBoxKey(box) {
+    if (!box) {
+      return "";
+    }
+    return ["range", Number(box.startTickId || 0)].join(":");
+  }
+
+  function structureEventKey(event) {
+    if (!event) {
+      return "";
+    }
+    return [
+      "event",
+      String(event.type || ""),
+      Number(event.tickId || 0),
+      Number(event.timestampMs || 0),
+      Number(event.price || 0).toFixed(5),
+      String(event.fromState || ""),
+      String(event.toState || ""),
+      String(event.state || ""),
+    ].join(":");
+  }
+
+  function sortStructureBars(items) {
+    return (items || []).slice().sort(function (left, right) {
+      return compareNumbers(left.startTickId, right.startTickId)
+        || compareNumbers(left.endTickId, right.endTickId)
+        || compareStrings(left.type, right.type)
+        || compareNumbers(left.id, right.id);
+    });
+  }
+
+  function sortRangeBoxes(items) {
+    return (items || []).slice().sort(function (left, right) {
+      return compareNumbers(left.startTickId, right.startTickId)
+        || compareNumbers(left.endTickId, right.endTickId)
+        || compareNumbers(left.id, right.id);
+    });
+  }
+
   function trimToTargetWindow() {
     const target = Math.max(1, Number(state.targetWindow) || DEFAULTS.window);
     const entries = [];
     state.structureBars.forEach(function (bar) {
       entries.push({
         kind: "structure",
-        id: Number(bar.id),
+        key: structureBarKey(bar),
         startTickId: Number(bar.startTickId),
         endTickId: Number(bar.endTickId),
       });
@@ -739,7 +809,7 @@
     state.rangeBoxes.forEach(function (box) {
       entries.push({
         kind: "range",
-        id: Number(box.id),
+        key: rangeBoxKey(box),
         startTickId: Number(box.startTickId),
         endTickId: Number(box.endTickId),
       });
@@ -753,19 +823,19 @@
       return Number(left.endTickId) - Number(right.endTickId)
         || Number(left.startTickId) - Number(right.startTickId)
         || (left.kind === right.kind ? 0 : (left.kind === "structure" ? -1 : 1))
-        || Number(left.id) - Number(right.id);
+        || compareStrings(left.key, right.key);
     });
     const kept = entries.slice(entries.length - target);
-    const structureIds = new Set(kept.filter(function (entry) { return entry.kind === "structure"; }).map(function (entry) { return entry.id; }));
-    const rangeIds = new Set(kept.filter(function (entry) { return entry.kind === "range"; }).map(function (entry) { return entry.id; }));
+    const structureKeys = new Set(kept.filter(function (entry) { return entry.kind === "structure"; }).map(function (entry) { return entry.key; }));
+    const rangeKeys = new Set(kept.filter(function (entry) { return entry.kind === "range"; }).map(function (entry) { return entry.key; }));
     const firstId = Math.min.apply(null, kept.map(function (entry) { return entry.startTickId; }));
     const lastId = Math.max.apply(null, kept.map(function (entry) { return entry.endTickId; }));
-    state.structureBars = state.structureBars.filter(function (bar) {
-      return structureIds.has(Number(bar.id));
-    });
-    state.rangeBoxes = state.rangeBoxes.filter(function (box) {
-      return rangeIds.has(Number(box.id));
-    });
+    state.structureBars = sortStructureBars(state.structureBars.filter(function (bar) {
+      return structureKeys.has(structureBarKey(bar));
+    }));
+    state.rangeBoxes = sortRangeBoxes(state.rangeBoxes.filter(function (box) {
+      return rangeKeys.has(rangeBoxKey(box));
+    }));
     state.structureEvents = state.structureEvents.filter(function (event) {
       const tickId = Number(event.tickId);
       return tickId >= firstId && tickId <= lastId;
@@ -775,12 +845,8 @@
   }
 
   function replaceStructure(payload) {
-    state.structureBars = Array.isArray(payload.structureBars) ? payload.structureBars.slice().sort(function (left, right) {
-      return Number(left.id) - Number(right.id);
-    }) : [];
-    state.rangeBoxes = Array.isArray(payload.rangeBoxes) ? payload.rangeBoxes.slice().sort(function (left, right) {
-      return Number(left.id) - Number(right.id);
-    }) : [];
+    state.structureBars = Array.isArray(payload.structureBars) ? sortStructureBars(payload.structureBars) : [];
+    state.rangeBoxes = Array.isArray(payload.rangeBoxes) ? sortRangeBoxes(payload.rangeBoxes) : [];
     state.structureEvents = Array.isArray(payload.structureEvents) ? payload.structureEvents.slice().sort(function (left, right) {
       return Number(left.tickId) - Number(right.tickId) || Number(left.id) - Number(right.id);
     }) : [];
@@ -802,45 +868,35 @@
     }
   }
 
-  function mergeById(items, updates) {
-    const byId = new Map();
+  function mergeItems(items, updates, keyForItem, preferUpdates) {
+    const byKey = new Map();
     items.forEach(function (item) {
-      if (item && item.id != null) {
-        byId.set(item.id, item);
+      const key = keyForItem(item);
+      if (key) {
+        byKey.set(key, item);
       }
     });
     (updates || []).forEach(function (item) {
-      if (item && item.id != null) {
-        byId.set(item.id, item);
+      const key = keyForItem(item);
+      if (key && (preferUpdates || !byKey.has(key))) {
+        byKey.set(key, item);
       }
     });
-    return Array.from(byId.values()).sort(function (left, right) {
-      return Number(left.id) - Number(right.id);
-    });
+    return Array.from(byKey.values());
   }
 
-  function mergeOlderOnly(items, olderItems) {
-    const byId = new Map();
-    items.forEach(function (item) {
-      if (item && item.id != null) {
-        byId.set(item.id, item);
-      }
-    });
-    (olderItems || []).forEach(function (item) {
-      if (item && item.id != null && !byId.has(item.id)) {
-        byId.set(item.id, item);
-      }
-    });
-    return Array.from(byId.values()).sort(function (left, right) {
-      return Number(left.id) - Number(right.id);
-    });
-  }
-
-  function mergeEvents(items, updates) {
+  function mergeEvents(items, updates, preferUpdates) {
     const byKey = new Map();
-    items.concat(updates || []).forEach(function (event) {
-      if (event) {
-        byKey.set(String(event.id) + ":" + String(event.tickId), event);
+    (items || []).forEach(function (event) {
+      const key = structureEventKey(event);
+      if (key) {
+        byKey.set(key, event);
+      }
+    });
+    (updates || []).forEach(function (event) {
+      const key = structureEventKey(event);
+      if (key && (preferUpdates || !byKey.has(key))) {
+        byKey.set(key, event);
       }
     });
     return Array.from(byKey.values()).sort(function (left, right) {
@@ -849,9 +905,9 @@
   }
 
   function applyStreamPayload(payload) {
-    state.structureBars = mergeById(state.structureBars, payload.structureBarUpdates || []);
-    state.rangeBoxes = mergeById(state.rangeBoxes, payload.rangeBoxUpdates || []);
-    state.structureEvents = mergeEvents(state.structureEvents, payload.structureEvents || []);
+    state.structureBars = sortStructureBars(mergeItems(state.structureBars, payload.structureBarUpdates || [], structureBarKey, true));
+    state.rangeBoxes = sortRangeBoxes(mergeItems(state.rangeBoxes, payload.rangeBoxUpdates || [], rangeBoxKey, true));
+    state.structureEvents = mergeEvents(state.structureEvents, payload.structureEvents || [], true);
     trimToTargetWindow();
     if (payload.lastId != null) {
       state.spanLastId = payload.lastId;
@@ -860,15 +916,29 @@
   }
 
   function applyBackfillPayload(payload) {
-    state.structureBars = mergeOlderOnly(state.structureBars, payload.structureBars || []);
-    state.rangeBoxes = mergeOlderOnly(state.rangeBoxes, payload.rangeBoxes || []);
-    state.structureEvents = mergeEvents(payload.structureEvents || [], state.structureEvents);
+    const previousCount = structureItemCount();
+    state.structureBars = sortStructureBars(mergeItems(state.structureBars, payload.structureBars || [], structureBarKey, false));
+    state.rangeBoxes = sortRangeBoxes(mergeItems(state.rangeBoxes, payload.rangeBoxes || [], rangeBoxKey, false));
+    state.structureEvents = mergeEvents(state.structureEvents, payload.structureEvents || [], false);
     state.hasMoreLeft = Boolean(payload.hasMoreLeft);
     trimToTargetWindow();
-    return structureItemCount();
+    return {
+      returnedCount: Number(payload.itemCount) || ((payload.structureBars || []).length + (payload.rangeBoxes || []).length),
+      addedCount: Math.max(0, structureItemCount() - previousCount),
+      totalLoaded: structureItemCount(),
+    };
   }
 
-  function clearActivity() {
+  function cancelBackfill() {
+    if (state.backfillTimer) {
+      window.clearTimeout(state.backfillTimer);
+      state.backfillTimer = 0;
+    }
+    state.backfillToken += 1;
+  }
+
+  function clearActivity(options) {
+    const keepBackfill = Boolean(options && options.keepBackfill);
     if (state.source) {
       state.source.close();
       state.source = null;
@@ -877,11 +947,9 @@
       window.clearTimeout(state.reviewTimer);
       state.reviewTimer = 0;
     }
-    if (state.backfillTimer) {
-      window.clearTimeout(state.backfillTimer);
-      state.backfillTimer = 0;
+    if (!keepBackfill) {
+      cancelBackfill();
     }
-    state.backfillToken += 1;
     state.streamConnected = false;
     renderPerf();
   }
@@ -966,22 +1034,55 @@
       return;
     }
     const config = currentConfig();
-    if (config.mode !== "live" || state.loadedWindow >= state.targetWindow || !state.hasMoreLeft || state.spanLastId == null) {
+    if (config.mode !== "live") {
+      logBackfill("stopping", { reason: "mode-not-live" });
+      return;
+    }
+    if (state.loadedWindow >= state.targetWindow) {
+      logBackfill("stopping", { reason: "target-reached", totalLoaded: state.loadedWindow, targetWindow: state.targetWindow });
+      return;
+    }
+    if (!state.hasMoreLeft) {
+      logBackfill("stopping", { reason: "no-more-left", totalLoaded: state.loadedWindow });
+      return;
+    }
+    if (state.spanLastId == null || state.spanFirstId == null) {
+      logBackfill("stopping", { reason: "missing-span", firstId: state.spanFirstId, lastId: state.spanLastId });
       return;
     }
     const nextTarget = Math.min(state.targetWindow, Math.max(state.loadedWindow + BACKFILL_CHUNK_ITEMS, INITIAL_LIVE_ITEM_WINDOW + BACKFILL_CHUNK_ITEMS));
+    const requestedBeforeId = state.spanFirstId;
+    logBackfill("requesting", {
+      beforeId: requestedBeforeId,
+      currentLastId: state.spanLastId,
+      requestedWindow: nextTarget,
+      loadedCount: state.loadedWindow,
+    });
     const payload = await fetchJson(previousUrl(config, nextTarget));
     if (token !== state.backfillToken) {
       return;
     }
     state.lastMetrics = payload.metrics || state.lastMetrics;
-    applyBackfillPayload(payload);
+    const result = applyBackfillPayload(payload);
+    logBackfill("received", {
+      beforeId: requestedBeforeId,
+      returnedCount: result.returnedCount,
+      addedCount: result.addedCount,
+      totalLoaded: result.totalLoaded,
+      hasMoreLeft: state.hasMoreLeft,
+    });
     renderMeta();
     renderPerf();
     renderChart({ shiftWithRun: false });
     if (state.loadedWindow < state.targetWindow && state.hasMoreLeft) {
       scheduleBackfill();
+      return;
     }
+    logBackfill("stopping", {
+      reason: state.loadedWindow >= state.targetWindow ? "target-reached" : "no-more-left",
+      totalLoaded: state.loadedWindow,
+      targetWindow: state.targetWindow,
+    });
   }
 
   async function loadBootstrap(resetView) {
@@ -1017,7 +1118,7 @@
   }
 
   function connectStream(afterId) {
-    clearActivity();
+    clearActivity({ keepBackfill: true });
     const config = currentConfig();
     const source = new EventSource("/api/structure/stream?" + new URLSearchParams({
       afterId: String(afterId || 0),
@@ -1049,7 +1150,7 @@
       state.streamConnected = false;
       renderPerf();
       status("Structure stream disconnected. Click Load or Run to reconnect.", true);
-      clearActivity();
+      clearActivity({ keepBackfill: true });
     };
   }
 
@@ -1179,7 +1280,7 @@
   bindSegment(elements.runToggle, function (value) {
     setSegment(elements.runToggle, value);
     writeQuery();
-    clearActivity();
+    clearActivity({ keepBackfill: true });
     if (value === "run" && state.spanLastId != null) {
       resumeRunIfNeeded();
       return;
