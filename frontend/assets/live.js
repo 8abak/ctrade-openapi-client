@@ -28,6 +28,15 @@
     down: { fill: "rgba(126,240,199,0.36)", stroke: "#7ef0c7" },
     range: { fill: "rgba(109,216,255,0.20)", stroke: "#6dd8ff" },
   };
+  const TRADE_POLL_INTERVAL_MS = 8000;
+  const TRADE_HISTORY_LIMIT = 40;
+  const TRADE_MARKER_COLORS = {
+    buyEntry: "#7ef0c7",
+    sellEntry: "#ff9fb2",
+    buyExit: "#38d39f",
+    sellExit: "#ff6b88",
+    pending: "#ffc857",
+  };
 
   const state = {
     chart: null,
@@ -51,6 +60,19 @@
     overlayFrame: 0,
     resizeObserver: null,
     ui: { sidebarCollapsed: true },
+    trade: {
+      authenticated: false,
+      username: null,
+      loginBusy: false,
+      actionBusy: false,
+      loading: false,
+      pollTimer: 0,
+      positions: [],
+      pendingOrders: [],
+      trades: [],
+      deals: [],
+      lastLoadedAtMs: null,
+    },
   };
 
   const elements = {
@@ -75,6 +97,23 @@
     livePerf: document.getElementById("livePerf"),
     chartPanel: document.getElementById("chartPanel"),
     chartHost: document.getElementById("liveChart"),
+    tradePanel: document.getElementById("tradePanel"),
+    tradeStatusLine: document.getElementById("tradeStatusLine"),
+    tradeAuthPill: document.getElementById("tradeAuthPill"),
+    tradeLoginForm: document.getElementById("tradeLoginForm"),
+    tradeUsername: document.getElementById("tradeUsername"),
+    tradePassword: document.getElementById("tradePassword"),
+    tradeLoginButton: document.getElementById("tradeLoginButton"),
+    tradeControls: document.getElementById("tradeControls"),
+    tradeVolume: document.getElementById("tradeVolume"),
+    tradeStopLoss: document.getElementById("tradeStopLoss"),
+    tradeTakeProfit: document.getElementById("tradeTakeProfit"),
+    tradeBuyButton: document.getElementById("tradeBuyButton"),
+    tradeSellButton: document.getElementById("tradeSellButton"),
+    tradeLogoutButton: document.getElementById("tradeLogoutButton"),
+    tradeOpenList: document.getElementById("tradeOpenList"),
+    tradePendingList: document.getElementById("tradePendingList"),
+    tradeHistoryList: document.getElementById("tradeHistoryList"),
   };
 
   function sanitizeWindowValue(rawValue) {
@@ -220,6 +259,55 @@
     elements.livePerf.textContent = parts.join(" | ");
   }
 
+  function tradeStatus(message, isError) {
+    if (!elements.tradeStatusLine) {
+      return;
+    }
+    elements.tradeStatusLine.textContent = message;
+    elements.tradeStatusLine.classList.toggle("error", Boolean(isError));
+    elements.tradeStatusLine.classList.toggle("success", Boolean(!isError));
+  }
+
+  function setTradeBusy(busy) {
+    const disabled = Boolean(busy);
+    state.trade.actionBusy = disabled;
+    [elements.tradeBuyButton, elements.tradeSellButton, elements.tradeLogoutButton, elements.tradeLoginButton].forEach((button) => {
+      if (button) {
+        button.disabled = disabled;
+      }
+    });
+  }
+
+  function setTradeAuthenticated(authenticated, username) {
+    state.trade.authenticated = Boolean(authenticated);
+    state.trade.username = username || null;
+    elements.tradeLoginForm.hidden = state.trade.authenticated;
+    elements.tradeControls.hidden = !state.trade.authenticated;
+    elements.tradeAuthPill.classList.toggle("ready", state.trade.authenticated);
+    elements.tradeAuthPill.textContent = state.trade.authenticated ? ("Ready " + (state.trade.username || "")) : "Locked";
+  }
+
+  function parseOptionalPriceInput(element) {
+    const raw = (element?.value || "").trim();
+    if (!raw) {
+      return null;
+    }
+    const number = Number(raw);
+    if (!Number.isFinite(number) || number <= 0) {
+      throw new Error("Price values must be greater than zero.");
+    }
+    return number;
+  }
+
+  function formatSignedPnl(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) {
+      return "-";
+    }
+    const fixed = number.toFixed(2);
+    return number > 0 ? "+" + fixed : fixed;
+  }
+
   function escapeHtml(value) {
     return String(value)
       .replaceAll("&", "&amp;")
@@ -273,6 +361,78 @@
     return state.rangeBoxes.filter((box) => rounded >= Number(box.startTickId) && rounded <= Number(box.endTickId));
   }
 
+  function rowTimestampMs(row) {
+    if (!row) {
+      return null;
+    }
+    const direct = Number(row.timestampMs);
+    if (Number.isFinite(direct)) {
+      return direct;
+    }
+    const fallback = Date.parse(row.timestamp);
+    return Number.isFinite(fallback) ? fallback : null;
+  }
+
+  function tickIdForTimestampMs(timestampMs) {
+    const target = Number(timestampMs);
+    if (!Number.isFinite(target) || !state.rows.length) {
+      return null;
+    }
+    let best = null;
+    let bestDelta = Number.POSITIVE_INFINITY;
+    state.rows.forEach((row) => {
+      const rowMs = rowTimestampMs(row);
+      if (!Number.isFinite(rowMs)) {
+        return;
+      }
+      const delta = Math.abs(rowMs - target);
+      if (delta < bestDelta) {
+        bestDelta = delta;
+        best = row;
+      }
+    });
+    return best ? Number(best.id) : null;
+  }
+
+  function activePositionById(positionId) {
+    const id = Number(positionId);
+    return state.trade.positions.find((item) => Number(item.positionId) === id) || null;
+  }
+
+  function tradeMarkersAtTickId(tickId) {
+    const rounded = Math.round(Number(tickId));
+    if (!Number.isFinite(rounded)) {
+      return [];
+    }
+    const markers = [];
+    state.trade.trades.forEach((trade) => {
+      const entryTick = tickIdForTimestampMs(trade.entryTimestampMs);
+      if (entryTick != null && entryTick === rounded) {
+        markers.push({
+          kind: "entry",
+          side: trade.side,
+          volume: trade.volume,
+          price: trade.entryPrice,
+          timestamp: trade.entryTimestamp,
+          positionId: trade.positionId,
+        });
+      }
+      const exitTick = tickIdForTimestampMs(trade.exitTimestampMs);
+      if (exitTick != null && exitTick === rounded && trade.exitPrice != null) {
+        markers.push({
+          kind: "exit",
+          side: trade.side,
+          volume: trade.volume,
+          price: trade.exitPrice,
+          timestamp: trade.exitTimestamp,
+          pnl: trade.realizedNetPnl,
+          positionId: trade.positionId,
+        });
+      }
+    });
+    return markers;
+  }
+
   function tooltipHtml(params) {
     const entries = Array.isArray(params) ? params : [params];
     const point = entries[0];
@@ -304,6 +464,21 @@
         "Range #" + String(box.id),
         formatPrice(box.bottom) + " - " + formatPrice(box.top) + " (" + String(box.status) + ")"
       ))));
+    }
+    const tradeMarkers = tradeMarkersAtTickId(tickId);
+    if (tradeMarkers.length) {
+      sections.push(tooltipSection("Trades", tradeMarkers.map((marker) => {
+        if (marker.kind === "entry") {
+          return tooltipRow(
+            "Entry " + String(marker.side || "").toUpperCase(),
+            formatPrice(marker.price) + " | vol " + String(marker.volume || 0) + " | " + String(marker.timestamp || "-")
+          );
+        }
+        return tooltipRow(
+          "Exit " + String(marker.side || "").toUpperCase(),
+          formatPrice(marker.price) + " | PnL " + formatSignedPnl(marker.pnl) + " | " + String(marker.timestamp || "-")
+        );
+      })));
     }
     return sections.length ? "<div class=\"chart-tip\">" + sections.join("") + "</div>" : "";
   }
@@ -396,6 +571,104 @@
     }));
   }
 
+  function tradeEntriesToSeriesData() {
+    return state.trade.trades
+      .map((trade) => {
+        const tickId = tickIdForTimestampMs(trade.entryTimestampMs);
+        if (!Number.isFinite(tickId) || trade.entryPrice == null) {
+          return null;
+        }
+        return {
+          value: [Number(tickId), Number(trade.entryPrice)],
+          trade,
+          itemStyle: {
+            color: trade.side === "buy" ? TRADE_MARKER_COLORS.buyEntry : TRADE_MARKER_COLORS.sellEntry,
+          },
+        };
+      })
+      .filter(Boolean);
+  }
+
+  function tradeExitsToSeriesData() {
+    return state.trade.trades
+      .map((trade) => {
+        const tickId = tickIdForTimestampMs(trade.exitTimestampMs);
+        if (!Number.isFinite(tickId) || trade.exitPrice == null) {
+          return null;
+        }
+        return {
+          value: [Number(tickId), Number(trade.exitPrice)],
+          trade,
+          itemStyle: {
+            color: trade.side === "buy" ? TRADE_MARKER_COLORS.buyExit : TRADE_MARKER_COLORS.sellExit,
+          },
+        };
+      })
+      .filter(Boolean);
+  }
+
+  function pendingToSeriesData() {
+    return state.trade.pendingOrders
+      .map((order) => {
+        const timestampMs = order.timestampMs || Date.now();
+        const tickId = tickIdForTimestampMs(timestampMs) ?? Number(state.rangeLastId);
+        const price = order.limitPrice ?? order.stopPrice;
+        if (!Number.isFinite(tickId) || !Number.isFinite(Number(price))) {
+          return null;
+        }
+        return {
+          value: [Number(tickId), Number(price)],
+          order,
+          itemStyle: { color: TRADE_MARKER_COLORS.pending },
+        };
+      })
+      .filter(Boolean);
+  }
+
+  function openConnectorData() {
+    const currentTick = Number(state.rangeLastId);
+    if (!Number.isFinite(currentTick)) {
+      return [];
+    }
+    const currentRow = rowAtTickId(currentTick);
+    const currentPrice = currentRow ? Number(currentRow.mid) : null;
+    return state.trade.positions
+      .map((position) => {
+        const entryTick = tickIdForTimestampMs(position.openTimestampMs);
+        const entryPrice = Number(position.entryPrice);
+        if (!Number.isFinite(entryTick) || !Number.isFinite(entryPrice) || !Number.isFinite(currentPrice)) {
+          return null;
+        }
+        return {
+          value: [Number(entryTick), Number(entryPrice), Number(currentTick), Number(currentPrice)],
+          position,
+        };
+      })
+      .filter(Boolean);
+  }
+
+  function openConnectorRender(params, api) {
+    const x1 = Number(api.value(0));
+    const y1 = Number(api.value(1));
+    const x2 = Number(api.value(2));
+    const y2 = Number(api.value(3));
+    const start = api.coord([x1, y1]);
+    const end = api.coord([x2, y2]);
+    const item = params.data?.position || {};
+    const side = item.side === "buy" ? "buy" : "sell";
+    const color = side === "buy" ? "rgba(126,240,199,0.88)" : "rgba(255,159,178,0.88)";
+    return {
+      type: "line",
+      shape: { x1: start[0], y1: start[1], x2: end[0], y2: end[1] },
+      style: {
+        stroke: color,
+        lineWidth: 1.2,
+        lineDash: [5, 3],
+      },
+      silent: true,
+    };
+  }
+
   function structureCandleRender(params, api) {
     const startTick = api.value(0);
     const endTick = api.value(1);
@@ -471,6 +744,49 @@
         z: 9,
       });
     }
+    if (state.trade.authenticated) {
+      series.push({
+        id: "trade-open-connectors",
+        name: "Open positions",
+        type: "custom",
+        renderItem: openConnectorRender,
+        data: openConnectorData(),
+        animation: false,
+        encode: { x: [0, 2], y: [1, 3] },
+        z: 6,
+      });
+      series.push({
+        id: "trade-entry-markers",
+        name: "Trade entries",
+        type: "scatter",
+        data: tradeEntriesToSeriesData(),
+        symbol: "triangle",
+        symbolRotate: 0,
+        symbolSize: 11,
+        animation: false,
+        z: 12,
+      });
+      series.push({
+        id: "trade-exit-markers",
+        name: "Trade exits",
+        type: "scatter",
+        data: tradeExitsToSeriesData(),
+        symbol: "diamond",
+        symbolSize: 10,
+        animation: false,
+        z: 13,
+      });
+      series.push({
+        id: "trade-pending-markers",
+        name: "Pending orders",
+        type: "scatter",
+        data: pendingToSeriesData(),
+        symbol: "rect",
+        symbolSize: 8,
+        animation: false,
+        z: 11,
+      });
+    }
     return series;
   }
 
@@ -492,6 +808,33 @@
     }
     if (config.showEvents) {
       state.structureEvents.forEach((event) => values.push(Number(event.price)));
+    }
+    if (state.trade.authenticated) {
+      state.trade.positions.forEach((position) => {
+        values.push(Number(position.entryPrice));
+        if (position.stopLoss != null) {
+          values.push(Number(position.stopLoss));
+        }
+        if (position.takeProfit != null) {
+          values.push(Number(position.takeProfit));
+        }
+      });
+      state.trade.pendingOrders.forEach((order) => {
+        if (order.limitPrice != null) {
+          values.push(Number(order.limitPrice));
+        }
+        if (order.stopPrice != null) {
+          values.push(Number(order.stopPrice));
+        }
+      });
+      state.trade.trades.forEach((trade) => {
+        if (trade.entryPrice != null) {
+          values.push(Number(trade.entryPrice));
+        }
+        if (trade.exitPrice != null) {
+          values.push(Number(trade.exitPrice));
+        }
+      });
     }
     const finite = values.filter(Number.isFinite);
     if (!finite.length) {
@@ -589,6 +932,117 @@
     return children;
   }
 
+  function buildTradeProtectionGraphics() {
+    const chart = state.chart;
+    if (!chart || !state.trade.authenticated) {
+      return [];
+    }
+    const grid = chart.getModel()?.getComponent("grid", 0);
+    const rect = grid?.coordinateSystem?.getRect?.();
+    if (!rect) {
+      return [];
+    }
+    const rightId = Number(state.rangeLastId || (state.rows[state.rows.length - 1]?.id || 0));
+    const graphics = [];
+
+    state.trade.positions.forEach((position) => {
+      ["stopLoss", "takeProfit"].forEach((key) => {
+        const price = Number(position[key]);
+        if (!Number.isFinite(price) || price <= 0) {
+          return;
+        }
+        const point = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [rightId || 1, price]);
+        if (!Array.isArray(point)) {
+          return;
+        }
+        const baseY = Number(point[1]);
+        if (!Number.isFinite(baseY) || baseY < rect.y || baseY > rect.y + rect.height) {
+          return;
+        }
+        const isStop = key === "stopLoss";
+        const color = isStop ? "rgba(255,107,136,0.85)" : "rgba(126,240,199,0.85)";
+        const textColor = isStop ? "#ffc0cd" : "#c7ffeb";
+        const labelPrefix = isStop ? "SL" : "TP";
+        graphics.push({
+          id: "trade-protection-" + String(position.positionId) + "-" + key,
+          type: "group",
+          x: 0,
+          y: 0,
+          draggable: true,
+          z: 16,
+          cursor: "ns-resize",
+          ondrag: function () {
+            const targetY = Math.max(rect.y + 2, Math.min(rect.y + rect.height - 2, baseY + Number(this.y || 0)));
+            this.x = 0;
+            this.y = targetY - baseY;
+          },
+          ondragend: function () {
+            const targetY = Math.max(rect.y + 2, Math.min(rect.y + rect.height - 2, baseY + Number(this.y || 0)));
+            this.x = 0;
+            this.y = 0;
+            const converted = chart.convertFromPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [rect.x + 12, targetY]);
+            const targetPrice = Number(Array.isArray(converted) ? converted[1] : NaN);
+            if (!Number.isFinite(targetPrice) || targetPrice <= 0) {
+              tradeStatus("Drag rejected: invalid target price.", true);
+              queueOverlayRender();
+              return;
+            }
+            requestProtectionDrag(position.positionId, key, targetPrice);
+          },
+          children: [
+            {
+              type: "line",
+              shape: { x1: rect.x + 2, y1: baseY, x2: rect.x + rect.width - 2, y2: baseY },
+              style: { stroke: color, lineWidth: 1.2, lineDash: [6, 3] },
+            },
+            {
+              type: "rect",
+              shape: { x: rect.x + rect.width - 88, y: baseY - 10, width: 84, height: 18, r: 4 },
+              style: { fill: "rgba(5,9,15,0.88)", stroke: color, lineWidth: 1 },
+            },
+            {
+              type: "text",
+              style: {
+                text: labelPrefix + " " + Number(price).toFixed(2),
+                x: rect.x + rect.width - 46,
+                y: baseY,
+                textAlign: "center",
+                textVerticalAlign: "middle",
+                fill: textColor,
+                font: "11px 'IBM Plex Mono'",
+              },
+            },
+          ],
+        });
+      });
+    });
+
+    state.trade.pendingOrders.forEach((order, index) => {
+      const price = Number(order.limitPrice ?? order.stopPrice);
+      if (!Number.isFinite(price) || price <= 0) {
+        return;
+      }
+      const point = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [rightId || 1, price]);
+      if (!Array.isArray(point)) {
+        return;
+      }
+      const y = Number(point[1]);
+      if (!Number.isFinite(y) || y < rect.y || y > rect.y + rect.height) {
+        return;
+      }
+      graphics.push({
+        id: "trade-pending-line-" + String(order.orderId || index),
+        type: "line",
+        silent: true,
+        z: 8,
+        shape: { x1: rect.x + 2, y1: y, x2: rect.x + rect.width - 2, y2: y },
+        style: { stroke: "rgba(255,200,87,0.62)", lineWidth: 1, lineDash: [3, 4] },
+      });
+    });
+
+    return graphics;
+  }
+
   function renderOverlay() {
     if (!state.chart) {
       return;
@@ -600,6 +1054,12 @@
         silent: true,
         z: 2,
         children: buildRangeBoxGraphics(),
+      }, {
+        id: "trade-overlay",
+        type: "group",
+        silent: false,
+        z: 15,
+        children: buildTradeProtectionGraphics(),
       }],
     }, { replaceMerge: ["graphic"], lazyUpdate: true });
   }
@@ -750,6 +1210,355 @@
       throw new Error(payload.detail || "Request failed.");
     }
     return payload;
+  }
+
+  async function tradeFetchJson(url, options) {
+    const request = {
+      method: options?.method || "GET",
+      headers: { "Content-Type": "application/json", ...(options?.headers || {}) },
+      body: options?.body,
+    };
+    if (!request.body) {
+      delete request.body;
+    }
+    return fetchJson(url, request);
+  }
+
+  function stopTradePolling() {
+    if (state.trade.pollTimer) {
+      window.clearTimeout(state.trade.pollTimer);
+      state.trade.pollTimer = 0;
+    }
+  }
+
+  function scheduleTradePolling() {
+    stopTradePolling();
+    if (!state.trade.authenticated) {
+      return;
+    }
+    state.trade.pollTimer = window.setTimeout(() => {
+      state.trade.pollTimer = 0;
+      refreshTradeData({ silent: true }).catch((error) => tradeStatus(error.message || "Trade refresh failed.", true));
+    }, TRADE_POLL_INTERVAL_MS);
+  }
+
+  function formatPositionSide(side) {
+    return String(side || "").toUpperCase();
+  }
+
+  function renderTradeLists() {
+    const openItems = state.trade.positions || [];
+    if (!openItems.length) {
+      elements.tradeOpenList.innerHTML = "<div class=\"sql-empty\">No open positions.</div>";
+    } else {
+      elements.tradeOpenList.innerHTML = openItems.map((position) => {
+        const stopLoss = position.stopLoss != null ? Number(position.stopLoss).toFixed(2) : "";
+        const takeProfit = position.takeProfit != null ? Number(position.takeProfit).toFixed(2) : "";
+        return [
+          "<article class=\"trade-item\" data-position-id=\"", escapeHtml(position.positionId), "\">",
+          "<div class=\"trade-item-head\"><span>", escapeHtml(formatPositionSide(position.side)), " #", escapeHtml(position.positionId), "</span><span>", escapeHtml(String(position.volume || 0)), "</span></div>",
+          "<div class=\"trade-item-meta\">Entry ", escapeHtml(formatPrice(position.entryPrice)), " | uPnL ", escapeHtml(formatSignedPnl(position.netUnrealizedPnl)), "</div>",
+          "<div class=\"trade-item-actions\">",
+          "<button class=\"ghost-button compact-button\" type=\"button\" data-action=\"close-position\" data-position-id=\"", escapeHtml(position.positionId), "\" data-volume=\"", escapeHtml(position.volume || 0), "\">Close</button>",
+          "<button class=\"ghost-button compact-button\" type=\"button\" data-action=\"close-half-position\" data-position-id=\"", escapeHtml(position.positionId), "\" data-volume=\"", escapeHtml(Math.max(1, Math.floor(Number(position.volume || 0) / 2))), "\">Close 1/2</button>",
+          "</div>",
+          "<div class=\"trade-inline-form\">",
+          "<input type=\"number\" step=\"0.01\" min=\"0\" data-role=\"amend-sl\" value=\"", escapeHtml(stopLoss), "\" placeholder=\"SL\">",
+          "<input type=\"number\" step=\"0.01\" min=\"0\" data-role=\"amend-tp\" value=\"", escapeHtml(takeProfit), "\" placeholder=\"TP\">",
+          "<button class=\"ghost-button compact-button\" type=\"button\" data-action=\"amend-position\" data-position-id=\"", escapeHtml(position.positionId), "\">Update</button>",
+          "</div>",
+          "</article>",
+        ].join("");
+      }).join("");
+    }
+
+    const pendingItems = state.trade.pendingOrders || [];
+    if (!pendingItems.length) {
+      elements.tradePendingList.innerHTML = "<div class=\"sql-empty\">No pending orders.</div>";
+    } else {
+      elements.tradePendingList.innerHTML = pendingItems.map((order) => [
+        "<article class=\"trade-item\">",
+        "<div class=\"trade-item-head\"><span>", escapeHtml(String(order.orderType || "ORDER")), " #", escapeHtml(order.orderId), "</span><span>", escapeHtml(formatPositionSide(order.side)), "</span></div>",
+        "<div class=\"trade-item-meta\">",
+        "Vol ", escapeHtml(order.volume || 0),
+        " | Px ", escapeHtml(formatPrice(order.limitPrice != null ? order.limitPrice : order.stopPrice)),
+        "</div></article>",
+      ].join("")).join("");
+    }
+
+    const historyItems = state.trade.trades || [];
+    if (!historyItems.length) {
+      elements.tradeHistoryList.innerHTML = "<div class=\"sql-empty\">No recent trade history.</div>";
+    } else {
+      elements.tradeHistoryList.innerHTML = historyItems.map((trade) => [
+        "<article class=\"trade-item\">",
+        "<div class=\"trade-item-head\"><span>", escapeHtml(formatPositionSide(trade.side)), " #", escapeHtml(trade.positionId), "</span><span>", escapeHtml(trade.isOpen ? "open" : "closed"), "</span></div>",
+        "<div class=\"trade-item-meta\">",
+        "Entry ", escapeHtml(formatPrice(trade.entryPrice)),
+        trade.exitPrice != null ? " -> Exit " + escapeHtml(formatPrice(trade.exitPrice)) : " -> Exit -",
+        " | PnL ", escapeHtml(formatSignedPnl(trade.realizedNetPnl)),
+        "</div>",
+        "</article>",
+      ].join("")).join("");
+    }
+  }
+
+  async function refreshTradeData(options) {
+    if (!state.trade.authenticated) {
+      return;
+    }
+    const silent = Boolean(options?.silent);
+    state.trade.loading = true;
+    if (!silent) {
+      tradeStatus("Loading trade state...", false);
+    }
+    try {
+      const [openPayload, historyPayload] = await Promise.all([
+        tradeFetchJson("/api/trade/open"),
+        tradeFetchJson("/api/trade/history?limit=" + String(TRADE_HISTORY_LIMIT)),
+      ]);
+      state.trade.positions = Array.isArray(openPayload.positions) ? openPayload.positions : [];
+      state.trade.pendingOrders = Array.isArray(openPayload.pendingOrders) ? openPayload.pendingOrders : [];
+      state.trade.trades = Array.isArray(historyPayload.trades) ? historyPayload.trades : [];
+      state.trade.deals = Array.isArray(historyPayload.deals) ? historyPayload.deals : [];
+      state.trade.lastLoadedAtMs = Date.now();
+      renderTradeLists();
+      renderChart({ shiftWithRun: false });
+      if (!silent) {
+        tradeStatus("Trade state updated.", false);
+      }
+      scheduleTradePolling();
+    } catch (error) {
+      if (String(error?.message || "").toLowerCase().includes("trade login required")) {
+        setTradeAuthenticated(false, null);
+        renderTradeLists();
+      }
+      throw error;
+    } finally {
+      state.trade.loading = false;
+    }
+  }
+
+  async function requestTradeLogin() {
+    if (state.trade.loginBusy || state.trade.actionBusy) {
+      return;
+    }
+    const username = (elements.tradeUsername.value || "").trim();
+    const password = elements.tradePassword.value || "";
+    if (!username || !password) {
+      tradeStatus("Username and password are required.", true);
+      return;
+    }
+    state.trade.loginBusy = true;
+    setTradeBusy(true);
+    try {
+      const payload = await tradeFetchJson("/api/trade/login", {
+        method: "POST",
+        body: JSON.stringify({ username, password }),
+      });
+      elements.tradePassword.value = "";
+      setTradeAuthenticated(true, payload.username || username);
+      tradeStatus("Trade login successful.", false);
+      await refreshTradeData({ silent: true });
+    } catch (error) {
+      tradeStatus(error.message || "Trade login failed.", true);
+    } finally {
+      state.trade.loginBusy = false;
+      setTradeBusy(false);
+    }
+  }
+
+  async function requestTradeLogout() {
+    if (state.trade.actionBusy) {
+      return;
+    }
+    setTradeBusy(true);
+    stopTradePolling();
+    try {
+      await tradeFetchJson("/api/trade/logout", { method: "POST" });
+    } catch (error) {
+      void error;
+    }
+    state.trade.positions = [];
+    state.trade.pendingOrders = [];
+    state.trade.trades = [];
+    state.trade.deals = [];
+    setTradeAuthenticated(false, null);
+    renderTradeLists();
+    renderChart({ shiftWithRun: false });
+    tradeStatus("Trade session logged out.", false);
+    setTradeBusy(false);
+  }
+
+  function readOrderInputs() {
+    const volume = Number.parseInt((elements.tradeVolume.value || "").trim(), 10);
+    if (!Number.isFinite(volume) || volume <= 0) {
+      throw new Error("Volume must be a positive integer.");
+    }
+    return {
+      volume,
+      stopLoss: parseOptionalPriceInput(elements.tradeStopLoss),
+      takeProfit: parseOptionalPriceInput(elements.tradeTakeProfit),
+    };
+  }
+
+  async function submitMarketOrder(side) {
+    if (!state.trade.authenticated || state.trade.actionBusy) {
+      return;
+    }
+    let inputs;
+    try {
+      inputs = readOrderInputs();
+    } catch (error) {
+      tradeStatus(error.message || "Invalid trade inputs.", true);
+      return;
+    }
+    setTradeBusy(true);
+    try {
+      await tradeFetchJson("/api/trade/order/market", {
+        method: "POST",
+        body: JSON.stringify({
+          side,
+          volume: inputs.volume,
+          stopLoss: inputs.stopLoss,
+          takeProfit: inputs.takeProfit,
+        }),
+      });
+      tradeStatus((side === "buy" ? "Buy" : "Sell") + " market order submitted.", false);
+      await refreshTradeData({ silent: true });
+    } catch (error) {
+      tradeStatus(error.message || "Order submit failed.", true);
+    } finally {
+      setTradeBusy(false);
+    }
+  }
+
+  async function submitClosePosition(positionId, volume) {
+    if (!state.trade.authenticated || state.trade.actionBusy) {
+      return;
+    }
+    const parsedVolume = Number.parseInt(String(volume || 0), 10);
+    if (!Number.isFinite(parsedVolume) || parsedVolume <= 0) {
+      tradeStatus("Close volume is invalid.", true);
+      return;
+    }
+    setTradeBusy(true);
+    try {
+      await tradeFetchJson("/api/trade/position/close", {
+        method: "POST",
+        body: JSON.stringify({ positionId: Number(positionId), volume: parsedVolume }),
+      });
+      tradeStatus("Position close submitted.", false);
+      await refreshTradeData({ silent: true });
+    } catch (error) {
+      tradeStatus(error.message || "Close position failed.", true);
+    } finally {
+      setTradeBusy(false);
+    }
+  }
+
+  async function submitAmendPosition(positionId, stopLoss, takeProfit) {
+    if (!state.trade.authenticated || state.trade.actionBusy) {
+      return;
+    }
+    const payload = { positionId: Number(positionId) };
+    if (stopLoss != null) {
+      payload.stopLoss = Number(stopLoss);
+    }
+    if (takeProfit != null) {
+      payload.takeProfit = Number(takeProfit);
+    }
+    if (payload.stopLoss == null && payload.takeProfit == null) {
+      tradeStatus("Provide SL or TP before amending.", true);
+      return;
+    }
+    setTradeBusy(true);
+    try {
+      await tradeFetchJson("/api/trade/position/amend-sltp", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      tradeStatus("Position protections updated.", false);
+      await refreshTradeData({ silent: true });
+    } catch (error) {
+      tradeStatus(error.message || "Amend SL/TP failed.", true);
+    } finally {
+      setTradeBusy(false);
+    }
+  }
+
+  function requestProtectionDrag(positionId, key, targetPrice) {
+    const position = activePositionById(positionId);
+    if (!position) {
+      tradeStatus("Position no longer exists.", true);
+      return;
+    }
+    const roundedPrice = Number(targetPrice).toFixed(2);
+    const nextStop = key === "stopLoss" ? Number(roundedPrice) : (position.stopLoss != null ? Number(position.stopLoss) : null);
+    const nextTake = key === "takeProfit" ? Number(roundedPrice) : (position.takeProfit != null ? Number(position.takeProfit) : null);
+    submitAmendPosition(positionId, nextStop, nextTake);
+  }
+
+  async function loadTradeSession() {
+    try {
+      const payload = await tradeFetchJson("/api/trade/me");
+      setTradeAuthenticated(Boolean(payload.authenticated), payload.username || null);
+      tradeStatus("Trade session active.", false);
+      await refreshTradeData({ silent: true });
+    } catch (error) {
+      setTradeAuthenticated(false, null);
+      renderTradeLists();
+      tradeStatus("Trade login required.", false);
+    }
+  }
+
+  function setupTradePanel() {
+    if (!elements.tradePanel) {
+      return;
+    }
+    setTradeAuthenticated(false, null);
+    renderTradeLists();
+    tradeStatus("Trade login required.", false);
+
+    elements.tradeLoginForm.addEventListener("submit", function (event) {
+      event.preventDefault();
+      requestTradeLogin();
+    });
+    elements.tradeBuyButton.addEventListener("click", function () {
+      submitMarketOrder("buy");
+    });
+    elements.tradeSellButton.addEventListener("click", function () {
+      submitMarketOrder("sell");
+    });
+    elements.tradeLogoutButton.addEventListener("click", function () {
+      requestTradeLogout();
+    });
+    elements.tradeOpenList.addEventListener("click", function (event) {
+      const button = event.target.closest("button[data-action]");
+      if (!button) {
+        return;
+      }
+      const action = button.dataset.action;
+      const positionId = Number(button.dataset.positionId);
+      if (action === "close-position" || action === "close-half-position") {
+        submitClosePosition(positionId, Number(button.dataset.volume || 0));
+        return;
+      }
+      if (action === "amend-position") {
+        const card = button.closest(".trade-item");
+        const slInput = card?.querySelector("input[data-role='amend-sl']");
+        const tpInput = card?.querySelector("input[data-role='amend-tp']");
+        try {
+          const sl = parseOptionalPriceInput(slInput);
+          const tp = parseOptionalPriceInput(tpInput);
+          submitAmendPosition(positionId, sl, tp);
+        } catch (error) {
+          tradeStatus(error.message || "Invalid SL/TP values.", true);
+        }
+      }
+    });
+
+    loadTradeSession();
   }
 
   async function resolveReviewStartId(config) {
@@ -1047,5 +1856,6 @@
   });
 
   applyInitialConfig(parseQuery());
+  setupTradePanel();
   loadAll(true);
 }());

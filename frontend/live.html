@@ -118,6 +118,71 @@
             <button class="ghost-button compact-button" id="loadMoreLeftButton" type="button">Load More Left</button>
           </div>
         </section>
+
+        <section class="live-sidebar-section trade-sidebar-section" id="tradePanel">
+          <header class="trade-panel-header">
+            <h2>Trading</h2>
+            <div class="trade-auth-pill" id="tradeAuthPill">Locked</div>
+          </header>
+          <div class="status-line" id="tradeStatusLine">Trade panel idle.</div>
+
+          <form class="trade-login-form" id="tradeLoginForm" autocomplete="off">
+            <label>
+              <span>username</span>
+              <input id="tradeUsername" type="text" value="babak" maxlength="64" autocomplete="username">
+            </label>
+            <label>
+              <span>password</span>
+              <input id="tradePassword" type="password" maxlength="128" autocomplete="current-password">
+            </label>
+            <div class="live-inline-actions">
+              <button class="primary-button compact-button" id="tradeLoginButton" type="submit">Login</button>
+            </div>
+          </form>
+
+          <div class="trade-controls" id="tradeControls" hidden>
+            <div class="live-form-grid">
+              <label>
+                <span>volume (units)</span>
+                <input id="tradeVolume" type="number" min="1" step="1" value="1000">
+              </label>
+              <label>
+                <span>stop loss (optional)</span>
+                <input id="tradeStopLoss" type="number" min="0" step="0.01" placeholder="none">
+              </label>
+              <label>
+                <span>take profit (optional)</span>
+                <input id="tradeTakeProfit" type="number" min="0" step="0.01" placeholder="none">
+              </label>
+              <div class="trade-quick-actions">
+                <button class="primary-button compact-button trade-buy-button" id="tradeBuyButton" type="button">Buy Market</button>
+                <button class="ghost-button compact-button trade-sell-button" id="tradeSellButton" type="button">Sell Market</button>
+                <button class="ghost-button compact-button" id="tradeLogoutButton" type="button">Logout</button>
+              </div>
+            </div>
+
+            <div class="trade-list-shell">
+              <div class="trade-list-title">Open positions</div>
+              <div class="trade-list" id="tradeOpenList">
+                <div class="sql-empty">No open positions.</div>
+              </div>
+            </div>
+
+            <div class="trade-list-shell">
+              <div class="trade-list-title">Pending orders</div>
+              <div class="trade-list" id="tradePendingList">
+                <div class="sql-empty">No pending orders.</div>
+              </div>
+            </div>
+
+            <div class="trade-list-shell">
+              <div class="trade-list-title">Recent trades</div>
+              <div class="trade-list" id="tradeHistoryList">
+                <div class="sql-empty">No recent trade history.</div>
+              </div>
+            </div>
+          </div>
+        </section>
       </div>
     </aside>
 

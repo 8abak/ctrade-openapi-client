@@ -236,6 +236,11 @@ textarea {
   border-color: rgba(255, 107, 136, 0.35);
 }
 
+.status-line.success {
+  color: #baf7df;
+  border-color: rgba(126, 240, 199, 0.4);
+}
+
 .live-sidebar-section {
   margin-top: 1rem;
   padding-top: 1rem;
@@ -398,6 +403,128 @@ input {
 .chart-tip-note {
   margin-top: 0.35rem;
   color: #b7c8dd;
+}
+
+.trade-sidebar-section {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.trade-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+}
+
+.trade-panel-header h2 {
+  margin: 0;
+  font-size: 1.05rem;
+  letter-spacing: 0.03em;
+}
+
+.trade-auth-pill {
+  padding: 0.35rem 0.55rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.7rem;
+  color: var(--muted);
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.trade-auth-pill.ready {
+  color: #baf7df;
+  border-color: rgba(126, 240, 199, 0.4);
+  background: rgba(126, 240, 199, 0.1);
+}
+
+.trade-login-form,
+.trade-controls {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.trade-quick-actions {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 0.5rem;
+}
+
+.trade-buy-button {
+  background: rgba(126, 240, 199, 0.9);
+  border-color: rgba(126, 240, 199, 0.9);
+}
+
+.trade-sell-button {
+  color: #ffc0cd;
+  border-color: rgba(255, 107, 136, 0.38);
+}
+
+.trade-list-shell {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.trade-list-title {
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  color: var(--accent);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.trade-list {
+  max-height: 170px;
+  overflow: auto;
+  display: grid;
+  align-content: start;
+  gap: 0.45rem;
+  padding-right: 0.1rem;
+}
+
+.trade-item {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0a101a;
+  padding: 0.5rem 0.55rem;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.trade-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.45rem;
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.74rem;
+  color: #d3e4fa;
+}
+
+.trade-item-meta {
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.71rem;
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+.trade-item-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.4rem;
+}
+
+.trade-inline-form {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 0.35rem;
+}
+
+.trade-inline-form input {
+  padding: 0.4rem 0.45rem;
+  font-size: 0.76rem;
 }
 
 .page-sql {
@@ -633,6 +760,14 @@ input {
 
   .live-form-grid,
   .live-check-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .trade-quick-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .trade-inline-form {
     grid-template-columns: 1fr;
   }
 

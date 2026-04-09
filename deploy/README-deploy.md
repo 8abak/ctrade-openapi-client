@@ -21,6 +21,21 @@ Runtime paths used by the deploy flow:
 - virtualenv: `/home/ec2-user/venvs/datavis`
 - env file: `/etc/datavis.env`
 
+Trading runtime env vars for `/etc/datavis.env`:
+- `DATAVIS_TRADE_USERNAME` (default `babak`)
+- `DATAVIS_TRADE_PASSWORD` (required to enable trade login)
+- `DATAVIS_TRADE_SESSION_SECRET` (recommended; stable secret for signed login cookie)
+- `DATAVIS_TRADE_COOKIE_SECURE` (`1` for HTTPS-only cookie in production)
+- `DATAVIS_CTRADER_CLIENT_ID`
+- `DATAVIS_CTRADER_CLIENT_SECRET`
+- `DATAVIS_CTRADER_ACCOUNT_ID`
+- `DATAVIS_CTRADER_ACCESS_TOKEN`
+- `DATAVIS_CTRADER_REFRESH_TOKEN`
+- `DATAVIS_CTRADER_SYMBOL` (default `XAUUSD`)
+- `DATAVIS_CTRADER_SYMBOL_ID` (optional; autodetected when omitted)
+- `DATAVIS_CTRADER_CONNECTION_TYPE` (`live` or `demo`)
+- optional fallback: `DATAVIS_CTRADER_CREDS_FILE` (JSON path compatible with existing `creds.json`)
+
 The deploy workflow resets and cleans the EC2 checkout, so do not store runtime-only files there.
 
 The deploy script:

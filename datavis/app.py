@@ -4,6 +4,9 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import base64
+import hmac
+import hashlib
 import time
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
@@ -16,14 +19,15 @@ import psycopg2
 import psycopg2.extras
 import sqlparse
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Query, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 from datavis.db import db_connect as shared_db_connect
 from datavis.structure import StructureEngine, replay_ticks
+from datavis.trading import CTraderGateway, load_broker_config
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
@@ -58,15 +62,65 @@ STREAM_HEARTBEAT_SECONDS = max(
     float(os.getenv("DATAVIS_STREAM_HEARTBEAT_SECONDS", "5.0")),
 )
 DEFAULT_REVIEW_TIMEZONE = "Australia/Sydney"
+TRADE_USERNAME = os.getenv("DATAVIS_TRADE_USERNAME", "babak").strip() or "babak"
+TRADE_PASSWORD = os.getenv("DATAVIS_TRADE_PASSWORD", "")
+TRADE_COOKIE_NAME = os.getenv("DATAVIS_TRADE_COOKIE_NAME", "datavis_trade_session").strip() or "datavis_trade_session"
+TRADE_SESSION_TTL_SECONDS = max(300, int(os.getenv("DATAVIS_TRADE_SESSION_TTL_SECONDS", "43200")))
+TRADE_SESSION_SECRET = os.getenv("DATAVIS_TRADE_SESSION_SECRET", "").encode("utf-8")
+TRADE_COOKIE_SECURE = os.getenv("DATAVIS_TRADE_COOKIE_SECURE", "0").strip().lower() in {"1", "true", "yes", "on"}
+TRADE_HISTORY_DEFAULT_LIMIT = 40
+TRADE_HISTORY_MAX_LIMIT = 120
 
 app = FastAPI(title="datavis.au", version="3.0.0")
 app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets")
 security = HTTPBasic(auto_error=False)
+RUNTIME_TRADE_SESSION_SECRET = TRADE_SESSION_SECRET or secrets.token_bytes(32)
+BROKER_CONFIG = load_broker_config(BASE_DIR)
+TRADE_GATEWAY = CTraderGateway(BROKER_CONFIG)
 
 
 class QueryRequest(BaseModel):
     sql: str
 
+
+class TradeLoginRequest(BaseModel):
+    username: str = Field(..., min_length=1, max_length=64)
+    password: str = Field(..., min_length=1, max_length=512)
+
+
+class TradeMarketOrderRequest(BaseModel):
+    side: str = Field(..., min_length=3, max_length=4)
+    volume: int = Field(..., ge=1)
+    stopLoss: Optional[float] = None
+    takeProfit: Optional[float] = None
+
+    @field_validator("side")
+    @classmethod
+    def validate_side(cls, value: str) -> str:
+        normalized = (value or "").strip().lower()
+        if normalized not in {"buy", "sell"}:
+            raise ValueError("side must be buy or sell")
+        return normalized
+
+
+class TradePositionCloseRequest(BaseModel):
+    positionId: int = Field(..., ge=1)
+    volume: int = Field(..., ge=1)
+
+
+class TradePositionAmendRequest(BaseModel):
+    positionId: int = Field(..., ge=1)
+    stopLoss: Optional[float] = None
+    takeProfit: Optional[float] = None
+
+    @field_validator("takeProfit", "stopLoss")
+    @classmethod
+    def validate_optional_price(cls, value: Optional[float]) -> Optional[float]:
+        if value is None:
+            return None
+        if value <= 0:
+            raise ValueError("price must be greater than 0")
+        return float(value)
 
 def ensure_database_url() -> str:
     if not DATABASE_URL:
@@ -190,6 +244,81 @@ def require_sql_admin(credentials: Optional[HTTPBasicCredentials] = Depends(secu
         )
 
     return credentials.username
+
+
+def _trade_session_sign(raw_payload: str) -> str:
+    return hmac.new(RUNTIME_TRADE_SESSION_SECRET, raw_payload.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _trade_session_encode(username: str) -> str:
+    now_ts = int(time.time())
+    payload_json = json.dumps(
+        {"u": username, "iat": now_ts, "exp": now_ts + TRADE_SESSION_TTL_SECONDS},
+        separators=(",", ":"),
+    )
+    payload = base64.urlsafe_b64encode(payload_json.encode("utf-8")).decode("utf-8").rstrip("=")
+    signature = _trade_session_sign(payload)
+    return payload + "." + signature
+
+
+def _trade_session_decode(token: str) -> Optional[Dict[str, Any]]:
+    if not token or "." not in token:
+        return None
+    payload_b64, signature = token.rsplit(".", 1)
+    expected = _trade_session_sign(payload_b64)
+    if not hmac.compare_digest(signature, expected):
+        return None
+    try:
+        padded = payload_b64 + "=" * (-len(payload_b64) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode("utf-8")).decode("utf-8"))
+    except json.JSONDecodeError:
+        return None
+    except Exception:
+        return None
+    exp = int(payload.get("exp") or 0)
+    if exp <= int(time.time()):
+        return None
+    username = str(payload.get("u") or "").strip()
+    if not username:
+        return None
+    return payload
+
+
+def _set_trade_cookie(response: Response, username: str) -> None:
+    response.set_cookie(
+        key=TRADE_COOKIE_NAME,
+        value=_trade_session_encode(username),
+        max_age=TRADE_SESSION_TTL_SECONDS,
+        httponly=True,
+        secure=TRADE_COOKIE_SECURE,
+        samesite="lax",
+        path="/",
+    )
+
+
+def _clear_trade_cookie(response: Response) -> None:
+    response.delete_cookie(
+        key=TRADE_COOKIE_NAME,
+        httponly=True,
+        secure=TRADE_COOKIE_SECURE,
+        samesite="lax",
+        path="/",
+    )
+
+
+def require_trade_auth(request: Request) -> str:
+    payload = _trade_session_decode(request.cookies.get(TRADE_COOKIE_NAME, ""))
+    if payload is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Trade login required.")
+    return str(payload["u"])
+
+
+def ensure_trade_login_configured() -> None:
+    if not TRADE_PASSWORD:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Trade login is not configured on the server.",
+        )
 
 
 def describe_columns(description: Any) -> List[Dict[str, Any]]:
@@ -1280,6 +1409,20 @@ def stream_events(
         return
 
 
+def _trade_not_configured() -> bool:
+    return not TRADE_GATEWAY.configured
+
+
+def _handle_trade_gateway_error(exc: Exception) -> None:
+    detail = str(exc) or "Trade request failed."
+    status_code = status.HTTP_502_BAD_GATEWAY
+    if "not configured" in detail.lower():
+        status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    if "must" in detail.lower() or "required" in detail.lower() or "invalid" in detail.lower():
+        status_code = status.HTTP_400_BAD_REQUEST
+    raise HTTPException(status_code=status_code, detail=detail) from exc
+
+
 @app.get("/", include_in_schema=False)
 def home_page() -> FileResponse:
     return FileResponse(FRONTEND_DIR / "index.html")
@@ -1331,6 +1474,134 @@ def sql_schema(_: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
 @app.post("/api/sql/query")
 def sql_query(payload: QueryRequest, _: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
     return execute_query(payload.sql)
+
+
+@app.post("/api/trade/login")
+def trade_login(payload: TradeLoginRequest, response: Response) -> Dict[str, Any]:
+    ensure_trade_login_configured()
+    username = (payload.username or "").strip()
+    password = payload.password or ""
+    valid_user = secrets.compare_digest(username, TRADE_USERNAME)
+    valid_password = secrets.compare_digest(password, TRADE_PASSWORD)
+    if not (valid_user and valid_password):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid trade credentials.")
+    _set_trade_cookie(response, username)
+    return {"ok": True, "username": username}
+
+
+@app.post("/api/trade/logout")
+def trade_logout(response: Response, _: str = Depends(require_trade_auth)) -> Dict[str, Any]:
+    _clear_trade_cookie(response)
+    return {"ok": True}
+
+
+@app.get("/api/trade/me")
+def trade_me(username: str = Depends(require_trade_auth)) -> Dict[str, Any]:
+    return {
+        "authenticated": True,
+        "username": username,
+        "configured": TRADE_GATEWAY.configured,
+        "broker": TRADE_GATEWAY.status(),
+    }
+
+
+@app.get("/api/trade/open")
+def trade_open(username: str = Depends(require_trade_auth)) -> Dict[str, Any]:
+    _ = username
+    if _trade_not_configured():
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Broker integration is not configured.")
+    try:
+        snapshot = TRADE_GATEWAY.snapshot()
+        return {
+            "symbol": snapshot.get("symbol"),
+            "symbolId": snapshot.get("symbolId"),
+            "symbolDigits": snapshot.get("symbolDigits"),
+            "positions": snapshot.get("positions", []),
+            "pendingOrders": snapshot.get("pendingOrders", []),
+            "serverTimeMs": now_ms(),
+        }
+    except Exception as exc:
+        _handle_trade_gateway_error(exc)
+
+
+@app.get("/api/trade/pending")
+def trade_pending(username: str = Depends(require_trade_auth)) -> Dict[str, Any]:
+    _ = username
+    if _trade_not_configured():
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Broker integration is not configured.")
+    try:
+        snapshot = TRADE_GATEWAY.snapshot()
+        return {
+            "symbol": snapshot.get("symbol"),
+            "symbolId": snapshot.get("symbolId"),
+            "pendingOrders": snapshot.get("pendingOrders", []),
+            "serverTimeMs": now_ms(),
+        }
+    except Exception as exc:
+        _handle_trade_gateway_error(exc)
+
+
+@app.get("/api/trade/history")
+def trade_history(
+    limit: int = Query(TRADE_HISTORY_DEFAULT_LIMIT, ge=1, le=TRADE_HISTORY_MAX_LIMIT),
+    username: str = Depends(require_trade_auth),
+) -> Dict[str, Any]:
+    _ = username
+    if _trade_not_configured():
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Broker integration is not configured.")
+    try:
+        payload = TRADE_GATEWAY.history(limit=clamp_int(limit, 1, TRADE_HISTORY_MAX_LIMIT))
+        payload["serverTimeMs"] = now_ms()
+        return payload
+    except Exception as exc:
+        _handle_trade_gateway_error(exc)
+
+
+@app.post("/api/trade/order/market")
+def trade_order_market(payload: TradeMarketOrderRequest, username: str = Depends(require_trade_auth)) -> Dict[str, Any]:
+    _ = username
+    if _trade_not_configured():
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Broker integration is not configured.")
+    try:
+        result = TRADE_GATEWAY.place_market_order(
+            side=payload.side,
+            volume=int(payload.volume),
+            stop_loss=payload.stopLoss,
+            take_profit=payload.takeProfit,
+        )
+        return {"ok": True, "result": result, "serverTimeMs": now_ms()}
+    except Exception as exc:
+        _handle_trade_gateway_error(exc)
+
+
+@app.post("/api/trade/position/close")
+def trade_position_close(payload: TradePositionCloseRequest, username: str = Depends(require_trade_auth)) -> Dict[str, Any]:
+    _ = username
+    if _trade_not_configured():
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Broker integration is not configured.")
+    try:
+        result = TRADE_GATEWAY.close_position(position_id=payload.positionId, volume=payload.volume)
+        return {"ok": True, "result": result, "serverTimeMs": now_ms()}
+    except Exception as exc:
+        _handle_trade_gateway_error(exc)
+
+
+@app.post("/api/trade/position/amend-sltp")
+def trade_position_amend(payload: TradePositionAmendRequest, username: str = Depends(require_trade_auth)) -> Dict[str, Any]:
+    _ = username
+    if _trade_not_configured():
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Broker integration is not configured.")
+    if payload.stopLoss is None and payload.takeProfit is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="At least one of stopLoss or takeProfit is required.")
+    try:
+        result = TRADE_GATEWAY.amend_position_sltp(
+            position_id=payload.positionId,
+            stop_loss=payload.stopLoss,
+            take_profit=payload.takeProfit,
+        )
+        return {"ok": True, "result": result, "serverTimeMs": now_ms()}
+    except Exception as exc:
+        _handle_trade_gateway_error(exc)
 
 
 @app.get("/api/live/review-start")
