@@ -10,7 +10,7 @@ import hashlib
 import time
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -70,6 +70,7 @@ TRADE_SESSION_SECRET = os.getenv("DATAVIS_TRADE_SESSION_SECRET", "").encode("utf
 TRADE_COOKIE_SECURE = os.getenv("DATAVIS_TRADE_COOKIE_SECURE", "0").strip().lower() in {"1", "true", "yes", "on"}
 TRADE_HISTORY_DEFAULT_LIMIT = 40
 TRADE_HISTORY_MAX_LIMIT = 120
+TRADE_DEFAULT_LOT_SIZE = Decimal("0.01")
 
 app = FastAPI(title="datavis.au", version="3.0.0")
 app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets")
@@ -90,7 +91,8 @@ class TradeLoginRequest(BaseModel):
 
 class TradeMarketOrderRequest(BaseModel):
     side: str = Field(..., min_length=3, max_length=4)
-    volume: int = Field(..., ge=1)
+    volume: Optional[int] = Field(None, ge=1)
+    lotSize: Optional[float] = Field(None, gt=0)
     stopLoss: Optional[float] = None
     takeProfit: Optional[float] = None
 
@@ -319,6 +321,45 @@ def ensure_trade_login_configured() -> None:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Trade login is not configured on the server.",
         )
+
+
+def trade_symbol_info() -> Dict[str, Any]:
+    if _trade_not_configured():
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Broker integration is not configured.")
+    try:
+        info = TRADE_GATEWAY.symbol_info()
+    except Exception as exc:
+        _handle_trade_gateway_error(exc)
+    info["defaultLotSize"] = float(TRADE_DEFAULT_LOT_SIZE)
+    return info
+
+
+def trade_volume_from_request(payload: TradeMarketOrderRequest) -> int:
+    if payload.lotSize is not None:
+        symbol_info = trade_symbol_info()
+        lot_size_units = int(symbol_info.get("lotSize") or 0)
+        step_volume = int(symbol_info.get("stepVolume") or 1)
+        min_volume = int(symbol_info.get("minVolume") or 1)
+        if lot_size_units <= 0:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Broker lot-size mapping is unavailable.")
+        lots = Decimal(str(payload.lotSize))
+        broker_volume = int((lots * Decimal(lot_size_units)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+        if broker_volume < min_volume:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Lot size must be at least {symbol_info.get('minLotSize') or float(TRADE_DEFAULT_LOT_SIZE):g}.",
+            )
+        if step_volume > 1 and broker_volume % step_volume != 0:
+            step_lot = symbol_info.get("lotStep")
+            step_hint = f" in {step_lot:g} lot steps" if isinstance(step_lot, (int, float)) and step_lot > 0 else ""
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Lot size is not aligned to broker volume increments{step_hint}.",
+            )
+        return broker_volume
+    if payload.volume is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="lotSize or volume is required.")
+    return int(payload.volume)
 
 
 def describe_columns(description: Any) -> List[Dict[str, Any]]:
@@ -1496,9 +1537,11 @@ def trade_logout(response: Response, _: str = Depends(require_trade_auth)) -> Di
 
 
 @app.get("/api/trade/me")
-def trade_me(username: str = Depends(require_trade_auth)) -> Dict[str, Any]:
+def trade_me(request: Request) -> Dict[str, Any]:
+    payload = _trade_session_decode(request.cookies.get(TRADE_COOKIE_NAME, ""))
+    username = str(payload["u"]) if payload else None
     return {
-        "authenticated": True,
+        "authenticated": bool(username),
         "username": username,
         "configured": TRADE_GATEWAY.configured,
         "broker": TRADE_GATEWAY.status(),
@@ -1512,10 +1555,13 @@ def trade_open(username: str = Depends(require_trade_auth)) -> Dict[str, Any]:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Broker integration is not configured.")
     try:
         snapshot = TRADE_GATEWAY.snapshot()
+        volume_info = dict(snapshot.get("volumeInfo") or {})
+        volume_info["defaultLotSize"] = float(TRADE_DEFAULT_LOT_SIZE)
         return {
             "symbol": snapshot.get("symbol"),
             "symbolId": snapshot.get("symbolId"),
             "symbolDigits": snapshot.get("symbolDigits"),
+            "volumeInfo": volume_info,
             "positions": snapshot.get("positions", []),
             "pendingOrders": snapshot.get("pendingOrders", []),
             "serverTimeMs": now_ms(),
@@ -1531,9 +1577,12 @@ def trade_pending(username: str = Depends(require_trade_auth)) -> Dict[str, Any]
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Broker integration is not configured.")
     try:
         snapshot = TRADE_GATEWAY.snapshot()
+        volume_info = dict(snapshot.get("volumeInfo") or {})
+        volume_info["defaultLotSize"] = float(TRADE_DEFAULT_LOT_SIZE)
         return {
             "symbol": snapshot.get("symbol"),
             "symbolId": snapshot.get("symbolId"),
+            "volumeInfo": volume_info,
             "pendingOrders": snapshot.get("pendingOrders", []),
             "serverTimeMs": now_ms(),
         }
@@ -1551,6 +1600,9 @@ def trade_history(
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Broker integration is not configured.")
     try:
         payload = TRADE_GATEWAY.history(limit=clamp_int(limit, 1, TRADE_HISTORY_MAX_LIMIT))
+        volume_info = dict(payload.get("volumeInfo") or {})
+        volume_info["defaultLotSize"] = float(TRADE_DEFAULT_LOT_SIZE)
+        payload["volumeInfo"] = volume_info
         payload["serverTimeMs"] = now_ms()
         return payload
     except Exception as exc:
@@ -1563,13 +1615,22 @@ def trade_order_market(payload: TradeMarketOrderRequest, username: str = Depends
     if _trade_not_configured():
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Broker integration is not configured.")
     try:
+        volume = trade_volume_from_request(payload)
         result = TRADE_GATEWAY.place_market_order(
             side=payload.side,
-            volume=int(payload.volume),
+            volume=volume,
             stop_loss=payload.stopLoss,
             take_profit=payload.takeProfit,
         )
-        return {"ok": True, "result": result, "serverTimeMs": now_ms()}
+        return {
+            "ok": True,
+            "result": result,
+            "submittedVolume": volume,
+            "submittedLotSize": payload.lotSize,
+            "serverTimeMs": now_ms(),
+        }
+    except HTTPException:
+        raise
     except Exception as exc:
         _handle_trade_gateway_error(exc)
 

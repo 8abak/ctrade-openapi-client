@@ -141,24 +141,9 @@
           </form>
 
           <div class="trade-controls" id="tradeControls" hidden>
-            <div class="live-form-grid">
-              <label>
-                <span>volume (units)</span>
-                <input id="tradeVolume" type="number" min="1" step="1" value="1000">
-              </label>
-              <label>
-                <span>stop loss (optional)</span>
-                <input id="tradeStopLoss" type="number" min="0" step="0.01" placeholder="none">
-              </label>
-              <label>
-                <span>take profit (optional)</span>
-                <input id="tradeTakeProfit" type="number" min="0" step="0.01" placeholder="none">
-              </label>
-              <div class="trade-quick-actions">
-                <button class="primary-button compact-button trade-buy-button" id="tradeBuyButton" type="button">Buy Market</button>
-                <button class="ghost-button compact-button trade-sell-button" id="tradeSellButton" type="button">Sell Market</button>
-                <button class="ghost-button compact-button" id="tradeLogoutButton" type="button">Logout</button>
-              </div>
+            <div class="trade-session-shell">
+              <div class="trade-session-copy" id="tradeSessionSummary">Chart entry enabled when the trade session is active.</div>
+              <button class="ghost-button compact-button" id="tradeLogoutButton" type="button">Logout</button>
             </div>
 
             <div class="trade-list-shell">
@@ -189,6 +174,57 @@
     <section class="live-chart-stage">
       <div class="panel chart-panel live-chart-panel" id="chartPanel">
         <div id="liveChart" class="chart-host"></div>
+        <div class="chart-trade-entry" id="chartTradeEntry">
+          <div class="chart-trade-entry-buttons">
+            <button class="chart-trade-button chart-trade-button-buy" id="chartTradeBuyButton" type="button">Buy Market</button>
+            <button class="chart-trade-button chart-trade-button-sell" id="chartTradeSellButton" type="button">Sell Market</button>
+          </div>
+          <div class="chart-trade-hint" id="chartTradeHint">Login required</div>
+        </div>
+
+        <div class="panel chart-trade-confirm" id="chartTradeConfirm" hidden>
+          <div class="chart-trade-card-title" id="chartTradeConfirmTitle">Buy Market</div>
+          <div class="chart-trade-card-copy" id="chartTradeConfirmCopy">Review the market order before submit.</div>
+          <div class="chart-trade-card-grid">
+            <label>
+              <span>lot size</span>
+              <input id="chartTradeLotSize" type="number" min="0.01" step="0.01" value="0.01">
+            </label>
+            <label>
+              <span>stop loss</span>
+              <input id="chartTradeStopLoss" type="number" min="0" step="0.01" placeholder="optional">
+            </label>
+            <label>
+              <span>take profit</span>
+              <input id="chartTradeTakeProfit" type="number" min="0" step="0.01" placeholder="optional">
+            </label>
+          </div>
+          <div class="chart-trade-card-copy" id="chartTradeVolumeInfo">Default size is 0.01 lot.</div>
+          <div class="chart-trade-card-actions">
+            <button class="primary-button compact-button" id="chartTradeConfirmButton" type="button">Confirm</button>
+            <button class="ghost-button compact-button" id="chartTradeCancelButton" type="button">Cancel</button>
+          </div>
+        </div>
+
+        <div class="panel chart-position-editor" id="chartPositionEditor" hidden>
+          <div class="chart-trade-card-title" id="chartPositionTitle">Position editor</div>
+          <div class="chart-trade-card-copy" id="chartPositionCopy">Drag SL/TP on chart or type exact prices, then confirm once.</div>
+          <div class="chart-trade-card-grid">
+            <label>
+              <span>stop loss</span>
+              <input id="chartPositionStopLoss" type="number" min="0" step="0.01" placeholder="none">
+            </label>
+            <label>
+              <span>take profit</span>
+              <input id="chartPositionTakeProfit" type="number" min="0" step="0.01" placeholder="none">
+            </label>
+          </div>
+          <div class="chart-trade-card-copy" id="chartPositionPendingState">No pending changes.</div>
+          <div class="chart-trade-card-actions">
+            <button class="primary-button compact-button" id="chartPositionConfirmButton" type="button">Confirm</button>
+            <button class="ghost-button compact-button" id="chartPositionCancelButton" type="button">Cancel</button>
+          </div>
+        </div>
       </div>
     </section>
   </div>

@@ -451,10 +451,38 @@ class CTraderGateway:
         except Exception:
             return str(value)
 
+    @staticmethod
+    def _volume_to_lots(volume: Any, lot_size: Any) -> Optional[float]:
+        try:
+            volume_value = int(volume)
+            lot_size_value = int(lot_size)
+        except Exception:
+            return None
+        if lot_size_value <= 0:
+            return None
+        return round(float(volume_value) / float(lot_size_value), 8)
+
+    def symbol_info(self) -> Dict[str, Any]:
+        symbol = self._resolve_symbol()
+        lot_size = int(symbol.get("lotSize") or 0)
+        min_volume = int(symbol.get("minVolume") or 1)
+        step_volume = int(symbol.get("stepVolume") or 1)
+        return {
+            "symbol": self._config.symbol,
+            "symbolId": symbol["symbolId"],
+            "symbolDigits": symbol["digits"],
+            "minVolume": min_volume,
+            "stepVolume": step_volume,
+            "lotSize": lot_size,
+            "minLotSize": self._volume_to_lots(min_volume, lot_size),
+            "lotStep": self._volume_to_lots(step_volume, lot_size),
+        }
+
     def snapshot(self) -> Dict[str, Any]:
         symbol = self._resolve_symbol()
         reconcile = self._reconcile()
         unrealized = self._unrealized_map()
+        lot_size = int(symbol.get("lotSize") or 0)
 
         positions: List[Dict[str, Any]] = []
         pending_orders: List[Dict[str, Any]] = []
@@ -476,6 +504,7 @@ class CTraderGateway:
                     "positionId": position_id,
                     "side": self._trade_side_name(int(getattr(trade_data, "tradeSide", SELL))),
                     "volume": int(getattr(trade_data, "volume", 0)),
+                    "volumeLots": self._volume_to_lots(getattr(trade_data, "volume", 0), lot_size),
                     "symbolId": int(getattr(trade_data, "symbolId", 0)),
                     "symbol": self._config.symbol,
                     "entryPrice": float(getattr(item, "price", 0.0) or 0.0),
@@ -506,6 +535,7 @@ class CTraderGateway:
                     "positionId": int(getattr(order, "positionId", 0)) if order.HasField("positionId") else None,
                     "side": self._trade_side_name(int(getattr(trade_data, "tradeSide", SELL))),
                     "volume": int(getattr(trade_data, "volume", 0)),
+                    "volumeLots": self._volume_to_lots(getattr(trade_data, "volume", 0), lot_size),
                     "orderType": self._enum_name(ProtoOAOrderType, int(getattr(order, "orderType", 0))),
                     "orderStatus": self._enum_name(ProtoOAOrderStatus, status_raw),
                     "limitPrice": float(getattr(order, "limitPrice", 0.0)) if order.HasField("limitPrice") else None,
@@ -523,6 +553,7 @@ class CTraderGateway:
             "symbol": self._config.symbol,
             "symbolId": symbol["symbolId"],
             "symbolDigits": symbol["digits"],
+            "volumeInfo": self.symbol_info(),
             "positions": positions,
             "pendingOrders": pending_orders,
         }
@@ -603,6 +634,7 @@ class CTraderGateway:
         self.ensure_ready()
         symbol = self._resolve_symbol()
         snapshot = self.snapshot()
+        lot_size = int(symbol.get("lotSize") or 0)
         open_position_ids = {int(item["positionId"]) for item in snapshot.get("positions", [])}
         now = datetime.now(tz=timezone.utc)
         from_ts = int((now - timedelta(days=30)).timestamp() * 1000)
@@ -642,6 +674,7 @@ class CTraderGateway:
                     "positionId": int(getattr(deal, "positionId", 0)),
                     "side": self._trade_side_name(int(getattr(deal, "tradeSide", SELL))),
                     "volume": int(getattr(deal, "volume", 0)),
+                    "volumeLots": self._volume_to_lots(getattr(deal, "volume", 0), lot_size),
                     "filledVolume": int(getattr(deal, "filledVolume", 0)),
                     "price": float(getattr(deal, "executionPrice", 0.0) or 0.0),
                     "timestampMs": exec_ts if exec_ts > 0 else None,
@@ -673,6 +706,7 @@ class CTraderGateway:
                     "positionId": position_id,
                     "side": first.get("side"),
                     "volume": first.get("volume"),
+                    "volumeLots": self._volume_to_lots(first.get("volume"), lot_size),
                     "entryPrice": first.get("price"),
                     "entryTimestampMs": first.get("timestampMs"),
                     "entryTimestamp": first.get("timestamp"),
@@ -697,6 +731,7 @@ class CTraderGateway:
         return {
             "symbol": self._config.symbol,
             "symbolId": symbol["symbolId"],
+            "volumeInfo": self.symbol_info(),
             "trades": trades,
             "deals": deals,
             "hasMore": bool(getattr(payload, "hasMore", False)),

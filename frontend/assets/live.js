@@ -30,6 +30,7 @@
   };
   const TRADE_POLL_INTERVAL_MS = 8000;
   const TRADE_HISTORY_LIMIT = 40;
+  const TRADE_DEFAULT_LOT_SIZE = 0.01;
   const TRADE_MARKER_COLORS = {
     buyEntry: "#7ef0c7",
     sellEntry: "#ff9fb2",
@@ -72,6 +73,10 @@
       trades: [],
       deals: [],
       lastLoadedAtMs: null,
+      volumeInfo: null,
+      activeOrderSide: null,
+      activePositionId: null,
+      pendingProtectionEdits: {},
     },
   };
 
@@ -105,15 +110,32 @@
     tradePassword: document.getElementById("tradePassword"),
     tradeLoginButton: document.getElementById("tradeLoginButton"),
     tradeControls: document.getElementById("tradeControls"),
-    tradeVolume: document.getElementById("tradeVolume"),
-    tradeStopLoss: document.getElementById("tradeStopLoss"),
-    tradeTakeProfit: document.getElementById("tradeTakeProfit"),
-    tradeBuyButton: document.getElementById("tradeBuyButton"),
-    tradeSellButton: document.getElementById("tradeSellButton"),
+    tradeSessionSummary: document.getElementById("tradeSessionSummary"),
     tradeLogoutButton: document.getElementById("tradeLogoutButton"),
     tradeOpenList: document.getElementById("tradeOpenList"),
     tradePendingList: document.getElementById("tradePendingList"),
     tradeHistoryList: document.getElementById("tradeHistoryList"),
+    chartTradeEntry: document.getElementById("chartTradeEntry"),
+    chartTradeBuyButton: document.getElementById("chartTradeBuyButton"),
+    chartTradeSellButton: document.getElementById("chartTradeSellButton"),
+    chartTradeHint: document.getElementById("chartTradeHint"),
+    chartTradeConfirm: document.getElementById("chartTradeConfirm"),
+    chartTradeConfirmTitle: document.getElementById("chartTradeConfirmTitle"),
+    chartTradeConfirmCopy: document.getElementById("chartTradeConfirmCopy"),
+    chartTradeLotSize: document.getElementById("chartTradeLotSize"),
+    chartTradeStopLoss: document.getElementById("chartTradeStopLoss"),
+    chartTradeTakeProfit: document.getElementById("chartTradeTakeProfit"),
+    chartTradeVolumeInfo: document.getElementById("chartTradeVolumeInfo"),
+    chartTradeConfirmButton: document.getElementById("chartTradeConfirmButton"),
+    chartTradeCancelButton: document.getElementById("chartTradeCancelButton"),
+    chartPositionEditor: document.getElementById("chartPositionEditor"),
+    chartPositionTitle: document.getElementById("chartPositionTitle"),
+    chartPositionCopy: document.getElementById("chartPositionCopy"),
+    chartPositionStopLoss: document.getElementById("chartPositionStopLoss"),
+    chartPositionTakeProfit: document.getElementById("chartPositionTakeProfit"),
+    chartPositionPendingState: document.getElementById("chartPositionPendingState"),
+    chartPositionConfirmButton: document.getElementById("chartPositionConfirmButton"),
+    chartPositionCancelButton: document.getElementById("chartPositionCancelButton"),
   };
 
   function sanitizeWindowValue(rawValue) {
@@ -271,11 +293,22 @@
   function setTradeBusy(busy) {
     const disabled = Boolean(busy);
     state.trade.actionBusy = disabled;
-    [elements.tradeBuyButton, elements.tradeSellButton, elements.tradeLogoutButton, elements.tradeLoginButton].forEach((button) => {
+    [
+      elements.tradeLogoutButton,
+      elements.tradeLoginButton,
+      elements.chartTradeBuyButton,
+      elements.chartTradeSellButton,
+      elements.chartTradeConfirmButton,
+      elements.chartTradeCancelButton,
+      elements.chartPositionConfirmButton,
+      elements.chartPositionCancelButton,
+    ].forEach((button) => {
       if (button) {
         button.disabled = disabled;
       }
     });
+    renderTradeEntryOverlay();
+    renderPositionEditor();
   }
 
   function setTradeAuthenticated(authenticated, username) {
@@ -285,6 +318,14 @@
     elements.tradeControls.hidden = !state.trade.authenticated;
     elements.tradeAuthPill.classList.toggle("ready", state.trade.authenticated);
     elements.tradeAuthPill.textContent = state.trade.authenticated ? ("Ready " + (state.trade.username || "")) : "Locked";
+    if (!state.trade.authenticated) {
+      state.trade.activeOrderSide = null;
+      state.trade.activePositionId = null;
+      state.trade.pendingProtectionEdits = {};
+    }
+    renderTradeEntryOverlay();
+    renderPositionEditor();
+    queueOverlayRender();
   }
 
   function parseOptionalPriceInput(element) {
@@ -306,6 +347,61 @@
     }
     const fixed = number.toFixed(2);
     return number > 0 ? "+" + fixed : fixed;
+  }
+
+  function formatCompactNumber(value, digits) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) {
+      return "-";
+    }
+    return number.toFixed(digits).replace(/\.?0+$/, "");
+  }
+
+  function formatLots(value) {
+    return formatCompactNumber(value, 4);
+  }
+
+  function currentTradeVolumeInfo() {
+    return state.trade.volumeInfo || { defaultLotSize: TRADE_DEFAULT_LOT_SIZE };
+  }
+
+  function tradeLotSizeUnits() {
+    return Number(currentTradeVolumeInfo().lotSize || 0);
+  }
+
+  function volumeToLots(volume) {
+    const lotSize = tradeLotSizeUnits();
+    const units = Number(volume);
+    if (!Number.isFinite(units) || !Number.isFinite(lotSize) || lotSize <= 0) {
+      return null;
+    }
+    return units / lotSize;
+  }
+
+  function positionLots(position) {
+    const direct = Number(position?.volumeLots);
+    if (Number.isFinite(direct)) {
+      return direct;
+    }
+    return volumeToLots(position?.volume);
+  }
+
+  function formatTradeVolume(volume, lots) {
+    const lotValue = Number.isFinite(Number(lots)) ? formatLots(lots) + " lot" : null;
+    const unitValue = Number.isFinite(Number(volume)) ? String(volume) + " u" : null;
+    return [lotValue, unitValue].filter(Boolean).join(" | ") || "-";
+  }
+
+  function sanitizeEditableProtectionValue(rawValue, fallbackValue) {
+    const raw = String(rawValue || "").trim();
+    if (!raw) {
+      return fallbackValue == null ? null : Number(fallbackValue);
+    }
+    const number = Number(raw);
+    if (!Number.isFinite(number) || number <= 0) {
+      throw new Error("Price values must be greater than zero.");
+    }
+    return number;
   }
 
   function escapeHtml(value) {
@@ -397,6 +493,187 @@
   function activePositionById(positionId) {
     const id = Number(positionId);
     return state.trade.positions.find((item) => Number(item.positionId) === id) || null;
+  }
+
+  function activeTradePosition() {
+    return activePositionById(state.trade.activePositionId);
+  }
+
+  function samePriceValue(left, right) {
+    if (left == null && right == null) {
+      return true;
+    }
+    const leftNumber = Number(left);
+    const rightNumber = Number(right);
+    if (!Number.isFinite(leftNumber) || !Number.isFinite(rightNumber)) {
+      return false;
+    }
+    return Math.abs(leftNumber - rightNumber) < 0.0000001;
+  }
+
+  function pendingProtectionForPosition(position) {
+    const pending = state.trade.pendingProtectionEdits[String(position.positionId)] || {};
+    const stopLoss = Object.prototype.hasOwnProperty.call(pending, "stopLoss") ? pending.stopLoss : (position.stopLoss != null ? Number(position.stopLoss) : null);
+    const takeProfit = Object.prototype.hasOwnProperty.call(pending, "takeProfit") ? pending.takeProfit : (position.takeProfit != null ? Number(position.takeProfit) : null);
+    const stopChanged = !samePriceValue(stopLoss, position.stopLoss);
+    const takeChanged = !samePriceValue(takeProfit, position.takeProfit);
+    return {
+      stopLoss,
+      takeProfit,
+      stopChanged,
+      takeChanged,
+      hasChanges: stopChanged || takeChanged,
+    };
+  }
+
+  function discardPendingProtection(positionId) {
+    if (positionId == null) {
+      state.trade.pendingProtectionEdits = {};
+    } else {
+      delete state.trade.pendingProtectionEdits[String(positionId)];
+    }
+    renderPositionEditor();
+    queueOverlayRender();
+  }
+
+  function setActiveTradePosition(positionId) {
+    const position = activePositionById(positionId);
+    state.trade.activePositionId = position ? Number(position.positionId) : null;
+    renderPositionEditor();
+    queueOverlayRender();
+  }
+
+  function setPendingProtectionValue(positionId, key, value) {
+    const position = activePositionById(positionId);
+    if (!position || (key !== "stopLoss" && key !== "takeProfit")) {
+      return;
+    }
+    const pendingKey = String(position.positionId);
+    const current = { ...(state.trade.pendingProtectionEdits[pendingKey] || {}) };
+    if (samePriceValue(value, position[key])) {
+      delete current[key];
+    } else {
+      current[key] = value == null ? null : Number(value);
+    }
+    if (!Object.keys(current).length) {
+      delete state.trade.pendingProtectionEdits[pendingKey];
+    } else {
+      state.trade.pendingProtectionEdits[pendingKey] = current;
+    }
+    state.trade.activePositionId = Number(position.positionId);
+    renderPositionEditor();
+    queueOverlayRender();
+  }
+
+  function syncTradeSelection() {
+    const openIds = new Set(state.trade.positions.map((item) => Number(item.positionId)));
+    Object.keys(state.trade.pendingProtectionEdits).forEach((positionId) => {
+      if (!openIds.has(Number(positionId))) {
+        delete state.trade.pendingProtectionEdits[positionId];
+      }
+    });
+    if (!state.trade.positions.length) {
+      state.trade.activePositionId = null;
+      return;
+    }
+    if (!openIds.has(Number(state.trade.activePositionId))) {
+      state.trade.activePositionId = Number(state.trade.positions[0].positionId);
+    }
+  }
+
+  function syncTradeVolumeInputs() {
+    const info = currentTradeVolumeInfo();
+    const defaultLotSize = Number(info.defaultLotSize || TRADE_DEFAULT_LOT_SIZE);
+    const minLotSize = Number(info.minLotSize || defaultLotSize);
+    const lotStep = Number(info.lotStep || defaultLotSize);
+    if (elements.chartTradeLotSize) {
+      elements.chartTradeLotSize.min = String(Number.isFinite(minLotSize) && minLotSize > 0 ? minLotSize : TRADE_DEFAULT_LOT_SIZE);
+      elements.chartTradeLotSize.step = String(Number.isFinite(lotStep) && lotStep > 0 ? lotStep : TRADE_DEFAULT_LOT_SIZE);
+      if (!(Number(elements.chartTradeLotSize.value) > 0)) {
+        elements.chartTradeLotSize.value = formatLots(defaultLotSize);
+      }
+    }
+    if (elements.chartTradeVolumeInfo) {
+      const unitsPerLot = tradeLotSizeUnits();
+      const unitText = Number.isFinite(unitsPerLot) && unitsPerLot > 0
+        ? " | " + formatLots(defaultLotSize) + " lot = " + formatCompactNumber(defaultLotSize * unitsPerLot, 0) + " units"
+        : "";
+      const stepText = Number.isFinite(lotStep) && lotStep > 0 ? " | step " + formatLots(lotStep) + " lot" : "";
+      elements.chartTradeVolumeInfo.textContent = "Default size is " + formatLots(defaultLotSize) + " lot" + unitText + stepText + ".";
+    }
+  }
+
+  function closeTradeConfirm() {
+    state.trade.activeOrderSide = null;
+    if (elements.chartTradeConfirm) {
+      elements.chartTradeConfirm.hidden = true;
+    }
+    renderTradeEntryOverlay();
+  }
+
+  function openTradeConfirm(side) {
+    if (!state.trade.authenticated || state.trade.actionBusy) {
+      return;
+    }
+    state.trade.activeOrderSide = side === "sell" ? "sell" : "buy";
+    syncTradeVolumeInputs();
+    renderTradeEntryOverlay();
+  }
+
+  function renderTradeEntryOverlay() {
+    if (!elements.chartTradeEntry) {
+      return;
+    }
+    const authenticated = state.trade.authenticated;
+    const busy = state.trade.actionBusy;
+    if (elements.chartTradeBuyButton) {
+      elements.chartTradeBuyButton.disabled = !authenticated || busy;
+    }
+    if (elements.chartTradeSellButton) {
+      elements.chartTradeSellButton.disabled = !authenticated || busy;
+    }
+    if (elements.chartTradeHint) {
+      elements.chartTradeHint.textContent = authenticated
+        ? ("Session active | default " + formatLots(Number(currentTradeVolumeInfo().defaultLotSize || TRADE_DEFAULT_LOT_SIZE)) + " lot")
+        : "Login required";
+    }
+    if (elements.chartTradeConfirm) {
+      const open = authenticated && Boolean(state.trade.activeOrderSide);
+      elements.chartTradeConfirm.hidden = !open;
+      if (open) {
+        const sideLabel = state.trade.activeOrderSide === "sell" ? "Sell Market" : "Buy Market";
+        elements.chartTradeConfirmTitle.textContent = sideLabel;
+        elements.chartTradeConfirmCopy.textContent = "Submit " + sideLabel.toLowerCase() + " with the configured lot size.";
+      }
+    }
+  }
+
+  function renderPositionEditor() {
+    if (!elements.chartPositionEditor) {
+      return;
+    }
+    syncTradeSelection();
+    const position = activeTradePosition();
+    const visible = state.trade.authenticated && Boolean(position);
+    elements.chartPositionEditor.hidden = !visible;
+    if (!visible) {
+      elements.chartPositionEditor.classList.remove("is-pending");
+      return;
+    }
+    const draft = pendingProtectionForPosition(position);
+    elements.chartPositionTitle.textContent = formatPositionSide(position.side) + " #" + String(position.positionId) + " | " + formatTradeVolume(position.volume, positionLots(position));
+    elements.chartPositionCopy.textContent = "Drag SL/TP on chart or type exact prices, then confirm once.";
+    elements.chartPositionStopLoss.value = draft.stopLoss != null ? Number(draft.stopLoss).toFixed(2) : "";
+    elements.chartPositionTakeProfit.value = draft.takeProfit != null ? Number(draft.takeProfit).toFixed(2) : "";
+    elements.chartPositionPendingState.textContent = draft.hasChanges
+      ? "Pending change: " + [
+        draft.stopChanged ? "SL " + formatPrice(draft.stopLoss) : null,
+        draft.takeChanged ? "TP " + formatPrice(draft.takeProfit) : null,
+      ].filter(Boolean).join(" | ")
+      : "No pending changes.";
+    elements.chartPositionEditor.classList.toggle("is-pending", draft.hasChanges);
+    elements.chartPositionConfirmButton.disabled = state.trade.actionBusy || !draft.hasChanges;
+    elements.chartPositionCancelButton.disabled = state.trade.actionBusy || !draft.hasChanges;
   }
 
   function tradeMarkersAtTickId(tickId) {
@@ -811,12 +1088,13 @@
     }
     if (state.trade.authenticated) {
       state.trade.positions.forEach((position) => {
+        const draft = pendingProtectionForPosition(position);
         values.push(Number(position.entryPrice));
-        if (position.stopLoss != null) {
-          values.push(Number(position.stopLoss));
+        if (draft.stopLoss != null) {
+          values.push(Number(draft.stopLoss));
         }
-        if (position.takeProfit != null) {
-          values.push(Number(position.takeProfit));
+        if (draft.takeProfit != null) {
+          values.push(Number(draft.takeProfit));
         }
       });
       state.trade.pendingOrders.forEach((order) => {
@@ -943,15 +1221,65 @@
       return [];
     }
     const rightId = Number(state.rangeLastId || (state.rows[state.rows.length - 1]?.id || 0));
+    const currentRow = rowAtTickId(rightId);
+    const currentPrice = currentRow ? Number(currentRow.mid) : null;
     const graphics = [];
 
-    state.trade.positions.forEach((position) => {
-      ["stopLoss", "takeProfit"].forEach((key) => {
-        const price = Number(position[key]);
-        if (!Number.isFinite(price) || price <= 0) {
+    state.trade.positions.forEach((position, index) => {
+      const draft = pendingProtectionForPosition(position);
+      const isActive = Number(state.trade.activePositionId) === Number(position.positionId);
+      const positionColor = position.side === "buy" ? "rgba(126,240,199,0.92)" : "rgba(255,159,178,0.92)";
+      const positionText = position.side === "buy" ? "#cffff0" : "#ffd1da";
+      if (Number.isFinite(currentPrice)) {
+        const currentPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [rightId || 1, currentPrice]);
+        if (Array.isArray(currentPoint)) {
+          const currentY = Number(currentPoint[1]);
+          const labelY = Math.max(rect.y + 10, Math.min(rect.y + rect.height - 10, currentY + (index * 18) - 9));
+          if (Number.isFinite(currentY)) {
+            graphics.push({
+              id: "trade-position-label-" + String(position.positionId),
+              type: "group",
+              silent: true,
+              z: 14,
+              children: [
+                {
+                  type: "rect",
+                  shape: { x: rect.x + rect.width - 128, y: labelY - 10, width: 124, height: 20, r: 4 },
+                  style: {
+                    fill: isActive ? "rgba(5,9,15,0.94)" : "rgba(5,9,15,0.82)",
+                    stroke: isActive ? "rgba(255,200,87,0.72)" : positionColor,
+                    lineWidth: isActive ? 1.2 : 1,
+                  },
+                },
+                {
+                  type: "text",
+                  style: {
+                    text: formatPositionSide(position.side) + " #" + String(position.positionId) + " " + formatLots(positionLots(position)),
+                    x: rect.x + rect.width - 66,
+                    y: labelY,
+                    textAlign: "center",
+                    textVerticalAlign: "middle",
+                    fill: positionText,
+                    font: "11px 'IBM Plex Mono'",
+                  },
+                },
+              ],
+            });
+          }
+        }
+      }
+
+      [
+        { key: "stopLoss", price: draft.stopLoss, changed: draft.stopChanged },
+        { key: "takeProfit", price: draft.takeProfit, changed: draft.takeChanged },
+      ].forEach(({ key, price, changed }) => {
+        const numericPrice = Number(price);
+        const actualPrice = Number(position[key]);
+        const linePrice = Number.isFinite(numericPrice) ? numericPrice : actualPrice;
+        if (!Number.isFinite(linePrice) || linePrice <= 0) {
           return;
         }
-        const point = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [rightId || 1, price]);
+        const point = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [rightId || 1, linePrice]);
         if (!Array.isArray(point)) {
           return;
         }
@@ -960,17 +1288,24 @@
           return;
         }
         const isStop = key === "stopLoss";
-        const color = isStop ? "rgba(255,107,136,0.85)" : "rgba(126,240,199,0.85)";
-        const textColor = isStop ? "#ffc0cd" : "#c7ffeb";
-        const labelPrefix = isStop ? "SL" : "TP";
+        const color = changed
+          ? "rgba(255,200,87,0.92)"
+          : (isStop ? "rgba(255,107,136,0.85)" : "rgba(126,240,199,0.85)");
+        const textColor = changed
+          ? "#ffe9a6"
+          : (isStop ? "#ffc0cd" : "#c7ffeb");
+        const labelPrefix = changed ? (isStop ? "SL*" : "TP*") : (isStop ? "SL" : "TP");
         graphics.push({
           id: "trade-protection-" + String(position.positionId) + "-" + key,
           type: "group",
           x: 0,
           y: 0,
           draggable: true,
-          z: 16,
+          z: isActive ? 18 : 16,
           cursor: "ns-resize",
+          onclick: function () {
+            setActiveTradePosition(position.positionId);
+          },
           ondrag: function () {
             const targetY = Math.max(rect.y + 2, Math.min(rect.y + rect.height - 2, baseY + Number(this.y || 0)));
             this.x = 0;
@@ -993,18 +1328,27 @@
             {
               type: "line",
               shape: { x1: rect.x + 2, y1: baseY, x2: rect.x + rect.width - 2, y2: baseY },
-              style: { stroke: color, lineWidth: 1.2, lineDash: [6, 3] },
+              style: {
+                stroke: color,
+                lineWidth: isActive ? 1.5 : 1.2,
+                lineDash: changed ? [3, 2] : [6, 3],
+                opacity: isActive ? 1 : 0.88,
+              },
             },
             {
               type: "rect",
-              shape: { x: rect.x + rect.width - 88, y: baseY - 10, width: 84, height: 18, r: 4 },
-              style: { fill: "rgba(5,9,15,0.88)", stroke: color, lineWidth: 1 },
+              shape: { x: rect.x + rect.width - 92, y: baseY - 10, width: 88, height: 18, r: 4 },
+              style: {
+                fill: "rgba(5,9,15,0.9)",
+                stroke: isActive ? "rgba(255,200,87,0.72)" : color,
+                lineWidth: isActive ? 1.2 : 1,
+              },
             },
             {
               type: "text",
               style: {
-                text: labelPrefix + " " + Number(price).toFixed(2),
-                x: rect.x + rect.width - 46,
+                text: labelPrefix + " " + Number(linePrice).toFixed(2),
+                x: rect.x + rect.width - 48,
                 y: baseY,
                 textAlign: "center",
                 textVerticalAlign: "middle",
@@ -1247,25 +1591,26 @@
   }
 
   function renderTradeLists() {
+    if (elements.tradeSessionSummary) {
+      elements.tradeSessionSummary.textContent = state.trade.authenticated
+        ? "Session unlocked for " + (state.trade.username || "trade user") + ". Market entry is on-chart."
+        : "Login required for chart trading.";
+    }
     const openItems = state.trade.positions || [];
     if (!openItems.length) {
       elements.tradeOpenList.innerHTML = "<div class=\"sql-empty\">No open positions.</div>";
     } else {
       elements.tradeOpenList.innerHTML = openItems.map((position) => {
-        const stopLoss = position.stopLoss != null ? Number(position.stopLoss).toFixed(2) : "";
-        const takeProfit = position.takeProfit != null ? Number(position.takeProfit).toFixed(2) : "";
+        const draft = pendingProtectionForPosition(position);
         return [
           "<article class=\"trade-item\" data-position-id=\"", escapeHtml(position.positionId), "\">",
-          "<div class=\"trade-item-head\"><span>", escapeHtml(formatPositionSide(position.side)), " #", escapeHtml(position.positionId), "</span><span>", escapeHtml(String(position.volume || 0)), "</span></div>",
+          "<div class=\"trade-item-head\"><span>", escapeHtml(formatPositionSide(position.side)), " #", escapeHtml(position.positionId), "</span><span>", escapeHtml(formatTradeVolume(position.volume, positionLots(position))), "</span></div>",
           "<div class=\"trade-item-meta\">Entry ", escapeHtml(formatPrice(position.entryPrice)), " | uPnL ", escapeHtml(formatSignedPnl(position.netUnrealizedPnl)), "</div>",
+          "<div class=\"trade-item-meta\">SL ", escapeHtml(formatPrice(draft.stopLoss)), draft.stopChanged ? " pending" : "", " | TP ", escapeHtml(formatPrice(draft.takeProfit)), draft.takeChanged ? " pending" : "", "</div>",
           "<div class=\"trade-item-actions\">",
+          "<button class=\"ghost-button compact-button\" type=\"button\" data-action=\"select-position\" data-position-id=\"", escapeHtml(position.positionId), "\">Edit SL/TP</button>",
           "<button class=\"ghost-button compact-button\" type=\"button\" data-action=\"close-position\" data-position-id=\"", escapeHtml(position.positionId), "\" data-volume=\"", escapeHtml(position.volume || 0), "\">Close</button>",
           "<button class=\"ghost-button compact-button\" type=\"button\" data-action=\"close-half-position\" data-position-id=\"", escapeHtml(position.positionId), "\" data-volume=\"", escapeHtml(Math.max(1, Math.floor(Number(position.volume || 0) / 2))), "\">Close 1/2</button>",
-          "</div>",
-          "<div class=\"trade-inline-form\">",
-          "<input type=\"number\" step=\"0.01\" min=\"0\" data-role=\"amend-sl\" value=\"", escapeHtml(stopLoss), "\" placeholder=\"SL\">",
-          "<input type=\"number\" step=\"0.01\" min=\"0\" data-role=\"amend-tp\" value=\"", escapeHtml(takeProfit), "\" placeholder=\"TP\">",
-          "<button class=\"ghost-button compact-button\" type=\"button\" data-action=\"amend-position\" data-position-id=\"", escapeHtml(position.positionId), "\">Update</button>",
           "</div>",
           "</article>",
         ].join("");
@@ -1280,7 +1625,7 @@
         "<article class=\"trade-item\">",
         "<div class=\"trade-item-head\"><span>", escapeHtml(String(order.orderType || "ORDER")), " #", escapeHtml(order.orderId), "</span><span>", escapeHtml(formatPositionSide(order.side)), "</span></div>",
         "<div class=\"trade-item-meta\">",
-        "Vol ", escapeHtml(order.volume || 0),
+        escapeHtml(formatTradeVolume(order.volume, order.volumeLots)),
         " | Px ", escapeHtml(formatPrice(order.limitPrice != null ? order.limitPrice : order.stopPrice)),
         "</div></article>",
       ].join("")).join("");
@@ -1294,6 +1639,8 @@
         "<article class=\"trade-item\">",
         "<div class=\"trade-item-head\"><span>", escapeHtml(formatPositionSide(trade.side)), " #", escapeHtml(trade.positionId), "</span><span>", escapeHtml(trade.isOpen ? "open" : "closed"), "</span></div>",
         "<div class=\"trade-item-meta\">",
+        escapeHtml(formatTradeVolume(trade.volume, trade.volumeLots)),
+        " | ",
         "Entry ", escapeHtml(formatPrice(trade.entryPrice)),
         trade.exitPrice != null ? " -> Exit " + escapeHtml(formatPrice(trade.exitPrice)) : " -> Exit -",
         " | PnL ", escapeHtml(formatSignedPnl(trade.realizedNetPnl)),
@@ -1301,6 +1648,7 @@
         "</article>",
       ].join("")).join("");
     }
+    renderPositionEditor();
   }
 
   async function refreshTradeData(options) {
@@ -1317,11 +1665,14 @@
         tradeFetchJson("/api/trade/open"),
         tradeFetchJson("/api/trade/history?limit=" + String(TRADE_HISTORY_LIMIT)),
       ]);
+      state.trade.volumeInfo = openPayload.volumeInfo || historyPayload.volumeInfo || currentTradeVolumeInfo();
       state.trade.positions = Array.isArray(openPayload.positions) ? openPayload.positions : [];
       state.trade.pendingOrders = Array.isArray(openPayload.pendingOrders) ? openPayload.pendingOrders : [];
       state.trade.trades = Array.isArray(historyPayload.trades) ? historyPayload.trades : [];
       state.trade.deals = Array.isArray(historyPayload.deals) ? historyPayload.deals : [];
       state.trade.lastLoadedAtMs = Date.now();
+      syncTradeSelection();
+      syncTradeVolumeInputs();
       renderTradeLists();
       renderChart({ shiftWithRun: false });
       if (!silent) {
@@ -1331,6 +1682,7 @@
     } catch (error) {
       if (String(error?.message || "").toLowerCase().includes("trade login required")) {
         setTradeAuthenticated(false, null);
+        state.trade.volumeInfo = null;
         renderTradeLists();
       }
       throw error;
@@ -1359,7 +1711,9 @@
       elements.tradePassword.value = "";
       setTradeAuthenticated(true, payload.username || username);
       tradeStatus("Trade login successful.", false);
-      await refreshTradeData({ silent: true });
+      await refreshTradeData({ silent: true }).catch((error) => {
+        tradeStatus(error.message || "Trade refresh failed.", true);
+      });
     } catch (error) {
       tradeStatus(error.message || "Trade login failed.", true);
     } finally {
@@ -1383,6 +1737,10 @@
     state.trade.pendingOrders = [];
     state.trade.trades = [];
     state.trade.deals = [];
+    state.trade.volumeInfo = null;
+    state.trade.activeOrderSide = null;
+    state.trade.activePositionId = null;
+    state.trade.pendingProtectionEdits = {};
     setTradeAuthenticated(false, null);
     renderTradeLists();
     renderChart({ shiftWithRun: false });
@@ -1391,14 +1749,14 @@
   }
 
   function readOrderInputs() {
-    const volume = Number.parseInt((elements.tradeVolume.value || "").trim(), 10);
-    if (!Number.isFinite(volume) || volume <= 0) {
-      throw new Error("Volume must be a positive integer.");
+    const lotSize = Number((elements.chartTradeLotSize.value || "").trim());
+    if (!Number.isFinite(lotSize) || lotSize <= 0) {
+      throw new Error("Lot size must be greater than zero.");
     }
     return {
-      volume,
-      stopLoss: parseOptionalPriceInput(elements.tradeStopLoss),
-      takeProfit: parseOptionalPriceInput(elements.tradeTakeProfit),
+      lotSize,
+      stopLoss: parseOptionalPriceInput(elements.chartTradeStopLoss),
+      takeProfit: parseOptionalPriceInput(elements.chartTradeTakeProfit),
     };
   }
 
@@ -1418,13 +1776,14 @@
       await tradeFetchJson("/api/trade/order/market", {
         method: "POST",
         body: JSON.stringify({
-          side,
-          volume: inputs.volume,
+          side: side || state.trade.activeOrderSide || "buy",
+          lotSize: inputs.lotSize,
           stopLoss: inputs.stopLoss,
           takeProfit: inputs.takeProfit,
         }),
       });
-      tradeStatus((side === "buy" ? "Buy" : "Sell") + " market order submitted.", false);
+      closeTradeConfirm();
+      tradeStatus(((side || state.trade.activeOrderSide) === "sell" ? "Sell" : "Buy") + " market order submitted.", false);
       await refreshTradeData({ silent: true });
     } catch (error) {
       tradeStatus(error.message || "Order submit failed.", true);
@@ -1478,9 +1837,11 @@
         method: "POST",
         body: JSON.stringify(payload),
       });
+      discardPendingProtection(positionId);
       tradeStatus("Position protections updated.", false);
       await refreshTradeData({ silent: true });
     } catch (error) {
+      discardPendingProtection(positionId);
       tradeStatus(error.message || "Amend SL/TP failed.", true);
     } finally {
       setTradeBusy(false);
@@ -1494,21 +1855,28 @@
       return;
     }
     const roundedPrice = Number(targetPrice).toFixed(2);
-    const nextStop = key === "stopLoss" ? Number(roundedPrice) : (position.stopLoss != null ? Number(position.stopLoss) : null);
-    const nextTake = key === "takeProfit" ? Number(roundedPrice) : (position.takeProfit != null ? Number(position.takeProfit) : null);
-    submitAmendPosition(positionId, nextStop, nextTake);
+    setPendingProtectionValue(positionId, key, Number(roundedPrice));
+    tradeStatus((key === "stopLoss" ? "SL" : "TP") + " moved. Confirm to submit.", false);
   }
 
   async function loadTradeSession() {
     try {
       const payload = await tradeFetchJson("/api/trade/me");
-      setTradeAuthenticated(Boolean(payload.authenticated), payload.username || null);
-      tradeStatus("Trade session active.", false);
-      await refreshTradeData({ silent: true });
-    } catch (error) {
+      if (payload.authenticated) {
+        setTradeAuthenticated(true, payload.username || null);
+        tradeStatus("Trade session active.", false);
+        await refreshTradeData({ silent: true }).catch((error) => {
+          tradeStatus(error.message || "Trade refresh failed.", true);
+        });
+        return;
+      }
       setTradeAuthenticated(false, null);
       renderTradeLists();
       tradeStatus("Trade login required.", false);
+    } catch (error) {
+      setTradeAuthenticated(false, null);
+      renderTradeLists();
+      tradeStatus(error.message || "Trade session check failed.", true);
     }
   }
 
@@ -1524,14 +1892,20 @@
       event.preventDefault();
       requestTradeLogin();
     });
-    elements.tradeBuyButton.addEventListener("click", function () {
-      submitMarketOrder("buy");
-    });
-    elements.tradeSellButton.addEventListener("click", function () {
-      submitMarketOrder("sell");
-    });
     elements.tradeLogoutButton.addEventListener("click", function () {
       requestTradeLogout();
+    });
+    elements.chartTradeBuyButton.addEventListener("click", function () {
+      openTradeConfirm("buy");
+    });
+    elements.chartTradeSellButton.addEventListener("click", function () {
+      openTradeConfirm("sell");
+    });
+    elements.chartTradeCancelButton.addEventListener("click", function () {
+      closeTradeConfirm();
+    });
+    elements.chartTradeConfirmButton.addEventListener("click", function () {
+      submitMarketOrder(state.trade.activeOrderSide);
     });
     elements.tradeOpenList.addEventListener("click", function (event) {
       const button = event.target.closest("button[data-action]");
@@ -1540,24 +1914,50 @@
       }
       const action = button.dataset.action;
       const positionId = Number(button.dataset.positionId);
+      if (action === "select-position") {
+        setActiveTradePosition(positionId);
+        return;
+      }
       if (action === "close-position" || action === "close-half-position") {
         submitClosePosition(positionId, Number(button.dataset.volume || 0));
         return;
       }
-      if (action === "amend-position") {
-        const card = button.closest(".trade-item");
-        const slInput = card?.querySelector("input[data-role='amend-sl']");
-        const tpInput = card?.querySelector("input[data-role='amend-tp']");
-        try {
-          const sl = parseOptionalPriceInput(slInput);
-          const tp = parseOptionalPriceInput(tpInput);
-          submitAmendPosition(positionId, sl, tp);
-        } catch (error) {
-          tradeStatus(error.message || "Invalid SL/TP values.", true);
+    });
+    [elements.chartPositionStopLoss, elements.chartPositionTakeProfit].forEach(function (input) {
+      input.addEventListener("input", function () {
+        const position = activeTradePosition();
+        if (!position) {
+          return;
         }
+        try {
+          const fallback = position[input === elements.chartPositionStopLoss ? "stopLoss" : "takeProfit"];
+          const nextValue = sanitizeEditableProtectionValue(input.value, fallback);
+          setPendingProtectionValue(position.positionId, input === elements.chartPositionStopLoss ? "stopLoss" : "takeProfit", nextValue);
+        } catch (error) {
+          tradeStatus(error.message || "Invalid protection value.", true);
+        }
+      });
+    });
+    elements.chartPositionCancelButton.addEventListener("click", function () {
+      const position = activeTradePosition();
+      if (!position) {
+        return;
       }
+      discardPendingProtection(position.positionId);
+      tradeStatus("Pending protection changes cleared.", false);
+    });
+    elements.chartPositionConfirmButton.addEventListener("click", function () {
+      const position = activeTradePosition();
+      if (!position) {
+        return;
+      }
+      const draft = pendingProtectionForPosition(position);
+      submitAmendPosition(position.positionId, draft.stopLoss, draft.takeProfit);
     });
 
+    syncTradeVolumeInputs();
+    renderTradeEntryOverlay();
+    renderPositionEditor();
     loadTradeSession();
   }
 
@@ -1850,7 +2250,14 @@
     loadMoreLeft().catch((error) => status(error.message || "Load More Left failed.", true));
   });
   window.addEventListener("keydown", function (event) {
-    if (event.key === "Escape" && !state.ui.sidebarCollapsed) {
+    if (event.key !== "Escape") {
+      return;
+    }
+    if (state.trade.activeOrderSide) {
+      closeTradeConfirm();
+      return;
+    }
+    if (!state.ui.sidebarCollapsed) {
       setSidebarCollapsed(true);
     }
   });

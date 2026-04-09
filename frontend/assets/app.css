@@ -332,6 +332,7 @@ input {
 }
 
 .live-chart-panel {
+  position: relative;
   height: 100%;
   padding: 0.5rem;
 }
@@ -445,6 +446,17 @@ input {
   gap: 0.65rem;
 }
 
+.trade-session-shell {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.trade-session-copy {
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
 .trade-quick-actions {
   grid-column: 1 / -1;
   display: grid;
@@ -516,6 +528,10 @@ input {
   gap: 0.4rem;
 }
 
+.trade-item-actions.trade-item-actions-single {
+  grid-template-columns: 1fr;
+}
+
 .trade-inline-form {
   display: grid;
   grid-template-columns: 1fr 1fr auto;
@@ -525,6 +541,135 @@ input {
 .trade-inline-form input {
   padding: 0.4rem 0.45rem;
   font-size: 0.76rem;
+}
+
+.chart-trade-entry,
+.chart-trade-confirm,
+.chart-position-editor {
+  position: absolute;
+  z-index: 6;
+}
+
+.chart-trade-entry {
+  left: 50%;
+  bottom: 1.55rem;
+  transform: translateX(-50%);
+  display: grid;
+  justify-items: center;
+  gap: 0.45rem;
+  pointer-events: none;
+}
+
+.chart-trade-entry-buttons {
+  display: grid;
+  grid-auto-flow: column;
+  gap: 0.7rem;
+  pointer-events: auto;
+}
+
+.chart-trade-button {
+  min-width: 148px;
+  min-height: 2.85rem;
+  border-radius: 10px;
+  border: 1px solid rgba(147, 181, 255, 0.2);
+  background: rgba(8, 13, 22, 0.16);
+  backdrop-filter: blur(8px);
+  color: #edf4ff;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease, transform 140ms ease;
+}
+
+.chart-trade-button:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.chart-trade-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.chart-trade-button-buy {
+  border-color: rgba(126, 240, 199, 0.52);
+  background: rgba(24, 93, 66, 0.24);
+  color: #cffff0;
+}
+
+.chart-trade-button-buy:hover:not(:disabled) {
+  background: rgba(24, 93, 66, 0.34);
+}
+
+.chart-trade-button-sell {
+  border-color: rgba(255, 107, 136, 0.5);
+  background: rgba(116, 34, 52, 0.22);
+  color: #ffd1da;
+}
+
+.chart-trade-button-sell:hover:not(:disabled) {
+  background: rgba(116, 34, 52, 0.32);
+}
+
+.chart-trade-hint,
+.chart-trade-card-copy {
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.chart-trade-hint {
+  padding: 0.28rem 0.55rem;
+  border-radius: 999px;
+  background: rgba(5, 9, 15, 0.72);
+  border: 1px solid rgba(147, 181, 255, 0.12);
+}
+
+.chart-trade-confirm,
+.chart-position-editor {
+  width: min(320px, calc(100% - 1.5rem));
+  padding: 0.8rem;
+  background: rgba(13, 20, 32, 0.95);
+  border-color: rgba(147, 181, 255, 0.2);
+}
+
+.chart-trade-confirm {
+  left: 50%;
+  bottom: 5.6rem;
+  transform: translateX(-50%);
+}
+
+.chart-position-editor {
+  top: 1rem;
+  right: 1rem;
+}
+
+.chart-trade-card-title {
+  font-size: 0.92rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+.chart-trade-card-copy + .chart-trade-card-grid,
+.chart-trade-card-grid + .chart-trade-card-copy,
+.chart-trade-card-grid + .chart-trade-card-actions,
+.chart-trade-card-copy + .chart-trade-card-actions {
+  margin-top: 0.7rem;
+}
+
+.chart-trade-card-grid {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.chart-trade-card-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.55rem;
+}
+
+.chart-position-editor.is-pending {
+  border-color: rgba(255, 200, 87, 0.48);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.34), 0 0 0 1px rgba(255, 200, 87, 0.1);
 }
 
 .page-sql {
@@ -769,6 +914,38 @@ input {
 
   .trade-inline-form {
     grid-template-columns: 1fr;
+  }
+
+  .chart-trade-entry {
+    width: calc(100% - 1.5rem);
+    bottom: 1rem;
+  }
+
+  .chart-trade-entry-buttons,
+  .chart-trade-card-actions {
+    grid-auto-flow: row;
+    grid-template-columns: 1fr;
+    width: 100%;
+  }
+
+  .chart-trade-button {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .chart-trade-confirm {
+    left: 0.75rem;
+    right: 0.75rem;
+    bottom: 5.2rem;
+    width: auto;
+    transform: none;
+  }
+
+  .chart-position-editor {
+    top: 0.75rem;
+    right: 0.75rem;
+    left: 0.75rem;
+    width: auto;
   }
 
   .page-sql {
