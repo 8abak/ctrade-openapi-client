@@ -65,6 +65,7 @@
       authConfigured: true,
       authError: null,
       brokerConfigured: false,
+      brokerStatus: null,
       lastLoggedErrorKey: null,
       authenticated: false,
       username: null,
@@ -116,6 +117,7 @@
     tradeLoginButton: document.getElementById("tradeLoginButton"),
     tradeControls: document.getElementById("tradeControls"),
     tradeSessionSummary: document.getElementById("tradeSessionSummary"),
+    tradeBrokerSummary: document.getElementById("tradeBrokerSummary"),
     tradeLogoutButton: document.getElementById("tradeLogoutButton"),
     tradePreparedLotSize: document.getElementById("tradePreparedLotSize"),
     tradePreparedStopLoss: document.getElementById("tradePreparedStopLoss"),
@@ -292,6 +294,39 @@
     elements.tradeStatusLine.classList.toggle("success", Boolean(!isError));
   }
 
+  function tradePayloadDetail(payload) {
+    return payload?.detail && typeof payload.detail === "object" ? payload.detail : null;
+  }
+
+  function brokerStatusFromPayload(payload) {
+    const detail = tradePayloadDetail(payload);
+    const broker = payload?.broker || detail?.broker || null;
+    const brokerConfigured = Boolean(
+      payload?.brokerConfigured
+      ?? detail?.brokerConfigured
+      ?? payload?.configured
+      ?? detail?.configured
+      ?? broker?.configured
+    );
+    const stateValue = typeof broker?.state === "string" && broker.state
+      ? broker.state
+      : (brokerConfigured ? "unavailable" : "not_configured");
+    const reason = typeof broker?.reason === "string" && broker.reason ? broker.reason : null;
+    return {
+      configured: brokerConfigured,
+      connected: Boolean(broker?.connected),
+      authenticated: Boolean(broker?.authenticated),
+      ready: Boolean(broker?.ready),
+      state: stateValue,
+      reason,
+      code: typeof broker?.code === "string" && broker.code ? broker.code : null,
+      symbol: typeof broker?.symbol === "string" && broker.symbol ? broker.symbol : null,
+      symbolId: broker?.symbolId ?? null,
+      connectionType: typeof broker?.connectionType === "string" && broker.connectionType ? broker.connectionType : null,
+      lastError: typeof broker?.lastError === "string" && broker.lastError ? broker.lastError : reason,
+    };
+  }
+
   function setTradeBusy(busy) {
     const disabled = Boolean(busy);
     state.trade.actionBusy = disabled;
@@ -316,6 +351,7 @@
       });
     }
     renderTradeEntryOverlay();
+    renderBrokerSummary();
     renderPositionEditor();
   }
 
@@ -336,7 +372,8 @@
   function applyTradeSessionPayload(payload) {
     state.trade.authConfigured = payload?.authConfigured !== false;
     state.trade.authError = payload?.error || null;
-    state.trade.brokerConfigured = Boolean(payload?.brokerConfigured ?? payload?.configured);
+    state.trade.brokerStatus = brokerStatusFromPayload(payload);
+    state.trade.brokerConfigured = Boolean(state.trade.brokerStatus?.configured);
     state.trade.authenticated = state.trade.authConfigured && Boolean(payload?.authenticated);
     state.trade.username = state.trade.authenticated ? (payload?.username || null) : null;
     if (!state.trade.authenticated) {
@@ -381,17 +418,21 @@
   }
 
   function tradeErrorMessage(payload) {
+    const detail = tradePayloadDetail(payload);
     if (typeof payload?.message === "string" && payload.message) {
       return payload.message;
     }
     if (typeof payload?.detail === "string" && payload.detail) {
       return payload.detail;
     }
-    if (payload?.detail && typeof payload.detail === "object" && typeof payload.detail.message === "string") {
-      return payload.detail.message;
+    if (typeof detail?.message === "string" && detail.message) {
+      return detail.message;
     }
     if (typeof payload?.error === "string" && payload.error) {
       return payload.error;
+    }
+    if (typeof detail?.error === "string" && detail.error) {
+      return detail.error;
     }
     return "Request failed.";
   }
@@ -493,6 +534,20 @@
     };
   }
 
+  function brokerUnavailableReason() {
+    const broker = state.trade.brokerStatus;
+    if (!state.trade.brokerConfigured || broker?.state === "not_configured") {
+      return broker?.reason || "Broker integration is not configured.";
+    }
+    if (broker?.reason) {
+      return broker.reason;
+    }
+    if (state.trade.loading) {
+      return "Loading broker state...";
+    }
+    return "Broker state unavailable.";
+  }
+
   function preparedTradeState() {
     const inputs = { lotSize: null, stopLoss: null, takeProfit: null };
     try {
@@ -508,10 +563,10 @@
       return { ready: false, reason: "Login required.", ...inputs };
     }
     if (!state.trade.brokerConfigured) {
-      return { ready: false, reason: "Broker integration is not configured.", ...inputs };
+      return { ready: false, reason: brokerUnavailableReason(), ...inputs };
     }
-    if (!state.trade.volumeInfo || !state.trade.lastLoadedAtMs) {
-      return { ready: false, reason: "Broker state unavailable.", ...inputs };
+    if (!state.trade.brokerStatus?.ready || !state.trade.volumeInfo || !state.trade.lastLoadedAtMs) {
+      return { ready: false, reason: brokerUnavailableReason(), ...inputs };
     }
     if (inputs.lotSize < limits.minLotSize) {
       return { ready: false, reason: "Lot size must be at least " + formatLots(limits.minLotSize) + " lot.", ...inputs };
@@ -739,6 +794,29 @@
     }
   }
 
+  function currentTradeReferencePrice(position) {
+    const currentTick = Number(state.rangeLastId);
+    const currentRow = rowAtTickId(currentTick);
+    const livePrice = currentRow ? Number(currentRow.mid) : NaN;
+    if (Number.isFinite(livePrice) && livePrice > 0) {
+      return livePrice;
+    }
+    const entryPrice = Number(position?.entryPrice);
+    return Number.isFinite(entryPrice) && entryPrice > 0 ? entryPrice : null;
+  }
+
+  function protectionKeyForDrop(position, targetPrice) {
+    const price = Number(targetPrice);
+    const referencePrice = Number(currentTradeReferencePrice(position));
+    if (!position || !Number.isFinite(price) || price <= 0 || !Number.isFinite(referencePrice) || referencePrice <= 0) {
+      return null;
+    }
+    if (position.side === "sell") {
+      return price >= referencePrice ? "stopLoss" : "takeProfit";
+    }
+    return price <= referencePrice ? "stopLoss" : "takeProfit";
+  }
+
   function renderPreparedTradeSummary() {
     if (!elements.tradePreparedSummary) {
       return;
@@ -752,6 +830,32 @@
     elements.tradePreparedSummary.textContent = prepared.ready
       ? parts.join(" | ")
       : parts.join(" | ") + " | " + prepared.reason;
+  }
+
+  function renderBrokerSummary() {
+    if (!elements.tradeBrokerSummary) {
+      return;
+    }
+    const broker = state.trade.brokerStatus;
+    if (!state.trade.authConfigured) {
+      elements.tradeBrokerSummary.textContent = "Broker unavailable until trade login is configured.";
+      return;
+    }
+    if (!state.trade.authenticated) {
+      elements.tradeBrokerSummary.textContent = "Broker status will load after trade login.";
+      return;
+    }
+    if (!broker || (!broker.ready && !broker.reason && !state.trade.lastLoadedAtMs)) {
+      elements.tradeBrokerSummary.textContent = "Broker status loading.";
+      return;
+    }
+    if (broker.ready) {
+      const symbol = broker.symbol || "-";
+      const mode = broker.connectionType ? broker.connectionType.toUpperCase() : "LIVE";
+      elements.tradeBrokerSummary.textContent = "Broker ready | " + symbol + " | " + mode + ".";
+      return;
+    }
+    elements.tradeBrokerSummary.textContent = "Broker unavailable | " + brokerUnavailableReason();
   }
 
   function renderTradeEntryOverlay() {
@@ -779,6 +883,7 @@
           : prepared.reason);
     }
     renderPreparedTradeSummary();
+    renderBrokerSummary();
   }
 
   function renderPositionEditor() {
@@ -795,7 +900,7 @@
     }
     const draft = pendingProtectionForPosition(position);
     elements.chartPositionTitle.textContent = formatPositionSide(position.side) + " #" + String(position.positionId) + " | " + formatTradeVolume(position.volume, positionLots(position));
-    elements.chartPositionCopy.textContent = "Drag SL/TP on chart or type exact prices, then confirm once.";
+    elements.chartPositionCopy.textContent = "Drag on chart to apply SL/TP immediately, or type exact prices and apply once.";
     elements.chartPositionStopLoss.value = draft.stopLoss != null ? Number(draft.stopLoss).toFixed(2) : "";
     elements.chartPositionTakeProfit.value = draft.takeProfit != null ? Number(draft.takeProfit).toFixed(2) : "";
     elements.chartPositionPendingState.textContent = draft.hasChanges
@@ -1433,18 +1538,27 @@
           type: "group",
           x: 0,
           y: 0,
-          draggable: true,
+          draggable: !state.trade.actionBusy,
           z: isActive ? 18 : 16,
-          cursor: "ns-resize",
+          cursor: state.trade.actionBusy ? "default" : "ns-resize",
           onclick: function () {
             setActiveTradePosition(position.positionId);
           },
           ondrag: function () {
+            if (state.trade.actionBusy) {
+              return;
+            }
             const targetY = Math.max(rect.y + 2, Math.min(rect.y + rect.height - 2, baseY + Number(this.y || 0)));
             this.x = 0;
             this.y = targetY - baseY;
           },
           ondragend: function () {
+            if (state.trade.actionBusy) {
+              this.x = 0;
+              this.y = 0;
+              queueOverlayRender();
+              return;
+            }
             const targetY = Math.max(rect.y + 2, Math.min(rect.y + rect.height - 2, baseY + Number(this.y || 0)));
             this.x = 0;
             this.y = 0;
@@ -1455,7 +1569,7 @@
               queueOverlayRender();
               return;
             }
-            requestProtectionDrag(position.positionId, key, targetPrice);
+            requestProtectionDrag(position.positionId, targetPrice, key);
           },
           children: [
             {
@@ -1492,6 +1606,85 @@
           ],
         });
       });
+
+      if (draft.stopLoss == null || draft.takeProfit == null) {
+        const referencePrice = Number(currentTradeReferencePrice(position));
+        const referencePoint = Number.isFinite(referencePrice)
+          ? chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [rightId || 1, referencePrice])
+          : null;
+        if (Array.isArray(referencePoint)) {
+          const addY = Number(referencePoint[1]);
+          if (Number.isFinite(addY) && addY >= rect.y && addY <= rect.y + rect.height) {
+            graphics.push({
+              id: "trade-protection-add-" + String(position.positionId),
+              type: "group",
+              x: 0,
+              y: 0,
+              draggable: !state.trade.actionBusy,
+              z: isActive ? 17 : 15,
+              cursor: state.trade.actionBusy ? "default" : "ns-resize",
+              onclick: function () {
+                setActiveTradePosition(position.positionId);
+              },
+              ondrag: function () {
+                if (state.trade.actionBusy) {
+                  return;
+                }
+                const targetY = Math.max(rect.y + 2, Math.min(rect.y + rect.height - 2, addY + Number(this.y || 0)));
+                this.x = 0;
+                this.y = targetY - addY;
+              },
+              ondragend: function () {
+                if (state.trade.actionBusy) {
+                  this.x = 0;
+                  this.y = 0;
+                  queueOverlayRender();
+                  return;
+                }
+                const targetY = Math.max(rect.y + 2, Math.min(rect.y + rect.height - 2, addY + Number(this.y || 0)));
+                this.x = 0;
+                this.y = 0;
+                const converted = chart.convertFromPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [rect.x + 12, targetY]);
+                const targetPrice = Number(Array.isArray(converted) ? converted[1] : NaN);
+                if (!Number.isFinite(targetPrice) || targetPrice <= 0) {
+                  tradeStatus("Drag rejected: invalid target price.", true);
+                  queueOverlayRender();
+                  return;
+                }
+                requestProtectionDrag(position.positionId, targetPrice, null);
+              },
+              children: [
+                {
+                  type: "line",
+                  shape: { x1: rect.x + 18, y1: addY, x2: rect.x + rect.width - 104, y2: addY },
+                  style: { stroke: "rgba(255,200,87,0.72)", lineWidth: 1, lineDash: [2, 4] },
+                },
+                {
+                  type: "rect",
+                  shape: { x: rect.x + rect.width - 100, y: addY - 10, width: 96, height: 18, r: 4 },
+                  style: {
+                    fill: "rgba(5,9,15,0.82)",
+                    stroke: "rgba(255,200,87,0.72)",
+                    lineWidth: 1,
+                  },
+                },
+                {
+                  type: "text",
+                  style: {
+                    text: "Drag to add",
+                    x: rect.x + rect.width - 52,
+                    y: addY,
+                    textAlign: "center",
+                    textVerticalAlign: "middle",
+                    fill: "#ffe9a6",
+                    font: "11px 'IBM Plex Mono'",
+                  },
+                },
+              ],
+            });
+          }
+        }
+      }
     });
 
     state.trade.pendingOrders.forEach((order, index) => {
@@ -1685,8 +1878,11 @@
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
       const error = new Error(tradeErrorMessage(payload));
+      const detail = tradePayloadDetail(payload);
       error.status = response.status;
-      error.code = typeof payload?.error === "string" ? payload.error : null;
+      error.code = typeof payload?.error === "string"
+        ? payload.error
+        : (typeof detail?.error === "string" ? detail.error : null);
       error.payload = payload;
       throw error;
     }
@@ -1743,6 +1939,7 @@
           : "Login required for chart trading.");
     }
     renderPreparedTradeSummary();
+    renderBrokerSummary();
     const openItems = state.trade.positions || [];
     if (!openItems.length) {
       elements.tradeOpenList.innerHTML = "<div class=\"sql-empty\">No open positions.</div>";
@@ -1809,6 +2006,8 @@
     }
     try {
       const openPayload = await tradeFetchJson("/api/trade/open");
+      state.trade.brokerStatus = brokerStatusFromPayload(openPayload);
+      state.trade.brokerConfigured = Boolean(state.trade.brokerStatus?.configured);
       state.trade.volumeInfo = openPayload.volumeInfo || currentTradeVolumeInfo();
       state.trade.positions = Array.isArray(openPayload.positions) ? openPayload.positions : [];
       state.trade.pendingOrders = Array.isArray(openPayload.pendingOrders) ? openPayload.pendingOrders : [];
@@ -1816,6 +2015,8 @@
       state.trade.historyAvailable = true;
       try {
         const historyPayload = await tradeFetchJson("/api/trade/history?limit=" + String(TRADE_HISTORY_LIMIT));
+        state.trade.brokerStatus = brokerStatusFromPayload(historyPayload);
+        state.trade.brokerConfigured = Boolean(state.trade.brokerStatus?.configured);
         state.trade.volumeInfo = openPayload.volumeInfo || historyPayload.volumeInfo || currentTradeVolumeInfo();
         state.trade.trades = Array.isArray(historyPayload.trades) ? historyPayload.trades : [];
         state.trade.deals = Array.isArray(historyPayload.deals) ? historyPayload.deals : [];
@@ -1840,8 +2041,9 @@
           authenticated: false,
           username: null,
           authConfigured: false,
-          brokerConfigured: error?.payload?.brokerConfigured ?? state.trade.brokerConfigured,
-          configured: error?.payload?.configured ?? state.trade.brokerConfigured,
+          brokerConfigured: error?.payload?.brokerConfigured ?? tradePayloadDetail(error?.payload)?.brokerConfigured ?? state.trade.brokerConfigured,
+          configured: error?.payload?.configured ?? tradePayloadDetail(error?.payload)?.configured ?? state.trade.brokerConfigured,
+          broker: error?.payload?.broker || tradePayloadDetail(error?.payload)?.broker || state.trade.brokerStatus,
           error: error?.code || "TRADE_AUTH_NOT_CONFIGURED",
         });
         renderTradeLists();
@@ -1852,9 +2054,12 @@
           authConfigured: true,
           brokerConfigured: state.trade.brokerConfigured,
           configured: state.trade.brokerConfigured,
+          broker: state.trade.brokerStatus,
         });
         renderTradeLists();
       } else {
+        state.trade.brokerStatus = brokerStatusFromPayload(error?.payload || { broker: state.trade.brokerStatus });
+        state.trade.brokerConfigured = Boolean(state.trade.brokerStatus?.configured);
         state.trade.volumeInfo = null;
         state.trade.lastLoadedAtMs = null;
         state.trade.positions = [];
@@ -1897,6 +2102,7 @@
         authConfigured: true,
         brokerConfigured: state.trade.brokerConfigured,
         configured: state.trade.brokerConfigured,
+        broker: state.trade.brokerStatus,
       });
       tradeStatus("Trade login successful.", false);
       await refreshTradeData({ silent: true }).catch((error) => {
@@ -1908,8 +2114,9 @@
           authenticated: false,
           username: null,
           authConfigured: false,
-          brokerConfigured: error?.payload?.brokerConfigured ?? state.trade.brokerConfigured,
-          configured: error?.payload?.configured ?? state.trade.brokerConfigured,
+          brokerConfigured: error?.payload?.brokerConfigured ?? tradePayloadDetail(error?.payload)?.brokerConfigured ?? state.trade.brokerConfigured,
+          configured: error?.payload?.configured ?? tradePayloadDetail(error?.payload)?.configured ?? state.trade.brokerConfigured,
+          broker: error?.payload?.broker || tradePayloadDetail(error?.payload)?.broker || state.trade.brokerStatus,
           error: error.code,
         });
         renderTradeLists();
@@ -1938,6 +2145,7 @@
       authConfigured: state.trade.authConfigured,
       brokerConfigured: state.trade.brokerConfigured,
       configured: state.trade.brokerConfigured,
+      broker: state.trade.brokerStatus,
     });
     renderTradeLists();
     renderChart({ shiftWithRun: false });
@@ -1958,7 +2166,7 @@
     renderTradeEntryOverlay();
     setTradeBusy(true);
     try {
-      await tradeFetchJson("/api/trade/order/market", {
+      const payload = await tradeFetchJson("/api/trade/order/market", {
         method: "POST",
         body: JSON.stringify({
           side: state.trade.activeOrderSide,
@@ -1967,9 +2175,13 @@
           takeProfit: prepared.takeProfit,
         }),
       });
+      state.trade.brokerStatus = brokerStatusFromPayload(payload);
+      state.trade.brokerConfigured = Boolean(state.trade.brokerStatus?.configured);
       tradeStatus((state.trade.activeOrderSide === "sell" ? "Sell" : "Buy") + " market order submitted.", false);
       await refreshTradeData({ silent: true });
     } catch (error) {
+      state.trade.brokerStatus = brokerStatusFromPayload(error?.payload || { broker: state.trade.brokerStatus });
+      state.trade.brokerConfigured = Boolean(state.trade.brokerStatus?.configured);
       tradeStatus(error.message || "Order submit failed.", true);
     } finally {
       state.trade.activeOrderSide = null;
@@ -1988,13 +2200,17 @@
     }
     setTradeBusy(true);
     try {
-      await tradeFetchJson("/api/trade/position/close", {
+      const payload = await tradeFetchJson("/api/trade/position/close", {
         method: "POST",
         body: JSON.stringify({ positionId: Number(positionId), volume: parsedVolume }),
       });
+      state.trade.brokerStatus = brokerStatusFromPayload(payload);
+      state.trade.brokerConfigured = Boolean(state.trade.brokerStatus?.configured);
       tradeStatus("Position close submitted.", false);
       await refreshTradeData({ silent: true });
     } catch (error) {
+      state.trade.brokerStatus = brokerStatusFromPayload(error?.payload || { broker: state.trade.brokerStatus });
+      state.trade.brokerConfigured = Boolean(state.trade.brokerStatus?.configured);
       tradeStatus(error.message || "Close position failed.", true);
     } finally {
       setTradeBusy(false);
@@ -2005,43 +2221,86 @@
     if (!state.trade.authenticated || state.trade.actionBusy) {
       return;
     }
-    const payload = { positionId: Number(positionId) };
-    if (stopLoss != null) {
-      payload.stopLoss = Number(stopLoss);
-    }
-    if (takeProfit != null) {
-      payload.takeProfit = Number(takeProfit);
-    }
-    if (payload.stopLoss == null && payload.takeProfit == null) {
-      tradeStatus("Provide SL or TP before amending.", true);
-      return;
-    }
-    setTradeBusy(true);
-    try {
-      await tradeFetchJson("/api/trade/position/amend-sltp", {
-        method: "POST",
-        body: JSON.stringify(payload),
-      });
-      discardPendingProtection(positionId);
-      tradeStatus("Position protections updated.", false);
-      await refreshTradeData({ silent: true });
-    } catch (error) {
-      discardPendingProtection(positionId);
-      tradeStatus(error.message || "Amend SL/TP failed.", true);
-    } finally {
-      setTradeBusy(false);
-    }
-  }
-
-  function requestProtectionDrag(positionId, key, targetPrice) {
     const position = activePositionById(positionId);
     if (!position) {
       tradeStatus("Position no longer exists.", true);
       return;
     }
-    const roundedPrice = Number(targetPrice).toFixed(2);
-    setPendingProtectionValue(positionId, key, Number(roundedPrice));
-    tradeStatus((key === "stopLoss" ? "SL" : "TP") + " moved. Confirm to submit.", false);
+    const payload = { positionId: Number(positionId) };
+    if (stopLoss != null) {
+      payload.stopLoss = Number(stopLoss);
+    } else if (position.stopLoss != null) {
+      payload.clearStopLoss = true;
+    }
+    if (takeProfit != null) {
+      payload.takeProfit = Number(takeProfit);
+    } else if (position.takeProfit != null) {
+      payload.clearTakeProfit = true;
+    }
+    if (payload.stopLoss == null && payload.takeProfit == null && !payload.clearStopLoss && !payload.clearTakeProfit) {
+      tradeStatus("Provide SL or TP before amending.", true);
+      return;
+    }
+    setTradeBusy(true);
+    try {
+      const response = await tradeFetchJson("/api/trade/position/amend-sltp", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      state.trade.brokerStatus = brokerStatusFromPayload(response);
+      state.trade.brokerConfigured = Boolean(state.trade.brokerStatus?.configured);
+      discardPendingProtection(positionId);
+      tradeStatus("Position protections updated.", false);
+      await refreshTradeData({ silent: true });
+    } catch (error) {
+      state.trade.brokerStatus = brokerStatusFromPayload(error?.payload || { broker: state.trade.brokerStatus });
+      state.trade.brokerConfigured = Boolean(state.trade.brokerStatus?.configured);
+      tradeStatus(error.message || "Amend SL/TP failed.", true);
+      throw error;
+    } finally {
+      setTradeBusy(false);
+    }
+  }
+
+  function requestProtectionDrag(positionId, targetPrice, originKey) {
+    const position = activePositionById(positionId);
+    if (!position) {
+      tradeStatus("Position no longer exists.", true);
+      return;
+    }
+    if (state.trade.actionBusy) {
+      tradeStatus("Sending...", false);
+      return;
+    }
+    const targetKey = protectionKeyForDrop(position, targetPrice);
+    if (!targetKey) {
+      tradeStatus("Protection type could not be resolved.", true);
+      return;
+    }
+    const roundedPrice = Number(Number(targetPrice).toFixed(2));
+    const previousPending = { ...(state.trade.pendingProtectionEdits[String(positionId)] || {}) };
+    const draft = pendingProtectionForPosition(position);
+    const nextValues = {
+      stopLoss: draft.stopLoss,
+      takeProfit: draft.takeProfit,
+    };
+    if (originKey && originKey !== targetKey) {
+      nextValues[originKey] = null;
+    }
+    nextValues[targetKey] = roundedPrice;
+    setPendingProtectionValue(positionId, "stopLoss", nextValues.stopLoss);
+    setPendingProtectionValue(positionId, "takeProfit", nextValues.takeProfit);
+    tradeStatus((targetKey === "stopLoss" ? "SL" : "TP") + " applying...", false);
+    submitAmendPosition(positionId, nextValues.stopLoss, nextValues.takeProfit).catch(() => {
+      const pendingKey = String(positionId);
+      if (Object.keys(previousPending).length) {
+        state.trade.pendingProtectionEdits[pendingKey] = previousPending;
+      } else {
+        delete state.trade.pendingProtectionEdits[pendingKey];
+      }
+      renderPositionEditor();
+      queueOverlayRender();
+    });
   }
 
   async function loadTradeSession() {
@@ -2068,6 +2327,7 @@
         authConfigured: true,
         brokerConfigured: state.trade.brokerConfigured,
         configured: state.trade.brokerConfigured,
+        broker: error?.payload?.broker || tradePayloadDetail(error?.payload)?.broker || state.trade.brokerStatus,
       });
       renderTradeLists();
       tradeStatus(error.message || "Trade session check failed.", true);
@@ -2084,6 +2344,7 @@
       authConfigured: true,
       brokerConfigured: false,
       configured: false,
+      broker: { configured: false, state: "not_configured", reason: "Broker integration is not configured." },
     });
     renderTradeLists();
     tradeStatus("Trade login required.", false);
@@ -2146,7 +2407,7 @@
         return;
       }
       const draft = pendingProtectionForPosition(position);
-      submitAmendPosition(position.positionId, draft.stopLoss, draft.takeProfit);
+      submitAmendPosition(position.positionId, draft.stopLoss, draft.takeProfit).catch(function () {});
     });
 
     [elements.tradePreparedLotSize, elements.tradePreparedStopLoss, elements.tradePreparedTakeProfit].forEach(function (input) {

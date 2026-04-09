@@ -143,6 +143,7 @@
           <div class="trade-controls" id="tradeControls" hidden>
             <div class="trade-session-shell">
               <div class="trade-session-copy" id="tradeSessionSummary">Chart entry enabled when the trade session is active.</div>
+              <div class="trade-session-copy" id="tradeBrokerSummary">Broker state unavailable.</div>
               <button class="ghost-button compact-button" id="tradeLogoutButton" type="button">Logout</button>
             </div>
 
@@ -209,7 +210,7 @@
 
         <div class="panel chart-position-editor" id="chartPositionEditor" hidden>
           <div class="chart-trade-card-title" id="chartPositionTitle">Position editor</div>
-          <div class="chart-trade-card-copy" id="chartPositionCopy">Drag SL/TP on chart or type exact prices, then confirm once.</div>
+          <div class="chart-trade-card-copy" id="chartPositionCopy">Drag on chart to apply SL/TP immediately, or type exact prices and apply once.</div>
           <div class="chart-trade-card-grid">
             <label>
               <span>stop loss</span>
@@ -222,7 +223,7 @@
           </div>
           <div class="chart-trade-card-copy" id="chartPositionPendingState">No pending changes.</div>
           <div class="chart-trade-card-actions">
-            <button class="primary-button compact-button" id="chartPositionConfirmButton" type="button">Confirm</button>
+            <button class="primary-button compact-button" id="chartPositionConfirmButton" type="button">Apply</button>
             <button class="ghost-button compact-button" id="chartPositionCancelButton" type="button">Cancel</button>
           </div>
         </div>

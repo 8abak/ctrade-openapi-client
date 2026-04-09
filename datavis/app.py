@@ -114,6 +114,8 @@ class TradePositionAmendRequest(BaseModel):
     positionId: int = Field(..., ge=1)
     stopLoss: Optional[float] = None
     takeProfit: Optional[float] = None
+    clearStopLoss: bool = False
+    clearTakeProfit: bool = False
 
     @field_validator("takeProfit", "stopLoss")
     @classmethod
@@ -1500,12 +1502,33 @@ def _trade_not_configured() -> bool:
 
 def _handle_trade_gateway_error(exc: Exception) -> None:
     detail = str(exc) or "Trade request failed."
-    status_code = status.HTTP_502_BAD_GATEWAY
-    if "not configured" in detail.lower():
-        status_code = status.HTTP_503_SERVICE_UNAVAILABLE
-    if "must" in detail.lower() or "required" in detail.lower() or "invalid" in detail.lower():
-        status_code = status.HTTP_400_BAD_REQUEST
-    raise HTTPException(status_code=status_code, detail=detail) from exc
+    status_code = getattr(exc, "status_code", None) or status.HTTP_502_BAD_GATEWAY
+    if not isinstance(status_code, int):
+        status_code = status.HTTP_502_BAD_GATEWAY
+    lowered = detail.lower()
+    if status_code == status.HTTP_502_BAD_GATEWAY:
+        if "not configured" in lowered:
+            status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        elif "must" in lowered or "required" in lowered:
+            status_code = status.HTTP_400_BAD_REQUEST
+    error_code = getattr(exc, "code", None)
+    if not error_code:
+        if status_code == status.HTTP_400_BAD_REQUEST:
+            error_code = "TRADE_REQUEST_INVALID"
+        elif status_code == status.HTTP_503_SERVICE_UNAVAILABLE:
+            error_code = "BROKER_UNAVAILABLE"
+        else:
+            error_code = "TRADE_REQUEST_FAILED"
+    raise HTTPException(
+        status_code=status_code,
+        detail={
+            "error": error_code,
+            "message": detail,
+            "brokerConfigured": TRADE_GATEWAY.configured,
+            "configured": TRADE_GATEWAY.configured,
+            "broker": TRADE_GATEWAY.status(),
+        },
+    ) from exc
 
 
 @app.get("/", include_in_schema=False)
@@ -1612,6 +1635,7 @@ def trade_open(username: str = Depends(require_trade_auth)) -> Dict[str, Any]:
             "volumeInfo": volume_info,
             "positions": snapshot.get("positions", []),
             "pendingOrders": snapshot.get("pendingOrders", []),
+            "broker": TRADE_GATEWAY.status(),
             "serverTimeMs": now_ms(),
         }
     except Exception as exc:
@@ -1632,6 +1656,7 @@ def trade_pending(username: str = Depends(require_trade_auth)) -> Dict[str, Any]
             "symbolId": snapshot.get("symbolId"),
             "volumeInfo": volume_info,
             "pendingOrders": snapshot.get("pendingOrders", []),
+            "broker": TRADE_GATEWAY.status(),
             "serverTimeMs": now_ms(),
         }
     except Exception as exc:
@@ -1651,6 +1676,7 @@ def trade_history(
         volume_info = dict(payload.get("volumeInfo") or {})
         volume_info["defaultLotSize"] = float(TRADE_DEFAULT_LOT_SIZE)
         payload["volumeInfo"] = volume_info
+        payload["broker"] = TRADE_GATEWAY.status()
         payload["serverTimeMs"] = now_ms()
         return payload
     except Exception as exc:
@@ -1675,6 +1701,7 @@ def trade_order_market(payload: TradeMarketOrderRequest, username: str = Depends
             "result": result,
             "submittedVolume": volume,
             "submittedLotSize": payload.lotSize,
+            "broker": TRADE_GATEWAY.status(),
             "serverTimeMs": now_ms(),
         }
     except HTTPException:
@@ -1690,7 +1717,7 @@ def trade_position_close(payload: TradePositionCloseRequest, username: str = Dep
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Broker integration is not configured.")
     try:
         result = TRADE_GATEWAY.close_position(position_id=payload.positionId, volume=payload.volume)
-        return {"ok": True, "result": result, "serverTimeMs": now_ms()}
+        return {"ok": True, "result": result, "broker": TRADE_GATEWAY.status(), "serverTimeMs": now_ms()}
     except Exception as exc:
         _handle_trade_gateway_error(exc)
 
@@ -1700,15 +1727,21 @@ def trade_position_amend(payload: TradePositionAmendRequest, username: str = Dep
     _ = username
     if _trade_not_configured():
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Broker integration is not configured.")
-    if payload.stopLoss is None and payload.takeProfit is None:
+    if payload.clearStopLoss and payload.stopLoss is not None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="stopLoss and clearStopLoss cannot be combined.")
+    if payload.clearTakeProfit and payload.takeProfit is not None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="takeProfit and clearTakeProfit cannot be combined.")
+    if payload.stopLoss is None and payload.takeProfit is None and not payload.clearStopLoss and not payload.clearTakeProfit:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="At least one of stopLoss or takeProfit is required.")
     try:
         result = TRADE_GATEWAY.amend_position_sltp(
             position_id=payload.positionId,
             stop_loss=payload.stopLoss,
             take_profit=payload.takeProfit,
+            clear_stop_loss=payload.clearStopLoss,
+            clear_take_profit=payload.clearTakeProfit,
         )
-        return {"ok": True, "result": result, "serverTimeMs": now_ms()}
+        return {"ok": True, "result": result, "broker": TRADE_GATEWAY.status(), "serverTimeMs": now_ms()}
     except Exception as exc:
         _handle_trade_gateway_error(exc)
 

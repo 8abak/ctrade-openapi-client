@@ -60,7 +60,16 @@ class BrokerConfig:
 
 
 class TradeGatewayError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: Optional[str] = None,
+        status_code: Optional[int] = None,
+    ):
+        super().__init__(message)
+        self.code = code
+        self.status_code = status_code
 
 
 def load_broker_config(base_dir: Path) -> BrokerConfig:
@@ -147,10 +156,12 @@ class CTraderGateway:
         self._client: Optional[Client] = None
         self._client_lock = threading.RLock()
         self._connected = threading.Event()
+        self._app_authed = False
         self._authed = False
         self._symbol_cache: Dict[str, Any] = {}
         self._operation_lock = threading.RLock()
         self._last_error: Optional[str] = None
+        self._last_error_code: Optional[str] = None
 
     @property
     def configured(self) -> bool:
@@ -165,18 +176,103 @@ class CTraderGateway:
         return self._config.account_id
 
     def status(self) -> Dict[str, Any]:
+        configured = self.configured
+        reason = (self._last_error or "").strip() or None
+        code = self._last_error_code
+        if not configured:
+            reason = self._config_reason()
+            code = code or "BROKER_NOT_CONFIGURED"
+            state = "not_configured"
+        elif self._connected.is_set() and self._authed and not reason:
+            state = "ready"
+        elif reason:
+            state = "error"
+        else:
+            state = "unavailable"
         return {
-            "configured": self.configured,
+            "configured": configured,
             "connected": self._connected.is_set(),
             "authenticated": bool(self._authed),
+            "ready": state == "ready",
+            "state": state,
+            "reason": reason,
+            "code": code,
             "symbol": self._config.symbol,
             "symbolId": self._config.symbol_id,
             "connectionType": self._config.connection_type,
-            "lastError": self._last_error,
+            "lastError": reason,
         }
 
-    def _set_error(self, message: str) -> None:
+    def _config_reason(self) -> str:
+        if not self._config.client_id or not self._config.client_secret:
+            return "Broker application credentials missing."
+        if not self._config.account_id:
+            return "Trader account not configured."
+        if not self._config.access_token:
+            return "Broker token missing."
+        return "Broker integration is not configured."
+
+    def _set_error(self, message: str, code: Optional[str] = None) -> None:
         self._last_error = message
+        self._last_error_code = code
+
+    def _clear_error(self) -> None:
+        self._last_error = None
+        self._last_error_code = None
+
+    def _error(
+        self,
+        message: str,
+        *,
+        code: Optional[str] = None,
+        status_code: Optional[int] = None,
+    ) -> TradeGatewayError:
+        self._set_error(message, code)
+        return TradeGatewayError(message, code=code, status_code=status_code)
+
+    @staticmethod
+    def _payload_message(payload: Any) -> str:
+        return str(getattr(payload, "description", "") or getattr(payload, "errorCode", "") or "").strip()
+
+    @staticmethod
+    def _payload_error_code(payload: Any) -> str:
+        return str(getattr(payload, "errorCode", "") or "").strip().upper()
+
+    def _is_token_error(self, payload: Any) -> bool:
+        error_code = self._payload_error_code(payload)
+        message = self._payload_message(payload).lower()
+        return (
+            error_code in {"CH_ACCESS_TOKEN_INVALID", "OA_AUTH_TOKEN_EXPIRED"}
+            or "invalid access token" in message
+            or "access token" in message
+        )
+
+    def _is_app_already_authorized(self, payload: Any) -> bool:
+        message = self._payload_message(payload).lower()
+        return "already authorized" in message
+
+    def _translate_gateway_error(
+        self,
+        message: str,
+        *,
+        error_code: Optional[str] = None,
+        default_code: str = "BROKER_ERROR",
+        default_status: int = 502,
+    ) -> TradeGatewayError:
+        normalized = (message or "").strip() or "Trade request failed."
+        lowered = normalized.lower()
+        resolved_error_code = (error_code or "").strip().upper()
+        if resolved_error_code in {"CH_ACCESS_TOKEN_INVALID", "OA_AUTH_TOKEN_EXPIRED"} or "invalid access token" in lowered:
+            return self._error("Broker session expired.", code="BROKER_SESSION_EXPIRED", status_code=503)
+        if "access denied" in lowered and "credential" in lowered:
+            return self._error("Gateway login failed.", code="BROKER_LOGIN_FAILED", status_code=503)
+        if "already authorized" in lowered:
+            return self._error("Gateway login already active.", code="BROKER_APP_ALREADY_AUTHORIZED", status_code=503)
+        if "not found on the broker account" in lowered or "symbol metadata" in lowered:
+            return self._error("Symbol not resolved.", code="BROKER_SYMBOL_NOT_RESOLVED", status_code=503)
+        if "unable to connect" in lowered or "timed out" in lowered or "disconnected" in lowered:
+            return self._error("Broker unavailable.", code="BROKER_UNAVAILABLE", status_code=503)
+        return self._error(normalized, code=default_code, status_code=default_status)
 
     @classmethod
     def _ensure_reactor_started(cls) -> None:
@@ -193,13 +289,15 @@ class CTraderGateway:
 
     def _on_connected(self, _: Client) -> None:
         self._connected.set()
+        self._app_authed = False
         self._authed = False
-        self._set_error("")
+        self._clear_error()
 
     def _on_disconnected(self, _: Client, reason: Any) -> None:
         self._connected.clear()
+        self._app_authed = False
         self._authed = False
-        self._set_error("Disconnected from cTrader.")
+        self._set_error("Disconnected from cTrader.", "BROKER_DISCONNECTED")
         _ = reason
 
     def _run_on_reactor(self, fn: Any, *, timeout: float = 8.0) -> Any:
@@ -219,7 +317,7 @@ class CTraderGateway:
 
     def _ensure_client(self) -> None:
         if not self.configured:
-            raise TradeGatewayError("cTrader broker credentials are not configured.")
+            raise self._error(self._config_reason(), code="BROKER_NOT_CONFIGURED", status_code=503)
 
         with self._client_lock:
             self._ensure_reactor_started()
@@ -263,20 +361,30 @@ class CTraderGateway:
             raise TradeGatewayError("cTrader request timed out.") from exc
         return Protobuf.extract(raw)
 
-    @staticmethod
-    def _raise_if_error(payload: Any) -> None:
+    def _raise_if_error(self, payload: Any) -> None:
         if isinstance(payload, ProtoOAErrorRes):
-            raise TradeGatewayError(payload.description or payload.errorCode or "cTrader request failed.")
+            raise self._translate_gateway_error(
+                self._payload_message(payload),
+                error_code=self._payload_error_code(payload),
+            )
         if isinstance(payload, ProtoOAOrderErrorEvent):
-            raise TradeGatewayError(payload.description or payload.errorCode or "Order request failed.")
+            raise self._translate_gateway_error(
+                self._payload_message(payload),
+                error_code=self._payload_error_code(payload),
+                default_code="BROKER_ORDER_REJECTED",
+            )
         if isinstance(payload, ProtoOAExecutionEvent) and getattr(payload, "errorCode", ""):
-            raise TradeGatewayError(payload.errorCode)
+            raise self._translate_gateway_error(
+                str(getattr(payload, "errorCode", "") or ""),
+                error_code=str(getattr(payload, "errorCode", "") or ""),
+                default_code="BROKER_EXECUTION_ERROR",
+            )
 
-    def _refresh_access_token(self) -> bool:
+    def _refresh_access_token(self) -> tuple[bool, Optional[str]]:
         if not self._config.refresh_token:
-            return False
+            return False, "Broker session expired."
         if not self._config.client_id or not self._config.client_secret:
-            return False
+            return False, "Gateway login failed."
 
         try:
             response = requests.post(
@@ -290,19 +398,25 @@ class CTraderGateway:
                 timeout=20,
             )
             if response.status_code != 200:
-                return False
+                return False, "Broker token refresh failed."
             payload = response.json()
+            error_code = str(payload.get("errorCode", "") or "").strip().upper()
+            description = str(payload.get("description", "") or "").strip()
             access_token = str(payload.get("access_token", "")).strip()
             if not access_token:
-                return False
+                if error_code == "ACCESS_DENIED":
+                    return False, "Broker session expired."
+                if description:
+                    return False, description
+                return False, "Broker token refresh failed."
             self._config.access_token = access_token
             refreshed = str(payload.get("refresh_token", "")).strip()
             if refreshed:
                 self._config.refresh_token = refreshed
             self._persist_tokens()
-            return True
+            return True, None
         except Exception:
-            return False
+            return False, "Broker token refresh failed."
 
     def _persist_tokens(self) -> None:
         path = self._config.creds_file
@@ -320,34 +434,41 @@ class CTraderGateway:
             return
 
     def _authenticate(self) -> None:
-        app_req = ProtoOAApplicationAuthReq()
-        app_req.clientId = self._config.client_id
-        app_req.clientSecret = self._config.client_secret
-        app_res = self._send_proto(app_req, timeout=12.0)
-        self._raise_if_error(app_res)
+        if not self._app_authed:
+            app_req = ProtoOAApplicationAuthReq()
+            app_req.clientId = self._config.client_id
+            app_req.clientSecret = self._config.client_secret
+            app_res = self._send_proto(app_req, timeout=12.0)
+            if isinstance(app_res, ProtoOAErrorRes) and self._is_app_already_authorized(app_res):
+                self._app_authed = True
+            else:
+                self._raise_if_error(app_res)
+                self._app_authed = True
 
         account_req = ProtoOAAccountAuthReq()
         account_req.ctidTraderAccountId = int(self._config.account_id)
         account_req.accessToken = self._config.access_token
         account_res = self._send_proto(account_req, timeout=12.0)
-        refresh_hint = False
-        if isinstance(account_res, ProtoOAErrorRes):
-            error_code = str(getattr(account_res, "errorCode", "") or "").upper()
-            description = str(getattr(account_res, "description", "") or "").lower()
-            refresh_hint = error_code in {"CH_ACCESS_TOKEN_INVALID", "OA_AUTH_TOKEN_EXPIRED"} or "access token" in description
-        if refresh_hint:
-            if not self._refresh_access_token():
-                self._raise_if_error(account_res)
+        if isinstance(account_res, ProtoOAErrorRes) and self._is_token_error(account_res):
+            refreshed, refresh_message = self._refresh_access_token()
+            if not refreshed:
+                raise self._error(
+                    refresh_message or "Broker session expired.",
+                    code="BROKER_SESSION_EXPIRED",
+                    status_code=503,
+                )
             account_req.accessToken = self._config.access_token
             account_res = self._send_proto(account_req, timeout=12.0)
+            if isinstance(account_res, ProtoOAErrorRes) and self._is_token_error(account_res):
+                raise self._error("Broker session expired.", code="BROKER_SESSION_EXPIRED", status_code=503)
         self._raise_if_error(account_res)
         self._authed = True
+        self._clear_error()
 
     def ensure_ready(self) -> None:
         self._ensure_client()
         if not self._connected.wait(timeout=10.0):
-            self._set_error("Unable to connect to cTrader.")
-            raise TradeGatewayError("Unable to connect to cTrader gateway.")
+            raise self._error("Broker unavailable.", code="BROKER_UNAVAILABLE", status_code=503)
 
         with self._operation_lock:
             if not self._authed:
@@ -374,7 +495,7 @@ class CTraderGateway:
                     symbol_id = int(item.symbolId)
                     break
         if symbol_id is None:
-            raise TradeGatewayError(f"Symbol {self._config.symbol} was not found on the broker account.")
+            raise self._error("Symbol not resolved.", code="BROKER_SYMBOL_NOT_RESOLVED", status_code=503)
 
         by_id_req = ProtoOASymbolByIdReq()
         by_id_req.ctidTraderAccountId = int(self._config.account_id)
@@ -388,7 +509,7 @@ class CTraderGateway:
                 symbol_meta = item
                 break
         if symbol_meta is None:
-            raise TradeGatewayError(f"Symbol metadata for id {symbol_id} is unavailable.")
+            raise self._error("Symbol not resolved.", code="BROKER_SYMBOL_NOT_RESOLVED", status_code=503)
 
         self._config.symbol_id = int(symbol_id)
         self._symbol_cache = {
@@ -567,14 +688,14 @@ class CTraderGateway:
         take_profit: Optional[float],
     ) -> Dict[str, Any]:
         if side not in {"buy", "sell"}:
-            raise TradeGatewayError("Order side must be buy or sell.")
+            raise self._error("Order side must be buy or sell.", code="INVALID_ORDER_SIDE", status_code=400)
         symbol = self._resolve_symbol()
         step = int(symbol.get("stepVolume") or 1)
         min_volume = int(symbol.get("minVolume") or 1)
         if volume < min_volume:
-            raise TradeGatewayError(f"Volume must be at least {min_volume}.")
+            raise self._error(f"Volume must be at least {min_volume}.", code="INVALID_VOLUME", status_code=400)
         if step > 1 and volume % step != 0:
-            raise TradeGatewayError(f"Volume must be a multiple of {step}.")
+            raise self._error(f"Volume must be a multiple of {step}.", code="INVALID_VOLUME", status_code=400)
 
         req = ProtoOANewOrderReq()
         req.ctidTraderAccountId = int(self._config.account_id)
@@ -589,14 +710,15 @@ class CTraderGateway:
 
         payload = self._send_proto(req, timeout=12.0)
         self._raise_if_error(payload)
+        self._clear_error()
         return self._normalize_execution_payload(payload)
 
     def close_position(self, *, position_id: int, volume: int) -> Dict[str, Any]:
         self.ensure_ready()
         if position_id <= 0:
-            raise TradeGatewayError("Position id is required.")
+            raise self._error("Position id is required.", code="INVALID_POSITION_ID", status_code=400)
         if volume <= 0:
-            raise TradeGatewayError("Close volume must be greater than zero.")
+            raise self._error("Close volume must be greater than zero.", code="INVALID_VOLUME", status_code=400)
 
         req = ProtoOAClosePositionReq()
         req.ctidTraderAccountId = int(self._config.account_id)
@@ -604,6 +726,7 @@ class CTraderGateway:
         req.volume = int(volume)
         payload = self._send_proto(req, timeout=12.0)
         self._raise_if_error(payload)
+        self._clear_error()
         return self._normalize_execution_payload(payload)
 
     def amend_position_sltp(
@@ -612,22 +735,29 @@ class CTraderGateway:
         position_id: int,
         stop_loss: Optional[float],
         take_profit: Optional[float],
+        clear_stop_loss: bool = False,
+        clear_take_profit: bool = False,
     ) -> Dict[str, Any]:
         self.ensure_ready()
         if position_id <= 0:
-            raise TradeGatewayError("Position id is required.")
-        if stop_loss is None and take_profit is None:
-            raise TradeGatewayError("At least one of stopLoss or takeProfit is required.")
+            raise self._error("Position id is required.", code="INVALID_POSITION_ID", status_code=400)
+        if stop_loss is None and take_profit is None and not clear_stop_loss and not clear_take_profit:
+            raise self._error("At least one of stopLoss or takeProfit is required.", code="INVALID_PROTECTION_EDIT", status_code=400)
 
         req = ProtoOAAmendPositionSLTPReq()
         req.ctidTraderAccountId = int(self._config.account_id)
         req.positionId = int(position_id)
         if stop_loss is not None:
             req.stopLoss = float(stop_loss)
+        elif clear_stop_loss:
+            req.stopLoss = 0.0
         if take_profit is not None:
             req.takeProfit = float(take_profit)
+        elif clear_take_profit:
+            req.takeProfit = 0.0
         payload = self._send_proto(req, timeout=12.0)
         self._raise_if_error(payload)
+        self._clear_error()
         return self._normalize_execution_payload(payload)
 
     def history(self, *, limit: int) -> Dict[str, Any]:
