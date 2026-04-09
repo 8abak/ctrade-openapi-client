@@ -146,6 +146,31 @@
               <button class="ghost-button compact-button" id="tradeLogoutButton" type="button">Logout</button>
             </div>
 
+            <div class="trade-prepare-shell">
+              <div class="trade-list-title">Prepared entry</div>
+              <div class="trade-prepare-grid">
+                <label>
+                  <span>lot size</span>
+                  <input id="tradePreparedLotSize" type="number" min="0.01" step="0.01" value="0.01">
+                </label>
+                <label>
+                  <span>default stop loss</span>
+                  <input id="tradePreparedStopLoss" type="number" min="0" step="0.01" placeholder="optional">
+                </label>
+                <label>
+                  <span>default take profit</span>
+                  <input id="tradePreparedTakeProfit" type="number" min="0" step="0.01" placeholder="optional">
+                </label>
+              </div>
+              <div class="trade-prepare-presets" id="tradePreparedPresets">
+                <button class="ghost-button compact-button" type="button" data-lot-size="0.01">0.01 lot</button>
+                <button class="ghost-button compact-button" type="button" data-lot-size="0.02">0.02 lot</button>
+                <button class="ghost-button compact-button" type="button" data-lot-size="0.05">0.05 lot</button>
+              </div>
+              <div class="trade-session-copy" id="tradePreparedVolumeInfo">Broker min 0.01 lot | step 0.01 lot.</div>
+              <div class="trade-session-copy" id="tradePreparedSummary">Prepared 0.01 lot | SL none | TP none.</div>
+            </div>
+
             <div class="trade-list-shell">
               <div class="trade-list-title">Open positions</div>
               <div class="trade-list" id="tradeOpenList">
@@ -180,30 +205,6 @@
             <button class="chart-trade-button chart-trade-button-sell" id="chartTradeSellButton" type="button">Sell Market</button>
           </div>
           <div class="chart-trade-hint" id="chartTradeHint">Login required</div>
-        </div>
-
-        <div class="panel chart-trade-confirm" id="chartTradeConfirm" hidden>
-          <div class="chart-trade-card-title" id="chartTradeConfirmTitle">Buy Market</div>
-          <div class="chart-trade-card-copy" id="chartTradeConfirmCopy">Review the market order before submit.</div>
-          <div class="chart-trade-card-grid">
-            <label>
-              <span>lot size</span>
-              <input id="chartTradeLotSize" type="number" min="0.01" step="0.01" value="0.01">
-            </label>
-            <label>
-              <span>stop loss</span>
-              <input id="chartTradeStopLoss" type="number" min="0" step="0.01" placeholder="optional">
-            </label>
-            <label>
-              <span>take profit</span>
-              <input id="chartTradeTakeProfit" type="number" min="0" step="0.01" placeholder="optional">
-            </label>
-          </div>
-          <div class="chart-trade-card-copy" id="chartTradeVolumeInfo">Default size is 0.01 lot.</div>
-          <div class="chart-trade-card-actions">
-            <button class="primary-button compact-button" id="chartTradeConfirmButton" type="button">Confirm</button>
-            <button class="ghost-button compact-button" id="chartTradeCancelButton" type="button">Cancel</button>
-          </div>
         </div>
 
         <div class="panel chart-position-editor" id="chartPositionEditor" hidden>

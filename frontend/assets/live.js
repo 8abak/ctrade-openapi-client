@@ -62,10 +62,15 @@
     resizeObserver: null,
     ui: { sidebarCollapsed: true },
     trade: {
+      authConfigured: true,
+      authError: null,
+      brokerConfigured: false,
+      lastLoggedErrorKey: null,
       authenticated: false,
       username: null,
       loginBusy: false,
       actionBusy: false,
+      historyAvailable: true,
       loading: false,
       pollTimer: 0,
       positions: [],
@@ -112,6 +117,12 @@
     tradeControls: document.getElementById("tradeControls"),
     tradeSessionSummary: document.getElementById("tradeSessionSummary"),
     tradeLogoutButton: document.getElementById("tradeLogoutButton"),
+    tradePreparedLotSize: document.getElementById("tradePreparedLotSize"),
+    tradePreparedStopLoss: document.getElementById("tradePreparedStopLoss"),
+    tradePreparedTakeProfit: document.getElementById("tradePreparedTakeProfit"),
+    tradePreparedPresets: document.getElementById("tradePreparedPresets"),
+    tradePreparedVolumeInfo: document.getElementById("tradePreparedVolumeInfo"),
+    tradePreparedSummary: document.getElementById("tradePreparedSummary"),
     tradeOpenList: document.getElementById("tradeOpenList"),
     tradePendingList: document.getElementById("tradePendingList"),
     tradeHistoryList: document.getElementById("tradeHistoryList"),
@@ -119,15 +130,6 @@
     chartTradeBuyButton: document.getElementById("chartTradeBuyButton"),
     chartTradeSellButton: document.getElementById("chartTradeSellButton"),
     chartTradeHint: document.getElementById("chartTradeHint"),
-    chartTradeConfirm: document.getElementById("chartTradeConfirm"),
-    chartTradeConfirmTitle: document.getElementById("chartTradeConfirmTitle"),
-    chartTradeConfirmCopy: document.getElementById("chartTradeConfirmCopy"),
-    chartTradeLotSize: document.getElementById("chartTradeLotSize"),
-    chartTradeStopLoss: document.getElementById("chartTradeStopLoss"),
-    chartTradeTakeProfit: document.getElementById("chartTradeTakeProfit"),
-    chartTradeVolumeInfo: document.getElementById("chartTradeVolumeInfo"),
-    chartTradeConfirmButton: document.getElementById("chartTradeConfirmButton"),
-    chartTradeCancelButton: document.getElementById("chartTradeCancelButton"),
     chartPositionEditor: document.getElementById("chartPositionEditor"),
     chartPositionTitle: document.getElementById("chartPositionTitle"),
     chartPositionCopy: document.getElementById("chartPositionCopy"),
@@ -296,10 +298,11 @@
     [
       elements.tradeLogoutButton,
       elements.tradeLoginButton,
+      elements.tradePreparedLotSize,
+      elements.tradePreparedStopLoss,
+      elements.tradePreparedTakeProfit,
       elements.chartTradeBuyButton,
       elements.chartTradeSellButton,
-      elements.chartTradeConfirmButton,
-      elements.chartTradeCancelButton,
       elements.chartPositionConfirmButton,
       elements.chartPositionCancelButton,
     ].forEach((button) => {
@@ -307,25 +310,90 @@
         button.disabled = disabled;
       }
     });
+    if (elements.tradePreparedPresets) {
+      elements.tradePreparedPresets.querySelectorAll("button").forEach((button) => {
+        button.disabled = disabled;
+      });
+    }
     renderTradeEntryOverlay();
     renderPositionEditor();
   }
 
-  function setTradeAuthenticated(authenticated, username) {
-    state.trade.authenticated = Boolean(authenticated);
-    state.trade.username = username || null;
-    elements.tradeLoginForm.hidden = state.trade.authenticated;
-    elements.tradeControls.hidden = !state.trade.authenticated;
-    elements.tradeAuthPill.classList.toggle("ready", state.trade.authenticated);
-    elements.tradeAuthPill.textContent = state.trade.authenticated ? ("Ready " + (state.trade.username || "")) : "Locked";
+  function clearTradeRuntimeState() {
+    stopTradePolling();
+    state.trade.positions = [];
+    state.trade.pendingOrders = [];
+    state.trade.trades = [];
+    state.trade.deals = [];
+    state.trade.historyAvailable = true;
+    state.trade.volumeInfo = null;
+    state.trade.lastLoadedAtMs = null;
+    state.trade.activeOrderSide = null;
+    state.trade.activePositionId = null;
+    state.trade.pendingProtectionEdits = {};
+  }
+
+  function applyTradeSessionPayload(payload) {
+    state.trade.authConfigured = payload?.authConfigured !== false;
+    state.trade.authError = payload?.error || null;
+    state.trade.brokerConfigured = Boolean(payload?.brokerConfigured ?? payload?.configured);
+    state.trade.authenticated = state.trade.authConfigured && Boolean(payload?.authenticated);
+    state.trade.username = state.trade.authenticated ? (payload?.username || null) : null;
     if (!state.trade.authenticated) {
-      state.trade.activeOrderSide = null;
-      state.trade.activePositionId = null;
-      state.trade.pendingProtectionEdits = {};
+      clearTradeRuntimeState();
     }
+    elements.tradeLoginForm.hidden = state.trade.authenticated || !state.trade.authConfigured;
+    elements.tradeControls.hidden = !state.trade.authenticated;
+    elements.tradeLogoutButton.hidden = !state.trade.authenticated || !state.trade.authConfigured;
+    elements.tradeUsername.disabled = !state.trade.authConfigured || state.trade.loginBusy || state.trade.actionBusy;
+    elements.tradePassword.disabled = !state.trade.authConfigured || state.trade.loginBusy || state.trade.actionBusy;
+    elements.tradeLoginButton.disabled = !state.trade.authConfigured || state.trade.loginBusy || state.trade.actionBusy;
+    elements.tradeAuthPill.classList.toggle("ready", state.trade.authenticated);
+    elements.tradeAuthPill.textContent = state.trade.authenticated
+      ? ("Ready " + (state.trade.username || ""))
+      : (state.trade.authConfigured ? "Locked" : "Unavailable");
     renderTradeEntryOverlay();
     renderPositionEditor();
     queueOverlayRender();
+  }
+
+  function tradeConsole(method, url, error) {
+    const message = String(error?.message || "");
+    const expected =
+      error?.code === "TRADE_AUTH_NOT_CONFIGURED"
+      || message.toLowerCase().includes("trade login required");
+    if (expected || !window.console) {
+      return;
+    }
+    const details = {
+      status: error?.status ?? null,
+      code: error?.code ?? null,
+      message,
+    };
+    const key = [method, url, details.status, details.code, details.message].join("|");
+    if (state.trade.lastLoggedErrorKey === key) {
+      return;
+    }
+    state.trade.lastLoggedErrorKey = key;
+    if (typeof window.console.error === "function") {
+      window.console.error("[trade] " + method + " " + url + " failed", details);
+    }
+  }
+
+  function tradeErrorMessage(payload) {
+    if (typeof payload?.message === "string" && payload.message) {
+      return payload.message;
+    }
+    if (typeof payload?.detail === "string" && payload.detail) {
+      return payload.detail;
+    }
+    if (payload?.detail && typeof payload.detail === "object" && typeof payload.detail.message === "string") {
+      return payload.detail.message;
+    }
+    if (typeof payload?.error === "string" && payload.error) {
+      return payload.error;
+    }
+    return "Request failed.";
   }
 
   function parseOptionalPriceInput(element) {
@@ -376,6 +444,82 @@
       return null;
     }
     return units / lotSize;
+  }
+
+  function tradeBrokerLimits() {
+    const info = currentTradeVolumeInfo();
+    const defaultLotSize = Number(info.defaultLotSize || TRADE_DEFAULT_LOT_SIZE);
+    const minLotSize = Number(info.minLotSize || defaultLotSize || TRADE_DEFAULT_LOT_SIZE);
+    const brokerStep = Number(info.lotStep || TRADE_DEFAULT_LOT_SIZE);
+    return {
+      defaultLotSize: Number.isFinite(defaultLotSize) && defaultLotSize > 0 ? defaultLotSize : TRADE_DEFAULT_LOT_SIZE,
+      minLotSize: Number.isFinite(minLotSize) && minLotSize > 0 ? minLotSize : TRADE_DEFAULT_LOT_SIZE,
+      lotStep: Number.isFinite(brokerStep) && brokerStep > TRADE_DEFAULT_LOT_SIZE ? brokerStep : TRADE_DEFAULT_LOT_SIZE,
+    };
+  }
+
+  function lotStepAligned(lotSize, step) {
+    const size = Number(lotSize);
+    const stepSize = Number(step);
+    if (!Number.isFinite(size) || !Number.isFinite(stepSize) || stepSize <= 0) {
+      return false;
+    }
+    const ratio = size / stepSize;
+    return Math.abs(ratio - Math.round(ratio)) < 0.000001;
+  }
+
+  function parseOptionalPreparedPriceInput(element) {
+    const raw = (element?.value || "").trim();
+    if (!raw) {
+      return null;
+    }
+    const number = Number(raw);
+    if (!Number.isFinite(number) || number <= 0) {
+      throw new Error("Prepared SL/TP values must be greater than zero.");
+    }
+    return number;
+  }
+
+  function readPreparedTradeInputs() {
+    const rawLotSize = (elements.tradePreparedLotSize?.value || "").trim();
+    const lotSize = Number(rawLotSize);
+    if (!Number.isFinite(lotSize) || lotSize <= 0) {
+      throw new Error("Lot size must be greater than zero.");
+    }
+    return {
+      lotSize,
+      stopLoss: parseOptionalPreparedPriceInput(elements.tradePreparedStopLoss),
+      takeProfit: parseOptionalPreparedPriceInput(elements.tradePreparedTakeProfit),
+    };
+  }
+
+  function preparedTradeState() {
+    const inputs = { lotSize: null, stopLoss: null, takeProfit: null };
+    try {
+      Object.assign(inputs, readPreparedTradeInputs());
+    } catch (error) {
+      return { ready: false, reason: error.message || "Prepared trade inputs are invalid.", ...inputs };
+    }
+    const limits = tradeBrokerLimits();
+    if (!state.trade.authConfigured) {
+      return { ready: false, reason: "Trade login is not configured on the server.", ...inputs };
+    }
+    if (!state.trade.authenticated) {
+      return { ready: false, reason: "Login required.", ...inputs };
+    }
+    if (!state.trade.brokerConfigured) {
+      return { ready: false, reason: "Broker integration is not configured.", ...inputs };
+    }
+    if (!state.trade.volumeInfo || !state.trade.lastLoadedAtMs) {
+      return { ready: false, reason: "Broker state unavailable.", ...inputs };
+    }
+    if (inputs.lotSize < limits.minLotSize) {
+      return { ready: false, reason: "Lot size must be at least " + formatLots(limits.minLotSize) + " lot.", ...inputs };
+    }
+    if (!lotStepAligned(inputs.lotSize, limits.lotStep)) {
+      return { ready: false, reason: "Lot size must use " + formatLots(limits.lotStep) + " lot steps.", ...inputs };
+    }
+    return { ready: true, reason: "", ...inputs };
   }
 
   function positionLots(position) {
@@ -581,71 +725,60 @@
     }
   }
 
-  function syncTradeVolumeInputs() {
-    const info = currentTradeVolumeInfo();
-    const defaultLotSize = Number(info.defaultLotSize || TRADE_DEFAULT_LOT_SIZE);
-    const minLotSize = Number(info.minLotSize || defaultLotSize);
-    const lotStep = Number(info.lotStep || defaultLotSize);
-    if (elements.chartTradeLotSize) {
-      elements.chartTradeLotSize.min = String(Number.isFinite(minLotSize) && minLotSize > 0 ? minLotSize : TRADE_DEFAULT_LOT_SIZE);
-      elements.chartTradeLotSize.step = String(Number.isFinite(lotStep) && lotStep > 0 ? lotStep : TRADE_DEFAULT_LOT_SIZE);
-      if (!(Number(elements.chartTradeLotSize.value) > 0)) {
-        elements.chartTradeLotSize.value = formatLots(defaultLotSize);
+  function syncPreparedTradeInputs() {
+    const limits = tradeBrokerLimits();
+    if (elements.tradePreparedLotSize) {
+      elements.tradePreparedLotSize.min = String(limits.minLotSize);
+      elements.tradePreparedLotSize.step = String(limits.lotStep);
+      if (!(Number(elements.tradePreparedLotSize.value) > 0)) {
+        elements.tradePreparedLotSize.value = formatLots(limits.defaultLotSize);
       }
     }
-    if (elements.chartTradeVolumeInfo) {
-      const unitsPerLot = tradeLotSizeUnits();
-      const unitText = Number.isFinite(unitsPerLot) && unitsPerLot > 0
-        ? " | " + formatLots(defaultLotSize) + " lot = " + formatCompactNumber(defaultLotSize * unitsPerLot, 0) + " units"
-        : "";
-      const stepText = Number.isFinite(lotStep) && lotStep > 0 ? " | step " + formatLots(lotStep) + " lot" : "";
-      elements.chartTradeVolumeInfo.textContent = "Default size is " + formatLots(defaultLotSize) + " lot" + unitText + stepText + ".";
+    if (elements.tradePreparedVolumeInfo) {
+      elements.tradePreparedVolumeInfo.textContent = "Broker min " + formatLots(limits.minLotSize) + " lot | step " + formatLots(limits.lotStep) + " lot.";
     }
   }
 
-  function closeTradeConfirm() {
-    state.trade.activeOrderSide = null;
-    if (elements.chartTradeConfirm) {
-      elements.chartTradeConfirm.hidden = true;
-    }
-    renderTradeEntryOverlay();
-  }
-
-  function openTradeConfirm(side) {
-    if (!state.trade.authenticated || state.trade.actionBusy) {
+  function renderPreparedTradeSummary() {
+    if (!elements.tradePreparedSummary) {
       return;
     }
-    state.trade.activeOrderSide = side === "sell" ? "sell" : "buy";
-    syncTradeVolumeInputs();
-    renderTradeEntryOverlay();
+    const prepared = preparedTradeState();
+    const parts = [
+      "Prepared " + (prepared.lotSize != null && Number.isFinite(Number(prepared.lotSize)) ? formatLots(prepared.lotSize) : formatLots(tradeBrokerLimits().defaultLotSize)) + " lot",
+      "SL " + (prepared.stopLoss != null ? formatPrice(prepared.stopLoss) : "none"),
+      "TP " + (prepared.takeProfit != null ? formatPrice(prepared.takeProfit) : "none"),
+    ];
+    elements.tradePreparedSummary.textContent = prepared.ready
+      ? parts.join(" | ")
+      : parts.join(" | ") + " | " + prepared.reason;
   }
 
   function renderTradeEntryOverlay() {
     if (!elements.chartTradeEntry) {
       return;
     }
-    const authenticated = state.trade.authenticated;
+    const prepared = preparedTradeState();
+    const authConfigured = state.trade.authConfigured;
     const busy = state.trade.actionBusy;
     if (elements.chartTradeBuyButton) {
-      elements.chartTradeBuyButton.disabled = !authenticated || busy;
+      elements.chartTradeBuyButton.hidden = !authConfigured;
+      elements.chartTradeBuyButton.disabled = !authConfigured || !prepared.ready || busy;
+      elements.chartTradeBuyButton.textContent = busy && state.trade.activeOrderSide === "buy" ? "Buying..." : "Buy Market";
     }
     if (elements.chartTradeSellButton) {
-      elements.chartTradeSellButton.disabled = !authenticated || busy;
+      elements.chartTradeSellButton.hidden = !authConfigured;
+      elements.chartTradeSellButton.disabled = !authConfigured || !prepared.ready || busy;
+      elements.chartTradeSellButton.textContent = busy && state.trade.activeOrderSide === "sell" ? "Selling..." : "Sell Market";
     }
     if (elements.chartTradeHint) {
-      elements.chartTradeHint.textContent = authenticated
-        ? ("Session active | default " + formatLots(Number(currentTradeVolumeInfo().defaultLotSize || TRADE_DEFAULT_LOT_SIZE)) + " lot")
-        : "Login required";
+      elements.chartTradeHint.textContent = busy && state.trade.activeOrderSide
+        ? ("Sending " + state.trade.activeOrderSide + " | " + formatLots(prepared.lotSize) + " lot | SL " + (prepared.stopLoss != null ? formatPrice(prepared.stopLoss) : "none") + " | TP " + (prepared.takeProfit != null ? formatPrice(prepared.takeProfit) : "none"))
+        : (prepared.ready
+          ? ("Using " + formatLots(prepared.lotSize) + " lot | SL " + (prepared.stopLoss != null ? formatPrice(prepared.stopLoss) : "none") + " | TP " + (prepared.takeProfit != null ? formatPrice(prepared.takeProfit) : "none"))
+          : prepared.reason);
     }
-    if (elements.chartTradeConfirm) {
-      const open = authenticated && Boolean(state.trade.activeOrderSide);
-      elements.chartTradeConfirm.hidden = !open;
-      if (open) {
-        const sideLabel = state.trade.activeOrderSide === "sell" ? "Sell Market" : "Buy Market";
-        elements.chartTradeConfirmTitle.textContent = sideLabel;
-        elements.chartTradeConfirmCopy.textContent = "Submit " + sideLabel.toLowerCase() + " with the configured lot size.";
-      }
-    }
+    renderPreparedTradeSummary();
   }
 
   function renderPositionEditor() {
@@ -1551,7 +1684,11 @@
     const response = await fetch(url, options);
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
-      throw new Error(payload.detail || "Request failed.");
+      const error = new Error(tradeErrorMessage(payload));
+      error.status = response.status;
+      error.code = typeof payload?.error === "string" ? payload.error : null;
+      error.payload = payload;
+      throw error;
     }
     return payload;
   }
@@ -1565,7 +1702,14 @@
     if (!request.body) {
       delete request.body;
     }
-    return fetchJson(url, request);
+    try {
+      const payload = await fetchJson(url, request);
+      state.trade.lastLoggedErrorKey = null;
+      return payload;
+    } catch (error) {
+      tradeConsole(request.method, url, error);
+      throw error;
+    }
   }
 
   function stopTradePolling() {
@@ -1592,10 +1736,13 @@
 
   function renderTradeLists() {
     if (elements.tradeSessionSummary) {
-      elements.tradeSessionSummary.textContent = state.trade.authenticated
-        ? "Session unlocked for " + (state.trade.username || "trade user") + ". Market entry is on-chart."
-        : "Login required for chart trading.";
+      elements.tradeSessionSummary.textContent = !state.trade.authConfigured
+        ? "Trade login is not configured on the server."
+        : (state.trade.authenticated
+          ? "Session unlocked for " + (state.trade.username || "trade user") + ". Market entry is one-click from the chart."
+          : "Login required for chart trading.");
     }
+    renderPreparedTradeSummary();
     const openItems = state.trade.positions || [];
     if (!openItems.length) {
       elements.tradeOpenList.innerHTML = "<div class=\"sql-empty\">No open positions.</div>";
@@ -1633,7 +1780,7 @@
 
     const historyItems = state.trade.trades || [];
     if (!historyItems.length) {
-      elements.tradeHistoryList.innerHTML = "<div class=\"sql-empty\">No recent trade history.</div>";
+      elements.tradeHistoryList.innerHTML = "<div class=\"sql-empty\">" + (state.trade.historyAvailable ? "No recent trade history." : "Recent trade history unavailable.") + "</div>";
     } else {
       elements.tradeHistoryList.innerHTML = historyItems.map((trade) => [
         "<article class=\"trade-item\">",
@@ -1661,29 +1808,60 @@
       tradeStatus("Loading trade state...", false);
     }
     try {
-      const [openPayload, historyPayload] = await Promise.all([
-        tradeFetchJson("/api/trade/open"),
-        tradeFetchJson("/api/trade/history?limit=" + String(TRADE_HISTORY_LIMIT)),
-      ]);
-      state.trade.volumeInfo = openPayload.volumeInfo || historyPayload.volumeInfo || currentTradeVolumeInfo();
+      const openPayload = await tradeFetchJson("/api/trade/open");
+      state.trade.volumeInfo = openPayload.volumeInfo || currentTradeVolumeInfo();
       state.trade.positions = Array.isArray(openPayload.positions) ? openPayload.positions : [];
       state.trade.pendingOrders = Array.isArray(openPayload.pendingOrders) ? openPayload.pendingOrders : [];
-      state.trade.trades = Array.isArray(historyPayload.trades) ? historyPayload.trades : [];
-      state.trade.deals = Array.isArray(historyPayload.deals) ? historyPayload.deals : [];
       state.trade.lastLoadedAtMs = Date.now();
+      state.trade.historyAvailable = true;
+      try {
+        const historyPayload = await tradeFetchJson("/api/trade/history?limit=" + String(TRADE_HISTORY_LIMIT));
+        state.trade.volumeInfo = openPayload.volumeInfo || historyPayload.volumeInfo || currentTradeVolumeInfo();
+        state.trade.trades = Array.isArray(historyPayload.trades) ? historyPayload.trades : [];
+        state.trade.deals = Array.isArray(historyPayload.deals) ? historyPayload.deals : [];
+      } catch (error) {
+        state.trade.historyAvailable = false;
+        if (!silent) {
+          tradeStatus("Trade state updated. Recent history unavailable.", true);
+        }
+      }
       syncTradeSelection();
-      syncTradeVolumeInputs();
+      syncPreparedTradeInputs();
       renderTradeLists();
       renderChart({ shiftWithRun: false });
-      if (!silent) {
+      if (!silent && state.trade.historyAvailable) {
         tradeStatus("Trade state updated.", false);
       }
       scheduleTradePolling();
     } catch (error) {
-      if (String(error?.message || "").toLowerCase().includes("trade login required")) {
-        setTradeAuthenticated(false, null);
-        state.trade.volumeInfo = null;
+      const message = String(error?.message || "").toLowerCase();
+      if (error?.code === "TRADE_AUTH_NOT_CONFIGURED" || message.includes("trade login is not configured on the server")) {
+        applyTradeSessionPayload({
+          authenticated: false,
+          username: null,
+          authConfigured: false,
+          brokerConfigured: error?.payload?.brokerConfigured ?? state.trade.brokerConfigured,
+          configured: error?.payload?.configured ?? state.trade.brokerConfigured,
+          error: error?.code || "TRADE_AUTH_NOT_CONFIGURED",
+        });
         renderTradeLists();
+      } else if (message.includes("trade login required")) {
+        applyTradeSessionPayload({
+          authenticated: false,
+          username: null,
+          authConfigured: true,
+          brokerConfigured: state.trade.brokerConfigured,
+          configured: state.trade.brokerConfigured,
+        });
+        renderTradeLists();
+      } else {
+        state.trade.volumeInfo = null;
+        state.trade.lastLoadedAtMs = null;
+        state.trade.positions = [];
+        state.trade.pendingOrders = [];
+        state.trade.historyAvailable = false;
+        renderTradeLists();
+        renderChart({ shiftWithRun: false });
       }
       throw error;
     } finally {
@@ -1693,6 +1871,10 @@
 
   async function requestTradeLogin() {
     if (state.trade.loginBusy || state.trade.actionBusy) {
+      return;
+    }
+    if (!state.trade.authConfigured) {
+      tradeStatus("Trade login is not configured on the server.", true);
       return;
     }
     const username = (elements.tradeUsername.value || "").trim();
@@ -1709,12 +1891,29 @@
         body: JSON.stringify({ username, password }),
       });
       elements.tradePassword.value = "";
-      setTradeAuthenticated(true, payload.username || username);
+      applyTradeSessionPayload({
+        authenticated: true,
+        username: payload.username || username,
+        authConfigured: true,
+        brokerConfigured: state.trade.brokerConfigured,
+        configured: state.trade.brokerConfigured,
+      });
       tradeStatus("Trade login successful.", false);
       await refreshTradeData({ silent: true }).catch((error) => {
         tradeStatus(error.message || "Trade refresh failed.", true);
       });
     } catch (error) {
+      if (error?.code === "TRADE_AUTH_NOT_CONFIGURED") {
+        applyTradeSessionPayload({
+          authenticated: false,
+          username: null,
+          authConfigured: false,
+          brokerConfigured: error?.payload?.brokerConfigured ?? state.trade.brokerConfigured,
+          configured: error?.payload?.configured ?? state.trade.brokerConfigured,
+          error: error.code,
+        });
+        renderTradeLists();
+      }
       tradeStatus(error.message || "Trade login failed.", true);
     } finally {
       state.trade.loginBusy = false;
@@ -1733,61 +1932,47 @@
     } catch (error) {
       void error;
     }
-    state.trade.positions = [];
-    state.trade.pendingOrders = [];
-    state.trade.trades = [];
-    state.trade.deals = [];
-    state.trade.volumeInfo = null;
-    state.trade.activeOrderSide = null;
-    state.trade.activePositionId = null;
-    state.trade.pendingProtectionEdits = {};
-    setTradeAuthenticated(false, null);
+    applyTradeSessionPayload({
+      authenticated: false,
+      username: null,
+      authConfigured: state.trade.authConfigured,
+      brokerConfigured: state.trade.brokerConfigured,
+      configured: state.trade.brokerConfigured,
+    });
     renderTradeLists();
     renderChart({ shiftWithRun: false });
     tradeStatus("Trade session logged out.", false);
     setTradeBusy(false);
   }
 
-  function readOrderInputs() {
-    const lotSize = Number((elements.chartTradeLotSize.value || "").trim());
-    if (!Number.isFinite(lotSize) || lotSize <= 0) {
-      throw new Error("Lot size must be greater than zero.");
-    }
-    return {
-      lotSize,
-      stopLoss: parseOptionalPriceInput(elements.chartTradeStopLoss),
-      takeProfit: parseOptionalPriceInput(elements.chartTradeTakeProfit),
-    };
-  }
-
   async function submitMarketOrder(side) {
     if (!state.trade.authenticated || state.trade.actionBusy) {
       return;
     }
-    let inputs;
-    try {
-      inputs = readOrderInputs();
-    } catch (error) {
-      tradeStatus(error.message || "Invalid trade inputs.", true);
+    const prepared = preparedTradeState();
+    if (!prepared.ready) {
+      tradeStatus(prepared.reason || "Prepared trade inputs are invalid.", true);
       return;
     }
+    state.trade.activeOrderSide = side === "sell" ? "sell" : "buy";
+    renderTradeEntryOverlay();
     setTradeBusy(true);
     try {
       await tradeFetchJson("/api/trade/order/market", {
         method: "POST",
         body: JSON.stringify({
-          side: side || state.trade.activeOrderSide || "buy",
-          lotSize: inputs.lotSize,
-          stopLoss: inputs.stopLoss,
-          takeProfit: inputs.takeProfit,
+          side: state.trade.activeOrderSide,
+          lotSize: prepared.lotSize,
+          stopLoss: prepared.stopLoss,
+          takeProfit: prepared.takeProfit,
         }),
       });
-      closeTradeConfirm();
-      tradeStatus(((side || state.trade.activeOrderSide) === "sell" ? "Sell" : "Buy") + " market order submitted.", false);
+      tradeStatus((state.trade.activeOrderSide === "sell" ? "Sell" : "Buy") + " market order submitted.", false);
       await refreshTradeData({ silent: true });
     } catch (error) {
       tradeStatus(error.message || "Order submit failed.", true);
     } finally {
+      state.trade.activeOrderSide = null;
       setTradeBusy(false);
     }
   }
@@ -1862,19 +2047,28 @@
   async function loadTradeSession() {
     try {
       const payload = await tradeFetchJson("/api/trade/me");
+      applyTradeSessionPayload(payload);
+      renderTradeLists();
+      if (payload.authConfigured === false) {
+        tradeStatus(payload.message || "Trade login is not configured on the server.", true);
+        return;
+      }
       if (payload.authenticated) {
-        setTradeAuthenticated(true, payload.username || null);
         tradeStatus("Trade session active.", false);
         await refreshTradeData({ silent: true }).catch((error) => {
           tradeStatus(error.message || "Trade refresh failed.", true);
         });
         return;
       }
-      setTradeAuthenticated(false, null);
-      renderTradeLists();
       tradeStatus("Trade login required.", false);
     } catch (error) {
-      setTradeAuthenticated(false, null);
+      applyTradeSessionPayload({
+        authenticated: false,
+        username: null,
+        authConfigured: true,
+        brokerConfigured: state.trade.brokerConfigured,
+        configured: state.trade.brokerConfigured,
+      });
       renderTradeLists();
       tradeStatus(error.message || "Trade session check failed.", true);
     }
@@ -1884,7 +2078,13 @@
     if (!elements.tradePanel) {
       return;
     }
-    setTradeAuthenticated(false, null);
+    applyTradeSessionPayload({
+      authenticated: false,
+      username: null,
+      authConfigured: true,
+      brokerConfigured: false,
+      configured: false,
+    });
     renderTradeLists();
     tradeStatus("Trade login required.", false);
 
@@ -1896,16 +2096,10 @@
       requestTradeLogout();
     });
     elements.chartTradeBuyButton.addEventListener("click", function () {
-      openTradeConfirm("buy");
+      submitMarketOrder("buy");
     });
     elements.chartTradeSellButton.addEventListener("click", function () {
-      openTradeConfirm("sell");
-    });
-    elements.chartTradeCancelButton.addEventListener("click", function () {
-      closeTradeConfirm();
-    });
-    elements.chartTradeConfirmButton.addEventListener("click", function () {
-      submitMarketOrder(state.trade.activeOrderSide);
+      submitMarketOrder("sell");
     });
     elements.tradeOpenList.addEventListener("click", function (event) {
       const button = event.target.closest("button[data-action]");
@@ -1955,7 +2149,20 @@
       submitAmendPosition(position.positionId, draft.stopLoss, draft.takeProfit);
     });
 
-    syncTradeVolumeInputs();
+    [elements.tradePreparedLotSize, elements.tradePreparedStopLoss, elements.tradePreparedTakeProfit].forEach(function (input) {
+      input.addEventListener("input", function () {
+        renderTradeEntryOverlay();
+      });
+    });
+    elements.tradePreparedPresets.addEventListener("click", function (event) {
+      const button = event.target.closest("button[data-lot-size]");
+      if (!button || !elements.tradePreparedLotSize) {
+        return;
+      }
+      elements.tradePreparedLotSize.value = String(button.dataset.lotSize || TRADE_DEFAULT_LOT_SIZE);
+      renderTradeEntryOverlay();
+    });
+    syncPreparedTradeInputs();
     renderTradeEntryOverlay();
     renderPositionEditor();
     loadTradeSession();
@@ -2251,10 +2458,6 @@
   });
   window.addEventListener("keydown", function (event) {
     if (event.key !== "Escape") {
-      return;
-    }
-    if (state.trade.activeOrderSide) {
-      closeTradeConfirm();
       return;
     }
     if (!state.ui.sidebarCollapsed) {

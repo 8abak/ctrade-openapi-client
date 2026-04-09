@@ -457,6 +457,31 @@ input {
   line-height: 1.5;
 }
 
+.trade-prepare-shell {
+  display: grid;
+  gap: 0.6rem;
+  padding: 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(5, 9, 15, 0.24);
+}
+
+.trade-prepare-grid {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.trade-prepare-presets {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.45rem;
+}
+
+.trade-prepare-presets .ghost-button {
+  min-width: 0;
+  padding-inline: 0.4rem;
+}
+
 .trade-quick-actions {
   grid-column: 1 / -1;
   display: grid;
@@ -544,7 +569,6 @@ input {
 }
 
 .chart-trade-entry,
-.chart-trade-confirm,
 .chart-position-editor {
   position: absolute;
   z-index: 6;
@@ -624,18 +648,11 @@ input {
   border: 1px solid rgba(147, 181, 255, 0.12);
 }
 
-.chart-trade-confirm,
 .chart-position-editor {
   width: min(320px, calc(100% - 1.5rem));
   padding: 0.8rem;
   background: rgba(13, 20, 32, 0.95);
   border-color: rgba(147, 181, 255, 0.2);
-}
-
-.chart-trade-confirm {
-  left: 50%;
-  bottom: 5.6rem;
-  transform: translateX(-50%);
 }
 
 .chart-position-editor {
@@ -912,6 +929,10 @@ input {
     grid-template-columns: 1fr;
   }
 
+  .trade-prepare-presets {
+    grid-template-columns: 1fr;
+  }
+
   .trade-inline-form {
     grid-template-columns: 1fr;
   }
@@ -931,14 +952,6 @@ input {
   .chart-trade-button {
     min-width: 0;
     width: 100%;
-  }
-
-  .chart-trade-confirm {
-    left: 0.75rem;
-    right: 0.75rem;
-    bottom: 5.2rem;
-    width: auto;
-    transform: none;
   }
 
   .chart-position-editor {

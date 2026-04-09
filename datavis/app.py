@@ -20,7 +20,7 @@ import psycopg2.extras
 import sqlparse
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
@@ -309,14 +309,58 @@ def _clear_trade_cookie(response: Response) -> None:
 
 
 def require_trade_auth(request: Request) -> str:
+    ensure_trade_login_configured()
     payload = _trade_session_decode(request.cookies.get(TRADE_COOKIE_NAME, ""))
     if payload is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Trade login required.")
     return str(payload["u"])
 
 
+def trade_login_configured() -> bool:
+    return bool(TRADE_PASSWORD)
+
+
+def trade_auth_status_payload(
+    *,
+    authenticated: bool,
+    username: Optional[str],
+    error: Optional[str] = None,
+    message: Optional[str] = None,
+) -> Dict[str, Any]:
+    auth_configured = trade_login_configured()
+    resolved_message = message
+    if not resolved_message:
+        if not auth_configured:
+            resolved_message = "Trade login is not configured on the server."
+        elif authenticated:
+            resolved_message = "Trade session active."
+        else:
+            resolved_message = "Trade login required."
+    return {
+        "authenticated": bool(authenticated and auth_configured),
+        "username": username if authenticated and auth_configured else None,
+        "authConfigured": auth_configured,
+        "brokerConfigured": TRADE_GATEWAY.configured,
+        "configured": TRADE_GATEWAY.configured,
+        "broker": TRADE_GATEWAY.status(),
+        "error": error,
+        "message": resolved_message,
+    }
+
+
+def trade_auth_not_configured_response() -> JSONResponse:
+    payload = trade_auth_status_payload(
+        authenticated=False,
+        username=None,
+        error="TRADE_AUTH_NOT_CONFIGURED",
+        message="Trade login is not configured on the server.",
+    )
+    payload["detail"] = payload["message"]
+    return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content=payload)
+
+
 def ensure_trade_login_configured() -> None:
-    if not TRADE_PASSWORD:
+    if not trade_login_configured():
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Trade login is not configured on the server.",
@@ -1518,8 +1562,9 @@ def sql_query(payload: QueryRequest, _: Optional[str] = Depends(require_sql_admi
 
 
 @app.post("/api/trade/login")
-def trade_login(payload: TradeLoginRequest, response: Response) -> Dict[str, Any]:
-    ensure_trade_login_configured()
+def trade_login(payload: TradeLoginRequest, response: Response) -> Any:
+    if not trade_login_configured():
+        return trade_auth_not_configured_response()
     username = (payload.username or "").strip()
     password = payload.password or ""
     valid_user = secrets.compare_digest(username, TRADE_USERNAME)
@@ -1531,21 +1576,24 @@ def trade_login(payload: TradeLoginRequest, response: Response) -> Dict[str, Any
 
 
 @app.post("/api/trade/logout")
-def trade_logout(response: Response, _: str = Depends(require_trade_auth)) -> Dict[str, Any]:
+def trade_logout(response: Response) -> Dict[str, Any]:
     _clear_trade_cookie(response)
     return {"ok": True}
 
 
 @app.get("/api/trade/me")
-def trade_me(request: Request) -> Dict[str, Any]:
+def trade_me(request: Request, response: Response) -> Dict[str, Any]:
+    if not trade_login_configured():
+        _clear_trade_cookie(response)
+        return trade_auth_status_payload(
+            authenticated=False,
+            username=None,
+            error="TRADE_AUTH_NOT_CONFIGURED",
+            message="Trade login is not configured on the server.",
+        )
     payload = _trade_session_decode(request.cookies.get(TRADE_COOKIE_NAME, ""))
     username = str(payload["u"]) if payload else None
-    return {
-        "authenticated": bool(username),
-        "username": username,
-        "configured": TRADE_GATEWAY.configured,
-        "broker": TRADE_GATEWAY.status(),
-    }
+    return trade_auth_status_payload(authenticated=bool(username), username=username)
 
 
 @app.get("/api/trade/open")
