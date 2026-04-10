@@ -49,6 +49,12 @@ from datavis.broker_creds import (
     token_tail,
     write_creds_file_atomic,
 )
+from datavis.ctrader_auth import (
+    is_app_already_authorized as shared_is_app_already_authorized,
+    is_token_error as shared_is_token_error,
+    payload_error_code as shared_payload_error_code,
+    payload_message as shared_payload_message,
+)
 
 
 @dataclass
@@ -326,24 +332,17 @@ class CTraderGateway:
 
     @staticmethod
     def _payload_message(payload: Any) -> str:
-        return str(getattr(payload, "description", "") or getattr(payload, "errorCode", "") or "").strip()
+        return shared_payload_message(payload)
 
     @staticmethod
     def _payload_error_code(payload: Any) -> str:
-        return str(getattr(payload, "errorCode", "") or "").strip().upper()
+        return shared_payload_error_code(payload)
 
     def _is_token_error(self, payload: Any) -> bool:
-        error_code = self._payload_error_code(payload)
-        message = self._payload_message(payload).lower()
-        return (
-            error_code in {"CH_ACCESS_TOKEN_INVALID", "OA_AUTH_TOKEN_EXPIRED"}
-            or "invalid access token" in message
-            or "access token" in message
-        )
+        return shared_is_token_error(payload)
 
     def _is_app_already_authorized(self, payload: Any) -> bool:
-        message = self._payload_message(payload).lower()
-        return "already authorized" in message
+        return shared_is_app_already_authorized(payload)
 
     def _translate_gateway_error(
         self,
