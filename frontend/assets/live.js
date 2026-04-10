@@ -1,4 +1,9 @@
 (function () {
+  if (window.__datavisLiveInitialized) {
+    return;
+  }
+  window.__datavisLiveInitialized = true;
+
   const DEFAULTS = {
     mode: "live",
     run: "run",
@@ -28,8 +33,9 @@
     down: { fill: "rgba(126,240,199,0.36)", stroke: "#7ef0c7" },
     range: { fill: "rgba(109,216,255,0.20)", stroke: "#6dd8ff" },
   };
-  const TRADE_POLL_INTERVAL_MS = 8000;
-  const SMART_POLL_INTERVAL_MS = 1200;
+  const TRADE_POLL_INTERVAL_MS = 15000;
+  const TRADE_HISTORY_REFRESH_INTERVAL_MS = 60000;
+  const SMART_POLL_INTERVAL_MS = 2000;
   const TRADE_HISTORY_LIMIT = 40;
   const TRADE_DEFAULT_LOT_SIZE = 0.01;
   const TRADE_REVIEW_DEFAULT_TICKS_BEFORE = 300;
@@ -77,11 +83,15 @@
       historyAvailable: true,
       loading: false,
       pollTimer: 0,
+      refreshPromise: null,
+      pendingRefresh: false,
+      pendingHistoryRefresh: false,
       positions: [],
       pendingOrders: [],
       trades: [],
       deals: [],
       lastLoadedAtMs: null,
+      lastHistoryLoadedAtMs: null,
       volumeInfo: null,
       positionEditorDraft: null,
       activeOrderSide: null,
@@ -91,6 +101,7 @@
       smart: {
         payload: null,
         pollTimer: 0,
+        refreshPromise: null,
         inputsDirty: false,
         inputsInitialized: false,
         lastTradeMutationId: 0,
@@ -418,6 +429,9 @@
   function clearTradeRuntimeState() {
     stopTradePolling();
     stopSmartPolling();
+    state.trade.refreshPromise = null;
+    state.trade.pendingRefresh = false;
+    state.trade.pendingHistoryRefresh = false;
     state.trade.positions = [];
     state.trade.pendingOrders = [];
     state.trade.trades = [];
@@ -425,6 +439,7 @@
     state.trade.historyAvailable = true;
     state.trade.volumeInfo = null;
     state.trade.lastLoadedAtMs = null;
+    state.trade.lastHistoryLoadedAtMs = null;
     state.trade.activeOrderSide = null;
     state.trade.activePositionId = null;
     state.trade.positionEditorDraft = null;
@@ -644,7 +659,7 @@
     if (mutationId > Number(state.trade.smart.lastTradeMutationId || 0)) {
       state.trade.smart.lastTradeMutationId = mutationId;
       if (state.trade.authenticated) {
-        refreshTradeData({ silent: true }).catch(function () {});
+        refreshTradeData({ silent: true, forceHistory: true }).catch(function () {});
       }
     }
     syncSmartConfigInputs();
@@ -765,25 +780,33 @@
     if (!state.trade.authenticated) {
       return;
     }
-    try {
-      const payload = await tradeFetchJson("/api/trade/smart");
-      applySmartPayload(payload);
-      renderTradeEntryOverlay();
-      renderTradeLists();
-      if (!options?.silent) {
-        tradeStatus("Smart scalp state updated.", false);
-      }
-      if (smartContextReady()) {
-        scheduleSmartPolling();
-      } else {
-        stopSmartPolling();
-      }
-    } catch (error) {
-      if (!options?.silent) {
-        tradeStatus(error.message || "Smart scalp refresh failed.", true);
-      }
-      throw error;
+    if (state.trade.smart.refreshPromise) {
+      return state.trade.smart.refreshPromise;
     }
+    state.trade.smart.refreshPromise = (async function () {
+      try {
+        const payload = await tradeFetchJson("/api/trade/smart");
+        applySmartPayload(payload);
+        renderTradeEntryOverlay();
+        renderTradeLists();
+        if (!options?.silent) {
+          tradeStatus("Smart scalp state updated.", false);
+        }
+        if (smartContextReady()) {
+          scheduleSmartPolling();
+        } else {
+          stopSmartPolling();
+        }
+      } catch (error) {
+        if (!options?.silent) {
+          tradeStatus(error.message || "Smart scalp refresh failed.", true);
+        }
+        throw error;
+      } finally {
+        state.trade.smart.refreshPromise = null;
+      }
+    })();
+    return state.trade.smart.refreshPromise;
   }
 
   async function syncSmartContext(options) {
@@ -1368,16 +1391,19 @@
       elements.chartSmartBuyButton.hidden = !authConfigured;
       elements.chartSmartBuyButton.disabled = !authConfigured || busy || !smartBuyAvailability.available;
       elements.chartSmartBuyButton.classList.toggle("is-armed", currentSmartArmed("buy"));
+      elements.chartSmartBuyButton.textContent = currentSmartArmed("buy") ? "Smart Buy ON" : "Smart Buy OFF";
     }
     if (elements.chartSmartSellButton) {
       elements.chartSmartSellButton.hidden = !authConfigured;
       elements.chartSmartSellButton.disabled = !authConfigured || busy || !smartSellAvailability.available;
       elements.chartSmartSellButton.classList.toggle("is-armed", currentSmartArmed("sell"));
+      elements.chartSmartSellButton.textContent = currentSmartArmed("sell") ? "Smart Sell ON" : "Smart Sell OFF";
     }
     if (elements.chartSmartCloseButton) {
       elements.chartSmartCloseButton.hidden = !authConfigured;
       elements.chartSmartCloseButton.disabled = !authConfigured || busy || !smartCloseAvailability.available;
       elements.chartSmartCloseButton.classList.toggle("is-armed", currentSmartArmed("close"));
+      elements.chartSmartCloseButton.textContent = currentSmartArmed("close") ? "Smart Close ON" : "Smart Close OFF";
     }
     if (elements.chartTradeSmartStatus) {
       const showSummary = state.trade.smart.inputsDirty && elements.tradeSmartShowSummary
@@ -2722,92 +2748,115 @@
     if (!state.trade.authenticated) {
       return;
     }
-    const silent = Boolean(options?.silent);
-    state.trade.loading = true;
-    if (!silent) {
-      tradeStatus("Loading trade state...", false);
+    if (state.trade.refreshPromise) {
+      state.trade.pendingRefresh = true;
+      state.trade.pendingHistoryRefresh = state.trade.pendingHistoryRefresh || Boolean(options?.forceHistory);
+      return state.trade.refreshPromise;
     }
-    try {
-      const openPayload = await tradeFetchJson("/api/trade/open");
-      state.trade.brokerStatus = brokerStatusFromPayload(openPayload);
-      state.trade.brokerConfigured = Boolean(state.trade.brokerStatus?.configured);
-      state.trade.volumeInfo = openPayload.volumeInfo || currentTradeVolumeInfo();
-      state.trade.positions = Array.isArray(openPayload.positions) ? openPayload.positions : [];
-      state.trade.pendingOrders = Array.isArray(openPayload.pendingOrders) ? openPayload.pendingOrders : [];
-      applySmartPayload(openPayload.smart);
-      state.trade.lastLoadedAtMs = Date.now();
-      state.trade.historyAvailable = true;
+    const silent = Boolean(options?.silent);
+    state.trade.refreshPromise = (async function () {
+      const shouldLoadHistory = Boolean(options?.forceHistory)
+        || !state.trade.lastHistoryLoadedAtMs
+        || (Date.now() - Number(state.trade.lastHistoryLoadedAtMs || 0)) >= TRADE_HISTORY_REFRESH_INTERVAL_MS;
+      state.trade.loading = true;
+      if (!silent) {
+        tradeStatus("Loading trade state...", false);
+      }
       try {
-        const historyPayload = await tradeFetchJson("/api/trade/history?limit=" + String(TRADE_HISTORY_LIMIT));
-        state.trade.brokerStatus = brokerStatusFromPayload(historyPayload);
+        const openPayload = await tradeFetchJson("/api/trade/open");
+        state.trade.brokerStatus = brokerStatusFromPayload(openPayload);
         state.trade.brokerConfigured = Boolean(state.trade.brokerStatus?.configured);
-        state.trade.volumeInfo = openPayload.volumeInfo || historyPayload.volumeInfo || currentTradeVolumeInfo();
-        state.trade.trades = Array.isArray(historyPayload.trades) ? historyPayload.trades : [];
-        state.trade.deals = Array.isArray(historyPayload.deals) ? historyPayload.deals : [];
-        const selected = selectedHistoricalTradeOverlay();
-        if (selected) {
-          const refreshedTrade = completedTradeByKey(selected.key);
-          if (refreshedTrade) {
-            state.trade.selectedHistoricalTradeOverlay = { ...selected, trade: refreshedTrade };
+        state.trade.volumeInfo = openPayload.volumeInfo || currentTradeVolumeInfo();
+        state.trade.positions = Array.isArray(openPayload.positions) ? openPayload.positions : [];
+        state.trade.pendingOrders = Array.isArray(openPayload.pendingOrders) ? openPayload.pendingOrders : [];
+        applySmartPayload(openPayload.smart);
+        state.trade.lastLoadedAtMs = Date.now();
+        if (shouldLoadHistory) {
+          state.trade.historyAvailable = true;
+          try {
+            const historyPayload = await tradeFetchJson("/api/trade/history?limit=" + String(TRADE_HISTORY_LIMIT));
+            state.trade.brokerStatus = brokerStatusFromPayload(historyPayload);
+            state.trade.brokerConfigured = Boolean(state.trade.brokerStatus?.configured);
+            state.trade.volumeInfo = openPayload.volumeInfo || historyPayload.volumeInfo || currentTradeVolumeInfo();
+            state.trade.trades = Array.isArray(historyPayload.trades) ? historyPayload.trades : [];
+            state.trade.deals = Array.isArray(historyPayload.deals) ? historyPayload.deals : [];
+            state.trade.lastHistoryLoadedAtMs = Date.now();
+            const selected = selectedHistoricalTradeOverlay();
+            if (selected) {
+              const refreshedTrade = completedTradeByKey(selected.key);
+              if (refreshedTrade) {
+                state.trade.selectedHistoricalTradeOverlay = { ...selected, trade: refreshedTrade };
+              }
+            }
+          } catch (error) {
+            state.trade.historyAvailable = false;
+            if (!silent) {
+              tradeStatus("Trade state updated. Recent history unavailable.", true);
+            }
           }
         }
-      } catch (error) {
-        state.trade.historyAvailable = false;
-        if (!silent) {
-          tradeStatus("Trade state updated. Recent history unavailable.", true);
-        }
-      }
-      syncTradeSelection();
-      syncPreparedTradeInputs();
-      renderTradeLists();
-      renderChart({ shiftWithRun: false });
-      if (!silent && state.trade.historyAvailable) {
-        tradeStatus("Trade state updated.", false);
-      }
-      if (smartContextReady()) {
-        scheduleSmartPolling();
-      } else {
-        stopSmartPolling();
-      }
-      scheduleTradePolling();
-    } catch (error) {
-      const message = String(error?.message || "").toLowerCase();
-      if (error?.code === "TRADE_AUTH_NOT_CONFIGURED" || message.includes("trade login is not configured on the server")) {
-        applyTradeSessionPayload({
-          authenticated: false,
-          username: null,
-          authConfigured: false,
-          brokerConfigured: error?.payload?.brokerConfigured ?? tradePayloadDetail(error?.payload)?.brokerConfigured ?? state.trade.brokerConfigured,
-          configured: error?.payload?.configured ?? tradePayloadDetail(error?.payload)?.configured ?? state.trade.brokerConfigured,
-          broker: error?.payload?.broker || tradePayloadDetail(error?.payload)?.broker || state.trade.brokerStatus,
-          error: error?.code || "TRADE_AUTH_NOT_CONFIGURED",
-        });
-        renderTradeLists();
-      } else if (message.includes("trade login required")) {
-        applyTradeSessionPayload({
-          authenticated: false,
-          username: null,
-          authConfigured: true,
-          brokerConfigured: state.trade.brokerConfigured,
-          configured: state.trade.brokerConfigured,
-          broker: state.trade.brokerStatus,
-        });
-        renderTradeLists();
-      } else {
-        state.trade.brokerStatus = brokerStatusFromPayload(error?.payload || { broker: state.trade.brokerStatus });
-        state.trade.brokerConfigured = Boolean(state.trade.brokerStatus?.configured);
-        state.trade.volumeInfo = null;
-        state.trade.lastLoadedAtMs = null;
-        state.trade.positions = [];
-        state.trade.pendingOrders = [];
-        state.trade.historyAvailable = false;
+        syncTradeSelection();
+        syncPreparedTradeInputs();
         renderTradeLists();
         renderChart({ shiftWithRun: false });
+        if (!silent && state.trade.historyAvailable) {
+          tradeStatus("Trade state updated.", false);
+        }
+        if (smartContextReady()) {
+          scheduleSmartPolling();
+        } else {
+          stopSmartPolling();
+        }
+        scheduleTradePolling();
+      } catch (error) {
+        const message = String(error?.message || "").toLowerCase();
+        if (error?.code === "TRADE_AUTH_NOT_CONFIGURED" || message.includes("trade login is not configured on the server")) {
+          applyTradeSessionPayload({
+            authenticated: false,
+            username: null,
+            authConfigured: false,
+            brokerConfigured: error?.payload?.brokerConfigured ?? tradePayloadDetail(error?.payload)?.brokerConfigured ?? state.trade.brokerConfigured,
+            configured: error?.payload?.configured ?? tradePayloadDetail(error?.payload)?.configured ?? state.trade.brokerConfigured,
+            broker: error?.payload?.broker || tradePayloadDetail(error?.payload)?.broker || state.trade.brokerStatus,
+            error: error?.code || "TRADE_AUTH_NOT_CONFIGURED",
+          });
+          renderTradeLists();
+        } else if (message.includes("trade login required")) {
+          applyTradeSessionPayload({
+            authenticated: false,
+            username: null,
+            authConfigured: true,
+            brokerConfigured: state.trade.brokerConfigured,
+            configured: state.trade.brokerConfigured,
+            broker: state.trade.brokerStatus,
+          });
+          renderTradeLists();
+        } else {
+          state.trade.brokerStatus = brokerStatusFromPayload(error?.payload || { broker: state.trade.brokerStatus });
+          state.trade.brokerConfigured = Boolean(state.trade.brokerStatus?.configured);
+          state.trade.volumeInfo = null;
+          state.trade.lastLoadedAtMs = null;
+          state.trade.positions = [];
+          state.trade.pendingOrders = [];
+          state.trade.historyAvailable = false;
+          renderTradeLists();
+          renderChart({ shiftWithRun: false });
+        }
+        throw error;
+      } finally {
+        state.trade.loading = false;
+        state.trade.refreshPromise = null;
+        if (state.trade.pendingRefresh && state.trade.authenticated) {
+          const nextForceHistory = Boolean(state.trade.pendingHistoryRefresh);
+          state.trade.pendingRefresh = false;
+          state.trade.pendingHistoryRefresh = false;
+          window.setTimeout(() => {
+            refreshTradeData({ silent: true, forceHistory: nextForceHistory }).catch((error) => tradeStatus(error.message || "Trade refresh failed.", true));
+          }, 0);
+        }
       }
-      throw error;
-    } finally {
-      state.trade.loading = false;
-    }
+    })();
+    return state.trade.refreshPromise;
   }
 
   async function requestTradeLogin() {
@@ -2841,7 +2890,7 @@
         broker: state.trade.brokerStatus,
       });
       tradeStatus("Trade login successful.", false);
-      await refreshTradeData({ silent: true }).catch((error) => {
+      await refreshTradeData({ silent: true, forceHistory: true }).catch((error) => {
         tradeStatus(error.message || "Trade refresh failed.", true);
       });
       await syncSmartContext({ silent: true }).catch(function () {});
@@ -2916,7 +2965,7 @@
       state.trade.brokerConfigured = Boolean(state.trade.brokerStatus?.configured);
       applySmartPayload(payload.smart);
       tradeStatus((state.trade.activeOrderSide === "sell" ? "Sell" : "Buy") + " market order submitted.", false);
-      await refreshTradeData({ silent: true });
+      await refreshTradeData({ silent: true, forceHistory: true });
     } catch (error) {
       state.trade.brokerStatus = brokerStatusFromPayload(error?.payload || { broker: state.trade.brokerStatus });
       state.trade.brokerConfigured = Boolean(state.trade.brokerStatus?.configured);
@@ -2946,7 +2995,7 @@
       state.trade.brokerConfigured = Boolean(state.trade.brokerStatus?.configured);
       applySmartPayload(payload.smart);
       tradeStatus("Position close submitted.", false);
-      await refreshTradeData({ silent: true });
+      await refreshTradeData({ silent: true, forceHistory: true });
     } catch (error) {
       state.trade.brokerStatus = brokerStatusFromPayload(error?.payload || { broker: state.trade.brokerStatus });
       state.trade.brokerConfigured = Boolean(state.trade.brokerStatus?.configured);
@@ -2992,7 +3041,7 @@
       state.trade.positionEditorDraft = null;
       renderPositionEditor();
       tradeStatus("Position protections updated.", false);
-      await refreshTradeData({ silent: true });
+      await refreshTradeData({ silent: true, forceHistory: true });
     } catch (error) {
       state.trade.brokerStatus = brokerStatusFromPayload(error?.payload || { broker: state.trade.brokerStatus });
       state.trade.brokerConfigured = Boolean(state.trade.brokerStatus?.configured);
@@ -3056,7 +3105,7 @@
       }
       if (payload.authenticated) {
         tradeStatus("Trade session active.", false);
-        await refreshTradeData({ silent: true }).catch((error) => {
+        await refreshTradeData({ silent: true, forceHistory: true }).catch((error) => {
           tradeStatus(error.message || "Trade refresh failed.", true);
         });
         await syncSmartContext({ silent: true }).catch(function () {});
@@ -3235,6 +3284,10 @@
     syncPreparedTradeInputs();
     renderTradeEntryOverlay();
     renderPositionEditor();
+    window.addEventListener("beforeunload", function () {
+      stopTradePolling();
+      stopSmartPolling();
+    });
     loadTradeSession();
   }
 

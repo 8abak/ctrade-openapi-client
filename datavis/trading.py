@@ -187,6 +187,8 @@ class CTraderGateway:
         self._operation_lock = threading.RLock()
         self._refresh_condition = threading.Condition(threading.Lock())
         self._refresh_in_flight = False
+        self._snapshot_condition = threading.Condition(threading.Lock())
+        self._snapshot_in_flight = False
         self._last_refresh_result: tuple[bool, Optional[str]] = (False, None)
         self._last_loaded_from_disk_at_ms: Optional[int] = None
         self._last_auth_existing_token_at_ms: Optional[int] = None
@@ -198,6 +200,14 @@ class CTraderGateway:
         self._last_snapshot_at_ms = 0
         self._last_snapshot_error: Optional[str] = None
         self._last_snapshot_error_at_ms: Optional[int] = None
+        self._snapshot_cache_ttl_ms = max(250, int(os.getenv("DATAVIS_TRADE_SNAPSHOT_CACHE_MS", "2500")))
+        self._history_snapshot_max_age_ms = max(
+            self._snapshot_cache_ttl_ms,
+            int(os.getenv("DATAVIS_TRADE_HISTORY_SNAPSHOT_MAX_AGE_MS", "15000")),
+        )
+        self._trader_money_digits_cache: Optional[int] = None
+        self._trader_money_digits_at_ms = 0
+        self._trader_info_cache_ttl_ms = max(1000, int(os.getenv("DATAVIS_TRADE_TRADER_INFO_CACHE_MS", "300000")))
         self._last_error: Optional[str] = None
         self._last_error_code: Optional[str] = None
         self._logger.info(
@@ -273,6 +283,17 @@ class CTraderGateway:
             "lastHealthySnapshotAtMs": self._last_snapshot_at_ms or None,
             "lastSnapshotErrorAtMs": self._last_snapshot_error_at_ms,
             "lastSnapshotError": self._last_snapshot_error,
+            "snapshotCache": {
+                "ttlMs": self._snapshot_cache_ttl_ms,
+                "historyMaxAgeMs": self._history_snapshot_max_age_ms,
+                "freshUntilMs": (self._last_snapshot_at_ms + self._snapshot_cache_ttl_ms) if self._last_snapshot_at_ms else None,
+                "hasSnapshot": self._last_snapshot is not None,
+            },
+            "traderInfoCache": {
+                "moneyDigits": self._trader_money_digits_cache,
+                "cachedAtMs": self._trader_money_digits_at_ms or None,
+                "ttlMs": self._trader_info_cache_ttl_ms,
+            },
             "brokerStatus": self.status(),
         }
 
@@ -771,6 +792,9 @@ class CTraderGateway:
         return self._symbol_cache
 
     def _trader_money_digits(self) -> Optional[int]:
+        cache_age_ms = _now_ms() - int(self._trader_money_digits_at_ms or 0)
+        if self._trader_money_digits_at_ms and cache_age_ms >= 0 and cache_age_ms <= self._trader_info_cache_ttl_ms:
+            return self._trader_money_digits_cache
         trader_req = ProtoOATraderReq()
         trader_req.ctidTraderAccountId = int(self._config.account_id)
         trader_res = self._send_proto(trader_req, timeout=10.0)
@@ -780,7 +804,9 @@ class CTraderGateway:
             return None
         try:
             if trader.HasField("moneyDigits"):
-                return int(trader.moneyDigits)
+                self._trader_money_digits_cache = int(trader.moneyDigits)
+                self._trader_money_digits_at_ms = _now_ms()
+                return self._trader_money_digits_cache
         except Exception:
             return None
         return None
@@ -836,9 +862,25 @@ class CTraderGateway:
         self._last_snapshot_error = None
         self._last_snapshot_error_at_ms = None
 
-    def snapshot_or_last_known(self) -> tuple[Dict[str, Any], bool]:
+    def _cached_snapshot_copy(self, *, max_age_ms: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        if self._last_snapshot is None:
+            return None
+        ttl_ms = self._snapshot_cache_ttl_ms if max_age_ms is None else max(0, int(max_age_ms))
+        if ttl_ms <= 0:
+            return None
+        age_ms = _now_ms() - int(self._last_snapshot_at_ms or 0)
+        if age_ms < 0 or age_ms > ttl_ms:
+            return None
+        return copy.deepcopy(self._last_snapshot)
+
+    def _invalidate_snapshot_cache(self) -> None:
+        with self._snapshot_condition:
+            self._last_snapshot_at_ms = 0
+            self._snapshot_condition.notify_all()
+
+    def snapshot_or_last_known(self, *, max_age_ms: Optional[int] = None) -> tuple[Dict[str, Any], bool]:
         try:
-            return self.snapshot(), False
+            return self.snapshot(max_age_ms=max_age_ms), False
         except Exception as exc:
             self._last_snapshot_error = str(exc) or "Broker snapshot failed."
             self._last_snapshot_error_at_ms = _now_ms()
@@ -878,7 +920,28 @@ class CTraderGateway:
             "lotStep": self._volume_to_lots(step_volume, lot_size),
         }
 
-    def snapshot(self) -> Dict[str, Any]:
+    def snapshot(self, *, max_age_ms: Optional[int] = None, force: bool = False) -> Dict[str, Any]:
+        cached = None if force else self._cached_snapshot_copy(max_age_ms=max_age_ms)
+        if cached is not None:
+            return cached
+        with self._snapshot_condition:
+            cached = None if force else self._cached_snapshot_copy(max_age_ms=max_age_ms)
+            if cached is not None:
+                return cached
+            while self._snapshot_in_flight:
+                self._snapshot_condition.wait(timeout=5.0)
+                cached = None if force else self._cached_snapshot_copy(max_age_ms=max_age_ms)
+                if cached is not None:
+                    return cached
+            self._snapshot_in_flight = True
+        try:
+            return self._build_snapshot_from_broker()
+        finally:
+            with self._snapshot_condition:
+                self._snapshot_in_flight = False
+                self._snapshot_condition.notify_all()
+
+    def _build_snapshot_from_broker(self) -> Dict[str, Any]:
         symbol = self._resolve_symbol()
         reconcile = self._reconcile()
         unrealized = self._unrealized_map()
@@ -997,6 +1060,7 @@ class CTraderGateway:
         payload = self._send_proto(req, timeout=12.0)
         self._raise_if_error(payload)
         self._clear_error()
+        self._invalidate_snapshot_cache()
         return self._normalize_execution_payload(payload)
 
     def close_position(self, *, position_id: int, volume: int) -> Dict[str, Any]:
@@ -1013,6 +1077,7 @@ class CTraderGateway:
         payload = self._send_proto(req, timeout=12.0)
         self._raise_if_error(payload)
         self._clear_error()
+        self._invalidate_snapshot_cache()
         return self._normalize_execution_payload(payload)
 
     def amend_position_sltp(
@@ -1044,12 +1109,13 @@ class CTraderGateway:
         payload = self._send_proto(req, timeout=12.0)
         self._raise_if_error(payload)
         self._clear_error()
+        self._invalidate_snapshot_cache()
         return self._normalize_execution_payload(payload)
 
     def history(self, *, limit: int) -> Dict[str, Any]:
         self.ensure_ready()
         symbol = self._resolve_symbol()
-        snapshot = self.snapshot()
+        snapshot, _ = self.snapshot_or_last_known(max_age_ms=self._history_snapshot_max_age_ms)
         lot_size = int(symbol.get("lotSize") or 0)
         open_position_ids = {int(item["positionId"]) for item in snapshot.get("positions", [])}
         now = datetime.now(tz=timezone.utc)

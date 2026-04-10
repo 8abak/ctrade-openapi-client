@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import secrets
 import base64
@@ -79,6 +80,7 @@ security = HTTPBasic(auto_error=False)
 RUNTIME_TRADE_SESSION_SECRET = TRADE_SESSION_SECRET or secrets.token_bytes(32)
 BROKER_CONFIG = load_broker_config(BASE_DIR)
 TRADE_GATEWAY = CTraderGateway(BROKER_CONFIG)
+AUDIT_LOGGER = logging.getLogger("datavis.trade.audit")
 
 
 class QueryRequest(BaseModel):
@@ -1564,26 +1566,80 @@ def smart_scalp_latest_tick() -> Optional[Dict[str, Any]]:
 
 
 def smart_scalp_snapshot() -> Dict[str, Any]:
-    return TRADE_GATEWAY.snapshot()
+    snapshot, _ = TRADE_GATEWAY.snapshot_or_last_known()
+    return snapshot
 
 
 def smart_scalp_broker_status() -> Dict[str, Any]:
     return TRADE_GATEWAY.status()
 
 
-def smart_scalp_place_market_order(*, side: str, volume: float, stop_loss: Optional[float], take_profit: Optional[float]) -> Dict[str, Any]:
+def _audit_trade_action(
+    *,
+    action: str,
+    source: str,
+    reason: str,
+    side: Optional[str] = None,
+    position_id: Optional[int] = None,
+    volume: Optional[int] = None,
+    lot_size: Optional[float] = None,
+) -> None:
+    AUDIT_LOGGER.info(
+        "trade_audit action=%s source=%s side=%s position_id=%s volume=%s lot_size=%s reason=%s",
+        action,
+        source,
+        side,
+        position_id,
+        volume,
+        lot_size,
+        reason,
+    )
+
+
+def smart_scalp_place_market_order(
+    *,
+    side: str,
+    volume: float,
+    stop_loss: Optional[float],
+    take_profit: Optional[float],
+    reason: Optional[str] = None,
+    source: str = "smart",
+) -> Dict[str, Any]:
     payload = TradeMarketOrderRequest(side=side, lotSize=float(volume), stopLoss=stop_loss, takeProfit=take_profit)
     broker_volume = trade_volume_from_request(payload)
-    return TRADE_GATEWAY.place_market_order(
+    result = TRADE_GATEWAY.place_market_order(
         side=payload.side,
         volume=broker_volume,
         stop_loss=payload.stopLoss,
         take_profit=payload.takeProfit,
     )
+    _audit_trade_action(
+        action="market_order",
+        source=source,
+        reason=reason or "Smart scalp auto-entry trigger.",
+        side=payload.side,
+        volume=broker_volume,
+        lot_size=float(volume),
+    )
+    return result
 
 
-def smart_scalp_close_position(*, position_id: int, volume: int) -> Dict[str, Any]:
-    return TRADE_GATEWAY.close_position(position_id=position_id, volume=volume)
+def smart_scalp_close_position(
+    *,
+    position_id: int,
+    volume: int,
+    reason: Optional[str] = None,
+    source: str = "smart",
+) -> Dict[str, Any]:
+    result = TRADE_GATEWAY.close_position(position_id=position_id, volume=volume)
+    _audit_trade_action(
+        action="close_position",
+        source=source,
+        reason=reason or "Smart scalp auto-close trigger.",
+        position_id=position_id,
+        volume=volume,
+    )
+    return result
 
 
 SMART_SCALP_SERVICE = SmartScalpService(
@@ -1595,7 +1651,7 @@ SMART_SCALP_SERVICE = SmartScalpService(
     fetch_broker_status=smart_scalp_broker_status,
     place_market_order=smart_scalp_place_market_order,
     close_position=smart_scalp_close_position,
-    smart_lot_size=float(TRADE_DEFAULT_LOT_SIZE),
+    smart_lot_size=0.01,
 )
 
 
@@ -1605,6 +1661,7 @@ def _trade_not_configured() -> bool:
 
 def _handle_trade_gateway_error(exc: Exception) -> None:
     detail = str(exc) or "Trade request failed."
+    SMART_SCALP_SERVICE.reset(reason=detail)
     status_code = getattr(exc, "status_code", None) or status.HTTP_502_BAD_GATEWAY
     if not isinstance(status_code, int):
         status_code = status.HTTP_502_BAD_GATEWAY
@@ -1730,6 +1787,7 @@ def trade_login(payload: TradeLoginRequest, response: Response) -> Any:
     if not (valid_user and valid_password):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid trade credentials.")
     _set_trade_cookie(response, username)
+    SMART_SCALP_SERVICE.reset(reason="Trade login successful. Smart modes default to OFF.")
     SMART_SCALP_SERVICE.touch_auth()
     return {"ok": True, "username": username}
 
@@ -1755,6 +1813,7 @@ def trade_me(request: Request, response: Response) -> Dict[str, Any]:
     payload = _trade_session_decode(request.cookies.get(TRADE_COOKIE_NAME, ""))
     username = str(payload["u"]) if payload else None
     if username:
+        SMART_SCALP_SERVICE.reset(reason="Trade session restored. Smart modes default to OFF.")
         SMART_SCALP_SERVICE.touch_auth()
     return trade_auth_status_payload(authenticated=bool(username), username=username)
 
@@ -1814,6 +1873,7 @@ def trade_debug_auth(username: str = Depends(require_trade_auth)) -> Dict[str, A
     return {
         "ok": True,
         "debug": TRADE_GATEWAY.auth_debug_info(),
+        "smart": SMART_SCALP_SERVICE.snapshot_state(),
         "serverTimeMs": now_ms(),
     }
 
@@ -1852,6 +1912,14 @@ def trade_order_market(payload: TradeMarketOrderRequest, username: str = Depends
             stop_loss=payload.stopLoss,
             take_profit=payload.takeProfit,
         )
+        _audit_trade_action(
+            action="market_order",
+            source="manual",
+            reason="Manual market order submitted.",
+            side=payload.side,
+            volume=volume,
+            lot_size=payload.lotSize,
+        )
         SMART_SCALP_SERVICE.reset(reason="Manual market order submitted.")
         return {
             "ok": True,
@@ -1875,6 +1943,13 @@ def trade_position_close(payload: TradePositionCloseRequest, username: str = Dep
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Broker integration is not configured.")
     try:
         result = TRADE_GATEWAY.close_position(position_id=payload.positionId, volume=payload.volume)
+        _audit_trade_action(
+            action="close_position",
+            source="manual",
+            reason="Manual close submitted.",
+            position_id=payload.positionId,
+            volume=payload.volume,
+        )
         SMART_SCALP_SERVICE.reset(reason="Manual close submitted.")
         return {
             "ok": True,

@@ -187,7 +187,7 @@ class SmartScalpService:
         self._fetch_broker_status = fetch_broker_status
         self._place_market_order = place_market_order
         self._close_position = close_position
-        self._smart_lot_size = float(smart_lot_size)
+        self._smart_lot_size = 0.01
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -220,7 +220,7 @@ class SmartScalpService:
             "minimumProfit": 0.30,
             "cooldownSeconds": 6,
             "maxHoldSeconds": 0,
-            "snapshotRefreshMs": 700,
+            "snapshotRefreshMs": 3000,
             "tickHistorySize": 96,
             "evaluationBatchSize": 32,
         }
@@ -250,6 +250,7 @@ class SmartScalpService:
             "lastAction": None,
             "lastTriggerReason": None,
             "lastTriggerAtMs": None,
+            "lastAutoDisarmReason": None,
             "currentPosition": None,
             "smartPosition": None,
             "openPositionCount": 0,
@@ -293,6 +294,7 @@ class SmartScalpService:
                 self._clear_armed_locked(
                     reason=reason or "Smart scalping unavailable.",
                     backend_state="not_available",
+                    auto_reason=reason or "Smart scalping unavailable.",
                 )
             else:
                 self._touch_locked("Context synced.")
@@ -379,6 +381,8 @@ class SmartScalpService:
             self._state["armed"][normalized_side] = bool(armed)
             if armed:
                 self._state["armed"][opposite_side] = False
+                self._state["armed"]["close"] = False
+                self._state["lastAutoDisarmReason"] = None
                 self._seed_recent_ticks_locked()
                 self._state["backendState"] = "armed_" + normalized_side
                 self._state["statusText"] = "Smart " + normalized_side.upper() + " armed."
@@ -410,7 +414,10 @@ class SmartScalpService:
                 self._state["error"] = None
                 self._seed_recent_ticks_locked()
                 position = positions[0]
+                self._state["armed"]["buy"] = False
+                self._state["armed"]["sell"] = False
                 self._state["armed"]["close"] = True
+                self._state["lastAutoDisarmReason"] = None
                 self._state["backendState"] = "armed_close"
                 self._state["statusText"] = "Smart Close armed."
                 self._state["currentPosition"] = self._position_summary(position)
@@ -425,7 +432,7 @@ class SmartScalpService:
 
     def reset(self, *, reason: str) -> Dict[str, Any]:
         with self._lock:
-            self._clear_armed_locked(reason=reason, backend_state="idle")
+            self._clear_armed_locked(reason=reason, backend_state="idle", auto_reason=reason)
             return self.snapshot_state()
 
     def snapshot_state(self) -> Dict[str, Any]:
@@ -435,6 +442,12 @@ class SmartScalpService:
             return {
                 "symbol": self._symbol,
                 "smartLotSize": self._smart_lot_size,
+                "smartBuyArmed": bool(state.get("armed", {}).get("buy")),
+                "smartSellArmed": bool(state.get("armed", {}).get("sell")),
+                "smartCloseArmed": bool(state.get("armed", {}).get("close")),
+                "lastSmartTriggerReason": state.get("lastTriggerReason"),
+                "lastSmartTriggerTime": state.get("lastTriggerAtMs"),
+                "lastAutoDisarmReason": state.get("lastAutoDisarmReason"),
                 "context": copy.deepcopy(self._context),
                 "config": copy.deepcopy(self._config),
                 "state": state,
@@ -464,8 +477,13 @@ class SmartScalpService:
                         self._evaluate_locked()
             except Exception as exc:
                 with self._lock:
-                    self._state["error"] = str(exc) or "Smart scalp worker error."
-                    self._touch_locked(self._state["error"])
+                    message = str(exc) or "Smart scalp worker error."
+                    self._state["error"] = message
+                    self._clear_armed_locked(
+                        reason=message,
+                        backend_state="idle",
+                        auto_reason=message,
+                    )
                 time.sleep(self._idle_seconds)
 
     def _should_work(self) -> bool:
@@ -473,7 +491,11 @@ class SmartScalpService:
             if not self._context.get("enabled"):
                 return False
             if not self._auth_active_locked():
-                self._clear_armed_locked(reason="Trade session heartbeat expired.", backend_state="idle")
+                self._clear_armed_locked(
+                    reason="Trade session heartbeat expired.",
+                    backend_state="idle",
+                    auto_reason="Trade session heartbeat expired.",
+                )
                 return False
             armed = self._state.get("armed") or {}
             return bool(armed.get("buy") or armed.get("sell") or armed.get("close"))
@@ -498,24 +520,33 @@ class SmartScalpService:
     def _evaluate_locked(self) -> None:
         if not self._context.get("enabled"):
             return
+        broker = self._safe_broker_status_locked()
+        if not broker.get("ready"):
+            reason = str(broker.get("reason") or "Broker state unavailable.")
+            self._clear_armed_locked(reason=reason, backend_state="idle", auto_reason=reason)
+            return
         snapshot = self._refresh_snapshot_locked()
         positions = list(snapshot.get("positions") or [])
         self._state["openPositionCount"] = len(positions)
         self._state["currentPosition"] = self._position_summary(positions[0]) if len(positions) == 1 else None
         self._state["snapshotAtMs"] = self._last_snapshot_at_ms
-        self._state["availabilityReason"] = "" if self._broker_ready_locked() else self._broker_reason_locked()
+        self._state["availabilityReason"] = ""
 
         if len(positions) != 1 and self._state["armed"].get("close"):
-            self._state["armed"]["close"] = False
-            self._clear_smart_position_locked()
-            self._state["backendState"] = "idle"
-            self._state["statusText"] = "Smart Close disarmed because no single open position is available."
+            self._clear_armed_locked(
+                reason="Smart Close disarmed because no single open position is available.",
+                backend_state="idle",
+                auto_reason="Smart Close disarmed because no single open position is available.",
+            )
+            return
 
         if positions and (self._state["armed"].get("buy") or self._state["armed"].get("sell")):
-            self._state["armed"]["buy"] = False
-            self._state["armed"]["sell"] = False
-            self._state["backendState"] = "idle"
-            self._state["statusText"] = "Smart entry disarmed because a position is already open."
+            self._clear_armed_locked(
+                reason="Smart entry disarmed because a position is already open.",
+                backend_state="idle",
+                auto_reason="Smart entry disarmed because a position is already open.",
+            )
+            return
 
         cooldown_remaining = max(0, int(self._state.get("cooldownUntilMs") or 0) - _now_ms())
         self._state["cooldownRemainingMs"] = cooldown_remaining
@@ -714,14 +745,21 @@ class SmartScalpService:
         return None
 
     def _execute_entry_locked(self, side: str, evaluation: Dict[str, Any]) -> None:
-        self._state["armed"]["buy"] = False
-        self._state["armed"]["sell"] = False
+        self._state["armed"] = {"buy": False, "sell": False, "close": False}
+        self._state["lastAutoDisarmReason"] = "Smart " + side.upper() + " triggered."
         self._state["backendState"] = "triggered_entry"
         self._state["lastTriggerReason"] = evaluation["reason"]
         self._state["lastTriggerAtMs"] = _now_ms()
         self._state["statusText"] = "Smart " + side.upper() + " triggered."
         try:
-            result = self._place_market_order(side=side, volume=self._smart_lot_size, stop_loss=None, take_profit=None)
+            result = self._place_market_order(
+                side=side,
+                volume=self._smart_lot_size,
+                stop_loss=None,
+                take_profit=None,
+                reason=evaluation["reason"],
+                source="smart_" + side,
+            )
             self._state["cooldownUntilMs"] = _now_ms() + int(self._config["cooldownSeconds"]) * 1000
             self._state["lastTradeMutationId"] = int(self._state["lastTradeMutationId"]) + 1
             self._record_action_locked(
@@ -742,6 +780,8 @@ class SmartScalpService:
                 "peakProfit": 0.0,
             }
         except Exception as exc:
+            self._state["armed"] = {"buy": False, "sell": False, "close": False}
+            self._state["lastAutoDisarmReason"] = str(exc) or "Smart entry failed."
             self._record_action_locked(
                 kind="entry",
                 side=side,
@@ -756,16 +796,25 @@ class SmartScalpService:
         position_id = int(position.get("positionId") or 0)
         volume = int(position.get("volume") or 0)
         if position_id <= 0 or volume <= 0:
-            self._state["armed"]["close"] = False
-            self._state["statusText"] = "Smart Close disarmed because the position is no longer valid."
+            self._clear_armed_locked(
+                reason="Smart Close disarmed because the position is no longer valid.",
+                backend_state="idle",
+                auto_reason="Smart Close disarmed because the position is no longer valid.",
+            )
             return
-        self._state["armed"]["close"] = False
+        self._state["armed"] = {"buy": False, "sell": False, "close": False}
+        self._state["lastAutoDisarmReason"] = "Smart Close triggered."
         self._state["backendState"] = "triggered_close"
         self._state["lastTriggerReason"] = evaluation["reason"]
         self._state["lastTriggerAtMs"] = _now_ms()
         self._state["statusText"] = "Smart Close triggered."
         try:
-            result = self._close_position(position_id=position_id, volume=volume)
+            result = self._close_position(
+                position_id=position_id,
+                volume=volume,
+                reason=evaluation["reason"],
+                source="smart_close",
+            )
             self._state["cooldownUntilMs"] = _now_ms() + int(self._config["cooldownSeconds"]) * 1000
             self._state["lastTradeMutationId"] = int(self._state["lastTradeMutationId"]) + 1
             self._record_action_locked(
@@ -777,6 +826,8 @@ class SmartScalpService:
             )
             self._clear_smart_position_locked()
         except Exception as exc:
+            self._state["armed"] = {"buy": False, "sell": False, "close": False}
+            self._state["lastAutoDisarmReason"] = str(exc) or "Smart close failed."
             self._record_action_locked(
                 kind="close",
                 side=str(position.get("side") or "").lower() or None,
@@ -918,11 +969,13 @@ class SmartScalpService:
     def _auth_active_locked(self) -> bool:
         return int(self._auth_valid_until_ms or 0) > _now_ms()
 
-    def _clear_armed_locked(self, *, reason: str, backend_state: str) -> None:
+    def _clear_armed_locked(self, *, reason: str, backend_state: str, auto_reason: Optional[str] = None) -> None:
         self._state["armed"] = {"buy": False, "sell": False, "close": False}
         self._state["backendState"] = backend_state
         self._state["statusText"] = reason
         self._state["availabilityReason"] = reason
+        if auto_reason:
+            self._state["lastAutoDisarmReason"] = auto_reason
         self._clear_smart_position_locked()
         self._touch_locked(reason)
 
