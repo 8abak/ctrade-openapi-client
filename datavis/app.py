@@ -1765,7 +1765,7 @@ def trade_open(username: str = Depends(require_trade_auth)) -> Dict[str, Any]:
     if _trade_not_configured():
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Broker integration is not configured.")
     try:
-        snapshot = TRADE_GATEWAY.snapshot()
+        snapshot, stale_snapshot = TRADE_GATEWAY.snapshot_or_last_known()
         volume_info = dict(snapshot.get("volumeInfo") or {})
         volume_info["defaultLotSize"] = float(TRADE_DEFAULT_LOT_SIZE)
         return {
@@ -1775,6 +1775,8 @@ def trade_open(username: str = Depends(require_trade_auth)) -> Dict[str, Any]:
             "volumeInfo": volume_info,
             "positions": snapshot.get("positions", []),
             "pendingOrders": snapshot.get("pendingOrders", []),
+            "snapshotMeta": snapshot.get("snapshotMeta"),
+            "staleSnapshot": stale_snapshot,
             "smart": SMART_SCALP_SERVICE.snapshot_state(),
             "broker": TRADE_GATEWAY.status(),
             "serverTimeMs": now_ms(),
@@ -1789,7 +1791,7 @@ def trade_pending(username: str = Depends(require_trade_auth)) -> Dict[str, Any]
     if _trade_not_configured():
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Broker integration is not configured.")
     try:
-        snapshot = TRADE_GATEWAY.snapshot()
+        snapshot, stale_snapshot = TRADE_GATEWAY.snapshot_or_last_known()
         volume_info = dict(snapshot.get("volumeInfo") or {})
         volume_info["defaultLotSize"] = float(TRADE_DEFAULT_LOT_SIZE)
         return {
@@ -1797,11 +1799,23 @@ def trade_pending(username: str = Depends(require_trade_auth)) -> Dict[str, Any]
             "symbolId": snapshot.get("symbolId"),
             "volumeInfo": volume_info,
             "pendingOrders": snapshot.get("pendingOrders", []),
+            "snapshotMeta": snapshot.get("snapshotMeta"),
+            "staleSnapshot": stale_snapshot,
             "broker": TRADE_GATEWAY.status(),
             "serverTimeMs": now_ms(),
         }
     except Exception as exc:
         _handle_trade_gateway_error(exc)
+
+
+@app.get("/api/trade/debug/auth")
+def trade_debug_auth(username: str = Depends(require_trade_auth)) -> Dict[str, Any]:
+    _ = username
+    return {
+        "ok": True,
+        "debug": TRADE_GATEWAY.auth_debug_info(),
+        "serverTimeMs": now_ms(),
+    }
 
 
 @app.get("/api/trade/history")

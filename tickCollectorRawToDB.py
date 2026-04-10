@@ -6,6 +6,7 @@ import signal
 import threading
 import time
 from datetime import datetime
+from pathlib import Path
 
 import psycopg2
 import psycopg2.extras
@@ -20,9 +21,10 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOASpotEvent,
     ProtoOASubscribeSpotsReq,
 )
+from datavis.broker_creds import locked_creds_file, read_creds_file, resolve_creds_file, token_tail, write_creds_file_atomic
 
 
-CREDS_FILE = os.path.expanduser("~/cTrade/creds.json")
+CREDS_FILE = str(resolve_creds_file(Path(__file__).resolve().parent))
 with open(CREDS_FILE, "r", encoding="utf-8") as f:
     CREDS = json.load(f)
 
@@ -54,6 +56,32 @@ MAX_RECONNECT_DELAY = 30.0
 CLIENT_STARTED = False
 
 
+def sync_tokens_from_disk(context):
+    global ACCESS_TOKEN, REFRESH_TOKEN, CREDS
+    try:
+        latest = read_creds_file(Path(CREDS_FILE))
+    except Exception as exc:
+        print(f"token reload failed context={context} error={exc}", flush=True)
+        return False
+    updated = False
+    access_token = str(latest.get("accessToken", "")).strip()
+    refresh_token = str(latest.get("refreshToken", "")).strip()
+    if access_token and access_token != ACCESS_TOKEN:
+        ACCESS_TOKEN = access_token
+        CREDS["accessToken"] = ACCESS_TOKEN
+        updated = True
+    if refresh_token and refresh_token != REFRESH_TOKEN:
+        REFRESH_TOKEN = refresh_token
+        CREDS["refreshToken"] = REFRESH_TOKEN
+        updated = True
+    if updated:
+        print(
+            f"token reload updated context={context} access_tail={token_tail(ACCESS_TOKEN)} refresh_tail={token_tail(REFRESH_TOKEN)}",
+            flush=True,
+        )
+    return updated
+
+
 def db_connect():
     conn = psycopg2.connect(**DB_KW)
     conn.autocommit = False
@@ -62,34 +90,65 @@ def db_connect():
 
 def refresh_tokens():
     global ACCESS_TOKEN, REFRESH_TOKEN, CREDS
-    print("refreshing cTrader token", flush=True)
-    resp = requests.post(
-        "https://openapi.ctrader.com/apps/token",
-        data={
-            "grant_type": "refresh_token",
-            "refresh_token": REFRESH_TOKEN,
-            "client_id": CLIENT_ID,
-            "client_secret": CLIENT_SECRET,
-        },
-        timeout=20,
+    print(
+        f"refreshing cTrader token access_tail={token_tail(ACCESS_TOKEN)} refresh_tail={token_tail(REFRESH_TOKEN)}",
+        flush=True,
     )
-    if resp.status_code != 200:
-        print(f"token refresh failed: {resp.status_code} {resp.text}", flush=True)
+    try:
+        with locked_creds_file(Path(CREDS_FILE)):
+            disk_access_before = ACCESS_TOKEN
+            if sync_tokens_from_disk("pre_refresh_lock") and ACCESS_TOKEN != disk_access_before:
+                print(
+                    f"token refresh reused rotated access token from disk access_tail={token_tail(ACCESS_TOKEN)} refresh_tail={token_tail(REFRESH_TOKEN)}",
+                    flush=True,
+                )
+                return True
+
+            resp = requests.post(
+                "https://openapi.ctrader.com/apps/token",
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": REFRESH_TOKEN,
+                    "client_id": CLIENT_ID,
+                    "client_secret": CLIENT_SECRET,
+                },
+                timeout=20,
+            )
+            if resp.status_code != 200:
+                print(
+                    f"token refresh failed status={resp.status_code} access_tail={token_tail(ACCESS_TOKEN)} refresh_tail={token_tail(REFRESH_TOKEN)}",
+                    flush=True,
+                )
+                return False
+
+            tokens = resp.json()
+            access_token = str(tokens.get("access_token", "")).strip()
+            if not access_token:
+                print(
+                    f"token refresh failed missing access token access_tail={token_tail(ACCESS_TOKEN)} refresh_tail={token_tail(REFRESH_TOKEN)}",
+                    flush=True,
+                )
+                return False
+            ACCESS_TOKEN = access_token
+            refreshed = str(tokens.get("refresh_token", "")).strip()
+            if refreshed:
+                REFRESH_TOKEN = refreshed
+
+            CREDS["accessToken"] = ACCESS_TOKEN
+            CREDS["refreshToken"] = REFRESH_TOKEN
+            CREDS["tokenType"] = tokens.get("token_type", "Bearer")
+            write_creds_file_atomic(Path(CREDS_FILE), CREDS)
+    except Exception as exc:
+        print(
+            f"token refresh exception access_tail={token_tail(ACCESS_TOKEN)} refresh_tail={token_tail(REFRESH_TOKEN)} error={exc}",
+            flush=True,
+        )
         return False
 
-    tokens = resp.json()
-    ACCESS_TOKEN = tokens["access_token"]
-    if "refresh_token" in tokens:
-        REFRESH_TOKEN = tokens["refresh_token"]
-
-    CREDS["accessToken"] = ACCESS_TOKEN
-    CREDS["refreshToken"] = REFRESH_TOKEN
-    CREDS["tokenType"] = tokens.get("token_type", "Bearer")
-
-    with open(CREDS_FILE, "w", encoding="utf-8") as f:
-        json.dump(CREDS, f, indent=2)
-
-    print("token refresh succeeded", flush=True)
+    print(
+        f"token refresh succeeded persisted=true access_tail={token_tail(ACCESS_TOKEN)} refresh_tail={token_tail(REFRESH_TOKEN)}",
+        flush=True,
+    )
     return True
 
 
