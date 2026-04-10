@@ -29,6 +29,7 @@
     range: { fill: "rgba(109,216,255,0.20)", stroke: "#6dd8ff" },
   };
   const TRADE_POLL_INTERVAL_MS = 8000;
+  const SMART_POLL_INTERVAL_MS = 1200;
   const TRADE_HISTORY_LIMIT = 40;
   const TRADE_DEFAULT_LOT_SIZE = 0.01;
   const TRADE_REVIEW_DEFAULT_TICKS_BEFORE = 300;
@@ -87,6 +88,13 @@
       activePositionId: null,
       pendingProtectionEdits: {},
       selectedHistoricalTradeOverlay: null,
+      smart: {
+        payload: null,
+        pollTimer: 0,
+        inputsDirty: false,
+        inputsInitialized: false,
+        lastTradeMutationId: 0,
+      },
     },
   };
 
@@ -130,6 +138,19 @@
     tradePreparedVolumeInfo: document.getElementById("tradePreparedVolumeInfo"),
     tradePreparedSummary: document.getElementById("tradePreparedSummary"),
     tradePreparedSectionSummary: document.getElementById("tradePreparedSectionSummary"),
+    tradeSmartSection: document.getElementById("tradeSmartSection"),
+    tradeSmartSectionSummary: document.getElementById("tradeSmartSectionSummary"),
+    tradeSmartShowSummary: document.getElementById("tradeSmartShowSummary"),
+    tradeSmartSummary: document.getElementById("tradeSmartSummary"),
+    tradeSmartBackendState: document.getElementById("tradeSmartBackendState"),
+    tradeSmartTriggerState: document.getElementById("tradeSmartTriggerState"),
+    tradeSmartEntryBaselineWindow: document.getElementById("tradeSmartEntryBaselineWindow"),
+    tradeSmartEntryTriggerThreshold: document.getElementById("tradeSmartEntryTriggerThreshold"),
+    tradeSmartCloseWeakeningThreshold: document.getElementById("tradeSmartCloseWeakeningThreshold"),
+    tradeSmartMinimumProfit: document.getElementById("tradeSmartMinimumProfit"),
+    tradeSmartCooldownSeconds: document.getElementById("tradeSmartCooldownSeconds"),
+    tradeSmartMaxHoldSeconds: document.getElementById("tradeSmartMaxHoldSeconds"),
+    tradeSmartApplyButton: document.getElementById("tradeSmartApplyButton"),
     tradeOpenSection: document.getElementById("tradeOpenSection"),
     tradeOpenSectionSummary: document.getElementById("tradeOpenSectionSummary"),
     tradeOpenList: document.getElementById("tradeOpenList"),
@@ -157,6 +178,10 @@
     chartTradeEntry: document.getElementById("chartTradeEntry"),
     chartTradeBuyButton: document.getElementById("chartTradeBuyButton"),
     chartTradeSellButton: document.getElementById("chartTradeSellButton"),
+    chartSmartBuyButton: document.getElementById("chartSmartBuyButton"),
+    chartSmartSellButton: document.getElementById("chartSmartSellButton"),
+    chartSmartCloseButton: document.getElementById("chartSmartCloseButton"),
+    chartTradeSmartStatus: document.getElementById("chartTradeSmartStatus"),
     chartTradeHint: document.getElementById("chartTradeHint"),
   };
 
@@ -358,10 +383,21 @@
       elements.tradePreparedLotSize,
       elements.tradePreparedStopLoss,
       elements.tradePreparedTakeProfit,
+      elements.tradeSmartShowSummary,
+      elements.tradeSmartEntryBaselineWindow,
+      elements.tradeSmartEntryTriggerThreshold,
+      elements.tradeSmartCloseWeakeningThreshold,
+      elements.tradeSmartMinimumProfit,
+      elements.tradeSmartCooldownSeconds,
+      elements.tradeSmartMaxHoldSeconds,
+      elements.tradeSmartApplyButton,
       elements.tradePositionStopLoss,
       elements.tradePositionTakeProfit,
       elements.chartTradeBuyButton,
       elements.chartTradeSellButton,
+      elements.chartSmartBuyButton,
+      elements.chartSmartSellButton,
+      elements.chartSmartCloseButton,
       elements.tradePositionConfirmButton,
       elements.tradePositionResetButton,
     ].forEach((button) => {
@@ -381,6 +417,7 @@
 
   function clearTradeRuntimeState() {
     stopTradePolling();
+    stopSmartPolling();
     state.trade.positions = [];
     state.trade.pendingOrders = [];
     state.trade.trades = [];
@@ -393,6 +430,10 @@
     state.trade.positionEditorDraft = null;
     state.trade.pendingProtectionEdits = {};
     state.trade.selectedHistoricalTradeOverlay = null;
+    state.trade.smart.payload = null;
+    state.trade.smart.lastTradeMutationId = 0;
+    state.trade.smart.inputsDirty = false;
+    state.trade.smart.inputsInitialized = false;
   }
 
   function applyTradeSessionPayload(payload) {
@@ -572,6 +613,275 @@
       return "Loading broker state...";
     }
     return "Broker state unavailable.";
+  }
+
+  function smartPayload() {
+    return state.trade.smart.payload || {
+      context: { enabled: false, reason: "Smart scalping unavailable." },
+      config: { showSummary: true, minimumProfit: 0.30 },
+      state: {
+        armed: { buy: false, sell: false, close: false },
+        backendState: "idle",
+        statusText: "Idle",
+        cooldownRemainingMs: 0,
+        lastAction: null,
+        lastTriggerReason: null,
+        currentPosition: null,
+        openPositionCount: 0,
+        smartPosition: null,
+      },
+      broker: state.trade.brokerStatus,
+    };
+  }
+
+  function applySmartPayload(payload) {
+    const resolved = payload?.smart || payload;
+    if (!resolved || typeof resolved !== "object") {
+      return;
+    }
+    state.trade.smart.payload = resolved;
+    const mutationId = Number(resolved?.state?.lastTradeMutationId || 0);
+    if (mutationId > Number(state.trade.smart.lastTradeMutationId || 0)) {
+      state.trade.smart.lastTradeMutationId = mutationId;
+      if (state.trade.authenticated) {
+        refreshTradeData({ silent: true }).catch(function () {});
+      }
+    }
+    syncSmartConfigInputs();
+  }
+
+  function currentSmartArmed(key) {
+    return Boolean(smartPayload()?.state?.armed?.[key]);
+  }
+
+  function smartCooldownRemainingMs() {
+    return Math.max(0, Number(smartPayload()?.state?.cooldownRemainingMs || 0));
+  }
+
+  function smartContextReady() {
+    return currentConfig().mode === "live" && currentConfig().run === "run";
+  }
+
+  function smartOpenPosition() {
+    return state.trade.positions.length === 1 ? state.trade.positions[0] : null;
+  }
+
+  function smartAvailability(kind) {
+    const smart = smartPayload();
+    if (!state.trade.authConfigured) {
+      return { available: false, reason: "Trade login is not configured on the server." };
+    }
+    if (!state.trade.authenticated) {
+      return { available: false, reason: "Login required." };
+    }
+    if (!state.trade.brokerConfigured || !state.trade.brokerStatus?.ready || !state.trade.lastLoadedAtMs) {
+      return { available: false, reason: brokerUnavailableReason() };
+    }
+    if (!smartContextReady()) {
+      return { available: false, reason: "Live + Run only." };
+    }
+    if (!smart.context?.enabled && smart.context?.reason) {
+      return { available: false, reason: smart.context.reason };
+    }
+    if ((kind === "buy" || kind === "sell") && state.trade.positions.length) {
+      return { available: false, reason: "Position already open." };
+    }
+    if (kind === "close" && !smartOpenPosition()) {
+      return { available: false, reason: "Open position required." };
+    }
+    if (smartCooldownRemainingMs() > 0 && !currentSmartArmed(kind)) {
+      return { available: false, reason: "Cooldown " + String(Math.ceil(smartCooldownRemainingMs() / 1000)) + "s" };
+    }
+    return { available: true, reason: "" };
+  }
+
+  function smartSummaryText() {
+    const smart = smartPayload();
+    const stateValue = smart.state || {};
+    const armed = [];
+    if (stateValue.armed?.buy) {
+      armed.push("Smart Buy armed");
+    }
+    if (stateValue.armed?.sell) {
+      armed.push("Smart Sell armed");
+    }
+    if (stateValue.armed?.close) {
+      armed.push("Smart Close armed");
+    }
+    if (armed.length) {
+      return armed.join(" | ");
+    }
+    if (smartCooldownRemainingMs() > 0) {
+      return "Cooldown " + String(Math.ceil(smartCooldownRemainingMs() / 1000)) + "s";
+    }
+    if (stateValue.lastAction?.status === "triggered") {
+      return "Triggered";
+    }
+    return stateValue.statusText || smart.context?.reason || "Smart scalping idle.";
+  }
+
+  function syncSmartConfigInputs() {
+    if (state.trade.smart.inputsDirty) {
+      return;
+    }
+    const config = smartPayload().config || {};
+    if (elements.tradeSmartShowSummary) {
+      elements.tradeSmartShowSummary.checked = config.showSummary !== false;
+    }
+    if (elements.tradeSmartEntryBaselineWindow && config.entryBaselineWindow != null) {
+      elements.tradeSmartEntryBaselineWindow.value = String(config.entryBaselineWindow);
+    }
+    if (elements.tradeSmartEntryTriggerThreshold && config.entryTriggerThreshold != null) {
+      elements.tradeSmartEntryTriggerThreshold.value = String(config.entryTriggerThreshold);
+    }
+    if (elements.tradeSmartCloseWeakeningThreshold && config.closeWeakeningThreshold != null) {
+      elements.tradeSmartCloseWeakeningThreshold.value = String(config.closeWeakeningThreshold);
+    }
+    if (elements.tradeSmartMinimumProfit && config.minimumProfit != null) {
+      elements.tradeSmartMinimumProfit.value = String(config.minimumProfit);
+    }
+    if (elements.tradeSmartCooldownSeconds && config.cooldownSeconds != null) {
+      elements.tradeSmartCooldownSeconds.value = String(config.cooldownSeconds);
+    }
+    if (elements.tradeSmartMaxHoldSeconds && config.maxHoldSeconds != null) {
+      elements.tradeSmartMaxHoldSeconds.value = String(config.maxHoldSeconds);
+    }
+    state.trade.smart.inputsInitialized = true;
+  }
+
+  function smartConfigPayloadFromInputs() {
+    return {
+      showSummary: Boolean(elements.tradeSmartShowSummary?.checked),
+      entryBaselineWindow: Number(elements.tradeSmartEntryBaselineWindow?.value || 24),
+      entryTriggerThreshold: Number(elements.tradeSmartEntryTriggerThreshold?.value || 3.4),
+      closeWeakeningThreshold: Number(elements.tradeSmartCloseWeakeningThreshold?.value || 0.42),
+      minimumProfit: Number(elements.tradeSmartMinimumProfit?.value || 0.30),
+      cooldownSeconds: Number(elements.tradeSmartCooldownSeconds?.value || 6),
+      maxHoldSeconds: Number(elements.tradeSmartMaxHoldSeconds?.value || 0),
+    };
+  }
+
+  async function refreshSmartState(options) {
+    if (!state.trade.authenticated) {
+      return;
+    }
+    try {
+      const payload = await tradeFetchJson("/api/trade/smart");
+      applySmartPayload(payload);
+      renderTradeEntryOverlay();
+      renderTradeLists();
+      if (!options?.silent) {
+        tradeStatus("Smart scalp state updated.", false);
+      }
+      if (smartContextReady()) {
+        scheduleSmartPolling();
+      } else {
+        stopSmartPolling();
+      }
+    } catch (error) {
+      if (!options?.silent) {
+        tradeStatus(error.message || "Smart scalp refresh failed.", true);
+      }
+      throw error;
+    }
+  }
+
+  async function syncSmartContext(options) {
+    if (!state.trade.authenticated) {
+      return;
+    }
+    try {
+      const payload = await tradeFetchJson("/api/trade/smart/context", {
+        method: "POST",
+        body: JSON.stringify({
+          page: "live",
+          mode: currentConfig().mode,
+          run: currentConfig().run,
+        }),
+      });
+      applySmartPayload(payload);
+      renderTradeEntryOverlay();
+      renderTradeLists();
+      if (!options?.silent) {
+        tradeStatus("Smart scalp context synced.", false);
+      }
+      scheduleSmartPolling();
+    } catch (error) {
+      if (!options?.silent) {
+        tradeStatus(error.message || "Smart scalp context sync failed.", true);
+      }
+      throw error;
+    }
+  }
+
+  async function submitSmartSettings() {
+    if (!state.trade.authenticated || state.trade.actionBusy) {
+      return;
+    }
+    setTradeBusy(true);
+    try {
+      const payload = await tradeFetchJson("/api/trade/smart/config", {
+        method: "POST",
+        body: JSON.stringify(smartConfigPayloadFromInputs()),
+      });
+      state.trade.smart.inputsDirty = false;
+      applySmartPayload(payload);
+      renderTradeEntryOverlay();
+      renderTradeLists();
+      tradeStatus("Smart scalp settings updated.", false);
+    } catch (error) {
+      tradeStatus(error.message || "Smart scalp settings failed to save.", true);
+    } finally {
+      setTradeBusy(false);
+    }
+  }
+
+  async function toggleSmartEntry(side) {
+    if (!state.trade.authenticated || state.trade.actionBusy) {
+      return;
+    }
+    await syncSmartContext({ silent: true }).catch(function () {});
+    const nextArmed = !currentSmartArmed(side);
+    setTradeBusy(true);
+    try {
+      const payload = await tradeFetchJson("/api/trade/smart/entry", {
+        method: "POST",
+        body: JSON.stringify({ side, armed: nextArmed }),
+      });
+      applySmartPayload(payload);
+      renderTradeEntryOverlay();
+      renderTradeLists();
+      tradeStatus(nextArmed ? ("Smart " + side.toUpperCase() + " armed.") : ("Smart " + side.toUpperCase() + " disarmed."), false);
+      scheduleSmartPolling();
+    } catch (error) {
+      tradeStatus(error.message || "Smart entry update failed.", true);
+    } finally {
+      setTradeBusy(false);
+    }
+  }
+
+  async function toggleSmartClose() {
+    if (!state.trade.authenticated || state.trade.actionBusy) {
+      return;
+    }
+    await syncSmartContext({ silent: true }).catch(function () {});
+    const nextArmed = !currentSmartArmed("close");
+    setTradeBusy(true);
+    try {
+      const payload = await tradeFetchJson("/api/trade/smart/close", {
+        method: "POST",
+        body: JSON.stringify({ armed: nextArmed }),
+      });
+      applySmartPayload(payload);
+      renderTradeEntryOverlay();
+      renderTradeLists();
+      tradeStatus(nextArmed ? "Smart Close armed." : "Smart Close disarmed.", false);
+      scheduleSmartPolling();
+    } catch (error) {
+      tradeStatus(error.message || "Smart close update failed.", true);
+    } finally {
+      setTradeBusy(false);
+    }
   }
 
   function preparedTradeState() {
@@ -975,6 +1285,59 @@
     elements.tradeBrokerSummary.textContent = "Broker unavailable | " + brokerUnavailableReason();
   }
 
+  function renderSmartPanel() {
+    if (!elements.tradeSmartSection) {
+      return;
+    }
+    const smart = smartPayload();
+    const stateValue = smart.state || {};
+    const currentPosition = smartOpenPosition();
+    const config = smart.config || {};
+    const visible = state.trade.authenticated;
+    elements.tradeSmartSection.hidden = !visible;
+    if (!visible) {
+      return;
+    }
+    if (elements.tradeSmartSectionSummary) {
+      elements.tradeSmartSectionSummary.textContent = smartSummaryText();
+    }
+    if (elements.tradeSmartSummary) {
+      elements.tradeSmartSummary.textContent = [
+        "Armed ",
+        currentSmartArmed("buy") ? "Buy" : "-",
+        " / ",
+        currentSmartArmed("sell") ? "Sell" : "-",
+        " / Close ",
+        currentSmartArmed("close") ? "on" : "off",
+        currentPosition ? " | Position " + formatPositionSide(currentPosition.side) + " #" + String(currentPosition.positionId) : " | No open position",
+      ].join("");
+    }
+    if (elements.tradeSmartBackendState) {
+      elements.tradeSmartBackendState.textContent = [
+        "Backend ",
+        String(stateValue.backendState || "idle"),
+        smartCooldownRemainingMs() > 0 ? " | Cooldown " + String(Math.ceil(smartCooldownRemainingMs() / 1000)) + "s" : "",
+        stateValue.currentPosition?.netUnrealizedPnl != null ? " | uPnL " + formatSignedPnl(stateValue.currentPosition.netUnrealizedPnl) : "",
+      ].join("");
+    }
+    if (elements.tradeSmartTriggerState) {
+      elements.tradeSmartTriggerState.textContent = stateValue.lastAction
+        ? [
+          "Last ",
+          String(stateValue.lastAction.kind || "action"),
+          stateValue.lastAction.side ? " " + String(stateValue.lastAction.side).toUpperCase() : "",
+          " | ",
+          String(stateValue.lastAction.status || "unknown"),
+          " | ",
+          String(stateValue.lastAction.reason || stateValue.lastTriggerReason || "No reason"),
+        ].join("")
+        : (stateValue.lastTriggerReason || smart.context?.reason || "No smart trigger yet.");
+    }
+    if (!state.trade.smart.inputsDirty && elements.tradeSmartShowSummary) {
+      elements.tradeSmartShowSummary.checked = config.showSummary !== false;
+    }
+  }
+
   function renderTradeEntryOverlay() {
     if (!elements.chartTradeEntry) {
       return;
@@ -987,6 +1350,10 @@
     const prepared = preparedTradeState();
     const authConfigured = state.trade.authConfigured;
     const busy = state.trade.actionBusy;
+    const smart = smartPayload();
+    const smartBuyAvailability = smartAvailability("buy");
+    const smartSellAvailability = smartAvailability("sell");
+    const smartCloseAvailability = smartAvailability("close");
     if (elements.chartTradeBuyButton) {
       elements.chartTradeBuyButton.hidden = !authConfigured;
       elements.chartTradeBuyButton.disabled = !authConfigured || !prepared.ready || busy;
@@ -997,6 +1364,30 @@
       elements.chartTradeSellButton.disabled = !authConfigured || !prepared.ready || busy;
       elements.chartTradeSellButton.textContent = busy && state.trade.activeOrderSide === "sell" ? "Selling..." : "Sell Market";
     }
+    if (elements.chartSmartBuyButton) {
+      elements.chartSmartBuyButton.hidden = !authConfigured;
+      elements.chartSmartBuyButton.disabled = !authConfigured || busy || !smartBuyAvailability.available;
+      elements.chartSmartBuyButton.classList.toggle("is-armed", currentSmartArmed("buy"));
+    }
+    if (elements.chartSmartSellButton) {
+      elements.chartSmartSellButton.hidden = !authConfigured;
+      elements.chartSmartSellButton.disabled = !authConfigured || busy || !smartSellAvailability.available;
+      elements.chartSmartSellButton.classList.toggle("is-armed", currentSmartArmed("sell"));
+    }
+    if (elements.chartSmartCloseButton) {
+      elements.chartSmartCloseButton.hidden = !authConfigured;
+      elements.chartSmartCloseButton.disabled = !authConfigured || busy || !smartCloseAvailability.available;
+      elements.chartSmartCloseButton.classList.toggle("is-armed", currentSmartArmed("close"));
+    }
+    if (elements.chartTradeSmartStatus) {
+      const showSummary = state.trade.smart.inputsDirty && elements.tradeSmartShowSummary
+        ? Boolean(elements.tradeSmartShowSummary.checked)
+        : smart.config?.showSummary !== false;
+      elements.chartTradeSmartStatus.hidden = !showSummary;
+      if (showSummary) {
+        elements.chartTradeSmartStatus.textContent = smartSummaryText();
+      }
+    }
     if (elements.chartTradeHint) {
       elements.chartTradeHint.textContent = busy && state.trade.activeOrderSide
         ? ("Sending " + state.trade.activeOrderSide + " | " + formatLots(prepared.lotSize) + " lot | SL " + (prepared.stopLoss != null ? formatPrice(prepared.stopLoss) : "none") + " | TP " + (prepared.takeProfit != null ? formatPrice(prepared.takeProfit) : "none"))
@@ -1006,6 +1397,7 @@
     }
     renderPreparedTradeSummary();
     renderBrokerSummary();
+    renderSmartPanel();
   }
 
   function renderPositionEditor() {
@@ -2082,6 +2474,13 @@
     }
   }
 
+  function stopSmartPolling() {
+    if (state.trade.smart.pollTimer) {
+      window.clearTimeout(state.trade.smart.pollTimer);
+      state.trade.smart.pollTimer = 0;
+    }
+  }
+
   function scheduleTradePolling() {
     stopTradePolling();
     if (!state.trade.authenticated) {
@@ -2091,6 +2490,17 @@
       state.trade.pollTimer = 0;
       refreshTradeData({ silent: true }).catch((error) => tradeStatus(error.message || "Trade refresh failed.", true));
     }, TRADE_POLL_INTERVAL_MS);
+  }
+
+  function scheduleSmartPolling() {
+    stopSmartPolling();
+    if (!state.trade.authenticated || !smartContextReady()) {
+      return;
+    }
+    state.trade.smart.pollTimer = window.setTimeout(() => {
+      state.trade.smart.pollTimer = 0;
+      refreshSmartState({ silent: true }).catch((error) => tradeStatus(error.message || "Smart scalp refresh failed.", true));
+    }, SMART_POLL_INTERVAL_MS);
   }
 
   function formatPositionSide(side) {
@@ -2304,6 +2714,7 @@
       ].join("")).join("");
     }
     renderTradeReviewControls();
+    renderSmartPanel();
     renderPositionEditor();
   }
 
@@ -2323,6 +2734,7 @@
       state.trade.volumeInfo = openPayload.volumeInfo || currentTradeVolumeInfo();
       state.trade.positions = Array.isArray(openPayload.positions) ? openPayload.positions : [];
       state.trade.pendingOrders = Array.isArray(openPayload.pendingOrders) ? openPayload.pendingOrders : [];
+      applySmartPayload(openPayload.smart);
       state.trade.lastLoadedAtMs = Date.now();
       state.trade.historyAvailable = true;
       try {
@@ -2351,6 +2763,11 @@
       renderChart({ shiftWithRun: false });
       if (!silent && state.trade.historyAvailable) {
         tradeStatus("Trade state updated.", false);
+      }
+      if (smartContextReady()) {
+        scheduleSmartPolling();
+      } else {
+        stopSmartPolling();
       }
       scheduleTradePolling();
     } catch (error) {
@@ -2427,6 +2844,7 @@
       await refreshTradeData({ silent: true }).catch((error) => {
         tradeStatus(error.message || "Trade refresh failed.", true);
       });
+      await syncSmartContext({ silent: true }).catch(function () {});
     } catch (error) {
       if (error?.code === "TRADE_AUTH_NOT_CONFIGURED") {
         applyTradeSessionPayload({
@@ -2496,6 +2914,7 @@
       });
       state.trade.brokerStatus = brokerStatusFromPayload(payload);
       state.trade.brokerConfigured = Boolean(state.trade.brokerStatus?.configured);
+      applySmartPayload(payload.smart);
       tradeStatus((state.trade.activeOrderSide === "sell" ? "Sell" : "Buy") + " market order submitted.", false);
       await refreshTradeData({ silent: true });
     } catch (error) {
@@ -2525,6 +2944,7 @@
       });
       state.trade.brokerStatus = brokerStatusFromPayload(payload);
       state.trade.brokerConfigured = Boolean(state.trade.brokerStatus?.configured);
+      applySmartPayload(payload.smart);
       tradeStatus("Position close submitted.", false);
       await refreshTradeData({ silent: true });
     } catch (error) {
@@ -2639,6 +3059,7 @@
         await refreshTradeData({ silent: true }).catch((error) => {
           tradeStatus(error.message || "Trade refresh failed.", true);
         });
+        await syncSmartContext({ silent: true }).catch(function () {});
         return;
       }
       tradeStatus("Trade login required.", false);
@@ -2683,6 +3104,15 @@
     });
     elements.chartTradeSellButton.addEventListener("click", function () {
       submitMarketOrder("sell");
+    });
+    elements.chartSmartBuyButton.addEventListener("click", function () {
+      toggleSmartEntry("buy");
+    });
+    elements.chartSmartSellButton.addEventListener("click", function () {
+      toggleSmartEntry("sell");
+    });
+    elements.chartSmartCloseButton.addEventListener("click", function () {
+      toggleSmartClose();
     });
     elements.tradeOpenList.addEventListener("click", function (event) {
       const button = event.target.closest("button[data-action]");
@@ -2776,6 +3206,32 @@
       elements.tradePreparedLotSize.value = String(button.dataset.lotSize || TRADE_DEFAULT_LOT_SIZE);
       renderTradeEntryOverlay();
     });
+    [
+      elements.tradeSmartShowSummary,
+      elements.tradeSmartEntryBaselineWindow,
+      elements.tradeSmartEntryTriggerThreshold,
+      elements.tradeSmartCloseWeakeningThreshold,
+      elements.tradeSmartMinimumProfit,
+      elements.tradeSmartCooldownSeconds,
+      elements.tradeSmartMaxHoldSeconds,
+    ].forEach(function (input) {
+      if (!input) {
+        return;
+      }
+      input.addEventListener("input", function () {
+        state.trade.smart.inputsDirty = true;
+      });
+      input.addEventListener("change", function () {
+        state.trade.smart.inputsDirty = true;
+        renderTradeEntryOverlay();
+        renderTradeLists();
+      });
+    });
+    if (elements.tradeSmartApplyButton) {
+      elements.tradeSmartApplyButton.addEventListener("click", function () {
+        submitSmartSettings();
+      });
+    }
     syncPreparedTradeInputs();
     renderTradeEntryOverlay();
     renderPositionEditor();
@@ -3080,14 +3536,17 @@
     renderPositionEditor();
     writeQuery();
     renderChart({ shiftWithRun: false });
+    syncSmartContext({ silent: true }).catch(function () {});
     status("Mode updated. Click Load to refresh data.", false);
   });
 
   bindSegment(elements.runToggle, function (value) {
     setSegment(elements.runToggle, value);
     renderTradeLists();
+    renderTradeEntryOverlay();
     writeQuery();
     clearActivity();
+    syncSmartContext({ silent: true }).catch(function () {});
     if (value === "run" && state.rangeLastId != null) {
       resumeRunIfNeeded();
       return;

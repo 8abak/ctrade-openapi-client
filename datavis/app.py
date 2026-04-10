@@ -26,6 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
 from datavis.db import db_connect as shared_db_connect
+from datavis.smart_scalp import SmartScalpError, SmartScalpService
 from datavis.structure import StructureEngine, replay_ticks
 from datavis.trading import CTraderGateway, load_broker_config
 
@@ -125,6 +126,49 @@ class TradePositionAmendRequest(BaseModel):
         if value <= 0:
             raise ValueError("price must be greater than 0")
         return float(value)
+
+
+class TradeSmartContextRequest(BaseModel):
+    page: str = Field("live", min_length=1, max_length=32)
+    mode: str = Field("live", min_length=1, max_length=32)
+    run: str = Field("stop", min_length=1, max_length=32)
+
+
+class TradeSmartEntryArmRequest(BaseModel):
+    side: str = Field(..., min_length=3, max_length=4)
+    armed: bool = False
+
+    @field_validator("side")
+    @classmethod
+    def validate_side(cls, value: str) -> str:
+        normalized = (value or "").strip().lower()
+        if normalized not in {"buy", "sell"}:
+            raise ValueError("side must be buy or sell")
+        return normalized
+
+
+class TradeSmartCloseArmRequest(BaseModel):
+    armed: bool = False
+
+
+class TradeSmartConfigRequest(BaseModel):
+    showSummary: Optional[bool] = None
+    entryBaselineWindow: Optional[int] = Field(None, ge=1)
+    entryTriggerWindow: Optional[int] = Field(None, ge=1)
+    entryTriggerThreshold: Optional[float] = Field(None, gt=0)
+    entryVelocityThreshold: Optional[float] = Field(None, gt=0)
+    entryMinMove: Optional[float] = Field(None, ge=0)
+    entryMinDirectionRatio: Optional[float] = Field(None, ge=0, le=1)
+    entryMaxSpreadFactor: Optional[float] = Field(None, gt=0)
+    entryMinActiveRange: Optional[float] = Field(None, ge=0)
+    closeBaselineWindow: Optional[int] = Field(None, ge=1)
+    closeTriggerWindow: Optional[int] = Field(None, ge=1)
+    closeWeakeningThreshold: Optional[float] = Field(None, gt=0)
+    closeReversalThreshold: Optional[float] = Field(None, gt=0)
+    closeMinPullback: Optional[float] = Field(None, ge=0)
+    minimumProfit: Optional[float] = Field(None, gt=0)
+    cooldownSeconds: Optional[int] = Field(None, ge=0)
+    maxHoldSeconds: Optional[int] = Field(None, ge=0)
 
 def ensure_database_url() -> str:
     if not DATABASE_URL:
@@ -315,6 +359,7 @@ def require_trade_auth(request: Request) -> str:
     payload = _trade_session_decode(request.cookies.get(TRADE_COOKIE_NAME, ""))
     if payload is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Trade login required.")
+    SMART_SCALP_SERVICE.touch_auth()
     return str(payload["u"])
 
 
@@ -1496,6 +1541,64 @@ def stream_events(
         return
 
 
+def smart_scalp_ticks_after(after_id: int, limit: int) -> List[Dict[str, Any]]:
+    effective_after_id = max(0, int(after_id or 0))
+    effective_limit = clamp_int(limit, 1, MAX_STREAM_BATCH)
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            return query_rows_after(cur, effective_after_id, effective_limit)
+
+
+def smart_scalp_recent_ticks(limit: int) -> List[Dict[str, Any]]:
+    effective_limit = clamp_int(limit, 1, MAX_TICK_WINDOW)
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            return query_bootstrap_rows(cur, mode="live", start_id=None, window=effective_limit, end_id=None)
+
+
+def smart_scalp_latest_tick() -> Optional[Dict[str, Any]]:
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            row = query_latest_tick(cur)
+            return dict(row) if row else None
+
+
+def smart_scalp_snapshot() -> Dict[str, Any]:
+    return TRADE_GATEWAY.snapshot()
+
+
+def smart_scalp_broker_status() -> Dict[str, Any]:
+    return TRADE_GATEWAY.status()
+
+
+def smart_scalp_place_market_order(*, side: str, volume: float, stop_loss: Optional[float], take_profit: Optional[float]) -> Dict[str, Any]:
+    payload = TradeMarketOrderRequest(side=side, lotSize=float(volume), stopLoss=stop_loss, takeProfit=take_profit)
+    broker_volume = trade_volume_from_request(payload)
+    return TRADE_GATEWAY.place_market_order(
+        side=payload.side,
+        volume=broker_volume,
+        stop_loss=payload.stopLoss,
+        take_profit=payload.takeProfit,
+    )
+
+
+def smart_scalp_close_position(*, position_id: int, volume: int) -> Dict[str, Any]:
+    return TRADE_GATEWAY.close_position(position_id=position_id, volume=volume)
+
+
+SMART_SCALP_SERVICE = SmartScalpService(
+    symbol=TICK_SYMBOL,
+    fetch_ticks_after=smart_scalp_ticks_after,
+    fetch_recent_ticks=smart_scalp_recent_ticks,
+    fetch_latest_tick=smart_scalp_latest_tick,
+    fetch_snapshot=smart_scalp_snapshot,
+    fetch_broker_status=smart_scalp_broker_status,
+    place_market_order=smart_scalp_place_market_order,
+    close_position=smart_scalp_close_position,
+    smart_lot_size=float(TRADE_DEFAULT_LOT_SIZE),
+)
+
+
 def _trade_not_configured() -> bool:
     return not TRADE_GATEWAY.configured
 
@@ -1529,6 +1632,38 @@ def _handle_trade_gateway_error(exc: Exception) -> None:
             "broker": TRADE_GATEWAY.status(),
         },
     ) from exc
+
+
+def _handle_smart_scalp_error(exc: Exception) -> None:
+    if isinstance(exc, SmartScalpError):
+        status_code = int(getattr(exc, "status_code", status.HTTP_400_BAD_REQUEST))
+        error_code = str(getattr(exc, "code", "") or "SMART_SCALP_ERROR")
+        message = str(exc) or "Smart scalp request failed."
+    else:
+        status_code = status.HTTP_502_BAD_GATEWAY
+        error_code = "SMART_SCALP_FAILED"
+        message = str(exc) or "Smart scalp request failed."
+    raise HTTPException(
+        status_code=status_code,
+        detail={
+            "error": error_code,
+            "message": message,
+            "brokerConfigured": TRADE_GATEWAY.configured,
+            "configured": TRADE_GATEWAY.configured,
+            "broker": TRADE_GATEWAY.status(),
+            "smart": SMART_SCALP_SERVICE.snapshot_state(),
+        },
+    ) from exc
+
+
+@app.on_event("startup")
+def app_startup() -> None:
+    SMART_SCALP_SERVICE.start()
+
+
+@app.on_event("shutdown")
+def app_shutdown() -> None:
+    SMART_SCALP_SERVICE.stop()
 
 
 @app.get("/", include_in_schema=False)
@@ -1595,12 +1730,14 @@ def trade_login(payload: TradeLoginRequest, response: Response) -> Any:
     if not (valid_user and valid_password):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid trade credentials.")
     _set_trade_cookie(response, username)
+    SMART_SCALP_SERVICE.touch_auth()
     return {"ok": True, "username": username}
 
 
 @app.post("/api/trade/logout")
 def trade_logout(response: Response) -> Dict[str, Any]:
     _clear_trade_cookie(response)
+    SMART_SCALP_SERVICE.reset(reason="Trade session logged out.")
     return {"ok": True}
 
 
@@ -1608,6 +1745,7 @@ def trade_logout(response: Response) -> Dict[str, Any]:
 def trade_me(request: Request, response: Response) -> Dict[str, Any]:
     if not trade_login_configured():
         _clear_trade_cookie(response)
+        SMART_SCALP_SERVICE.reset(reason="Trade login is not configured on the server.")
         return trade_auth_status_payload(
             authenticated=False,
             username=None,
@@ -1616,6 +1754,8 @@ def trade_me(request: Request, response: Response) -> Dict[str, Any]:
         )
     payload = _trade_session_decode(request.cookies.get(TRADE_COOKIE_NAME, ""))
     username = str(payload["u"]) if payload else None
+    if username:
+        SMART_SCALP_SERVICE.touch_auth()
     return trade_auth_status_payload(authenticated=bool(username), username=username)
 
 
@@ -1635,6 +1775,7 @@ def trade_open(username: str = Depends(require_trade_auth)) -> Dict[str, Any]:
             "volumeInfo": volume_info,
             "positions": snapshot.get("positions", []),
             "pendingOrders": snapshot.get("pendingOrders", []),
+            "smart": SMART_SCALP_SERVICE.snapshot_state(),
             "broker": TRADE_GATEWAY.status(),
             "serverTimeMs": now_ms(),
         }
@@ -1677,6 +1818,7 @@ def trade_history(
         volume_info["defaultLotSize"] = float(TRADE_DEFAULT_LOT_SIZE)
         payload["volumeInfo"] = volume_info
         payload["broker"] = TRADE_GATEWAY.status()
+        payload["smart"] = SMART_SCALP_SERVICE.snapshot_state()
         payload["serverTimeMs"] = now_ms()
         return payload
     except Exception as exc:
@@ -1696,11 +1838,13 @@ def trade_order_market(payload: TradeMarketOrderRequest, username: str = Depends
             stop_loss=payload.stopLoss,
             take_profit=payload.takeProfit,
         )
+        SMART_SCALP_SERVICE.reset(reason="Manual market order submitted.")
         return {
             "ok": True,
             "result": result,
             "submittedVolume": volume,
             "submittedLotSize": payload.lotSize,
+            "smart": SMART_SCALP_SERVICE.snapshot_state(),
             "broker": TRADE_GATEWAY.status(),
             "serverTimeMs": now_ms(),
         }
@@ -1717,7 +1861,14 @@ def trade_position_close(payload: TradePositionCloseRequest, username: str = Dep
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Broker integration is not configured.")
     try:
         result = TRADE_GATEWAY.close_position(position_id=payload.positionId, volume=payload.volume)
-        return {"ok": True, "result": result, "broker": TRADE_GATEWAY.status(), "serverTimeMs": now_ms()}
+        SMART_SCALP_SERVICE.reset(reason="Manual close submitted.")
+        return {
+            "ok": True,
+            "result": result,
+            "smart": SMART_SCALP_SERVICE.snapshot_state(),
+            "broker": TRADE_GATEWAY.status(),
+            "serverTimeMs": now_ms(),
+        }
     except Exception as exc:
         _handle_trade_gateway_error(exc)
 
@@ -1744,6 +1895,52 @@ def trade_position_amend(payload: TradePositionAmendRequest, username: str = Dep
         return {"ok": True, "result": result, "broker": TRADE_GATEWAY.status(), "serverTimeMs": now_ms()}
     except Exception as exc:
         _handle_trade_gateway_error(exc)
+
+
+@app.get("/api/trade/smart")
+def trade_smart_state(username: str = Depends(require_trade_auth)) -> Dict[str, Any]:
+    _ = username
+    return SMART_SCALP_SERVICE.snapshot_state()
+
+
+@app.post("/api/trade/smart/context")
+def trade_smart_context(payload: TradeSmartContextRequest, username: str = Depends(require_trade_auth)) -> Dict[str, Any]:
+    _ = username
+    try:
+        return SMART_SCALP_SERVICE.set_context(page=payload.page, mode=payload.mode, run=payload.run)
+    except Exception as exc:
+        _handle_smart_scalp_error(exc)
+
+
+@app.post("/api/trade/smart/entry")
+def trade_smart_entry(payload: TradeSmartEntryArmRequest, username: str = Depends(require_trade_auth)) -> Dict[str, Any]:
+    _ = username
+    if _trade_not_configured():
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Broker integration is not configured.")
+    try:
+        return SMART_SCALP_SERVICE.arm_entry(side=payload.side, armed=payload.armed)
+    except Exception as exc:
+        _handle_smart_scalp_error(exc)
+
+
+@app.post("/api/trade/smart/close")
+def trade_smart_close(payload: TradeSmartCloseArmRequest, username: str = Depends(require_trade_auth)) -> Dict[str, Any]:
+    _ = username
+    if _trade_not_configured():
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Broker integration is not configured.")
+    try:
+        return SMART_SCALP_SERVICE.arm_close(armed=payload.armed)
+    except Exception as exc:
+        _handle_smart_scalp_error(exc)
+
+
+@app.post("/api/trade/smart/config")
+def trade_smart_config(payload: TradeSmartConfigRequest, username: str = Depends(require_trade_auth)) -> Dict[str, Any]:
+    _ = username
+    try:
+        return SMART_SCALP_SERVICE.update_config(payload.model_dump(exclude_none=True))
+    except Exception as exc:
+        _handle_smart_scalp_error(exc)
 
 
 @app.get("/api/live/review-start")

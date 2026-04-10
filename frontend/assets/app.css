@@ -655,6 +655,12 @@ input {
   padding: 0.15rem 0;
 }
 
+.trade-smart-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
 .chart-trade-entry {
   position: absolute;
   z-index: 6;
@@ -671,14 +677,15 @@ input {
 }
 
 .chart-trade-entry-buttons {
-  display: grid;
-  grid-auto-flow: column;
-  gap: 0.7rem;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.55rem;
   pointer-events: auto;
 }
 
 .chart-trade-button {
-  min-width: 148px;
+  min-width: 124px;
   min-height: 2.85rem;
   border-radius: 10px;
   border: 1px solid rgba(147, 181, 255, 0.2);
@@ -718,6 +725,50 @@ input {
 
 .chart-trade-button-sell:hover:not(:disabled) {
   background: rgba(116, 34, 52, 0.32);
+}
+
+.chart-trade-button-smart {
+  border-color: rgba(109, 216, 255, 0.32);
+  background: rgba(20, 34, 54, 0.26);
+  color: #d7f0ff;
+}
+
+.chart-trade-button-smart:hover:not(:disabled) {
+  background: rgba(28, 46, 72, 0.34);
+}
+
+.chart-trade-button-smart.is-armed {
+  border-color: rgba(109, 216, 255, 0.85);
+  background: rgba(37, 91, 120, 0.48);
+  color: #f3fbff;
+  box-shadow: 0 0 0 1px rgba(109, 216, 255, 0.38), 0 0 18px rgba(109, 216, 255, 0.22);
+}
+
+.chart-trade-button-smart-close {
+  border-color: rgba(255, 200, 87, 0.38);
+  background: rgba(92, 72, 18, 0.24);
+  color: #ffe9ac;
+}
+
+.chart-trade-button-smart-close:hover:not(:disabled) {
+  background: rgba(92, 72, 18, 0.34);
+}
+
+.chart-trade-button-smart-close.is-armed {
+  border-color: rgba(255, 200, 87, 0.82);
+  background: rgba(122, 96, 22, 0.48);
+  color: #fff8de;
+  box-shadow: 0 0 0 1px rgba(255, 200, 87, 0.34), 0 0 18px rgba(255, 200, 87, 0.18);
+}
+
+.chart-trade-smart-status {
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.72rem;
+  color: #d7f0ff;
+  padding: 0.28rem 0.55rem;
+  border-radius: 999px;
+  background: rgba(5, 9, 15, 0.72);
+  border: 1px solid rgba(109, 216, 255, 0.16);
 }
 
 .chart-trade-hint {
@@ -981,6 +1032,10 @@ input {
     grid-template-columns: 1fr;
   }
 
+  .trade-smart-grid {
+    grid-template-columns: 1fr;
+  }
+
   .trade-inline-form {
     grid-template-columns: 1fr;
   }
@@ -991,8 +1046,6 @@ input {
   }
 
   .chart-trade-entry-buttons {
-    grid-auto-flow: row;
-    grid-template-columns: 1fr;
     width: 100%;
   }
 
