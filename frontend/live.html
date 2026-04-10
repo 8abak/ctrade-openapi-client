@@ -147,64 +147,124 @@
               <button class="ghost-button compact-button" id="tradeLogoutButton" type="button">Logout</button>
             </div>
 
-            <div class="trade-prepare-shell">
-              <div class="trade-list-title">Prepared entry</div>
-              <div class="trade-prepare-grid">
-                <label>
-                  <span>lot size</span>
-                  <input id="tradePreparedLotSize" type="number" min="0.01" step="0.01" value="0.01">
-                </label>
-                <label>
-                  <span>default stop loss</span>
-                  <input id="tradePreparedStopLoss" type="number" min="0" step="0.01" placeholder="optional">
-                </label>
-                <label>
-                  <span>default take profit</span>
-                  <input id="tradePreparedTakeProfit" type="number" min="0" step="0.01" placeholder="optional">
-                </label>
+            <details class="trade-section-shell" id="tradePreparedSection" open>
+              <summary class="trade-section-toggle">
+                <span class="trade-list-title">Prepared Entry</span>
+                <span class="trade-section-summary" id="tradePreparedSectionSummary">0.01 lot | SL none | TP none</span>
+              </summary>
+              <div class="trade-section-body">
+                <div class="trade-prepare-shell">
+                  <div class="trade-prepare-grid">
+                    <label>
+                      <span>lot size</span>
+                      <input id="tradePreparedLotSize" type="number" min="0.01" step="0.01" value="0.01">
+                    </label>
+                    <label>
+                      <span>default stop loss</span>
+                      <input id="tradePreparedStopLoss" type="number" min="0" step="0.01" placeholder="optional">
+                    </label>
+                    <label>
+                      <span>default take profit</span>
+                      <input id="tradePreparedTakeProfit" type="number" min="0" step="0.01" placeholder="optional">
+                    </label>
+                  </div>
+                  <div class="trade-prepare-presets" id="tradePreparedPresets">
+                    <button class="ghost-button compact-button" type="button" data-lot-size="0.01">0.01 lot</button>
+                    <button class="ghost-button compact-button" type="button" data-lot-size="0.02">0.02 lot</button>
+                    <button class="ghost-button compact-button" type="button" data-lot-size="0.05">0.05 lot</button>
+                  </div>
+                  <div class="trade-session-copy" id="tradePreparedVolumeInfo">Broker min 0.01 lot | step 0.01 lot.</div>
+                  <div class="trade-session-copy" id="tradePreparedSummary">Prepared 0.01 lot | SL none | TP none.</div>
+                </div>
               </div>
-              <div class="trade-prepare-presets" id="tradePreparedPresets">
-                <button class="ghost-button compact-button" type="button" data-lot-size="0.01">0.01 lot</button>
-                <button class="ghost-button compact-button" type="button" data-lot-size="0.02">0.02 lot</button>
-                <button class="ghost-button compact-button" type="button" data-lot-size="0.05">0.05 lot</button>
-              </div>
-              <div class="trade-session-copy" id="tradePreparedVolumeInfo">Broker min 0.01 lot | step 0.01 lot.</div>
-              <div class="trade-session-copy" id="tradePreparedSummary">Prepared 0.01 lot | SL none | TP none.</div>
-            </div>
+            </details>
 
-            <div class="trade-list-shell">
-              <div class="trade-list-title">Open positions</div>
-              <div class="trade-list" id="tradeOpenList">
-                <div class="sql-empty">No open positions.</div>
+            <details class="trade-section-shell" id="tradeOpenSection" open>
+              <summary class="trade-section-toggle">
+                <span class="trade-list-title">Open Positions</span>
+                <span class="trade-section-summary" id="tradeOpenSectionSummary">No open positions</span>
+              </summary>
+              <div class="trade-section-body">
+                <div class="trade-list-shell">
+                  <div class="trade-list" id="tradeOpenList">
+                    <div class="sql-empty">No open positions.</div>
+                  </div>
+                </div>
               </div>
-            </div>
+            </details>
 
-            <div class="trade-list-shell">
-              <div class="trade-list-title">Pending orders</div>
-              <div class="trade-list" id="tradePendingList">
-                <div class="sql-empty">No pending orders.</div>
+            <details class="trade-section-shell" id="tradePositionSection" open>
+              <summary class="trade-section-toggle">
+                <span class="trade-list-title">Position Editor</span>
+                <span class="trade-section-summary" id="tradePositionSectionSummary">Select a position</span>
+              </summary>
+              <div class="trade-section-body">
+                <div class="trade-list-shell trade-position-editor-shell" id="tradePositionEditorShell">
+                  <div class="trade-session-copy" id="tradePositionEditorHint">Select an open position, drag SL/TP on chart, or type exact prices here and apply once.</div>
+                  <div class="trade-position-editor-empty sql-empty" id="tradePositionEditorEmpty">No open position selected.</div>
+                  <div class="trade-position-editor-form" id="tradePositionEditorForm" hidden>
+                    <div class="trade-item-head">
+                      <span id="tradePositionTitle">Position editor</span>
+                      <span id="tradePositionPendingBadge">No pending changes</span>
+                    </div>
+                    <div class="trade-position-editor-grid">
+                      <label>
+                        <span>stop loss</span>
+                        <input id="tradePositionStopLoss" type="text" inputmode="decimal" autocomplete="off" placeholder="none">
+                      </label>
+                      <label>
+                        <span>take profit</span>
+                        <input id="tradePositionTakeProfit" type="text" inputmode="decimal" autocomplete="off" placeholder="none">
+                      </label>
+                    </div>
+                    <div class="trade-session-copy" id="tradePositionPendingState">No pending changes.</div>
+                    <div class="trade-item-actions">
+                      <button class="primary-button compact-button" id="tradePositionConfirmButton" type="button">Apply</button>
+                      <button class="ghost-button compact-button" id="tradePositionResetButton" type="button">Reset</button>
+                    </div>
+                  </div>
+                </div>
               </div>
-            </div>
+            </details>
 
-            <div class="trade-list-shell trade-review-shell" id="tradeReviewSection">
-              <div class="trade-list-title">Trade review</div>
-              <div class="trade-session-copy" id="tradeReviewHint">Switch the chart to Review + Stop to inspect one completed trade.</div>
-              <div class="trade-review-grid">
-                <label>
-                  <span>ticks before</span>
-                  <input id="tradeReviewTicksBefore" type="number" min="0" max="10000" step="1" value="300">
-                </label>
-                <label>
-                  <span>ticks after</span>
-                  <input id="tradeReviewTicksAfter" type="number" min="0" max="10000" step="1" value="300">
-                </label>
+            <details class="trade-section-shell" id="tradePendingSection">
+              <summary class="trade-section-toggle">
+                <span class="trade-list-title">Pending Orders</span>
+                <span class="trade-section-summary" id="tradePendingSectionSummary">No pending orders</span>
+              </summary>
+              <div class="trade-section-body">
+                <div class="trade-list-shell">
+                  <div class="trade-list" id="tradePendingList">
+                    <div class="sql-empty">No pending orders.</div>
+                  </div>
+                </div>
               </div>
-              <div class="trade-session-copy" id="tradeReviewSummary">No review trade selected.</div>
-              <div class="trade-list-title">Recent completed trades</div>
-              <div class="trade-list" id="tradeHistoryList">
-                <div class="sql-empty">No recent trade history.</div>
+            </details>
+
+            <details class="trade-section-shell trade-review-shell" id="tradeReviewSection">
+              <summary class="trade-section-toggle">
+                <span class="trade-list-title">Trade Review</span>
+                <span class="trade-section-summary" id="tradeReviewSectionSummary">No review trade selected</span>
+              </summary>
+              <div class="trade-section-body">
+                <div class="trade-session-copy" id="tradeReviewHint">Switch the chart to Review + Stop to inspect one completed trade.</div>
+                <div class="trade-review-grid">
+                  <label>
+                    <span>ticks before</span>
+                    <input id="tradeReviewTicksBefore" type="number" min="0" max="10000" step="1" value="300">
+                  </label>
+                  <label>
+                    <span>ticks after</span>
+                    <input id="tradeReviewTicksAfter" type="number" min="0" max="10000" step="1" value="300">
+                  </label>
+                </div>
+                <div class="trade-session-copy" id="tradeReviewSummary">No review trade selected.</div>
+                <div class="trade-list-title">Recent completed trades</div>
+                <div class="trade-list" id="tradeHistoryList">
+                  <div class="sql-empty">No recent trade history.</div>
+                </div>
               </div>
-            </div>
+            </details>
           </div>
         </section>
       </div>
@@ -221,25 +281,6 @@
           <div class="chart-trade-hint" id="chartTradeHint">Login required</div>
         </div>
 
-        <div class="panel chart-position-editor" id="chartPositionEditor" hidden>
-          <div class="chart-trade-card-title" id="chartPositionTitle">Position editor</div>
-          <div class="chart-trade-card-copy" id="chartPositionCopy">Drag on chart to apply SL/TP immediately, or type exact prices and apply once.</div>
-          <div class="chart-trade-card-grid">
-            <label>
-              <span>stop loss</span>
-              <input id="chartPositionStopLoss" type="number" min="0" step="0.01" placeholder="none">
-            </label>
-            <label>
-              <span>take profit</span>
-              <input id="chartPositionTakeProfit" type="number" min="0" step="0.01" placeholder="none">
-            </label>
-          </div>
-          <div class="chart-trade-card-copy" id="chartPositionPendingState">No pending changes.</div>
-          <div class="chart-trade-card-actions">
-            <button class="primary-button compact-button" id="chartPositionConfirmButton" type="button">Apply</button>
-            <button class="ghost-button compact-button" id="chartPositionCancelButton" type="button">Cancel</button>
-          </div>
-        </div>
       </div>
     </section>
   </div>

@@ -82,6 +82,7 @@
       deals: [],
       lastLoadedAtMs: null,
       volumeInfo: null,
+      positionEditorDraft: null,
       activeOrderSide: null,
       activePositionId: null,
       pendingProtectionEdits: {},
@@ -128,9 +129,26 @@
     tradePreparedPresets: document.getElementById("tradePreparedPresets"),
     tradePreparedVolumeInfo: document.getElementById("tradePreparedVolumeInfo"),
     tradePreparedSummary: document.getElementById("tradePreparedSummary"),
+    tradePreparedSectionSummary: document.getElementById("tradePreparedSectionSummary"),
+    tradeOpenSection: document.getElementById("tradeOpenSection"),
+    tradeOpenSectionSummary: document.getElementById("tradeOpenSectionSummary"),
     tradeOpenList: document.getElementById("tradeOpenList"),
+    tradePositionSection: document.getElementById("tradePositionSection"),
+    tradePositionSectionSummary: document.getElementById("tradePositionSectionSummary"),
+    tradePositionEditorHint: document.getElementById("tradePositionEditorHint"),
+    tradePositionEditorEmpty: document.getElementById("tradePositionEditorEmpty"),
+    tradePositionEditorForm: document.getElementById("tradePositionEditorForm"),
+    tradePositionTitle: document.getElementById("tradePositionTitle"),
+    tradePositionPendingBadge: document.getElementById("tradePositionPendingBadge"),
+    tradePositionStopLoss: document.getElementById("tradePositionStopLoss"),
+    tradePositionTakeProfit: document.getElementById("tradePositionTakeProfit"),
+    tradePositionPendingState: document.getElementById("tradePositionPendingState"),
+    tradePositionConfirmButton: document.getElementById("tradePositionConfirmButton"),
+    tradePositionResetButton: document.getElementById("tradePositionResetButton"),
+    tradePendingSectionSummary: document.getElementById("tradePendingSectionSummary"),
     tradePendingList: document.getElementById("tradePendingList"),
     tradeReviewSection: document.getElementById("tradeReviewSection"),
+    tradeReviewSectionSummary: document.getElementById("tradeReviewSectionSummary"),
     tradeReviewHint: document.getElementById("tradeReviewHint"),
     tradeReviewTicksBefore: document.getElementById("tradeReviewTicksBefore"),
     tradeReviewTicksAfter: document.getElementById("tradeReviewTicksAfter"),
@@ -140,14 +158,6 @@
     chartTradeBuyButton: document.getElementById("chartTradeBuyButton"),
     chartTradeSellButton: document.getElementById("chartTradeSellButton"),
     chartTradeHint: document.getElementById("chartTradeHint"),
-    chartPositionEditor: document.getElementById("chartPositionEditor"),
-    chartPositionTitle: document.getElementById("chartPositionTitle"),
-    chartPositionCopy: document.getElementById("chartPositionCopy"),
-    chartPositionStopLoss: document.getElementById("chartPositionStopLoss"),
-    chartPositionTakeProfit: document.getElementById("chartPositionTakeProfit"),
-    chartPositionPendingState: document.getElementById("chartPositionPendingState"),
-    chartPositionConfirmButton: document.getElementById("chartPositionConfirmButton"),
-    chartPositionCancelButton: document.getElementById("chartPositionCancelButton"),
   };
 
   function sanitizeWindowValue(rawValue) {
@@ -348,10 +358,12 @@
       elements.tradePreparedLotSize,
       elements.tradePreparedStopLoss,
       elements.tradePreparedTakeProfit,
+      elements.tradePositionStopLoss,
+      elements.tradePositionTakeProfit,
       elements.chartTradeBuyButton,
       elements.chartTradeSellButton,
-      elements.chartPositionConfirmButton,
-      elements.chartPositionCancelButton,
+      elements.tradePositionConfirmButton,
+      elements.tradePositionResetButton,
     ].forEach((button) => {
       if (button) {
         button.disabled = disabled;
@@ -378,6 +390,7 @@
     state.trade.lastLoadedAtMs = null;
     state.trade.activeOrderSide = null;
     state.trade.activePositionId = null;
+    state.trade.positionEditorDraft = null;
     state.trade.pendingProtectionEdits = {};
     state.trade.selectedHistoricalTradeOverlay = null;
   }
@@ -604,16 +617,84 @@
     return [lotValue, unitValue].filter(Boolean).join(" | ") || "-";
   }
 
-  function sanitizeEditableProtectionValue(rawValue, fallbackValue) {
-    const raw = String(rawValue || "").trim();
+  function parseEditableProtectionText(rawValue) {
+    const raw = String(rawValue ?? "").trim();
     if (!raw) {
-      return fallbackValue == null ? null : Number(fallbackValue);
+      return { valid: true, value: null, text: "" };
+    }
+    if (!/^\d+(?:\.\d+)?$/.test(raw)) {
+      return { valid: false, value: null, text: raw, message: "Enter a valid price." };
     }
     const number = Number(raw);
     if (!Number.isFinite(number) || number <= 0) {
-      throw new Error("Price values must be greater than zero.");
+      return { valid: false, value: null, text: raw, message: "Price values must be greater than zero." };
     }
-    return number;
+    return { valid: true, value: number, text: raw };
+  }
+
+  function editableProtectionText(value) {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? String(number) : "";
+  }
+
+  function seedPositionEditorDraft(position) {
+    if (!position) {
+      state.trade.positionEditorDraft = null;
+      return null;
+    }
+    const draft = pendingProtectionForPosition(position);
+    state.trade.positionEditorDraft = {
+      positionId: Number(position.positionId),
+      stopLossText: editableProtectionText(draft.stopLoss),
+      takeProfitText: editableProtectionText(draft.takeProfit),
+    };
+    return state.trade.positionEditorDraft;
+  }
+
+  function ensurePositionEditorDraft(position, options) {
+    if (!position) {
+      state.trade.positionEditorDraft = null;
+      return null;
+    }
+    const current = state.trade.positionEditorDraft;
+    if (options?.force || !current || Number(current.positionId) !== Number(position.positionId)) {
+      return seedPositionEditorDraft(position);
+    }
+    return current;
+  }
+
+  function positionEditorState(position, options) {
+    const editor = ensurePositionEditorDraft(position, options);
+    if (!position || !editor) {
+      return null;
+    }
+    const stopLoss = parseEditableProtectionText(editor.stopLossText);
+    const takeProfit = parseEditableProtectionText(editor.takeProfitText);
+    const stopChanged = stopLoss.valid && !samePriceValue(stopLoss.value, position.stopLoss);
+    const takeChanged = takeProfit.valid && !samePriceValue(takeProfit.value, position.takeProfit);
+    return {
+      position,
+      editor,
+      stopLossText: editor.stopLossText,
+      takeProfitText: editor.takeProfitText,
+      stopLoss,
+      takeProfit,
+      stopChanged,
+      takeChanged,
+      hasChanges: stopChanged || takeChanged,
+      valid: stopLoss.valid && takeProfit.valid,
+      error: stopLoss.valid ? takeProfit.message : stopLoss.message,
+    };
+  }
+
+  function syncPendingProtectionFromEditor(position) {
+    const editorState = positionEditorState(position);
+    if (!editorState || !editorState.valid) {
+      return editorState;
+    }
+    setPendingProtectionValue(position.positionId, "stopLoss", editorState.stopLoss.value, { renderEditor: false, source: "editor" });
+    setPendingProtectionValue(position.positionId, "takeProfit", editorState.takeProfit.value, { renderEditor: false, source: "editor" });
+    return editorState;
   }
 
   function escapeHtml(value) {
@@ -738,11 +819,19 @@
     };
   }
 
-  function discardPendingProtection(positionId) {
+  function discardPendingProtection(positionId, options) {
     if (positionId == null) {
       state.trade.pendingProtectionEdits = {};
     } else {
       delete state.trade.pendingProtectionEdits[String(positionId)];
+    }
+    if (options?.syncEditor !== false) {
+      const position = positionId == null ? activeTradePosition() : activePositionById(positionId);
+      if (position) {
+        seedPositionEditorDraft(position);
+      } else if (positionId == null) {
+        state.trade.positionEditorDraft = null;
+      }
     }
     renderPositionEditor();
     queueOverlayRender();
@@ -751,11 +840,12 @@
   function setActiveTradePosition(positionId) {
     const position = activePositionById(positionId);
     state.trade.activePositionId = position ? Number(position.positionId) : null;
+    seedPositionEditorDraft(position);
     renderPositionEditor();
     queueOverlayRender();
   }
 
-  function setPendingProtectionValue(positionId, key, value) {
+  function setPendingProtectionValue(positionId, key, value, options) {
     const position = activePositionById(positionId);
     if (!position || (key !== "stopLoss" && key !== "takeProfit")) {
       return;
@@ -773,7 +863,12 @@
       state.trade.pendingProtectionEdits[pendingKey] = current;
     }
     state.trade.activePositionId = Number(position.positionId);
-    renderPositionEditor();
+    if (options?.source !== "editor") {
+      seedPositionEditorDraft(position);
+    }
+    if (options?.renderEditor !== false) {
+      renderPositionEditor();
+    }
     queueOverlayRender();
   }
 
@@ -791,6 +886,11 @@
     if (!openIds.has(Number(state.trade.activePositionId))) {
       state.trade.activePositionId = Number(state.trade.positions[0].positionId);
     }
+    if (!activePositionById(state.trade.activePositionId)) {
+      state.trade.positionEditorDraft = null;
+      return;
+    }
+    ensurePositionEditorDraft(activeTradePosition());
   }
 
   function syncPreparedTradeInputs() {
@@ -840,9 +940,13 @@
       "SL " + (prepared.stopLoss != null ? formatPrice(prepared.stopLoss) : "none"),
       "TP " + (prepared.takeProfit != null ? formatPrice(prepared.takeProfit) : "none"),
     ];
-    elements.tradePreparedSummary.textContent = prepared.ready
+    const summary = prepared.ready
       ? parts.join(" | ")
       : parts.join(" | ") + " | " + prepared.reason;
+    elements.tradePreparedSummary.textContent = summary;
+    if (elements.tradePreparedSectionSummary) {
+      elements.tradePreparedSectionSummary.textContent = parts.join(" | ");
+    }
   }
 
   function renderBrokerSummary() {
@@ -905,31 +1009,53 @@
   }
 
   function renderPositionEditor() {
-    if (!elements.chartPositionEditor) {
+    if (!elements.tradePositionSection) {
       return;
     }
     syncTradeSelection();
     const position = activeTradePosition();
-    const visible = currentConfig().mode === "live" && state.trade.authenticated && Boolean(position);
-    elements.chartPositionEditor.hidden = !visible;
+    const visible = currentConfig().mode === "live" && state.trade.authenticated;
+    elements.tradePositionSection.hidden = !visible;
     if (!visible) {
-      elements.chartPositionEditor.classList.remove("is-pending");
       return;
     }
-    const draft = pendingProtectionForPosition(position);
-    elements.chartPositionTitle.textContent = formatPositionSide(position.side) + " #" + String(position.positionId) + " | " + formatTradeVolume(position.volume, positionLots(position));
-    elements.chartPositionCopy.textContent = "Drag on chart to apply SL/TP immediately, or type exact prices and apply once.";
-    elements.chartPositionStopLoss.value = draft.stopLoss != null ? Number(draft.stopLoss).toFixed(2) : "";
-    elements.chartPositionTakeProfit.value = draft.takeProfit != null ? Number(draft.takeProfit).toFixed(2) : "";
-    elements.chartPositionPendingState.textContent = draft.hasChanges
-      ? "Pending change: " + [
-        draft.stopChanged ? "SL " + formatPrice(draft.stopLoss) : null,
-        draft.takeChanged ? "TP " + formatPrice(draft.takeProfit) : null,
-      ].filter(Boolean).join(" | ")
-      : "No pending changes.";
-    elements.chartPositionEditor.classList.toggle("is-pending", draft.hasChanges);
-    elements.chartPositionConfirmButton.disabled = state.trade.actionBusy || !draft.hasChanges;
-    elements.chartPositionCancelButton.disabled = state.trade.actionBusy || !draft.hasChanges;
+    if (!position) {
+      state.trade.positionEditorDraft = null;
+      elements.tradePositionEditorForm.hidden = true;
+      elements.tradePositionEditorEmpty.hidden = false;
+      elements.tradePositionEditorHint.textContent = state.trade.positions.length
+        ? "Select an open position to type exact SL/TP values here."
+        : "No live position is available to edit.";
+      elements.tradePositionSectionSummary.textContent = state.trade.positions.length ? "Select a position" : "No open positions";
+      return;
+    }
+    const editorState = positionEditorState(position);
+    elements.tradePositionEditorForm.hidden = false;
+    elements.tradePositionEditorEmpty.hidden = true;
+    elements.tradePositionTitle.textContent = formatPositionSide(position.side) + " #" + String(position.positionId) + " | " + formatTradeVolume(position.volume, positionLots(position));
+    elements.tradePositionEditorHint.textContent = "Drag protection lines on chart for immediate apply, or type exact prices here and apply once.";
+    if (elements.tradePositionStopLoss.value !== editorState.stopLossText) {
+      elements.tradePositionStopLoss.value = editorState.stopLossText;
+    }
+    if (elements.tradePositionTakeProfit.value !== editorState.takeProfitText) {
+      elements.tradePositionTakeProfit.value = editorState.takeProfitText;
+    }
+    elements.tradePositionSectionSummary.textContent = formatPositionSide(position.side) + " #" + String(position.positionId);
+    if (!editorState.valid) {
+      elements.tradePositionPendingBadge.textContent = "Fix price input";
+      elements.tradePositionPendingState.textContent = editorState.error || "Enter valid prices before applying.";
+    } else if (editorState.hasChanges) {
+      elements.tradePositionPendingBadge.textContent = "Pending";
+      elements.tradePositionPendingState.textContent = "Pending change: " + [
+        editorState.stopChanged ? "SL " + (editorState.stopLoss.value != null ? formatPrice(editorState.stopLoss.value) : "none") : null,
+        editorState.takeChanged ? "TP " + (editorState.takeProfit.value != null ? formatPrice(editorState.takeProfit.value) : "none") : null,
+      ].filter(Boolean).join(" | ");
+    } else {
+      elements.tradePositionPendingBadge.textContent = "No pending changes";
+      elements.tradePositionPendingState.textContent = "No pending changes.";
+    }
+    elements.tradePositionConfirmButton.disabled = state.trade.actionBusy || !editorState.valid || !editorState.hasChanges;
+    elements.tradePositionResetButton.disabled = state.trade.actionBusy || (!editorState.hasChanges && editorState.valid);
   }
 
   function tradeMarkersAtTickId(tickId) {
@@ -2091,6 +2217,11 @@
         ].join("")
         : "No review trade selected.";
     }
+    if (elements.tradeReviewSectionSummary) {
+      elements.tradeReviewSectionSummary.textContent = selected
+        ? formatPositionSide(selected.trade?.side) + " #" + String(selected.trade?.positionId || "-")
+        : "No review trade selected";
+    }
   }
 
   function renderTradeLists() {
@@ -2104,18 +2235,23 @@
     renderPreparedTradeSummary();
     renderBrokerSummary();
     const openItems = state.trade.positions || [];
+    if (elements.tradeOpenSectionSummary) {
+      elements.tradeOpenSectionSummary.textContent = openItems.length
+        ? String(openItems.length) + " open " + (openItems.length === 1 ? "position" : "positions")
+        : "No open positions";
+    }
     if (!openItems.length) {
       elements.tradeOpenList.innerHTML = "<div class=\"sql-empty\">No open positions.</div>";
     } else {
       elements.tradeOpenList.innerHTML = openItems.map((position) => {
         const draft = pendingProtectionForPosition(position);
         return [
-          "<article class=\"trade-item\" data-position-id=\"", escapeHtml(position.positionId), "\">",
+          "<article class=\"trade-item", Number(state.trade.activePositionId) === Number(position.positionId) ? " is-selected" : "", "\" data-position-id=\"", escapeHtml(position.positionId), "\">",
           "<div class=\"trade-item-head\"><span>", escapeHtml(formatPositionSide(position.side)), " #", escapeHtml(position.positionId), "</span><span>", escapeHtml(formatTradeVolume(position.volume, positionLots(position))), "</span></div>",
           "<div class=\"trade-item-meta\">Entry ", escapeHtml(formatPrice(position.entryPrice)), " | uPnL ", escapeHtml(formatSignedPnl(position.netUnrealizedPnl)), "</div>",
           "<div class=\"trade-item-meta\">SL ", escapeHtml(formatPrice(draft.stopLoss)), draft.stopChanged ? " pending" : "", " | TP ", escapeHtml(formatPrice(draft.takeProfit)), draft.takeChanged ? " pending" : "", "</div>",
           "<div class=\"trade-item-actions\">",
-          "<button class=\"ghost-button compact-button\" type=\"button\" data-action=\"select-position\" data-position-id=\"", escapeHtml(position.positionId), "\">Edit SL/TP</button>",
+          "<button class=\"ghost-button compact-button\" type=\"button\" data-action=\"select-position\" data-position-id=\"", escapeHtml(position.positionId), "\">Select</button>",
           "<button class=\"ghost-button compact-button\" type=\"button\" data-action=\"close-position\" data-position-id=\"", escapeHtml(position.positionId), "\" data-volume=\"", escapeHtml(position.volume || 0), "\">Close</button>",
           "<button class=\"ghost-button compact-button\" type=\"button\" data-action=\"close-half-position\" data-position-id=\"", escapeHtml(position.positionId), "\" data-volume=\"", escapeHtml(Math.max(1, Math.floor(Number(position.volume || 0) / 2))), "\">Close 1/2</button>",
           "</div>",
@@ -2125,6 +2261,11 @@
     }
 
     const pendingItems = state.trade.pendingOrders || [];
+    if (elements.tradePendingSectionSummary) {
+      elements.tradePendingSectionSummary.textContent = pendingItems.length
+        ? String(pendingItems.length) + " pending " + (pendingItems.length === 1 ? "order" : "orders")
+        : "No pending orders";
+    }
     if (!pendingItems.length) {
       elements.tradePendingList.innerHTML = "<div class=\"sql-empty\">No pending orders.</div>";
     } else {
@@ -2427,7 +2568,9 @@
       });
       state.trade.brokerStatus = brokerStatusFromPayload(response);
       state.trade.brokerConfigured = Boolean(state.trade.brokerStatus?.configured);
-      discardPendingProtection(positionId);
+      discardPendingProtection(positionId, { syncEditor: false });
+      state.trade.positionEditorDraft = null;
+      renderPositionEditor();
       tradeStatus("Position protections updated.", false);
       await refreshTradeData({ silent: true });
     } catch (error) {
@@ -2476,6 +2619,7 @@
       } else {
         delete state.trade.pendingProtectionEdits[pendingKey];
       }
+      seedPositionEditorDraft(activePositionById(positionId));
       renderPositionEditor();
       queueOverlayRender();
     });
@@ -2549,6 +2693,9 @@
       const positionId = Number(button.dataset.positionId);
       if (action === "select-position") {
         setActiveTradePosition(positionId);
+        if (elements.tradePositionSection) {
+          elements.tradePositionSection.open = true;
+        }
         return;
       }
       if (action === "close-position" || action === "close-half-position") {
@@ -2575,22 +2722,26 @@
         reloadSelectedTradeReviewFromSettings();
       });
     });
-    [elements.chartPositionStopLoss, elements.chartPositionTakeProfit].forEach(function (input) {
+    [elements.tradePositionStopLoss, elements.tradePositionTakeProfit].forEach(function (input) {
       input.addEventListener("input", function () {
         const position = activeTradePosition();
         if (!position) {
           return;
         }
-        try {
-          const fallback = position[input === elements.chartPositionStopLoss ? "stopLoss" : "takeProfit"];
-          const nextValue = sanitizeEditableProtectionValue(input.value, fallback);
-          setPendingProtectionValue(position.positionId, input === elements.chartPositionStopLoss ? "stopLoss" : "takeProfit", nextValue);
-        } catch (error) {
-          tradeStatus(error.message || "Invalid protection value.", true);
+        const editor = ensurePositionEditorDraft(position);
+        if (!editor) {
+          return;
         }
+        if (input === elements.tradePositionStopLoss) {
+          editor.stopLossText = input.value;
+        } else {
+          editor.takeProfitText = input.value;
+        }
+        syncPendingProtectionFromEditor(position);
+        renderPositionEditor();
       });
     });
-    elements.chartPositionCancelButton.addEventListener("click", function () {
+    elements.tradePositionResetButton.addEventListener("click", function () {
       const position = activeTradePosition();
       if (!position) {
         return;
@@ -2598,13 +2749,18 @@
       discardPendingProtection(position.positionId);
       tradeStatus("Pending protection changes cleared.", false);
     });
-    elements.chartPositionConfirmButton.addEventListener("click", function () {
+    elements.tradePositionConfirmButton.addEventListener("click", function () {
       const position = activeTradePosition();
       if (!position) {
         return;
       }
-      const draft = pendingProtectionForPosition(position);
-      submitAmendPosition(position.positionId, draft.stopLoss, draft.takeProfit).catch(function () {});
+      const editorState = syncPendingProtectionFromEditor(position) || positionEditorState(position);
+      if (!editorState?.valid) {
+        tradeStatus(editorState?.error || "Invalid protection value.", true);
+        renderPositionEditor();
+        return;
+      }
+      submitAmendPosition(position.positionId, editorState.stopLoss.value, editorState.takeProfit.value).catch(function () {});
     });
 
     [elements.tradePreparedLotSize, elements.tradePreparedStopLoss, elements.tradePreparedTakeProfit].forEach(function (input) {

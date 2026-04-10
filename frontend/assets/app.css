@@ -457,13 +457,63 @@ input {
   line-height: 1.5;
 }
 
-.trade-prepare-shell {
-  display: grid;
-  gap: 0.6rem;
-  padding: 0.7rem;
+.trade-section-shell {
+  margin: 0;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: rgba(5, 9, 15, 0.24);
+  overflow: hidden;
+}
+
+.trade-section-shell[hidden] {
+  display: none;
+}
+
+.trade-section-toggle {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.7rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.trade-section-toggle::-webkit-details-marker {
+  display: none;
+}
+
+.trade-section-toggle::after {
+  content: "+";
+  color: var(--muted);
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.88rem;
+}
+
+.trade-section-shell[open] > .trade-section-toggle::after {
+  content: "-";
+}
+
+.trade-section-summary {
+  min-width: 0;
+  color: var(--muted);
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.7rem;
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.trade-section-body {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0 0.7rem 0.7rem;
+}
+
+.trade-prepare-shell {
+  display: grid;
+  gap: 0.6rem;
 }
 
 .trade-prepare-grid {
@@ -505,10 +555,7 @@ input {
 }
 
 .trade-review-shell {
-  padding: 0.7rem;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: rgba(5, 9, 15, 0.24);
+  padding: 0;
 }
 
 .trade-review-shell.is-disabled {
@@ -590,8 +637,25 @@ input {
   font-size: 0.76rem;
 }
 
-.chart-trade-entry,
-.chart-position-editor {
+.trade-position-editor-form {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0a101a;
+}
+
+.trade-position-editor-grid {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.trade-position-editor-empty {
+  padding: 0.15rem 0;
+}
+
+.chart-trade-entry {
   position: absolute;
   z-index: 6;
 }
@@ -656,8 +720,7 @@ input {
   background: rgba(116, 34, 52, 0.32);
 }
 
-.chart-trade-hint,
-.chart-trade-card-copy {
+.chart-trade-hint {
   font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 0.72rem;
   color: var(--muted);
@@ -668,47 +731,6 @@ input {
   border-radius: 999px;
   background: rgba(5, 9, 15, 0.72);
   border: 1px solid rgba(147, 181, 255, 0.12);
-}
-
-.chart-position-editor {
-  width: min(320px, calc(100% - 1.5rem));
-  padding: 0.8rem;
-  background: rgba(13, 20, 32, 0.95);
-  border-color: rgba(147, 181, 255, 0.2);
-}
-
-.chart-position-editor {
-  top: 1rem;
-  right: 1rem;
-}
-
-.chart-trade-card-title {
-  font-size: 0.92rem;
-  font-weight: 700;
-  letter-spacing: 0.03em;
-}
-
-.chart-trade-card-copy + .chart-trade-card-grid,
-.chart-trade-card-grid + .chart-trade-card-copy,
-.chart-trade-card-grid + .chart-trade-card-actions,
-.chart-trade-card-copy + .chart-trade-card-actions {
-  margin-top: 0.7rem;
-}
-
-.chart-trade-card-grid {
-  display: grid;
-  gap: 0.65rem;
-}
-
-.chart-trade-card-actions {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0.55rem;
-}
-
-.chart-position-editor.is-pending {
-  border-color: rgba(255, 200, 87, 0.48);
-  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.34), 0 0 0 1px rgba(255, 200, 87, 0.1);
 }
 
 .page-sql {
@@ -968,8 +990,7 @@ input {
     bottom: 1rem;
   }
 
-  .chart-trade-entry-buttons,
-  .chart-trade-card-actions {
+  .chart-trade-entry-buttons {
     grid-auto-flow: row;
     grid-template-columns: 1fr;
     width: 100%;
@@ -980,11 +1001,18 @@ input {
     width: 100%;
   }
 
-  .chart-position-editor {
-    top: 0.75rem;
-    right: 0.75rem;
-    left: 0.75rem;
-    width: auto;
+  .trade-section-toggle {
+    grid-template-columns: 1fr auto;
+  }
+
+  .trade-list-title {
+    grid-column: 1 / 2;
+  }
+
+  .trade-section-summary {
+    grid-column: 1 / 2;
+    text-align: left;
+    white-space: normal;
   }
 
   .page-sql {
