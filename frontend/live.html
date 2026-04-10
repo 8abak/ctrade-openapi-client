@@ -186,8 +186,21 @@
               </div>
             </div>
 
-            <div class="trade-list-shell">
-              <div class="trade-list-title">Recent trades</div>
+            <div class="trade-list-shell trade-review-shell" id="tradeReviewSection">
+              <div class="trade-list-title">Trade review</div>
+              <div class="trade-session-copy" id="tradeReviewHint">Switch the chart to Review + Stop to inspect one completed trade.</div>
+              <div class="trade-review-grid">
+                <label>
+                  <span>ticks before</span>
+                  <input id="tradeReviewTicksBefore" type="number" min="0" max="10000" step="1" value="300">
+                </label>
+                <label>
+                  <span>ticks after</span>
+                  <input id="tradeReviewTicksAfter" type="number" min="0" max="10000" step="1" value="300">
+                </label>
+              </div>
+              <div class="trade-session-copy" id="tradeReviewSummary">No review trade selected.</div>
+              <div class="trade-list-title">Recent completed trades</div>
               <div class="trade-list" id="tradeHistoryList">
                 <div class="sql-empty">No recent trade history.</div>
               </div>

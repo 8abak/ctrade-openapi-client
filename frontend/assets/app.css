@@ -504,6 +504,23 @@ input {
   gap: 0.4rem;
 }
 
+.trade-review-shell {
+  padding: 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(5, 9, 15, 0.24);
+}
+
+.trade-review-shell.is-disabled {
+  opacity: 0.72;
+}
+
+.trade-review-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
 .trade-list-title {
   font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
   color: var(--accent);
@@ -528,6 +545,11 @@ input {
   padding: 0.5rem 0.55rem;
   display: grid;
   gap: 0.35rem;
+}
+
+.trade-item.is-selected {
+  border-color: rgba(109, 216, 255, 0.48);
+  box-shadow: inset 0 0 0 1px rgba(109, 216, 255, 0.18);
 }
 
 .trade-item-head {
@@ -930,6 +952,10 @@ input {
   }
 
   .trade-prepare-presets {
+    grid-template-columns: 1fr;
+  }
+
+  .trade-review-grid {
     grid-template-columns: 1fr;
   }
 

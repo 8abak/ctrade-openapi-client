@@ -31,6 +31,8 @@
   const TRADE_POLL_INTERVAL_MS = 8000;
   const TRADE_HISTORY_LIMIT = 40;
   const TRADE_DEFAULT_LOT_SIZE = 0.01;
+  const TRADE_REVIEW_DEFAULT_TICKS_BEFORE = 300;
+  const TRADE_REVIEW_DEFAULT_TICKS_AFTER = 300;
   const TRADE_MARKER_COLORS = {
     buyEntry: "#7ef0c7",
     sellEntry: "#ff9fb2",
@@ -83,6 +85,7 @@
       activeOrderSide: null,
       activePositionId: null,
       pendingProtectionEdits: {},
+      selectedHistoricalTradeOverlay: null,
     },
   };
 
@@ -127,6 +130,11 @@
     tradePreparedSummary: document.getElementById("tradePreparedSummary"),
     tradeOpenList: document.getElementById("tradeOpenList"),
     tradePendingList: document.getElementById("tradePendingList"),
+    tradeReviewSection: document.getElementById("tradeReviewSection"),
+    tradeReviewHint: document.getElementById("tradeReviewHint"),
+    tradeReviewTicksBefore: document.getElementById("tradeReviewTicksBefore"),
+    tradeReviewTicksAfter: document.getElementById("tradeReviewTicksAfter"),
+    tradeReviewSummary: document.getElementById("tradeReviewSummary"),
     tradeHistoryList: document.getElementById("tradeHistoryList"),
     chartTradeEntry: document.getElementById("chartTradeEntry"),
     chartTradeBuyButton: document.getElementById("chartTradeBuyButton"),
@@ -144,6 +152,10 @@
 
   function sanitizeWindowValue(rawValue) {
     return Math.max(1, Math.min(MAX_WINDOW, Number.parseInt(rawValue || String(DEFAULTS.window), 10) || DEFAULTS.window));
+  }
+
+  function clampTradeReviewTicks(rawValue, fallback) {
+    return Math.max(0, Math.min(MAX_WINDOW, Number.parseInt(rawValue || String(fallback), 10) || fallback));
   }
 
   function parseQuery() {
@@ -367,6 +379,7 @@
     state.trade.activeOrderSide = null;
     state.trade.activePositionId = null;
     state.trade.pendingProtectionEdits = {};
+    state.trade.selectedHistoricalTradeOverlay = null;
   }
 
   function applyTradeSessionPayload(payload) {
@@ -862,6 +875,11 @@
     if (!elements.chartTradeEntry) {
       return;
     }
+    const liveMode = currentConfig().mode === "live";
+    elements.chartTradeEntry.hidden = !liveMode;
+    if (!liveMode) {
+      return;
+    }
     const prepared = preparedTradeState();
     const authConfigured = state.trade.authConfigured;
     const busy = state.trade.actionBusy;
@@ -892,7 +910,7 @@
     }
     syncTradeSelection();
     const position = activeTradePosition();
-    const visible = state.trade.authenticated && Boolean(position);
+    const visible = currentConfig().mode === "live" && state.trade.authenticated && Boolean(position);
     elements.chartPositionEditor.hidden = !visible;
     if (!visible) {
       elements.chartPositionEditor.classList.remove("is-pending");
@@ -919,32 +937,35 @@
     if (!Number.isFinite(rounded)) {
       return [];
     }
+    const overlay = selectedHistoricalTradeVisible();
+    if (!overlay) {
+      return [];
+    }
     const markers = [];
-    state.trade.trades.forEach((trade) => {
-      const entryTick = tickIdForTimestampMs(trade.entryTimestampMs);
-      if (entryTick != null && entryTick === rounded) {
-        markers.push({
-          kind: "entry",
-          side: trade.side,
-          volume: trade.volume,
-          price: trade.entryPrice,
-          timestamp: trade.entryTimestamp,
-          positionId: trade.positionId,
-        });
-      }
-      const exitTick = tickIdForTimestampMs(trade.exitTimestampMs);
-      if (exitTick != null && exitTick === rounded && trade.exitPrice != null) {
-        markers.push({
-          kind: "exit",
-          side: trade.side,
-          volume: trade.volume,
-          price: trade.exitPrice,
-          timestamp: trade.exitTimestamp,
-          pnl: trade.realizedNetPnl,
-          positionId: trade.positionId,
-        });
-      }
-    });
+    const trade = overlay.trade || {};
+    if (Number(overlay.entryTickId) === rounded && trade.entryPrice != null) {
+      markers.push({
+        kind: "entry",
+        side: trade.side,
+        volume: trade.volume,
+        volumeLots: trade.volumeLots,
+        price: trade.entryPrice,
+        timestamp: trade.entryTimestamp,
+        positionId: trade.positionId,
+      });
+    }
+    if (Number(overlay.exitTickId) === rounded && trade.exitPrice != null) {
+      markers.push({
+        kind: "exit",
+        side: trade.side,
+        volume: trade.volume,
+        volumeLots: trade.volumeLots,
+        price: trade.exitPrice,
+        timestamp: trade.exitTimestamp,
+        pnl: trade.realizedNetPnl,
+        positionId: trade.positionId,
+      });
+    }
     return markers;
   }
 
@@ -982,11 +1003,11 @@
     }
     const tradeMarkers = tradeMarkersAtTickId(tickId);
     if (tradeMarkers.length) {
-      sections.push(tooltipSection("Trades", tradeMarkers.map((marker) => {
+      sections.push(tooltipSection("Selected Trade", tradeMarkers.map((marker) => {
         if (marker.kind === "entry") {
           return tooltipRow(
             "Entry " + String(marker.side || "").toUpperCase(),
-            formatPrice(marker.price) + " | vol " + String(marker.volume || 0) + " | " + String(marker.timestamp || "-")
+            formatPrice(marker.price) + " | " + formatTradeVolume(marker.volume, marker.volumeLots) + " | " + String(marker.timestamp || "-")
           );
         }
         return tooltipRow(
@@ -1086,40 +1107,32 @@
     }));
   }
 
-  function tradeEntriesToSeriesData() {
-    return state.trade.trades
-      .map((trade) => {
-        const tickId = tickIdForTimestampMs(trade.entryTimestampMs);
-        if (!Number.isFinite(tickId) || trade.entryPrice == null) {
-          return null;
-        }
-        return {
-          value: [Number(tickId), Number(trade.entryPrice)],
-          trade,
-          itemStyle: {
-            color: trade.side === "buy" ? TRADE_MARKER_COLORS.buyEntry : TRADE_MARKER_COLORS.sellEntry,
-          },
-        };
-      })
-      .filter(Boolean);
+  function selectedHistoricalTradeEntrySeriesData() {
+    const overlay = selectedHistoricalTradeVisible();
+    if (!overlay || overlay.trade?.entryPrice == null) {
+      return [];
+    }
+    return [{
+      value: [Number(overlay.entryTickId), Number(overlay.trade.entryPrice)],
+      trade: overlay.trade,
+      itemStyle: {
+        color: overlay.trade.side === "buy" ? TRADE_MARKER_COLORS.buyEntry : TRADE_MARKER_COLORS.sellEntry,
+      },
+    }];
   }
 
-  function tradeExitsToSeriesData() {
-    return state.trade.trades
-      .map((trade) => {
-        const tickId = tickIdForTimestampMs(trade.exitTimestampMs);
-        if (!Number.isFinite(tickId) || trade.exitPrice == null) {
-          return null;
-        }
-        return {
-          value: [Number(tickId), Number(trade.exitPrice)],
-          trade,
-          itemStyle: {
-            color: trade.side === "buy" ? TRADE_MARKER_COLORS.buyExit : TRADE_MARKER_COLORS.sellExit,
-          },
-        };
-      })
-      .filter(Boolean);
+  function selectedHistoricalTradeExitSeriesData() {
+    const overlay = selectedHistoricalTradeVisible();
+    if (!overlay || overlay.trade?.exitPrice == null) {
+      return [];
+    }
+    return [{
+      value: [Number(overlay.exitTickId), Number(overlay.trade.exitPrice)],
+      trade: overlay.trade,
+      itemStyle: {
+        color: overlay.trade.side === "buy" ? TRADE_MARKER_COLORS.buyExit : TRADE_MARKER_COLORS.sellExit,
+      },
+    }];
   }
 
   function pendingToSeriesData() {
@@ -1162,14 +1175,30 @@
       .filter(Boolean);
   }
 
-  function openConnectorRender(params, api) {
+  function selectedHistoricalConnectorData() {
+    const overlay = selectedHistoricalTradeVisible();
+    if (!overlay || overlay.trade?.entryPrice == null || overlay.trade?.exitPrice == null) {
+      return [];
+    }
+    return [{
+      value: [
+        Number(overlay.entryTickId),
+        Number(overlay.trade.entryPrice),
+        Number(overlay.exitTickId),
+        Number(overlay.trade.exitPrice),
+      ],
+      trade: overlay.trade,
+    }];
+  }
+
+  function tradeConnectorRender(params, api) {
     const x1 = Number(api.value(0));
     const y1 = Number(api.value(1));
     const x2 = Number(api.value(2));
     const y2 = Number(api.value(3));
     const start = api.coord([x1, y1]);
     const end = api.coord([x2, y2]);
-    const item = params.data?.position || {};
+    const item = params.data?.position || params.data?.trade || {};
     const side = item.side === "buy" ? "buy" : "sell";
     const color = side === "buy" ? "rgba(126,240,199,0.88)" : "rgba(255,159,178,0.88)";
     return {
@@ -1259,37 +1288,16 @@
         z: 9,
       });
     }
-    if (state.trade.authenticated) {
+    if (isLiveTradeOverlayMode()) {
       series.push({
         id: "trade-open-connectors",
         name: "Open positions",
         type: "custom",
-        renderItem: openConnectorRender,
+        renderItem: tradeConnectorRender,
         data: openConnectorData(),
         animation: false,
         encode: { x: [0, 2], y: [1, 3] },
         z: 6,
-      });
-      series.push({
-        id: "trade-entry-markers",
-        name: "Trade entries",
-        type: "scatter",
-        data: tradeEntriesToSeriesData(),
-        symbol: "triangle",
-        symbolRotate: 0,
-        symbolSize: 11,
-        animation: false,
-        z: 12,
-      });
-      series.push({
-        id: "trade-exit-markers",
-        name: "Trade exits",
-        type: "scatter",
-        data: tradeExitsToSeriesData(),
-        symbol: "diamond",
-        symbolSize: 10,
-        animation: false,
-        z: 13,
       });
       series.push({
         id: "trade-pending-markers",
@@ -1300,6 +1308,38 @@
         symbolSize: 8,
         animation: false,
         z: 11,
+      });
+    }
+    if (isSelectedHistoricalReviewMode()) {
+      series.push({
+        id: "selected-trade-connector",
+        name: "Selected trade",
+        type: "custom",
+        renderItem: tradeConnectorRender,
+        data: selectedHistoricalConnectorData(),
+        animation: false,
+        encode: { x: [0, 2], y: [1, 3] },
+        z: 10,
+      });
+      series.push({
+        id: "selected-trade-entry-marker",
+        name: "Selected trade entry",
+        type: "scatter",
+        data: selectedHistoricalTradeEntrySeriesData(),
+        symbol: "triangle",
+        symbolSize: 11,
+        animation: false,
+        z: 12,
+      });
+      series.push({
+        id: "selected-trade-exit-marker",
+        name: "Selected trade exit",
+        type: "scatter",
+        data: selectedHistoricalTradeExitSeriesData(),
+        symbol: "diamond",
+        symbolSize: 10,
+        animation: false,
+        z: 13,
       });
     }
     return series;
@@ -1324,7 +1364,7 @@
     if (config.showEvents) {
       state.structureEvents.forEach((event) => values.push(Number(event.price)));
     }
-    if (state.trade.authenticated) {
+    if (isLiveTradeOverlayMode()) {
       state.trade.positions.forEach((position) => {
         const draft = pendingProtectionForPosition(position);
         values.push(Number(position.entryPrice));
@@ -1343,14 +1383,15 @@
           values.push(Number(order.stopPrice));
         }
       });
-      state.trade.trades.forEach((trade) => {
-        if (trade.entryPrice != null) {
-          values.push(Number(trade.entryPrice));
-        }
-        if (trade.exitPrice != null) {
-          values.push(Number(trade.exitPrice));
-        }
-      });
+    }
+    if (isSelectedHistoricalReviewMode()) {
+      const trade = selectedHistoricalTradeOverlay()?.trade;
+      if (trade?.entryPrice != null) {
+        values.push(Number(trade.entryPrice));
+      }
+      if (trade?.exitPrice != null) {
+        values.push(Number(trade.exitPrice));
+      }
     }
     const finite = values.filter(Number.isFinite);
     if (!finite.length) {
@@ -1450,7 +1491,7 @@
 
   function buildTradeProtectionGraphics() {
     const chart = state.chart;
-    if (!chart || !state.trade.authenticated) {
+    if (!chart || !isLiveTradeOverlayMode()) {
       return [];
     }
     const grid = chart.getModel()?.getComponent("grid", 0);
@@ -1930,6 +1971,128 @@
     return String(side || "").toUpperCase();
   }
 
+  function formatTradeTimestamp(value) {
+    if (!value) {
+      return "-";
+    }
+    const parsedMs = Date.parse(value);
+    if (!Number.isFinite(parsedMs)) {
+      return String(value);
+    }
+    const timestamp = new Date(parsedMs);
+    return timestamp.toLocaleDateString() + " " + timestamp.toLocaleTimeString();
+  }
+
+  function selectedHistoricalTradeKey(trade) {
+    return [
+      Number(trade?.positionId || 0),
+      Number(trade?.entryTimestampMs || 0),
+      Number(trade?.exitTimestampMs || 0),
+    ].join(":");
+  }
+
+  function completedTradeHistoryItems() {
+    return (state.trade.trades || []).filter((trade) => !trade?.isOpen && trade?.entryTimestampMs && trade?.exitTimestampMs);
+  }
+
+  function completedTradeByKey(key) {
+    return completedTradeHistoryItems().find((trade) => selectedHistoricalTradeKey(trade) === String(key)) || null;
+  }
+
+  function currentTradeReviewSettings() {
+    return {
+      beforeTicks: clampTradeReviewTicks(elements.tradeReviewTicksBefore?.value, TRADE_REVIEW_DEFAULT_TICKS_BEFORE),
+      afterTicks: clampTradeReviewTicks(elements.tradeReviewTicksAfter?.value, TRADE_REVIEW_DEFAULT_TICKS_AFTER),
+    };
+  }
+
+  function isLiveTradeOverlayMode() {
+    return state.trade.authenticated && currentConfig().mode === "live";
+  }
+
+  function isSelectedHistoricalReviewMode() {
+    return currentConfig().mode === "review" && Boolean(state.trade.selectedHistoricalTradeOverlay);
+  }
+
+  function reviewTradeSelectionReady() {
+    const config = currentConfig();
+    return state.trade.authenticated && config.mode === "review" && config.run === "stop";
+  }
+
+  function selectedHistoricalTradeOverlay() {
+    return state.trade.selectedHistoricalTradeOverlay;
+  }
+
+  function selectedHistoricalTradeVisible() {
+    const overlay = selectedHistoricalTradeOverlay();
+    if (!overlay || !isSelectedHistoricalReviewMode()) {
+      return null;
+    }
+    const firstId = Number(state.rangeFirstId);
+    const lastId = Number(state.rangeLastId);
+    if (!Number.isFinite(firstId) || !Number.isFinite(lastId)) {
+      return overlay;
+    }
+    const entryTickId = Number(overlay.entryTickId);
+    const exitTickId = Number(overlay.exitTickId);
+    if ((Number.isFinite(entryTickId) && entryTickId >= firstId && entryTickId <= lastId)
+      || (Number.isFinite(exitTickId) && exitTickId >= firstId && exitTickId <= lastId)) {
+      return overlay;
+    }
+    return null;
+  }
+
+  function renderTradeReviewControls() {
+    if (!elements.tradeReviewSection) {
+      return;
+    }
+    const reviewReady = reviewTradeSelectionReady();
+    const config = currentConfig();
+    const selected = selectedHistoricalTradeOverlay();
+    const completedCount = completedTradeHistoryItems().length;
+    elements.tradeReviewSection.classList.toggle("is-disabled", !reviewReady);
+    [elements.tradeReviewTicksBefore, elements.tradeReviewTicksAfter].forEach((input, index) => {
+      if (!input) {
+        return;
+      }
+      const fallback = index === 0 ? TRADE_REVIEW_DEFAULT_TICKS_BEFORE : TRADE_REVIEW_DEFAULT_TICKS_AFTER;
+      input.value = String(clampTradeReviewTicks(input.value, fallback));
+      input.disabled = !reviewReady || state.trade.actionBusy;
+    });
+    if (elements.tradeReviewHint) {
+      elements.tradeReviewHint.textContent = !state.trade.authenticated
+        ? "Trade review becomes available after trade login."
+        : (config.mode === "review" && config.run === "run" && selected
+          ? "Replay is running from the selected trade window."
+          : (!reviewReady
+          ? "Switch the chart to Review + Stop to load one completed trade."
+          : (completedCount
+            ? "Click one completed trade to load a focused review window."
+            : "No completed trades are available for review.")));
+    }
+    if (elements.tradeReviewSummary) {
+      elements.tradeReviewSummary.textContent = selected
+        ? [
+          "Selected ",
+          formatPositionSide(selected.trade?.side),
+          " #",
+          String(selected.trade?.positionId || "-"),
+          " | Entry ",
+          formatTradeTimestamp(selected.trade?.entryTimestamp),
+          " | Exit ",
+          formatTradeTimestamp(selected.trade?.exitTimestamp),
+          " | PnL ",
+          formatSignedPnl(selected.trade?.realizedNetPnl),
+          " | Replay window ",
+          String(selected.beforeTicks),
+          " before / ",
+          String(selected.afterTicks),
+          " after",
+        ].join("")
+        : "No review trade selected.";
+    }
+  }
+
   function renderTradeLists() {
     if (elements.tradeSessionSummary) {
       elements.tradeSessionSummary.textContent = !state.trade.authConfigured
@@ -1975,23 +2138,31 @@
       ].join("")).join("");
     }
 
-    const historyItems = state.trade.trades || [];
+    const historyItems = completedTradeHistoryItems();
+    const reviewReady = reviewTradeSelectionReady();
+    const selectedKey = selectedHistoricalTradeOverlay()?.key;
     if (!historyItems.length) {
       elements.tradeHistoryList.innerHTML = "<div class=\"sql-empty\">" + (state.trade.historyAvailable ? "No recent trade history." : "Recent trade history unavailable.") + "</div>";
     } else {
       elements.tradeHistoryList.innerHTML = historyItems.map((trade) => [
-        "<article class=\"trade-item\">",
-        "<div class=\"trade-item-head\"><span>", escapeHtml(formatPositionSide(trade.side)), " #", escapeHtml(trade.positionId), "</span><span>", escapeHtml(trade.isOpen ? "open" : "closed"), "</span></div>",
+        "<article class=\"trade-item", selectedHistoricalTradeKey(trade) === selectedKey ? " is-selected" : "", "\">",
+        "<div class=\"trade-item-head\"><span>", escapeHtml(formatPositionSide(trade.side)), " #", escapeHtml(trade.positionId), "</span><span>", escapeHtml(formatSignedPnl(trade.realizedNetPnl)), "</span></div>",
         "<div class=\"trade-item-meta\">",
         escapeHtml(formatTradeVolume(trade.volume, trade.volumeLots)),
-        " | ",
-        "Entry ", escapeHtml(formatPrice(trade.entryPrice)),
+        " | Entry ", escapeHtml(formatPrice(trade.entryPrice)),
         trade.exitPrice != null ? " -> Exit " + escapeHtml(formatPrice(trade.exitPrice)) : " -> Exit -",
-        " | PnL ", escapeHtml(formatSignedPnl(trade.realizedNetPnl)),
+        "</div>",
+        "<div class=\"trade-item-meta\">In ", escapeHtml(formatTradeTimestamp(trade.entryTimestamp)), "</div>",
+        "<div class=\"trade-item-meta\">Out ", escapeHtml(formatTradeTimestamp(trade.exitTimestamp)), "</div>",
+        "<div class=\"trade-item-actions trade-item-actions-single\">",
+        "<button class=\"ghost-button compact-button\" type=\"button\" data-action=\"select-trade\" data-trade-key=\"", escapeHtml(selectedHistoricalTradeKey(trade)), "\"", (reviewReady && !state.trade.actionBusy) ? "" : " disabled", ">",
+        selectedHistoricalTradeKey(trade) === selectedKey ? "Reload review" : "Review trade",
+        "</button>",
         "</div>",
         "</article>",
       ].join("")).join("");
     }
+    renderTradeReviewControls();
     renderPositionEditor();
   }
 
@@ -2020,6 +2191,13 @@
         state.trade.volumeInfo = openPayload.volumeInfo || historyPayload.volumeInfo || currentTradeVolumeInfo();
         state.trade.trades = Array.isArray(historyPayload.trades) ? historyPayload.trades : [];
         state.trade.deals = Array.isArray(historyPayload.deals) ? historyPayload.deals : [];
+        const selected = selectedHistoricalTradeOverlay();
+        if (selected) {
+          const refreshedTrade = completedTradeByKey(selected.key);
+          if (refreshedTrade) {
+            state.trade.selectedHistoricalTradeOverlay = { ...selected, trade: refreshedTrade };
+          }
+        }
       } catch (error) {
         state.trade.historyAvailable = false;
         if (!silent) {
@@ -2378,6 +2556,25 @@
         return;
       }
     });
+    elements.tradeHistoryList.addEventListener("click", function (event) {
+      const button = event.target.closest("button[data-action=\"select-trade\"]");
+      if (!button || button.disabled) {
+        return;
+      }
+      const trade = completedTradeByKey(button.dataset.tradeKey);
+      if (!trade) {
+        status("The selected trade is no longer available in recent history.", true);
+        return;
+      }
+      loadSelectedTradeReview(trade, { resetView: true }).catch((error) => {
+        status(error.message || "Trade review load failed.", true);
+      });
+    });
+    [elements.tradeReviewTicksBefore, elements.tradeReviewTicksAfter].forEach(function (input) {
+      input.addEventListener("change", function () {
+        reloadSelectedTradeReviewFromSettings();
+      });
+    });
     [elements.chartPositionStopLoss, elements.chartPositionTakeProfit].forEach(function (input) {
       input.addEventListener("input", function () {
         const position = activeTradePosition();
@@ -2427,6 +2624,64 @@
     renderTradeEntryOverlay();
     renderPositionEditor();
     loadTradeSession();
+  }
+
+  async function loadSelectedTradeReview(trade, options) {
+    if (!trade?.entryTimestamp || !trade?.exitTimestamp) {
+      throw new Error("The selected trade does not have a complete entry and exit.");
+    }
+    const settings = currentTradeReviewSettings();
+    const [entryPayload, exitPayload] = await Promise.all([
+      fetchJson("/api/live/review-start?" + new URLSearchParams({
+        timestamp: trade.entryTimestamp,
+        timezoneName: "Australia/Sydney",
+      }).toString()),
+      fetchJson("/api/live/review-start?" + new URLSearchParams({
+        timestamp: trade.exitTimestamp,
+        timezoneName: "Australia/Sydney",
+      }).toString()),
+    ]);
+    const entryTickId = Number(entryPayload?.resolvedId);
+    const exitTickId = Number(exitPayload?.resolvedId);
+    if (!Number.isFinite(entryTickId) || !Number.isFinite(exitTickId)) {
+      throw new Error("The selected trade could not be mapped to chart ticks.");
+    }
+    const startId = Math.max(1, Math.min(entryTickId, exitTickId) - settings.beforeTicks);
+    const visibleSpan = Math.max(1, Math.abs(exitTickId - entryTickId) + 1);
+    const reviewWindow = sanitizeWindowValue(visibleSpan + settings.beforeTicks + settings.afterTicks);
+    state.trade.selectedHistoricalTradeOverlay = {
+      key: selectedHistoricalTradeKey(trade),
+      trade,
+      entryTickId,
+      exitTickId,
+      startId,
+      window: reviewWindow,
+      beforeTicks: settings.beforeTicks,
+      afterTicks: settings.afterTicks,
+    };
+    setSegment(elements.modeToggle, "review");
+    setSegment(elements.runToggle, "stop");
+    updateReviewFields();
+    renderTradeEntryOverlay();
+    renderPositionEditor();
+    elements.tickId.value = String(startId);
+    elements.reviewStart.value = "";
+    elements.windowSize.value = String(reviewWindow);
+    renderTradeLists();
+    writeQuery();
+    await loadAll(options?.resetView !== false);
+    status(options?.fromSettingsChange ? "Selected trade review window updated." : "Selected trade loaded for review.", false);
+  }
+
+  function reloadSelectedTradeReviewFromSettings() {
+    const selected = selectedHistoricalTradeOverlay();
+    if (!selected || !reviewTradeSelectionReady()) {
+      renderTradeReviewControls();
+      return;
+    }
+    loadSelectedTradeReview(selected.trade, { resetView: false, fromSettingsChange: true }).catch((error) => {
+      status(error.message || "Trade review reload failed.", true);
+    });
   }
 
   async function resolveReviewStartId(config) {
@@ -2664,12 +2919,17 @@
   bindSegment(elements.modeToggle, function (value) {
     setSegment(elements.modeToggle, value);
     updateReviewFields();
+    renderTradeLists();
+    renderTradeEntryOverlay();
+    renderPositionEditor();
     writeQuery();
+    renderChart({ shiftWithRun: false });
     status("Mode updated. Click Load to refresh data.", false);
   });
 
   bindSegment(elements.runToggle, function (value) {
     setSegment(elements.runToggle, value);
+    renderTradeLists();
     writeQuery();
     clearActivity();
     if (value === "run" && state.rangeLastId != null) {
