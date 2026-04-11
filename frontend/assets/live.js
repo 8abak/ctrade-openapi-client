@@ -70,6 +70,13 @@
     overlayFrame: 0,
     resizeObserver: null,
     ui: { sidebarCollapsed: true },
+    paper: {
+      current: null,
+      busy: false,
+      drawState: "idle",
+      firstPoint: null,
+      defaultSmartCloseEnabled: false,
+    },
     trade: {
       authConfigured: true,
       authError: null,
@@ -131,6 +138,12 @@
     livePerf: document.getElementById("livePerf"),
     chartPanel: document.getElementById("chartPanel"),
     chartHost: document.getElementById("liveChart"),
+    paperPanel: document.getElementById("paperPanel"),
+    rectDrawButton: document.getElementById("rectDrawButton"),
+    rectClearButton: document.getElementById("rectClearButton"),
+    rectManualCloseButton: document.getElementById("rectManualCloseButton"),
+    rectSmartCloseToggle: document.getElementById("rectSmartCloseToggle"),
+    rectStatusLine: document.getElementById("rectStatusLine"),
     tradePanel: document.getElementById("tradePanel"),
     tradeStatusLine: document.getElementById("tradeStatusLine"),
     tradeAuthPill: document.getElementById("tradeAuthPill"),
@@ -341,6 +354,317 @@
       parts.push("Wire " + Math.max(0, Date.now() - metrics.serverSentAtMs) + "ms");
     }
     elements.livePerf.textContent = parts.join(" | ");
+  }
+
+  function activePaperRect() {
+    const rect = state.paper.current;
+    if (!rect) {
+      return null;
+    }
+    return rect.mode === currentConfig().mode ? rect : null;
+  }
+
+  function paperDrawStateLabel() {
+    if (state.paper.drawState === "drawingfirstpoint") {
+      return "Draw mode active. Click the first corner.";
+    }
+    if (state.paper.drawState === "drawingsecondpoint") {
+      return "First corner placed. Click the opposite corner to the right.";
+    }
+    return null;
+  }
+
+  function currentPaperSmartCloseEnabled() {
+    const rect = activePaperRect();
+    return rect ? Boolean(rect.smartcloseenabled) : Boolean(state.paper.defaultSmartCloseEnabled);
+  }
+
+  function setPaperBusy(busy) {
+    state.paper.busy = Boolean(busy);
+    renderPaperPanel();
+  }
+
+  function clearPaperDrawing(options) {
+    state.paper.drawState = "idle";
+    state.paper.firstPoint = null;
+    if (options?.keepStatus !== true) {
+      renderPaperPanel();
+    }
+    queueOverlayRender();
+  }
+
+  function applyPaperPayload(rect) {
+    state.paper.current = rect && typeof rect === "object" ? rect : null;
+    if (state.paper.current) {
+      state.paper.defaultSmartCloseEnabled = Boolean(state.paper.current.smartcloseenabled);
+      clearPaperDrawing({ keepStatus: true });
+    }
+    renderPaperPanel();
+    queueOverlayRender();
+  }
+
+  function paperStatusText() {
+    const drawText = paperDrawStateLabel();
+    if (drawText) {
+      return drawText;
+    }
+    const rect = activePaperRect();
+    if (!rect) {
+      return "Mode " + currentConfig().mode.toUpperCase() + " | No paper rectangle.";
+    }
+    const parts = [
+      "Mode " + String(rect.mode || currentConfig().mode).toUpperCase(),
+      "Rect " + String(rect.id || "-"),
+      "Rect status " + String(rect.state || rect.status || "-"),
+      "Trade " + (rect.tradeactive ? "active" : (rect.closed ? "closed" : "waiting")),
+      "Dir " + String(rect.entrydir || "-"),
+      "Entry " + formatPrice(rect.entryprice),
+      "Stop " + formatPrice(rect.stoploss),
+      "Target " + formatPrice(rect.takeprofit),
+      "PnL " + formatSignedPnl(rect.currentpnl != null ? rect.currentpnl : rect.pnl),
+      "Exit " + String(rect.exitreason || "-"),
+    ];
+    return parts.join("\n");
+  }
+
+  function renderPaperPanel() {
+    if (!elements.paperPanel) {
+      return;
+    }
+    const rect = activePaperRect();
+    const drawModeActive = state.paper.drawState === "drawingfirstpoint" || state.paper.drawState === "drawingsecondpoint";
+    if (elements.rectDrawButton) {
+      elements.rectDrawButton.textContent = drawModeActive ? "Cancel Draw" : "Draw Rect";
+      elements.rectDrawButton.disabled = state.paper.busy || (!!rect && !drawModeActive);
+    }
+    if (elements.rectClearButton) {
+      elements.rectClearButton.disabled = state.paper.busy || !rect;
+    }
+    if (elements.rectManualCloseButton) {
+      elements.rectManualCloseButton.disabled = state.paper.busy || !rect || !rect.tradeactive;
+    }
+    if (elements.rectSmartCloseToggle) {
+      elements.rectSmartCloseToggle.checked = currentPaperSmartCloseEnabled();
+      elements.rectSmartCloseToggle.disabled = state.paper.busy;
+    }
+    if (elements.rectStatusLine) {
+      elements.rectStatusLine.textContent = paperStatusText();
+      elements.rectStatusLine.classList.toggle("success", Boolean(rect?.closed));
+      elements.rectStatusLine.classList.toggle("error", false);
+    }
+  }
+
+  function paperRequestPayloadFromRect(rect) {
+    return {
+      mode: currentConfig().mode,
+      leftx: Number(rect.leftx),
+      rightx: Number(rect.rightx),
+      firstprice: Number(rect.firstprice),
+      secondprice: Number(rect.secondprice),
+      smartcloseenabled: Boolean(rect.smartcloseenabled),
+    };
+  }
+
+  async function createPaperRect(rect) {
+    setPaperBusy(true);
+    const previous = state.paper.current;
+    applyPaperPayload(rect);
+    try {
+      const payload = await fetchJson("/api/live/rect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...paperRequestPayloadFromRect(rect), metadata: { source: "live-chart" } }),
+      });
+      applyPaperPayload(payload.rect || null);
+      status("Rectangle armed.", false);
+    } catch (error) {
+      state.paper.current = previous;
+      renderPaperPanel();
+      queueOverlayRender();
+      status(error.message || "Rectangle create failed.", true);
+    } finally {
+      setPaperBusy(false);
+    }
+  }
+
+  async function updatePaperRect(rect) {
+    if (!rect?.id) {
+      return;
+    }
+    setPaperBusy(true);
+    try {
+      const payload = await fetchJson("/api/live/rect/" + encodeURIComponent(rect.id), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(paperRequestPayloadFromRect(rect)),
+      });
+      applyPaperPayload(payload.rect || null);
+      status("Rectangle updated.", false);
+    } catch (error) {
+      try {
+        const refresh = await fetchJson("/api/live/rect?" + new URLSearchParams({ mode: currentConfig().mode }).toString());
+        applyPaperPayload(refresh.rect || null);
+      } catch (refreshError) {
+        void refreshError;
+      }
+      status(error.message || "Rectangle update failed.", true);
+      queueOverlayRender();
+    } finally {
+      setPaperBusy(false);
+    }
+  }
+
+  async function clearPaperRect() {
+    const rect = activePaperRect();
+    if (!rect?.id || state.paper.busy) {
+      return;
+    }
+    setPaperBusy(true);
+    try {
+      await fetchJson("/api/live/rect/" + encodeURIComponent(rect.id) + "/clear", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: currentConfig().mode }),
+      });
+      state.paper.current = null;
+      clearPaperDrawing({ keepStatus: true });
+      renderPaperPanel();
+      queueOverlayRender();
+      status("Rectangle cleared.", false);
+    } catch (error) {
+      status(error.message || "Rectangle clear failed.", true);
+    } finally {
+      setPaperBusy(false);
+    }
+  }
+
+  async function manualClosePaperRect() {
+    const rect = activePaperRect();
+    if (!rect?.id || state.paper.busy || !rect.tradeactive) {
+      return;
+    }
+    setPaperBusy(true);
+    try {
+      const payload = await fetchJson("/api/live/rect/" + encodeURIComponent(rect.id) + "/manual-close", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: currentConfig().mode }),
+      });
+      applyPaperPayload(payload.rect || null);
+      status("Paper trade closed manually.", false);
+    } catch (error) {
+      status(error.message || "Manual close failed.", true);
+    } finally {
+      setPaperBusy(false);
+    }
+  }
+
+  async function togglePaperSmartClose(enabled) {
+    state.paper.defaultSmartCloseEnabled = Boolean(enabled);
+    const rect = activePaperRect();
+    renderPaperPanel();
+    if (!rect?.id || state.paper.busy) {
+      return;
+    }
+    setPaperBusy(true);
+    try {
+      const payload = await fetchJson("/api/live/rect/" + encodeURIComponent(rect.id) + "/smart-close", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: currentConfig().mode, enabled: Boolean(enabled) }),
+      });
+      applyPaperPayload(payload.rect || null);
+      status(Boolean(enabled) ? "Smart Close enabled." : "Smart Close disabled.", false);
+    } catch (error) {
+      status(error.message || "Smart Close update failed.", true);
+      renderPaperPanel();
+    } finally {
+      setPaperBusy(false);
+    }
+  }
+
+  function togglePaperDrawMode() {
+    if (state.paper.busy) {
+      return;
+    }
+    if (state.paper.drawState === "drawingfirstpoint" || state.paper.drawState === "drawingsecondpoint") {
+      clearPaperDrawing();
+      status("Rectangle drawing cancelled.", false);
+      return;
+    }
+    if (activePaperRect()) {
+      status("Clear the current rectangle before drawing a new one.", true);
+      return;
+    }
+    state.paper.drawState = "drawingfirstpoint";
+    state.paper.firstPoint = null;
+    renderPaperPanel();
+    queueOverlayRender();
+    status("Draw Rect active. Click the first corner.", false);
+  }
+
+  function handlePaperChartClick(event) {
+    if (state.paper.busy) {
+      return;
+    }
+    if (state.paper.drawState !== "drawingfirstpoint" && state.paper.drawState !== "drawingsecondpoint") {
+      return;
+    }
+    if (event?.target) {
+      return;
+    }
+    const point = resolveChartPointFromPixel(event.offsetX, event.offsetY);
+    if (!point) {
+      return;
+    }
+    if (state.paper.drawState === "drawingfirstpoint") {
+      state.paper.firstPoint = point;
+      state.paper.drawState = "drawingsecondpoint";
+      renderPaperPanel();
+      queueOverlayRender();
+      status("First corner placed. Click the opposite corner to the right.", false);
+      return;
+    }
+    if (!state.paper.firstPoint) {
+      state.paper.drawState = "drawingfirstpoint";
+      renderPaperPanel();
+      return;
+    }
+    if (Number(point.tickId) <= Number(state.paper.firstPoint.tickId)) {
+      status("The second point must be to the right of the first point.", true);
+      return;
+    }
+    const optimisticRect = normalizedPaperRect(state.paper.firstPoint, point, {
+      mode: currentConfig().mode,
+      status: "armed",
+      state: "armededitable",
+      smartcloseenabled: currentPaperSmartCloseEnabled(),
+    });
+    if (!optimisticRect) {
+      status("Rectangle height must be greater than zero.", true);
+      return;
+    }
+    clearPaperDrawing({ keepStatus: true });
+    createPaperRect(optimisticRect);
+  }
+
+  function setupPaperPanel() {
+    if (!elements.paperPanel) {
+      return;
+    }
+    renderPaperPanel();
+    elements.rectDrawButton?.addEventListener("click", function () {
+      togglePaperDrawMode();
+    });
+    elements.rectClearButton?.addEventListener("click", function () {
+      clearPaperRect();
+    });
+    elements.rectManualCloseButton?.addEventListener("click", function () {
+      manualClosePaperRect();
+    });
+    elements.rectSmartCloseToggle?.addEventListener("change", function () {
+      togglePaperSmartClose(Boolean(elements.rectSmartCloseToggle.checked));
+    });
   }
 
   function tradeStatus(message, isError) {
@@ -1116,6 +1440,161 @@
     return best ? Number(best.id) : null;
   }
 
+  function nearestRowForTickValue(tickValue) {
+    const target = Number(tickValue);
+    if (!Number.isFinite(target) || !state.rows.length) {
+      return null;
+    }
+    let best = null;
+    let bestDelta = Number.POSITIVE_INFINITY;
+    state.rows.forEach((row) => {
+      const delta = Math.abs(Number(row.id) - target);
+      if (delta < bestDelta) {
+        bestDelta = delta;
+        best = row;
+      }
+    });
+    return best;
+  }
+
+  function normalizedPaperRect(leftPoint, rightPoint, options) {
+    const leftTick = Number(leftPoint?.tickId);
+    const rightTick = Number(rightPoint?.tickId);
+    const firstPrice = Number(leftPoint?.price);
+    const secondPrice = Number(rightPoint?.price);
+    if (!Number.isFinite(leftTick) || !Number.isFinite(rightTick) || !Number.isFinite(firstPrice) || !Number.isFinite(secondPrice)) {
+      return null;
+    }
+    const lowPrice = Math.min(firstPrice, secondPrice);
+    const highPrice = Math.max(firstPrice, secondPrice);
+    const height = highPrice - lowPrice;
+    if (rightTick <= leftTick || !(height > 0)) {
+      return null;
+    }
+    return {
+      id: options?.id || null,
+      mode: options?.mode || currentConfig().mode,
+      status: options?.status || "armed",
+      state: options?.state || "armededitable",
+      leftx: Math.round(leftTick),
+      rightx: Math.round(rightTick),
+      lefttickid: Math.round(leftTick),
+      righttickid: Math.round(rightTick),
+      lefttime: leftPoint?.timestamp || null,
+      righttime: rightPoint?.timestamp || null,
+      firstprice: firstPrice,
+      secondprice: secondPrice,
+      lowprice: lowPrice,
+      highprice: highPrice,
+      topprice: highPrice,
+      bottomprice: lowPrice,
+      height,
+      smartcloseenabled: options?.smartcloseenabled ?? currentPaperSmartCloseEnabled(),
+      entrydir: options?.entrydir || null,
+      entryprice: options?.entryprice ?? null,
+      entrytickid: options?.entrytickid ?? null,
+      stoploss: options?.stoploss ?? null,
+      takeprofit: options?.takeprofit ?? null,
+      exittickid: options?.exittickid ?? null,
+      exitprice: options?.exitprice ?? null,
+      exitreason: options?.exitreason || null,
+      tradeactive: Boolean(options?.tradeactive),
+      closed: Boolean(options?.closed),
+    };
+  }
+
+  function paperRectEdgePoint(rect, edge) {
+    if (!rect) {
+      return null;
+    }
+    const ascending = String(rect.orientation || "") === "ascending" || Number(rect.firstprice) <= Number(rect.secondprice);
+    const leftPrice = ascending ? Number(rect.lowprice) : Number(rect.highprice);
+    const rightPrice = ascending ? Number(rect.highprice) : Number(rect.lowprice);
+    if (edge === "left") {
+      return { tickId: Number(rect.leftx), price: leftPrice, timestamp: rect.lefttime || null };
+    }
+    return { tickId: Number(rect.rightx), price: rightPrice, timestamp: rect.righttime || null };
+  }
+
+  function resolveChartPointFromPixel(offsetX, offsetY) {
+    if (!state.chart || !state.chart.containPixel({ gridIndex: 0 }, [offsetX, offsetY])) {
+      return null;
+    }
+    const converted = state.chart.convertFromPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [offsetX, offsetY]);
+    const row = nearestRowForTickValue(Array.isArray(converted) ? converted[0] : NaN);
+    const price = Number(Array.isArray(converted) ? converted[1] : NaN);
+    if (!row || !Number.isFinite(price) || !(price > 0)) {
+      return null;
+    }
+    return {
+      tickId: Number(row.id),
+      timestamp: row.timestamp,
+      price: Number(price.toFixed(2)),
+    };
+  }
+
+  function paperRectWithEdgeChange(rect, edge, rawValue) {
+    if (!rect) {
+      return null;
+    }
+    const orientation = String(rect.orientation || "") === "descending" ? "descending" : "ascending";
+    const next = { ...rect };
+    if (edge === "left" || edge === "right") {
+      const row = nearestRowForTickValue(rawValue);
+      const tickId = Number(row?.id);
+      if (!Number.isFinite(tickId)) {
+        return null;
+      }
+      if (edge === "left") {
+        next.leftx = tickId;
+        next.lefttickid = tickId;
+        next.lefttime = row.timestamp;
+      } else {
+        next.rightx = tickId;
+        next.righttickid = tickId;
+        next.righttime = row.timestamp;
+      }
+      if (Number(next.rightx) <= Number(next.leftx)) {
+        return null;
+      }
+      return normalizedPaperRect(
+        { tickId: next.leftx, price: next.firstprice, timestamp: next.lefttime },
+        { tickId: next.rightx, price: next.secondprice, timestamp: next.righttime },
+        next
+      );
+    }
+    const price = Number(Number(rawValue).toFixed(2));
+    if (!Number.isFinite(price) || !(price > 0)) {
+      return null;
+    }
+    if (edge === "top") {
+      if (orientation === "ascending") {
+        return normalizedPaperRect(
+          { tickId: next.leftx, price: next.lowprice, timestamp: next.lefttime },
+          { tickId: next.rightx, price, timestamp: next.righttime },
+          next
+        );
+      }
+      return normalizedPaperRect(
+        { tickId: next.leftx, price, timestamp: next.lefttime },
+        { tickId: next.rightx, price: next.lowprice, timestamp: next.righttime },
+        next
+      );
+    }
+    if (orientation === "ascending") {
+      return normalizedPaperRect(
+        { tickId: next.leftx, price, timestamp: next.lefttime },
+        { tickId: next.rightx, price: next.highprice, timestamp: next.righttime },
+        next
+      );
+    }
+    return normalizedPaperRect(
+      { tickId: next.leftx, price: next.highprice, timestamp: next.lefttime },
+      { tickId: next.rightx, price, timestamp: next.righttime },
+      next
+    );
+  }
+
   function activePositionById(positionId) {
     const id = Number(positionId);
     return state.trade.positions.find((item) => Number(item.positionId) === id) || null;
@@ -1611,6 +2090,9 @@
         state.rightEdgeAnchored = !zoom || Number(zoom.end) >= 99.5;
         queueOverlayRender();
       });
+      state.chart.getZr().on("click", function (event) {
+        handlePaperChartClick(event);
+      });
       if (typeof ResizeObserver === "function") {
         state.resizeObserver = new ResizeObserver(() => {
           state.chart.resize();
@@ -1936,6 +2418,22 @@
       if (trade?.exitPrice != null) {
         values.push(Number(trade.exitPrice));
       }
+    }
+    const paperRect = activePaperRect();
+    if (paperRect) {
+      [
+        paperRect.lowprice,
+        paperRect.highprice,
+        paperRect.entryprice,
+        paperRect.stoploss,
+        paperRect.takeprofit,
+        paperRect.exitprice,
+        paperRect.firstprice,
+        paperRect.secondprice,
+      ].forEach((value) => values.push(Number(value)));
+    }
+    if (state.paper.firstPoint) {
+      values.push(Number(state.paper.firstPoint.price));
     }
     const finite = values.filter(Number.isFinite);
     if (!finite.length) {
@@ -2298,6 +2796,197 @@
     return graphics;
   }
 
+  function paperRectEndTick(rect) {
+    if (!rect) {
+      return Number(state.rangeLastId || 0);
+    }
+    if (rect.closed && rect.exittickid != null) {
+      return Number(rect.exittickid);
+    }
+    return Number(state.rangeLastId || rect.entrytickid || rect.rightx || 0);
+  }
+
+  function buildPaperRectGraphics() {
+    const chart = state.chart;
+    if (!chart) {
+      return [];
+    }
+    const grid = chart.getModel()?.getComponent("grid", 0);
+    const rectBounds = grid?.coordinateSystem?.getRect?.();
+    if (!rectBounds) {
+      return [];
+    }
+    const graphics = [];
+    const rect = activePaperRect();
+
+    if (state.paper.firstPoint && !rect) {
+      const point = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [Number(state.paper.firstPoint.tickId), Number(state.paper.firstPoint.price)]);
+      if (Array.isArray(point)) {
+        graphics.push({
+          id: "paper-first-dot",
+          type: "circle",
+          silent: true,
+          z: 20,
+          shape: { cx: Number(point[0]), cy: Number(point[1]), r: 4 },
+          style: { fill: "#ffe08a", stroke: "#0b1118", lineWidth: 1.2 },
+        });
+      }
+    }
+
+    if (!rect) {
+      return graphics;
+    }
+
+    const leftDot = paperRectEdgePoint(rect, "left");
+    const rightDot = paperRectEdgePoint(rect, "right");
+    const leftBottom = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [Number(rect.leftx), Number(rect.lowprice)]);
+    const rightBottom = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [Number(rect.rightx), Number(rect.lowprice)]);
+    const leftTop = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [Number(rect.leftx), Number(rect.highprice)]);
+    const rightTop = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [Number(rect.rightx), Number(rect.highprice)]);
+    if (!Array.isArray(leftBottom) || !Array.isArray(rightBottom) || !Array.isArray(leftTop) || !Array.isArray(rightTop)) {
+      return graphics;
+    }
+    const left = Number(leftBottom[0]);
+    const right = Number(rightBottom[0]);
+    const top = Math.min(Number(leftTop[1]), Number(rightTop[1]));
+    const bottom = Math.max(Number(leftBottom[1]), Number(rightBottom[1]));
+    if (![left, right, top, bottom].every(Number.isFinite)) {
+      return graphics;
+    }
+    const fillColor = rect.tradeactive || rect.closed ? "rgba(255, 200, 87, 0.08)" : "rgba(109, 216, 255, 0.12)";
+    const strokeColor = rect.tradeactive || rect.closed ? "rgba(255, 200, 87, 0.88)" : "rgba(109, 216, 255, 0.88)";
+    graphics.push({
+      id: "paper-rect-body",
+      type: "rect",
+      silent: true,
+      z: 7,
+      shape: { x: left, y: top, width: Math.max(2, right - left), height: Math.max(2, bottom - top), r: 2 },
+      style: { fill: fillColor, stroke: strokeColor, lineWidth: 1.4 },
+    });
+
+    [leftDot, rightDot].forEach(function (dot, index) {
+      if (!dot) {
+        return;
+      }
+      const point = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [Number(dot.tickId), Number(dot.price)]);
+      if (!Array.isArray(point)) {
+        return;
+      }
+      graphics.push({
+        id: "paper-dot-" + String(index),
+        type: "circle",
+        silent: true,
+        z: 21,
+        shape: { cx: Number(point[0]), cy: Number(point[1]), r: 4 },
+        style: { fill: "#ffe08a", stroke: "#0b1118", lineWidth: 1.2 },
+      });
+    });
+
+    const lineEndTick = paperRectEndTick(rect);
+    [
+      { id: "paper-top-line", price: rect.highprice, color: "rgba(109, 216, 255, 0.88)" },
+      { id: "paper-bottom-line", price: rect.lowprice, color: "rgba(109, 216, 255, 0.88)" },
+      { id: "paper-stop-line", price: rect.stoploss, color: "rgba(255, 107, 136, 0.86)" },
+      { id: "paper-target-line", price: rect.takeprofit, color: "rgba(126, 240, 199, 0.86)" },
+    ].forEach(function (line) {
+      const price = Number(line.price);
+      if (!Number.isFinite(price)) {
+        return;
+      }
+      if ((line.id === "paper-stop-line" || line.id === "paper-target-line") && !rect.tradeactive && !rect.closed) {
+        return;
+      }
+      const startPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [Number(rect.rightx), price]);
+      const endPoint = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [lineEndTick, price]);
+      if (!Array.isArray(startPoint) || !Array.isArray(endPoint)) {
+        return;
+      }
+      graphics.push({
+        id: line.id,
+        type: "line",
+        silent: true,
+        z: 8,
+        shape: { x1: Number(startPoint[0]), y1: Number(startPoint[1]), x2: Number(endPoint[0]), y2: Number(endPoint[1]) },
+        style: { stroke: line.color, lineWidth: 1.2, lineDash: line.id.indexOf("paper-stop") >= 0 || line.id.indexOf("paper-target") >= 0 ? [5, 3] : [3, 2] },
+      });
+    });
+
+    [
+      { id: "paper-entry-marker", tickId: rect.entrytickid, price: rect.entryprice, fill: rect.entrydir === "short" ? "#ff9fb2" : "#7ef0c7" },
+      { id: "paper-exit-marker", tickId: rect.exittickid, price: rect.exitprice, fill: "#ffe08a" },
+    ].forEach(function (marker) {
+      const tickId = Number(marker.tickId);
+      const price = Number(marker.price);
+      if (!Number.isFinite(tickId) || !Number.isFinite(price)) {
+        return;
+      }
+      const point = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [tickId, price]);
+      if (!Array.isArray(point)) {
+        return;
+      }
+      graphics.push({
+        id: marker.id,
+        type: "circle",
+        silent: true,
+        z: 22,
+        shape: { cx: Number(point[0]), cy: Number(point[1]), r: marker.id === "paper-entry-marker" ? 5 : 4.5 },
+        style: { fill: marker.fill, stroke: "#0b1118", lineWidth: 1.2 },
+      });
+    });
+
+    if (!rect.editable || state.paper.busy) {
+      return graphics;
+    }
+
+    function addEdgeHandle(edge, x1, y1, x2, y2, cursor, useX) {
+      graphics.push({
+        id: "paper-handle-" + edge,
+        type: "group",
+        x: 0,
+        y: 0,
+        draggable: true,
+        z: 24,
+        cursor,
+        ondrag: function () {
+          if (useX) {
+            this.y = 0;
+          } else {
+            this.x = 0;
+          }
+        },
+        ondragend: function () {
+          const targetX = useX ? ((x1 + x2) / 2) + Number(this.x || 0) : ((x1 + x2) / 2);
+          const targetY = useX ? ((y1 + y2) / 2) : ((y1 + y2) / 2) + Number(this.y || 0);
+          this.x = 0;
+          this.y = 0;
+          const converted = chart.convertFromPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [targetX, targetY]);
+          const value = Number(Array.isArray(converted) ? (useX ? converted[0] : converted[1]) : NaN);
+          const nextRect = paperRectWithEdgeChange(rect, edge, value);
+          if (!nextRect) {
+            status("Rectangle edit rejected.", true);
+            queueOverlayRender();
+            return;
+          }
+          state.paper.current = nextRect;
+          renderPaperPanel();
+          queueOverlayRender();
+          updatePaperRect(nextRect);
+        },
+        children: [{
+          type: "line",
+          shape: { x1, y1, x2, y2 },
+          style: { stroke: "rgba(255, 200, 87, 0.92)", lineWidth: 6, opacity: 0.01 },
+        }],
+      });
+    }
+
+    addEdgeHandle("left", left, top, left, bottom, "ew-resize", true);
+    addEdgeHandle("right", right, top, right, bottom, "ew-resize", true);
+    addEdgeHandle("top", left, top, right, top, "ns-resize", false);
+    addEdgeHandle("bottom", left, bottom, right, bottom, "ns-resize", false);
+    return graphics;
+  }
+
   function renderOverlay() {
     if (!state.chart) {
       return;
@@ -2309,6 +2998,12 @@
         silent: true,
         z: 2,
         children: buildRangeBoxGraphics(),
+      }, {
+        id: "paper-rect-overlay",
+        type: "group",
+        silent: false,
+        z: 9,
+        children: buildPaperRectGraphics(),
       }, {
         id: "trade-overlay",
         type: "group",
@@ -2430,6 +3125,9 @@
   function applyStreamPayload(payload) {
     if (payload.lastId != null) {
       state.rangeLastId = payload.lastId;
+    }
+    if (Object.prototype.hasOwnProperty.call(payload || {}, "rect")) {
+      applyPaperPayload(payload.rect || null);
     }
     const appended = dedupeAppend(payload.rows || []);
     state.structureBars = mergeById(state.structureBars, payload.structureBarUpdates || []);
@@ -3394,6 +4092,7 @@
       beforeId: String(state.rangeFirstId || 1),
       currentLastId: String(state.rangeLastId || state.rangeFirstId || 1),
       limit: String(limit),
+      mode: config.mode,
       ...visibilityParams(config),
     }).toString();
   }
@@ -3409,6 +4108,7 @@
     state.reviewEndId = payload.reviewEndId || null;
     state.hasMoreLeft = Boolean(payload.hasMoreLeft);
     state.lastMetrics = payload.metrics || null;
+    applyPaperPayload(payload.rect || null);
     if (resetView) {
       state.zoom = null;
       state.rightEdgeAnchored = true;
@@ -3421,7 +4121,7 @@
       if (config.mode === "live") {
         connectStream(state.rangeLastId || 0);
       } else {
-        scheduleReviewStep();
+        connectReviewStream(state.rangeLastId || 0, state.reviewEndId || 0);
       }
     }
   }
@@ -3460,6 +4160,49 @@
       renderPerf();
       status("Live stream disconnected. Click Load or Run to reconnect.", true);
       clearActivity();
+    };
+  }
+
+  function connectReviewStream(afterId, endId) {
+    clearActivity();
+    const config = currentConfig();
+    if (!endId || afterId >= endId) {
+      status("Review reached the current end snapshot.", false);
+      return;
+    }
+    const source = new EventSource("/api/live/review-stream?" + new URLSearchParams({
+      afterId: String(afterId || 0),
+      endId: String(endId),
+      speed: String(config.reviewSpeed),
+      window: String(config.window),
+      ...visibilityParams(config),
+    }).toString());
+    state.source = source;
+    source.onopen = function () {
+      state.streamConnected = true;
+      renderPerf();
+      status("Review replay connected.", false);
+    };
+    source.onmessage = function (event) {
+      const payload = JSON.parse(event.data);
+      state.lastMetrics = payload;
+      const changed = applyStreamPayload(payload);
+      renderMeta();
+      renderPerf();
+      if (changed) {
+        renderChart({ shiftWithRun: true });
+      }
+      if (payload.endReached) {
+        clearActivity();
+        status("Review reached the current end snapshot.", false);
+      }
+    };
+    source.onerror = function () {
+      const reachedEnd = state.reviewEndId && state.rangeLastId != null && Number(state.rangeLastId) >= Number(state.reviewEndId);
+      state.streamConnected = false;
+      renderPerf();
+      clearActivity();
+      status(reachedEnd ? "Review reached the current end snapshot." : "Review replay disconnected. Click Load or Run to reconnect.", !reachedEnd);
     };
   }
 
@@ -3512,7 +4255,7 @@
     if (config.mode === "live") {
       connectStream(state.rangeLastId);
     } else {
-      scheduleReviewStep();
+      connectReviewStream(state.rangeLastId, state.reviewEndId);
     }
   }
 
@@ -3533,6 +4276,9 @@
     }
     const payload = await fetchJson(previousUrl(config, limit));
     state.lastMetrics = payload.metrics || null;
+    if (Object.prototype.hasOwnProperty.call(payload || {}, "rect")) {
+      applyPaperPayload(payload.rect || null);
+    }
     const prepended = dedupePrepend(payload.rows || [], targetWindow);
     replaceStructure(payload);
     applyRangePayload(payload);
@@ -3576,6 +4322,7 @@
     elements.windowSize.value = String(config.window);
     setSidebarCollapsed(true);
     updateReviewFields();
+    renderPaperPanel();
     renderMeta();
     renderPerf();
     writeQuery();
@@ -3584,6 +4331,8 @@
   bindSegment(elements.modeToggle, function (value) {
     setSegment(elements.modeToggle, value);
     updateReviewFields();
+    clearPaperDrawing({ keepStatus: true });
+    renderPaperPanel();
     renderTradeLists();
     renderTradeEntryOverlay();
     renderPositionEditor();
@@ -3620,7 +4369,7 @@
     writeQuery();
     if (currentConfig().mode === "review" && currentConfig().run === "run") {
       clearActivity();
-      scheduleReviewStep();
+      resumeRunIfNeeded();
     }
   });
 
@@ -3655,6 +4404,7 @@
   });
 
   applyInitialConfig(parseQuery());
+  setupPaperPanel();
   setupTradePanel();
   loadAll(true);
 }());

@@ -229,6 +229,7 @@ textarea {
   background: rgba(0, 0, 0, 0.18);
   font-size: 0.78rem;
   line-height: 1.45;
+  white-space: pre-line;
 }
 
 .status-line.error {
@@ -409,6 +410,15 @@ input {
 .trade-sidebar-section {
   display: grid;
   gap: 0.75rem;
+}
+
+.paper-sidebar-section {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.paper-smart-close-toggle {
+  margin-top: 0.2rem;
 }
 
 .trade-panel-header {

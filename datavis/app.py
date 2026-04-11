@@ -27,6 +27,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
 from datavis.db import db_connect as shared_db_connect
+from datavis.rects import RectPaperService, RectServiceError
 from datavis.smart_scalp import SmartScalpError, SmartScalpService
 from datavis.structure import StructureEngine, replay_ticks
 from datavis.trading import CTraderGateway, load_broker_config
@@ -63,6 +64,9 @@ STREAM_HEARTBEAT_SECONDS = max(
     STREAM_IDLE_POLL_SECONDS,
     float(os.getenv("DATAVIS_STREAM_HEARTBEAT_SECONDS", "5.0")),
 )
+REVIEW_STREAM_BATCH = int(os.getenv("DATAVIS_REVIEW_STREAM_BATCH", "256"))
+REVIEW_MAX_DELAY_MS = max(50, int(os.getenv("DATAVIS_REVIEW_MAX_DELAY_MS", "1500")))
+REVIEW_MIN_DELAY_MS = max(0, int(os.getenv("DATAVIS_REVIEW_MIN_DELAY_MS", "5")))
 DEFAULT_REVIEW_TIMEZONE = "Australia/Sydney"
 TRADE_USERNAME = os.getenv("DATAVIS_TRADE_USERNAME", "babak").strip() or "babak"
 TRADE_PASSWORD = os.getenv("DATAVIS_TRADE_PASSWORD", "")
@@ -171,6 +175,53 @@ class TradeSmartConfigRequest(BaseModel):
     minimumProfit: Optional[float] = Field(None, gt=0)
     cooldownSeconds: Optional[int] = Field(None, ge=0)
     maxHoldSeconds: Optional[int] = Field(None, ge=0)
+
+
+class RectCreateRequest(BaseModel):
+    mode: str = Field("review", min_length=1, max_length=16)
+    leftx: int = Field(..., ge=1)
+    rightx: int = Field(..., ge=1)
+    firstprice: float = Field(..., gt=0)
+    secondprice: float = Field(..., gt=0)
+    smartcloseenabled: bool = False
+    metadata: Optional[Dict[str, Any]] = None
+
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, value: str) -> str:
+        normalized = (value or "").strip().lower()
+        if normalized not in {"live", "review"}:
+            raise ValueError("mode must be live or review")
+        return normalized
+
+
+class RectUpdateRequest(RectCreateRequest):
+    pass
+
+
+class RectSmartCloseRequest(BaseModel):
+    mode: str = Field("review", min_length=1, max_length=16)
+    enabled: bool = False
+
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, value: str) -> str:
+        normalized = (value or "").strip().lower()
+        if normalized not in {"live", "review"}:
+            raise ValueError("mode must be live or review")
+        return normalized
+
+
+class RectModeRequest(BaseModel):
+    mode: str = Field("review", min_length=1, max_length=16)
+
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, value: str) -> str:
+        normalized = (value or "").strip().lower()
+        if normalized not in {"live", "review"}:
+            raise ValueError("mode must be live or review")
+        return normalized
 
 def ensure_database_url() -> str:
     if not DATABASE_URL:
@@ -883,6 +934,13 @@ def apply_structure_flags(payload: Dict[str, Any], *, show_events: bool, show_st
     return payload
 
 
+def rect_snapshot_for_mode(mode: str) -> Optional[Dict[str, Any]]:
+    try:
+        return RECT_PAPER_SERVICE.current_rect(mode)
+    except Exception:
+        return None
+
+
 def structure_item_entries(snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
     entries: List[Dict[str, Any]] = []
     for bar in snapshot.get("structureBars", []):
@@ -1186,7 +1244,7 @@ def load_bootstrap_payload(
                 window=effective_window,
                 end_id=review_end_id,
             )
-    return build_range_payload(
+    payload = build_range_payload(
         mode=mode,
         window=effective_window,
         rows=rows,
@@ -1200,6 +1258,8 @@ def load_bootstrap_payload(
         show_structure=show_structure,
         show_ranges=show_ranges,
     )
+    payload["rect"] = rect_snapshot_for_mode(mode)
+    return payload
 
 
 def load_structure_bootstrap_payload(
@@ -1286,7 +1346,7 @@ def load_next_payload(
         show_structure=show_structure,
         show_ranges=show_ranges,
     )
-    return {
+    payload = {
         "rows": serialize_tick_rows(tick_rows) if show_ticks else [],
         "rowCount": len(tick_rows) if show_ticks else 0,
         "lastId": last_seen_id,
@@ -1299,6 +1359,8 @@ def load_next_payload(
             latest_row=tick_rows[-1] if tick_rows else None,
         ),
     }
+    payload["rect"] = rect_snapshot_for_mode("review" if end_id is not None else "live")
+    return payload
 
 
 def load_structure_next_payload(
@@ -1378,7 +1440,7 @@ def load_previous_payload(
         show_ranges=show_ranges,
     )
     first_row_id = first_row["id"] if first_row else None
-    return {
+    payload = {
         "rows": serialize_tick_rows(previous_rows) if show_ticks else [],
         "rowCount": len(previous_rows) if show_ticks else 0,
         "firstId": first_row_id,
@@ -1392,6 +1454,7 @@ def load_previous_payload(
             latest_row=(replay_rows[-1] if replay_rows else (previous_rows[-1] if previous_rows else None)),
         ),
     }
+    return payload
 
 
 def load_structure_previous_payload(
@@ -1452,6 +1515,7 @@ def stream_events(
     show_ranges: bool,
     max_window: int = MAX_TICK_WINDOW,
     seed_by_item_window: bool = False,
+    rect_mode: Optional[str] = None,
 ) -> Generator[str, None, None]:
     last_id = max(0, after_id)
     effective_limit = clamp_int(limit, 1, MAX_STREAM_BATCH)
@@ -1496,6 +1560,10 @@ def stream_events(
                             except Exception:
                                 updates = {"bars": [], "rangeBoxes": [], "events": []}
                                 engine = None
+                        rect_snapshot = rect_snapshot_for_mode(rect_mode) if rect_mode else None
+                        if rect_mode:
+                            for row in tick_rows:
+                                rect_snapshot = RECT_PAPER_SERVICE.process_tick(rect_mode, row) or rect_snapshot
 
                         last_id = int(latest_tick_row["id"])
                         payload = {
@@ -1506,6 +1574,7 @@ def stream_events(
                             "structureEvents": updates["events"] if show_events else [],
                             "lastId": last_id,
                             "streamMode": "delta",
+                            "rect": rect_snapshot,
                             **serialize_metrics_payload(
                                 fetch_ms=fetch_ms,
                                 serialize_ms=elapsed_ms(serialize_started),
@@ -1528,6 +1597,7 @@ def stream_events(
                             "structureEvents": [],
                             "lastId": last_id,
                             "streamMode": "heartbeat",
+                            "rect": rect_snapshot_for_mode(rect_mode) if rect_mode else None,
                             "pollSleepMs": round(idle_sleep * 1000.0, 2),
                             **serialize_metrics_payload(
                                 fetch_ms=fetch_ms,
@@ -1539,6 +1609,112 @@ def stream_events(
                         last_heartbeat = now
                     time.sleep(idle_sleep)
                     idle_sleep = STREAM_IDLE_POLL_SECONDS
+    except GeneratorExit:
+        return
+
+
+def stream_review_events(
+    *,
+    after_id: int,
+    end_id: int,
+    speed: float,
+    window: int,
+    show_ticks: bool,
+    show_events: bool,
+    show_structure: bool,
+    show_ranges: bool,
+    rect_mode: str = "review",
+) -> Generator[str, None, None]:
+    last_id = max(0, after_id)
+    effective_window = clamp_int(window, 1, MAX_TICK_WINDOW)
+    effective_batch = clamp_int(REVIEW_STREAM_BATCH, 1, MAX_STREAM_BATCH)
+    speed_multiplier = max(0.1, float(speed or 1.0))
+    structure_enabled = show_events or show_structure or show_ranges
+    engine = StructureEngine(symbol=TICK_SYMBOL) if structure_enabled else None
+    previous_row: Optional[Dict[str, Any]] = None
+
+    try:
+        with db_connection(readonly=True, autocommit=True) as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                if engine is not None and last_id:
+                    seed_rows = query_window_ending_at(cur, last_id, effective_window)
+                    for row in seed_rows:
+                        try:
+                            engine.process_tick(row)
+                        except Exception:
+                            engine = None
+                            break
+                    previous_row = seed_rows[-1] if seed_rows else None
+
+                while last_id < end_id:
+                    fetch_started = time.perf_counter()
+                    batch_rows = query_rows_after(cur, last_id, effective_batch, end_id=end_id)
+                    fetch_ms = elapsed_ms(fetch_started)
+                    if not batch_rows:
+                        payload = {
+                            "rows": [],
+                            "rowCount": 0,
+                            "structureBarUpdates": [],
+                            "rangeBoxUpdates": [],
+                            "structureEvents": [],
+                            "lastId": last_id,
+                            "endId": end_id,
+                            "endReached": True,
+                            "streamMode": "complete",
+                            "rect": rect_snapshot_for_mode(rect_mode),
+                            **serialize_metrics_payload(
+                                fetch_ms=fetch_ms,
+                                serialize_ms=0.0,
+                                latest_row=query_latest_tick(cur),
+                            ),
+                        }
+                        yield format_sse(payload)
+                        return
+
+                    for row in batch_rows:
+                        delay_ms = 0
+                        if previous_row and previous_row.get("timestamp") and row.get("timestamp"):
+                            delta_ms = max(0, dt_to_ms(row["timestamp"]) - dt_to_ms(previous_row["timestamp"]))
+                            delay_ms = min(REVIEW_MAX_DELAY_MS, int(round(delta_ms / speed_multiplier)))
+                        if delay_ms > 0:
+                            time.sleep(max(REVIEW_MIN_DELAY_MS, delay_ms) / 1000.0)
+
+                        serialize_started = time.perf_counter()
+                        updates = {"bars": [], "rangeBoxes": [], "events": []}
+                        if engine is not None:
+                            try:
+                                delta = engine.process_tick(row)
+                                updates["bars"].extend(delta["bars"])
+                                updates["rangeBoxes"].extend(delta["rangeBoxes"])
+                                updates["events"].extend(delta["events"])
+                            except Exception:
+                                updates = {"bars": [], "rangeBoxes": [], "events": []}
+                                engine = None
+
+                        last_id = int(row["id"])
+                        rect_snapshot = RECT_PAPER_SERVICE.process_tick(rect_mode, row)
+                        payload = {
+                            "rows": serialize_tick_rows([row]) if show_ticks else [],
+                            "rowCount": 1 if show_ticks else 0,
+                            "structureBarUpdates": updates["bars"] if show_structure else [],
+                            "rangeBoxUpdates": updates["rangeBoxes"] if show_ranges else [],
+                            "structureEvents": updates["events"] if show_events else [],
+                            "lastId": last_id,
+                            "endId": end_id,
+                            "endReached": bool(last_id >= end_id),
+                            "streamMode": "delta",
+                            "rect": rect_snapshot or rect_snapshot_for_mode(rect_mode),
+                            "playbackDelayMs": delay_ms,
+                            **serialize_metrics_payload(
+                                fetch_ms=fetch_ms,
+                                serialize_ms=elapsed_ms(serialize_started),
+                                latest_row=row,
+                            ),
+                        }
+                        yield format_sse(payload)
+                        previous_row = row
+                        if last_id >= end_id:
+                            return
     except GeneratorExit:
         return
 
@@ -1653,6 +1829,7 @@ SMART_SCALP_SERVICE = SmartScalpService(
     close_position=smart_scalp_close_position,
     smart_lot_size=0.01,
 )
+RECT_PAPER_SERVICE = RectPaperService(db_factory=db_connection, symbol=TICK_SYMBOL)
 
 
 def _trade_not_configured() -> bool:
@@ -1713,14 +1890,35 @@ def _handle_smart_scalp_error(exc: Exception) -> None:
     ) from exc
 
 
+def _handle_rect_error(exc: Exception) -> None:
+    if isinstance(exc, RectServiceError):
+        status_code = int(getattr(exc, "status_code", status.HTTP_400_BAD_REQUEST))
+        error_code = str(getattr(exc, "code", "") or "RECT_ERROR")
+        message = str(exc) or "Rectangle request failed."
+    else:
+        status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+        error_code = "RECT_FAILED"
+        message = str(exc) or "Rectangle request failed."
+    raise HTTPException(
+        status_code=status_code,
+        detail={
+            "error": error_code,
+            "message": message,
+            "rect": None,
+        },
+    ) from exc
+
+
 @app.on_event("startup")
 def app_startup() -> None:
     SMART_SCALP_SERVICE.start()
+    RECT_PAPER_SERVICE.start()
 
 
 @app.on_event("shutdown")
 def app_shutdown() -> None:
     SMART_SCALP_SERVICE.stop()
+    RECT_PAPER_SERVICE.stop()
 
 
 @app.get("/", include_in_schema=False)
@@ -2052,6 +2250,72 @@ def live_review_start(
     }
 
 
+@app.get("/api/live/rect")
+def live_rect_state(mode: str = Query("review", pattern="^(live|review)$")) -> Dict[str, Any]:
+    return {"rect": rect_snapshot_for_mode(mode)}
+
+
+@app.post("/api/live/rect")
+def live_rect_create(payload: RectCreateRequest) -> Dict[str, Any]:
+    try:
+        rect = RECT_PAPER_SERVICE.create_rect(
+            mode=payload.mode,
+            leftx=payload.leftx,
+            rightx=payload.rightx,
+            firstprice=payload.firstprice,
+            secondprice=payload.secondprice,
+            smartcloseenabled=payload.smartcloseenabled,
+            metadata=payload.metadata,
+        )
+        return {"rect": rect}
+    except Exception as exc:
+        _handle_rect_error(exc)
+
+
+@app.patch("/api/live/rect/{rect_id}")
+def live_rect_update(rect_id: int, payload: RectUpdateRequest) -> Dict[str, Any]:
+    try:
+        rect = RECT_PAPER_SERVICE.update_rect(
+            rect_id=rect_id,
+            mode=payload.mode,
+            leftx=payload.leftx,
+            rightx=payload.rightx,
+            firstprice=payload.firstprice,
+            secondprice=payload.secondprice,
+            smartcloseenabled=payload.smartcloseenabled,
+        )
+        return {"rect": rect}
+    except Exception as exc:
+        _handle_rect_error(exc)
+
+
+@app.post("/api/live/rect/{rect_id}/smart-close")
+def live_rect_smart_close(rect_id: int, payload: RectSmartCloseRequest) -> Dict[str, Any]:
+    try:
+        rect = RECT_PAPER_SERVICE.set_smart_close(rect_id=rect_id, mode=payload.mode, enabled=payload.enabled)
+        return {"rect": rect}
+    except Exception as exc:
+        _handle_rect_error(exc)
+
+
+@app.post("/api/live/rect/{rect_id}/clear")
+def live_rect_clear(rect_id: int, payload: RectModeRequest) -> Dict[str, Any]:
+    try:
+        RECT_PAPER_SERVICE.clear_rect(rect_id=rect_id, mode=payload.mode)
+        return {"rect": None}
+    except Exception as exc:
+        _handle_rect_error(exc)
+
+
+@app.post("/api/live/rect/{rect_id}/manual-close")
+def live_rect_manual_close(rect_id: int, payload: RectModeRequest) -> Dict[str, Any]:
+    try:
+        rect = RECT_PAPER_SERVICE.manual_close(rect_id=rect_id, mode=payload.mode)
+        return {"rect": rect}
+    except Exception as exc:
+        _handle_rect_error(exc)
+
+
 @app.get("/api/structure/review-start")
 def structure_review_start(
     timestamp: str = Query(..., min_length=1),
@@ -2109,12 +2373,13 @@ def live_previous(
     beforeId: int = Query(..., ge=1),
     currentLastId: Optional[int] = Query(None, ge=1),
     limit: int = Query(DEFAULT_HISTORY_LIMIT, ge=1, le=MAX_TICK_WINDOW),
+    mode: str = Query("live", pattern="^(live|review)$"),
     showTicks: bool = Query(True),
     showEvents: bool = Query(True),
     showStructure: bool = Query(True),
     showRanges: bool = Query(True),
 ) -> Dict[str, Any]:
-    return load_previous_payload(
+    payload = load_previous_payload(
         before_id=beforeId,
         current_last_id=currentLastId,
         limit=limit,
@@ -2123,6 +2388,8 @@ def live_previous(
         show_structure=showStructure,
         show_ranges=showRanges,
     )
+    payload["rect"] = rect_snapshot_for_mode(mode)
+    return payload
 
 
 @app.get("/api/live/stream")
@@ -2144,6 +2411,39 @@ def live_stream(
             show_events=showEvents,
             show_structure=showStructure,
             show_ranges=showRanges,
+            rect_mode="live",
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.get("/api/live/review-stream")
+def live_review_stream(
+    afterId: int = Query(0, ge=0),
+    endId: int = Query(..., ge=1),
+    speed: float = Query(1.0, gt=0),
+    window: int = Query(DEFAULT_WINDOW, ge=1, le=MAX_TICK_WINDOW),
+    showTicks: bool = Query(True),
+    showEvents: bool = Query(True),
+    showStructure: bool = Query(True),
+    showRanges: bool = Query(True),
+) -> StreamingResponse:
+    return StreamingResponse(
+        stream_review_events(
+            after_id=afterId,
+            end_id=endId,
+            speed=speed,
+            window=window,
+            show_ticks=showTicks,
+            show_events=showEvents,
+            show_structure=showStructure,
+            show_ranges=showRanges,
+            rect_mode="review",
         ),
         media_type="text/event-stream",
         headers={
