@@ -52,6 +52,9 @@ DEFAULT_STRUCTURE_WINDOW = int(os.getenv("DATAVIS_STRUCTURE_WINDOW", "50"))
 MAX_STRUCTURE_WINDOW = int(os.getenv("DATAVIS_STRUCTURE_MAX_WINDOW", "200000"))
 MAX_STRUCTURE_SOURCE_TICKS = int(os.getenv("DATAVIS_STRUCTURE_SOURCE_MAX_TICKS", "200000"))
 DEFAULT_HISTORY_LIMIT = 2000
+DEFAULT_BIGPICTURE_POINTS = 2000
+MAX_BIGPICTURE_POINTS = int(os.getenv("DATAVIS_BIGPICTURE_MAX_POINTS", "2400"))
+MAX_AUCTION_HISTORY_SESSIONS = int(os.getenv("DATAVIS_AUCTION_HISTORY_MAX_SESSIONS", "96"))
 MAX_STREAM_BATCH = 1000
 MAX_QUERY_ROWS = int(os.getenv("DATAVIS_SQL_MAX_ROWS", "1000"))
 STATEMENT_TIMEOUT_MS = int(os.getenv("DATAVIS_SQL_TIMEOUT_MS", "15000"))
@@ -265,6 +268,12 @@ def dt_to_ms(value: Optional[datetime]) -> Optional[int]:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return int(value.timestamp() * 1000)
+
+
+def ms_to_dt(value: Optional[int]) -> Optional[datetime]:
+    if value is None:
+        return None
+    return datetime.fromtimestamp(int(value) / 1000.0, tz=timezone.utc)
 
 
 def serialize_value(value: Any) -> Any:
@@ -917,6 +926,428 @@ def query_window_ending_at_timestamp(
         cur,
         start_ts=end_ts - timedelta(seconds=max(1, int(seconds))),
         end_ts=end_ts,
+    )
+
+
+def query_ticks_in_time_range(
+    cur: Any,
+    *,
+    start_ts: datetime,
+    end_ts: datetime,
+    limit: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    select_sql = tick_columns()
+    if limit is None:
+        cur.execute(
+            """
+            SELECT {select_sql}
+            FROM public.ticks
+            WHERE symbol = %s
+              AND timestamp >= %s
+              AND timestamp <= %s
+            ORDER BY id ASC
+            """.format(select_sql=select_sql),
+            (TICK_SYMBOL, start_ts, end_ts),
+        )
+    else:
+        cur.execute(
+            """
+            SELECT {select_sql}
+            FROM public.ticks
+            WHERE symbol = %s
+              AND timestamp >= %s
+              AND timestamp <= %s
+            ORDER BY id ASC
+            LIMIT %s
+            """.format(select_sql=select_sql),
+            (TICK_SYMBOL, start_ts, end_ts, limit),
+        )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def query_tick_range_bounds_for_time(
+    cur: Any,
+    *,
+    start_ts: datetime,
+    end_ts: datetime,
+) -> Dict[str, Any]:
+    cur.execute(
+        """
+        SELECT
+            COUNT(*) AS row_count,
+            MIN(id) AS first_id,
+            MAX(id) AS last_id,
+            MIN(timestamp) AS first_timestamp,
+            MAX(timestamp) AS last_timestamp
+        FROM public.ticks
+        WHERE symbol = %s
+          AND timestamp >= %s
+          AND timestamp <= %s
+        """,
+        (TICK_SYMBOL, start_ts, end_ts),
+    )
+    return dict(cur.fetchone() or {})
+
+
+def query_bigpicture_rows(
+    cur: Any,
+    *,
+    start_ts: datetime,
+    end_ts: datetime,
+    target_points: int,
+) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    normalized_target = clamp_int(target_points, 200, MAX_BIGPICTURE_POINTS)
+    if end_ts <= start_ts:
+        end_ts = start_ts + timedelta(milliseconds=1)
+    range_bounds = query_tick_range_bounds_for_time(cur, start_ts=start_ts, end_ts=end_ts)
+    row_count = int(range_bounds.get("row_count") or 0)
+    if row_count <= 0:
+        return [], range_bounds
+    if row_count <= normalized_target:
+        return query_ticks_in_time_range(cur, start_ts=start_ts, end_ts=end_ts), range_bounds
+
+    bucket_count = max(1, normalized_target // 4)
+    select_sql = tick_columns()
+    cur.execute(
+        """
+        WITH params AS (
+            SELECT
+                %s::timestamptz AS start_ts,
+                %s::timestamptz AS end_ts,
+                %s::int AS bucket_count
+        ),
+        ranked AS (
+            SELECT
+                {select_sql},
+                LEAST(
+                    p.bucket_count,
+                    GREATEST(
+                        1,
+                        width_bucket(
+                            EXTRACT(EPOCH FROM t.timestamp),
+                            EXTRACT(EPOCH FROM p.start_ts),
+                            EXTRACT(EPOCH FROM p.end_ts) + 0.000001,
+                            p.bucket_count
+                        )
+                    )
+                ) AS bucket,
+                row_number() OVER (
+                    PARTITION BY LEAST(
+                        p.bucket_count,
+                        GREATEST(
+                            1,
+                            width_bucket(
+                                EXTRACT(EPOCH FROM t.timestamp),
+                                EXTRACT(EPOCH FROM p.start_ts),
+                                EXTRACT(EPOCH FROM p.end_ts) + 0.000001,
+                                p.bucket_count
+                            )
+                        )
+                    )
+                    ORDER BY t.timestamp ASC, t.id ASC
+                ) AS rn_first,
+                row_number() OVER (
+                    PARTITION BY LEAST(
+                        p.bucket_count,
+                        GREATEST(
+                            1,
+                            width_bucket(
+                                EXTRACT(EPOCH FROM t.timestamp),
+                                EXTRACT(EPOCH FROM p.start_ts),
+                                EXTRACT(EPOCH FROM p.end_ts) + 0.000001,
+                                p.bucket_count
+                            )
+                        )
+                    )
+                    ORDER BY t.timestamp DESC, t.id DESC
+                ) AS rn_last,
+                row_number() OVER (
+                    PARTITION BY LEAST(
+                        p.bucket_count,
+                        GREATEST(
+                            1,
+                            width_bucket(
+                                EXTRACT(EPOCH FROM t.timestamp),
+                                EXTRACT(EPOCH FROM p.start_ts),
+                                EXTRACT(EPOCH FROM p.end_ts) + 0.000001,
+                                p.bucket_count
+                            )
+                        )
+                    )
+                    ORDER BY t.mid ASC NULLS LAST, t.timestamp ASC, t.id ASC
+                ) AS rn_low,
+                row_number() OVER (
+                    PARTITION BY LEAST(
+                        p.bucket_count,
+                        GREATEST(
+                            1,
+                            width_bucket(
+                                EXTRACT(EPOCH FROM t.timestamp),
+                                EXTRACT(EPOCH FROM p.start_ts),
+                                EXTRACT(EPOCH FROM p.end_ts) + 0.000001,
+                                p.bucket_count
+                            )
+                        )
+                    )
+                    ORDER BY t.mid DESC NULLS LAST, t.timestamp ASC, t.id ASC
+                ) AS rn_high
+            FROM public.ticks t
+            CROSS JOIN params p
+            WHERE t.symbol = %s
+              AND t.timestamp >= p.start_ts
+              AND t.timestamp <= p.end_ts
+        )
+        SELECT id, symbol, timestamp, bid, ask, mid, spread
+        FROM ranked
+        WHERE rn_first = 1 OR rn_last = 1 OR rn_low = 1 OR rn_high = 1
+        ORDER BY id ASC
+        """.format(select_sql=select_sql),
+        (start_ts, end_ts, bucket_count, TICK_SYMBOL),
+    )
+    return [dict(row) for row in cur.fetchall()], range_bounds
+
+
+def serialize_auction_history_ref(row: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": int(row["id"]),
+        "sessionId": int(row["auctionhistorysessionid"]),
+        "refKind": row.get("refkind"),
+        "price": float(row["price"]) if row.get("price") is not None else None,
+        "strength": float(row["strength"]) if row.get("strength") is not None else None,
+        "validFromTs": serialize_value(row.get("validfromts")),
+        "validToTs": serialize_value(row.get("validtots")),
+        "validFromTsMs": dt_to_ms(row.get("validfromts")),
+        "validToTsMs": dt_to_ms(row.get("validtots")),
+        "notesJson": row.get("notesjson") or {},
+    }
+
+
+def serialize_auction_history_event(row: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": int(row["id"]),
+        "sessionId": int(row["auctionhistorysessionid"]),
+        "eventTs": serialize_value(row.get("eventts")),
+        "eventTsMs": dt_to_ms(row.get("eventts")),
+        "eventKind": row.get("eventkind"),
+        "price1": float(row["price1"]) if row.get("price1") is not None else None,
+        "price2": float(row["price2"]) if row.get("price2") is not None else None,
+        "direction": row.get("direction"),
+        "strength": float(row["strength"]) if row.get("strength") is not None else None,
+        "confirmed": bool(row.get("confirmed")),
+        "payload": row.get("payloadjson") or {},
+    }
+
+
+def load_auction_history_payload(
+    *,
+    start_ts_ms: int,
+    end_ts_ms: int,
+    include_refs: bool,
+    include_events: bool,
+    limit_sessions: int,
+) -> Dict[str, Any]:
+    start_ts = ms_to_dt(start_ts_ms)
+    end_ts = ms_to_dt(end_ts_ms)
+    if start_ts is None or end_ts is None:
+        raise HTTPException(status_code=400, detail="Invalid auction history range.")
+    if end_ts < start_ts:
+        start_ts, end_ts = end_ts, start_ts
+    effective_limit = clamp_int(limit_sessions, 1, MAX_AUCTION_HISTORY_SESSIONS)
+
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                    id, symbol, sessionkind, startts, endts, asofts, windowseconds,
+                    openprice, highprice, lowprice, closeprice,
+                    pocprice, vahprice, valprice, ibhigh, iblow,
+                    statekind, opentype, inventorytype,
+                    valuedrift, balancescore, trendscore, transitionscore,
+                    summaryjson
+                FROM public.auctionhistorysession
+                WHERE symbol = %s
+                  AND endts >= %s
+                  AND startts <= %s
+                ORDER BY startts ASC
+                LIMIT %s
+                """,
+                (TICK_SYMBOL, start_ts, end_ts, effective_limit),
+            )
+            session_rows = [dict(row) for row in cur.fetchall()]
+            session_ids = [int(row["id"]) for row in session_rows]
+            refs_by_session: Dict[int, List[Dict[str, Any]]] = {session_id: [] for session_id in session_ids}
+            events_by_session: Dict[int, List[Dict[str, Any]]] = {session_id: [] for session_id in session_ids}
+
+            if session_ids and include_refs:
+                cur.execute(
+                    """
+                    SELECT
+                        id, auctionhistorysessionid, refkind, price, strength,
+                        validfromts, validtots, notesjson
+                    FROM public.auctionhistoryref
+                    WHERE auctionhistorysessionid = ANY(%s)
+                    ORDER BY auctionhistorysessionid ASC, validfromts ASC NULLS LAST, id ASC
+                    """,
+                    (session_ids,),
+                )
+                for row in cur.fetchall():
+                    payload = serialize_auction_history_ref(dict(row))
+                    refs_by_session[payload["sessionId"]].append(payload)
+
+            if session_ids and include_events:
+                cur.execute(
+                    """
+                    SELECT
+                        id, auctionhistorysessionid, eventts, eventkind, price1, price2,
+                        direction, strength, confirmed, payloadjson
+                    FROM public.auctionhistoryevent
+                    WHERE auctionhistorysessionid = ANY(%s)
+                    ORDER BY auctionhistorysessionid ASC, eventts ASC, id ASC
+                    """,
+                    (session_ids,),
+                )
+                for row in cur.fetchall():
+                    payload = serialize_auction_history_event(dict(row))
+                    events_by_session[payload["sessionId"]].append(payload)
+
+    sessions = []
+    for row in session_rows:
+        session_id = int(row["id"])
+        sessions.append(
+            {
+                "id": session_id,
+                "symbol": row.get("symbol"),
+                "sessionKind": row.get("sessionkind"),
+                "startTs": serialize_value(row.get("startts")),
+                "endTs": serialize_value(row.get("endts")),
+                "asOfTs": serialize_value(row.get("asofts")),
+                "startTsMs": dt_to_ms(row.get("startts")),
+                "endTsMs": dt_to_ms(row.get("endts")),
+                "asOfTsMs": dt_to_ms(row.get("asofts")),
+                "windowSeconds": int(row.get("windowseconds") or 0),
+                "openPrice": float(row["openprice"]) if row.get("openprice") is not None else None,
+                "highPrice": float(row["highprice"]) if row.get("highprice") is not None else None,
+                "lowPrice": float(row["lowprice"]) if row.get("lowprice") is not None else None,
+                "closePrice": float(row["closeprice"]) if row.get("closeprice") is not None else None,
+                "pocPrice": float(row["pocprice"]) if row.get("pocprice") is not None else None,
+                "vahPrice": float(row["vahprice"]) if row.get("vahprice") is not None else None,
+                "valPrice": float(row["valprice"]) if row.get("valprice") is not None else None,
+                "ibHigh": float(row["ibhigh"]) if row.get("ibhigh") is not None else None,
+                "ibLow": float(row["iblow"]) if row.get("iblow") is not None else None,
+                "stateKind": row.get("statekind"),
+                "openType": row.get("opentype"),
+                "inventoryType": row.get("inventorytype"),
+                "valueDrift": float(row["valuedrift"]) if row.get("valuedrift") is not None else None,
+                "balanceScore": float(row["balancescore"]) if row.get("balancescore") is not None else None,
+                "trendScore": float(row["trendscore"]) if row.get("trendscore") is not None else None,
+                "transitionScore": float(row["transitionscore"]) if row.get("transitionscore") is not None else None,
+                "summary": row.get("summaryjson") or {},
+                "refs": refs_by_session.get(session_id, []),
+                "events": events_by_session.get(session_id, []),
+            }
+        )
+
+    return {
+        "symbol": TICK_SYMBOL,
+        "requestedStartTsMs": start_ts_ms,
+        "requestedEndTsMs": end_ts_ms,
+        "sessions": sessions,
+        "sessionCount": len(sessions),
+    }
+
+
+def build_bigpicture_payload(
+    *,
+    rows: List[Dict[str, Any]],
+    requested_start_ts: Optional[datetime],
+    requested_end_ts: Optional[datetime],
+    source_bounds: Dict[str, Any],
+    global_bounds: Dict[str, Any],
+    fetch_ms: float,
+) -> Dict[str, Any]:
+    first_row = rows[0] if rows else None
+    last_row = rows[-1] if rows else None
+    payload = {
+        "symbol": TICK_SYMBOL,
+        "points": serialize_tick_rows(rows),
+        "returnedPointCount": len(rows),
+        "sourceRowCount": int(source_bounds.get("row_count") or len(rows)),
+        "requestedStartTs": serialize_value(requested_start_ts),
+        "requestedEndTs": serialize_value(requested_end_ts),
+        "requestedStartTsMs": dt_to_ms(requested_start_ts),
+        "requestedEndTsMs": dt_to_ms(requested_end_ts),
+        "actualStartTs": serialize_value(first_row.get("timestamp") if first_row else None),
+        "actualEndTs": serialize_value(last_row.get("timestamp") if last_row else None),
+        "actualStartTsMs": dt_to_ms(first_row.get("timestamp") if first_row else None),
+        "actualEndTsMs": dt_to_ms(last_row.get("timestamp") if last_row else None),
+        "firstId": first_row.get("id") if first_row else None,
+        "lastId": last_row.get("id") if last_row else None,
+        "hasMoreLeft": bool(global_bounds.get("firstId") and first_row and int(first_row["id"]) > int(global_bounds["firstId"])),
+        "hasMoreRight": bool(global_bounds.get("lastId") and last_row and int(last_row["id"]) < int(global_bounds["lastId"])),
+        "overlays": {
+            "auctionRefs": [],
+            "events": [],
+            "rectangles": [],
+            "structureLines": [],
+        },
+    }
+    payload["metrics"] = serialize_metrics_payload(
+        fetch_ms=fetch_ms,
+        serialize_ms=0.0,
+        latest_row=last_row,
+    )
+    return payload
+
+
+def load_bigpicture_bootstrap_payload(points: int) -> Dict[str, Any]:
+    target_points = clamp_int(points, 200, MAX_BIGPICTURE_POINTS)
+    fetch_started = time.perf_counter()
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            global_bounds = query_tick_bounds(cur)
+            rows = query_bootstrap_rows(cur, mode="live", start_id=None, window=target_points, end_id=None)
+    return build_bigpicture_payload(
+        rows=rows,
+        requested_start_ts=rows[0]["timestamp"] if rows else None,
+        requested_end_ts=rows[-1]["timestamp"] if rows else None,
+        source_bounds={"row_count": len(rows)},
+        global_bounds=global_bounds,
+        fetch_ms=elapsed_ms(fetch_started),
+    )
+
+
+def load_bigpicture_window_payload(
+    *,
+    start_ts_ms: int,
+    end_ts_ms: int,
+    points: int,
+) -> Dict[str, Any]:
+    start_ts = ms_to_dt(start_ts_ms)
+    end_ts = ms_to_dt(end_ts_ms)
+    if start_ts is None or end_ts is None:
+        raise HTTPException(status_code=400, detail="Invalid big picture range.")
+    if end_ts < start_ts:
+        start_ts, end_ts = end_ts, start_ts
+    fetch_started = time.perf_counter()
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            global_bounds = query_tick_bounds(cur)
+            rows, source_bounds = query_bigpicture_rows(
+                cur,
+                start_ts=start_ts,
+                end_ts=end_ts,
+                target_points=points,
+            )
+    if not rows:
+        raise HTTPException(status_code=404, detail="No ticks were found for the requested big picture range.")
+    return build_bigpicture_payload(
+        rows=rows,
+        requested_start_ts=start_ts,
+        requested_end_ts=end_ts,
+        source_bounds=source_bounds,
+        global_bounds=global_bounds,
+        fetch_ms=elapsed_ms(fetch_started),
     )
 
 
@@ -2235,6 +2666,11 @@ def auction_page() -> FileResponse:
     return FileResponse(FRONTEND_DIR / "auction.html")
 
 
+@app.get("/bigpicture", include_in_schema=False)
+def bigpicture_page() -> FileResponse:
+    return FileResponse(FRONTEND_DIR / "bigpicture.html")
+
+
 @app.get("/sql", include_in_schema=False)
 def sql_page(_: Optional[str] = Depends(require_sql_admin)) -> FileResponse:
     return FileResponse(FRONTEND_DIR / "sql.html")
@@ -2643,6 +3079,43 @@ def auction_bootstrap(
         start_id=id,
         window=window,
         focus_kind=focusKind,
+    )
+
+
+@app.get("/api/auction/history")
+def auction_history(
+    startTsMs: int = Query(..., ge=1),
+    endTsMs: int = Query(..., ge=1),
+    includeRefs: bool = Query(True),
+    includeEvents: bool = Query(True),
+    limitSessions: int = Query(36, ge=1, le=MAX_AUCTION_HISTORY_SESSIONS),
+) -> Dict[str, Any]:
+    return load_auction_history_payload(
+        start_ts_ms=startTsMs,
+        end_ts_ms=endTsMs,
+        include_refs=includeRefs,
+        include_events=includeEvents,
+        limit_sessions=limitSessions,
+    )
+
+
+@app.get("/api/bigpicture/bootstrap")
+def bigpicture_bootstrap(
+    points: int = Query(DEFAULT_BIGPICTURE_POINTS, ge=200, le=MAX_BIGPICTURE_POINTS),
+) -> Dict[str, Any]:
+    return load_bigpicture_bootstrap_payload(points)
+
+
+@app.get("/api/bigpicture/window")
+def bigpicture_window(
+    startTsMs: int = Query(..., ge=1),
+    endTsMs: int = Query(..., ge=1),
+    points: int = Query(DEFAULT_BIGPICTURE_POINTS, ge=200, le=MAX_BIGPICTURE_POINTS),
+) -> Dict[str, Any]:
+    return load_bigpicture_window_payload(
+        start_ts_ms=startTsMs,
+        end_ts_ms=endTsMs,
+        points=points,
     )
 
 

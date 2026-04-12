@@ -8,6 +8,8 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/assets/app.css">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="icon" type="image/svg+xml" href="/assets/datavis_favicon.svg">
 </head>
 <body class="page-live page-auction">
   <div class="live-workspace is-sidebar-collapsed" id="auctionWorkspace">
@@ -76,6 +78,36 @@
                 <option value="rolling24h">Rolling 24h</option>
               </select>
             </label>
+
+            <div class="live-control-field live-control-field-wide">
+              <span>display</span>
+              <div class="live-check-grid">
+                <label class="compact-check">
+                  <input id="showValueArea" type="checkbox" checked>
+                  <span>Value area</span>
+                </label>
+                <label class="compact-check">
+                  <input id="showPoc" type="checkbox" checked>
+                  <span>POC</span>
+                </label>
+                <label class="compact-check">
+                  <input id="showRefs" type="checkbox" checked>
+                  <span>Refs</span>
+                </label>
+                <label class="compact-check">
+                  <input id="showEvents" type="checkbox" checked>
+                  <span>Events</span>
+                </label>
+                <label class="compact-check">
+                  <input id="showHistory" type="checkbox">
+                  <span>History markers</span>
+                </label>
+                <label class="compact-check">
+                  <input id="showHeavyOverlays" type="checkbox">
+                  <span>Heavy overlays</span>
+                </label>
+              </div>
+            </div>
 
             <label>
               <span>review start id</span>

@@ -24,6 +24,7 @@ LONDON_TZ = ZoneInfo("Europe/London")
 NEW_YORK_TZ = ZoneInfo("America/New_York")
 
 ACTIVE_SESSION_KINDS = {"brokerday", "london", "newyork"}
+HISTORY_SESSION_KINDS = ("brokerday", "london", "newyork")
 WINDOW_ORDER = ["rolling15m", "rolling60m", "rolling240m", "session", "rolling24h"]
 WINDOW_LABELS = {
     "rolling15m": "15m",
@@ -41,6 +42,7 @@ ROLLING_WINDOWS = {
     "rolling240m": 240 * 60,
     "rolling24h": 24 * 60 * 60,
 }
+HISTORY_STATE_RETENTION_DAYS = 14
 
 
 def dt_to_ms(value: Optional[datetime]) -> Optional[int]:
@@ -989,6 +991,348 @@ def previous_session_window(kind: str, start_dt: datetime, end_dt: datetime) -> 
     return start_dt - timedelta(days=1), start_dt
 
 
+def build_history_snapshots(
+    store: "AuctionStateStore",
+    *,
+    session_kinds: Iterable[str] = HISTORY_SESSION_KINDS,
+) -> Dict[str, Dict[str, Any]]:
+    snapshots: Dict[str, Dict[str, Any]] = {}
+    for session_kind in session_kinds:
+        normalized_kind = str(session_kind or "").strip().lower()
+        if normalized_kind not in ACTIVE_SESSION_KINDS:
+            continue
+        snapshot = store.build_snapshot(focus_kind=normalized_kind)
+        session_summary = snapshot.get("windows", {}).get("session")
+        if session_summary and session_summary.get("rowsAvailable"):
+            snapshots[normalized_kind] = snapshot
+    return snapshots
+
+
+def auction_history_counts(
+    conn: Any,
+    *,
+    symbol: str,
+    since: datetime,
+    session_kinds: Iterable[str] = HISTORY_SESSION_KINDS,
+) -> Dict[str, int]:
+    kinds = [str(kind).strip().lower() for kind in session_kinds if str(kind).strip().lower() in ACTIVE_SESSION_KINDS]
+    counts = {kind: 0 for kind in kinds}
+    if not kinds:
+        return counts
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT sessionkind, COUNT(*) AS rowcount
+            FROM public.auctionhistorysession
+            WHERE symbol = %s
+              AND startts >= %s
+              AND sessionkind = ANY(%s)
+            GROUP BY sessionkind
+            """,
+            (symbol, since, kinds),
+        )
+        for row in cur.fetchall():
+            counts[str(row.get("sessionkind"))] = int(row.get("rowcount") or 0)
+    return counts
+
+
+def delete_auction_history_range(
+    conn: Any,
+    *,
+    symbol: str,
+    start_ts: datetime,
+    end_ts: datetime,
+    session_kinds: Iterable[str] = HISTORY_SESSION_KINDS,
+) -> Dict[str, int]:
+    kinds = [str(kind).strip().lower() for kind in session_kinds if str(kind).strip().lower() in ACTIVE_SESSION_KINDS]
+    if not kinds:
+        return {"sessionsDeleted": 0, "statesDeleted": 0}
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM public.auctionhistorystate
+            WHERE symbol = %s
+              AND focuskind = ANY(%s)
+              AND snapshotts >= %s
+              AND snapshotts <= %s
+            """,
+            (symbol, kinds, start_ts, end_ts),
+        )
+        state_deleted = int(cur.rowcount or 0)
+        cur.execute(
+            """
+            DELETE FROM public.auctionhistorysession
+            WHERE symbol = %s
+              AND sessionkind = ANY(%s)
+              AND endts >= %s
+              AND startts <= %s
+            """,
+            (symbol, kinds, start_ts, end_ts),
+        )
+        session_deleted = int(cur.rowcount or 0)
+    return {"sessionsDeleted": session_deleted, "statesDeleted": state_deleted}
+
+
+def persist_auction_history_snapshots(
+    conn: Any,
+    *,
+    symbol: str,
+    snapshots: Dict[str, Dict[str, Any]],
+    with_bins: bool = True,
+    retain_state_days: int = HISTORY_STATE_RETENTION_DAYS,
+) -> Dict[str, int]:
+    summary = {
+        "sessionsUpserted": 0,
+        "binsWritten": 0,
+        "refsWritten": 0,
+        "eventsWritten": 0,
+        "statesWritten": 0,
+        "statesDeleted": 0,
+    }
+    if not snapshots:
+        return summary
+
+    with conn.cursor() as cur:
+        for focus_kind, snapshot in snapshots.items():
+            session_summary = snapshot.get("windows", {}).get("session") or {}
+            if not session_summary.get("rowsAvailable"):
+                continue
+            as_of_ts = ms_to_dt(snapshot.get("asOfTsMs"))
+            if as_of_ts is None and snapshot.get("asOfTs"):
+                try:
+                    as_of_ts = datetime.fromisoformat(str(snapshot["asOfTs"]))
+                except ValueError:
+                    as_of_ts = None
+            if as_of_ts is None:
+                continue
+
+            session_kind = str(session_summary.get("sessionKind") or focus_kind or "").strip().lower()
+            if session_kind not in ACTIVE_SESSION_KINDS:
+                continue
+
+            cur.execute(
+                """
+                INSERT INTO public.auctionhistorysession (
+                    symbol, sessionkind, startts, endts, asofts, windowseconds,
+                    openprice, highprice, lowprice, closeprice,
+                    pocprice, vahprice, valprice, ibhigh, iblow,
+                    statekind, opentype, inventorytype,
+                    valuedrift, balancescore, trendscore, transitionscore,
+                    summaryjson, updatedts
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s,
+                    %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s::jsonb, NOW()
+                )
+                ON CONFLICT (symbol, sessionkind, startts)
+                DO UPDATE SET
+                    endts = EXCLUDED.endts,
+                    asofts = EXCLUDED.asofts,
+                    windowseconds = EXCLUDED.windowseconds,
+                    openprice = EXCLUDED.openprice,
+                    highprice = EXCLUDED.highprice,
+                    lowprice = EXCLUDED.lowprice,
+                    closeprice = EXCLUDED.closeprice,
+                    pocprice = EXCLUDED.pocprice,
+                    vahprice = EXCLUDED.vahprice,
+                    valprice = EXCLUDED.valprice,
+                    ibhigh = EXCLUDED.ibhigh,
+                    iblow = EXCLUDED.iblow,
+                    statekind = EXCLUDED.statekind,
+                    opentype = EXCLUDED.opentype,
+                    inventorytype = EXCLUDED.inventorytype,
+                    valuedrift = EXCLUDED.valuedrift,
+                    balancescore = EXCLUDED.balancescore,
+                    trendscore = EXCLUDED.trendscore,
+                    transitionscore = EXCLUDED.transitionscore,
+                    summaryjson = EXCLUDED.summaryjson,
+                    updatedts = NOW()
+                RETURNING id
+                """,
+                (
+                    symbol,
+                    session_kind,
+                    session_summary.get("startTs"),
+                    session_summary.get("endTs"),
+                    as_of_ts,
+                    session_summary.get("windowSeconds"),
+                    session_summary.get("openPrice"),
+                    session_summary.get("highPrice"),
+                    session_summary.get("lowPrice"),
+                    session_summary.get("closePrice"),
+                    session_summary.get("pocPrice"),
+                    session_summary.get("vahPrice"),
+                    session_summary.get("valPrice"),
+                    session_summary.get("ibHigh"),
+                    session_summary.get("ibLow"),
+                    session_summary.get("stateKind"),
+                    session_summary.get("openType"),
+                    session_summary.get("inventoryType"),
+                    session_summary.get("valueDrift"),
+                    session_summary.get("balanceScore"),
+                    session_summary.get("trendScore"),
+                    session_summary.get("transitionScore"),
+                    psycopg2.extras.Json(session_summary),
+                ),
+            )
+            session_id = int(cur.fetchone()[0])
+            summary["sessionsUpserted"] += 1
+
+            if with_bins:
+                cur.execute(
+                    "DELETE FROM public.auctionhistorybin WHERE auctionhistorysessionid = %s",
+                    (session_id,),
+                )
+                for profile_bin in session_summary.get("profile") or []:
+                    cur.execute(
+                        """
+                        INSERT INTO public.auctionhistorybin (
+                            auctionhistorysessionid, pricebin, tickcount, timems,
+                            bidhitcount, askliftcount, spreadsum,
+                            l2bidvol, l2askvol, activityscore, dwellscore, deltascore
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            session_id,
+                            profile_bin.get("priceBin"),
+                            profile_bin.get("tickCount"),
+                            profile_bin.get("timeMs"),
+                            profile_bin.get("bidHitCount"),
+                            profile_bin.get("askLiftCount"),
+                            profile_bin.get("spreadSum"),
+                            profile_bin.get("l2BidVol"),
+                            profile_bin.get("l2AskVol"),
+                            profile_bin.get("activityScore"),
+                            profile_bin.get("dwellScore"),
+                            profile_bin.get("deltaScore"),
+                        ),
+                    )
+                    summary["binsWritten"] += 1
+
+            cur.execute(
+                "DELETE FROM public.auctionhistoryref WHERE auctionhistorysessionid = %s",
+                (session_id,),
+            )
+            for ref in session_summary.get("references") or []:
+                cur.execute(
+                    """
+                    INSERT INTO public.auctionhistoryref (
+                        auctionhistorysessionid, refkind, price, strength, validfromts, validtots, notesjson
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)
+                    """,
+                    (
+                        session_id,
+                        ref.get("refKind"),
+                        ref.get("price"),
+                        ref.get("strength"),
+                        ref.get("validFromTs"),
+                        ref.get("validToTs"),
+                        psycopg2.extras.Json(ref.get("notesJson") or {}),
+                    ),
+                )
+                summary["refsWritten"] += 1
+
+            cur.execute(
+                "DELETE FROM public.auctionhistoryevent WHERE auctionhistorysessionid = %s",
+                (session_id,),
+            )
+            for event in session_summary.get("events") or []:
+                cur.execute(
+                    """
+                    INSERT INTO public.auctionhistoryevent (
+                        auctionhistorysessionid, eventts, eventkind, price1, price2,
+                        direction, strength, confirmed, payloadjson
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                    """,
+                    (
+                        session_id,
+                        event.get("eventTs"),
+                        event.get("eventKind"),
+                        event.get("price1"),
+                        event.get("price2"),
+                        event.get("direction"),
+                        event.get("strength"),
+                        bool(event.get("confirmed")),
+                        psycopg2.extras.Json(event),
+                    ),
+                )
+                summary["eventsWritten"] += 1
+
+            focus_window = snapshot.get("focusWindow") or {}
+            cur.execute(
+                """
+                INSERT INTO public.auctionhistorystate (
+                    symbol, focuskind, snapshotts, sessionkind, sessionstartts, sessionendts,
+                    lastprocessedid, statekind, locationkind, acceptancekind,
+                    inventorytype, biaskind, confidence, invalidationprice,
+                    targetprice1, targetprice2, summaryjson
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s, %s, %s::jsonb
+                )
+                ON CONFLICT (symbol, focuskind, snapshotts)
+                DO UPDATE SET
+                    sessionkind = EXCLUDED.sessionkind,
+                    sessionstartts = EXCLUDED.sessionstartts,
+                    sessionendts = EXCLUDED.sessionendts,
+                    lastprocessedid = EXCLUDED.lastprocessedid,
+                    statekind = EXCLUDED.statekind,
+                    locationkind = EXCLUDED.locationkind,
+                    acceptancekind = EXCLUDED.acceptancekind,
+                    inventorytype = EXCLUDED.inventorytype,
+                    biaskind = EXCLUDED.biaskind,
+                    confidence = EXCLUDED.confidence,
+                    invalidationprice = EXCLUDED.invalidationprice,
+                    targetprice1 = EXCLUDED.targetprice1,
+                    targetprice2 = EXCLUDED.targetprice2,
+                    summaryjson = EXCLUDED.summaryjson
+                """,
+                (
+                    symbol,
+                    session_kind,
+                    as_of_ts,
+                    session_kind,
+                    session_summary.get("startTs"),
+                    session_summary.get("endTs"),
+                    snapshot.get("lastProcessedId"),
+                    focus_window.get("stateKind"),
+                    focus_window.get("locationKind"),
+                    focus_window.get("acceptanceKind"),
+                    focus_window.get("inventoryType"),
+                    focus_window.get("biasKind"),
+                    focus_window.get("confidence"),
+                    focus_window.get("invalidationPrice"),
+                    focus_window.get("targetPrice1"),
+                    focus_window.get("targetPrice2"),
+                    psycopg2.extras.Json(focus_window),
+                ),
+            )
+            summary["statesWritten"] += 1
+
+        if retain_state_days > 0:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, int(retain_state_days)))
+            cur.execute(
+                """
+                DELETE FROM public.auctionhistorystate
+                WHERE symbol = %s
+                  AND snapshotts < %s
+                """,
+                (symbol, cutoff),
+            )
+            summary["statesDeleted"] = int(cur.rowcount or 0)
+    return summary
+
+
 class AuctionStateStore:
     def __init__(self, *, symbol: str) -> None:
         self.symbol = symbol
@@ -1310,191 +1654,207 @@ class AuctionService:
         if not force and now_monotonic - self._last_persist_monotonic < PERSIST_INTERVAL_SECONDS:
             return
         snapshot = self._last_live_snapshot or self._store.build_snapshot(focus_kind="brokerday")
+        history_snapshots = build_history_snapshots(self._store)
         payload = {
             "serviceState": self._store.serialize(),
             "liveSnapshot": snapshot,
         }
         try:
-            self._persist_snapshot(payload, snapshot)
+            self._persist_snapshot(payload, snapshot, history_snapshots=history_snapshots)
         except psycopg2.Error:
             return
         self._last_persist_monotonic = now_monotonic
 
-    def _persist_snapshot(self, payload: Dict[str, Any], snapshot: Dict[str, Any]) -> None:
+    def _persist_snapshot(
+        self,
+        payload: Dict[str, Any],
+        snapshot: Dict[str, Any],
+        *,
+        history_snapshots: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> None:
         with self._db_factory(readonly=False, autocommit=False) as conn:
             with conn.cursor() as cur:
+                self._persist_live_cache(cur, payload, snapshot)
+            persist_auction_history_snapshots(
+                conn,
+                symbol=self._symbol,
+                snapshots=history_snapshots or {},
+                with_bins=True,
+            )
+            conn.commit()
+
+    def _persist_live_cache(self, cur: Any, payload: Dict[str, Any], snapshot: Dict[str, Any]) -> None:
+        cur.execute(
+            """
+            INSERT INTO public.auctionsnap (symbol, asts, snapshotjson)
+            VALUES (%s, NOW(), %s::jsonb)
+            """,
+            (self._symbol, psycopg2.extras.Json(payload)),
+        )
+        cur.execute(
+            """
+            DELETE FROM public.auctionsnap
+            WHERE symbol = %s
+              AND id NOT IN (
+                SELECT id
+                FROM public.auctionsnap
+                WHERE symbol = %s
+                ORDER BY id DESC
+                LIMIT 6
+              )
+            """,
+            (self._symbol, self._symbol),
+        )
+        cur.execute(
+            """
+            DELETE FROM public.auctionstate
+            WHERE symbol = %s
+              AND id NOT IN (
+                SELECT id
+                FROM public.auctionstate
+                WHERE symbol = %s
+                ORDER BY id DESC
+                LIMIT 200
+              )
+            """,
+            (self._symbol, self._symbol),
+        )
+        cur.execute("DELETE FROM public.auctionsession WHERE symbol = %s", (self._symbol,))
+        for key in WINDOW_ORDER:
+            item = snapshot.get("windows", {}).get(key)
+            if not item or not item.get("rowsAvailable"):
+                continue
+            cur.execute(
+                """
+                INSERT INTO public.auctionsession (
+                    symbol, anchorkind, startts, endts, windowseconds,
+                    openprice, highprice, lowprice, closeprice,
+                    pocprice, vahprice, valprice, ibhigh, iblow,
+                    statekind, opentype, inventorytype,
+                    valuedrift, balancescore, trendscore, transitionscore,
+                    updatedts
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s,
+                    %s, %s, %s,
+                    %s, %s, %s, %s,
+                    NOW()
+                )
+                RETURNING id
+                """,
+                (
+                    self._symbol,
+                    item.get("sessionKind") if key == "session" else key,
+                    item.get("startTs"),
+                    item.get("endTs"),
+                    item.get("windowSeconds"),
+                    item.get("openPrice"),
+                    item.get("highPrice"),
+                    item.get("lowPrice"),
+                    item.get("closePrice"),
+                    item.get("pocPrice"),
+                    item.get("vahPrice"),
+                    item.get("valPrice"),
+                    item.get("ibHigh"),
+                    item.get("ibLow"),
+                    item.get("stateKind"),
+                    item.get("openType"),
+                    item.get("inventoryType"),
+                    item.get("valueDrift"),
+                    item.get("balanceScore"),
+                    item.get("trendScore"),
+                    item.get("transitionScore"),
+                ),
+            )
+            session_id = int(cur.fetchone()[0])
+            for profile_bin in item.get("profile") or []:
                 cur.execute(
                     """
-                    INSERT INTO public.auctionsnap (symbol, asts, snapshotjson)
-                    VALUES (%s, NOW(), %s::jsonb)
-                    """,
-                    (self._symbol, psycopg2.extras.Json(payload)),
-                )
-                cur.execute(
-                    """
-                    DELETE FROM public.auctionsnap
-                    WHERE symbol = %s
-                      AND id NOT IN (
-                        SELECT id
-                        FROM public.auctionsnap
-                        WHERE symbol = %s
-                        ORDER BY id DESC
-                        LIMIT 6
-                      )
-                    """,
-                    (self._symbol, self._symbol),
-                )
-                cur.execute(
-                    """
-                    DELETE FROM public.auctionstate
-                    WHERE symbol = %s
-                      AND id NOT IN (
-                        SELECT id
-                        FROM public.auctionstate
-                        WHERE symbol = %s
-                        ORDER BY id DESC
-                        LIMIT 200
-                      )
-                    """,
-                    (self._symbol, self._symbol),
-                )
-                cur.execute("DELETE FROM public.auctionsession WHERE symbol = %s", (self._symbol,))
-                for key in WINDOW_ORDER:
-                    item = snapshot.get("windows", {}).get(key)
-                    if not item or not item.get("rowsAvailable"):
-                        continue
-                    cur.execute(
-                        """
-                        INSERT INTO public.auctionsession (
-                            symbol, anchorkind, startts, endts, windowseconds,
-                            openprice, highprice, lowprice, closeprice,
-                            pocprice, vahprice, valprice, ibhigh, iblow,
-                            statekind, opentype, inventorytype,
-                            valuedrift, balancescore, trendscore, transitionscore,
-                            updatedts
-                        )
-                        VALUES (
-                            %s, %s, %s, %s, %s,
-                            %s, %s, %s, %s,
-                            %s, %s, %s, %s, %s,
-                            %s, %s, %s,
-                            %s, %s, %s, %s,
-                            NOW()
-                        )
-                        RETURNING id
-                        """,
-                        (
-                            self._symbol,
-                            item.get("sessionKind") if key == "session" else key,
-                            item.get("startTs"),
-                            item.get("endTs"),
-                            item.get("windowSeconds"),
-                            item.get("openPrice"),
-                            item.get("highPrice"),
-                            item.get("lowPrice"),
-                            item.get("closePrice"),
-                            item.get("pocPrice"),
-                            item.get("vahPrice"),
-                            item.get("valPrice"),
-                            item.get("ibHigh"),
-                            item.get("ibLow"),
-                            item.get("stateKind"),
-                            item.get("openType"),
-                            item.get("inventoryType"),
-                            item.get("valueDrift"),
-                            item.get("balanceScore"),
-                            item.get("trendScore"),
-                            item.get("transitionScore"),
-                        ),
+                    INSERT INTO public.auctionbin (
+                        auctionsessionid, pricebin, tickcount, timems,
+                        bidhitcount, askliftcount, spreadsum,
+                        l2bidvol, l2askvol,
+                        activityscore, dwellscore, deltascore
                     )
-                    session_id = int(cur.fetchone()[0])
-                    for profile_bin in item.get("profile") or []:
-                        cur.execute(
-                            """
-                            INSERT INTO public.auctionbin (
-                                auctionsessionid, pricebin, tickcount, timems,
-                                bidhitcount, askliftcount, spreadsum,
-                                l2bidvol, l2askvol,
-                                activityscore, dwellscore, deltascore
-                            )
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                            """,
-                            (
-                                session_id,
-                                profile_bin.get("priceBin"),
-                                profile_bin.get("tickCount"),
-                                profile_bin.get("timeMs"),
-                                profile_bin.get("bidHitCount"),
-                                profile_bin.get("askLiftCount"),
-                                profile_bin.get("spreadSum"),
-                                profile_bin.get("l2BidVol"),
-                                profile_bin.get("l2AskVol"),
-                                profile_bin.get("activityScore"),
-                                profile_bin.get("dwellScore"),
-                                profile_bin.get("deltaScore"),
-                            ),
-                        )
-                    for ref in item.get("references") or []:
-                        cur.execute(
-                            """
-                            INSERT INTO public.auctionref (
-                                auctionsessionid, refkind, price, strength, validfromts, validtots, notesjson
-                            )
-                            VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)
-                            """,
-                            (
-                                session_id,
-                                ref.get("refKind"),
-                                ref.get("price"),
-                                ref.get("strength"),
-                                ref.get("validFromTs"),
-                                ref.get("validToTs"),
-                                psycopg2.extras.Json(ref.get("notesJson") or {}),
-                            ),
-                        )
-                    for event in item.get("events") or []:
-                        cur.execute(
-                            """
-                            INSERT INTO public.auctionevent (
-                                auctionsessionid, eventts, eventkind, price1, price2,
-                                direction, strength, confirmed, payloadjson
-                            )
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
-                            """,
-                            (
-                                session_id,
-                                event.get("eventTs"),
-                                event.get("eventKind"),
-                                event.get("price1"),
-                                event.get("price2"),
-                                event.get("direction"),
-                                event.get("strength"),
-                                bool(event.get("confirmed")),
-                                psycopg2.extras.Json(event),
-                            ),
-                        )
-                focus_window = snapshot.get("focusWindow") or {}
-                cur.execute(
-                    """
-                    INSERT INTO public.auctionstate (
-                        symbol, asts, windowkind, statekind, locationkind, acceptancekind,
-                        inventorytype, biaskind, confidence, invalidationprice, targetprice1, targetprice2, summaryjson
-                    )
-                    VALUES (%s, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
-                        self._symbol,
-                        snapshot.get("focusKind"),
-                        focus_window.get("stateKind"),
-                        focus_window.get("locationKind"),
-                        focus_window.get("acceptanceKind"),
-                        focus_window.get("inventoryType"),
-                        focus_window.get("biasKind"),
-                        focus_window.get("confidence"),
-                        focus_window.get("invalidationPrice"),
-                        focus_window.get("targetPrice1"),
-                        focus_window.get("targetPrice2"),
-                        psycopg2.extras.Json(focus_window),
+                        session_id,
+                        profile_bin.get("priceBin"),
+                        profile_bin.get("tickCount"),
+                        profile_bin.get("timeMs"),
+                        profile_bin.get("bidHitCount"),
+                        profile_bin.get("askLiftCount"),
+                        profile_bin.get("spreadSum"),
+                        profile_bin.get("l2BidVol"),
+                        profile_bin.get("l2AskVol"),
+                        profile_bin.get("activityScore"),
+                        profile_bin.get("dwellScore"),
+                        profile_bin.get("deltaScore"),
                     ),
                 )
-            conn.commit()
+            for ref in item.get("references") or []:
+                cur.execute(
+                    """
+                    INSERT INTO public.auctionref (
+                        auctionsessionid, refkind, price, strength, validfromts, validtots, notesjson
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)
+                    """,
+                    (
+                        session_id,
+                        ref.get("refKind"),
+                        ref.get("price"),
+                        ref.get("strength"),
+                        ref.get("validFromTs"),
+                        ref.get("validToTs"),
+                        psycopg2.extras.Json(ref.get("notesJson") or {}),
+                    ),
+                )
+            for event in item.get("events") or []:
+                cur.execute(
+                    """
+                    INSERT INTO public.auctionevent (
+                        auctionsessionid, eventts, eventkind, price1, price2,
+                        direction, strength, confirmed, payloadjson
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                    """,
+                    (
+                        session_id,
+                        event.get("eventTs"),
+                        event.get("eventKind"),
+                        event.get("price1"),
+                        event.get("price2"),
+                        event.get("direction"),
+                        event.get("strength"),
+                        bool(event.get("confirmed")),
+                        psycopg2.extras.Json(event),
+                    ),
+                )
+        focus_window = snapshot.get("focusWindow") or {}
+        cur.execute(
+            """
+            INSERT INTO public.auctionstate (
+                symbol, asts, windowkind, statekind, locationkind, acceptancekind,
+                inventorytype, biaskind, confidence, invalidationprice, targetprice1, targetprice2, summaryjson
+            )
+            VALUES (%s, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+            """,
+            (
+                self._symbol,
+                snapshot.get("focusKind"),
+                focus_window.get("stateKind"),
+                focus_window.get("locationKind"),
+                focus_window.get("acceptanceKind"),
+                focus_window.get("inventoryType"),
+                focus_window.get("biasKind"),
+                focus_window.get("confidence"),
+                focus_window.get("invalidationPrice"),
+                focus_window.get("targetPrice1"),
+                focus_window.get("targetPrice2"),
+                psycopg2.extras.Json(focus_window),
+            ),
+        )
