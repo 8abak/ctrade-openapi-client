@@ -16,7 +16,11 @@ LEGACY_SERVICES=(
   "fastzig"
   "zonebuilder"
 )
-MIGRATION_FILES=("deploy/sql/20260408_layer_zero_structure.sql")
+MIGRATION_FILES=(
+  "deploy/sql/20260408_layer_zero_structure.sql"
+  "deploy/sql/20260411_layer_zero_rects.sql"
+  "deploy/sql/20260412_auction_framework.sql"
+)
 HEALTH_URL="http://127.0.0.1:8000/api/health"
 
 log() {

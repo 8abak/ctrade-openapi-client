@@ -26,6 +26,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
+from datavis.auction import AuctionService, AuctionStateStore
 from datavis.db import db_connect as shared_db_connect
 from datavis.rects import RectPaperService, RectServiceError
 from datavis.smart_scalp import SmartScalpError, SmartScalpService
@@ -45,6 +46,8 @@ if DATABASE_URL.startswith("postgresql+psycopg2://"):
 TICK_SYMBOL = os.getenv("DATAVIS_SYMBOL", "XAUUSD")
 DEFAULT_WINDOW = int(os.getenv("DATAVIS_WINDOW", "2000"))
 MAX_TICK_WINDOW = int(os.getenv("DATAVIS_MAX_WINDOW", "10000"))
+DEFAULT_AUCTION_WINDOW = int(os.getenv("DATAVIS_AUCTION_WINDOW", "2000"))
+MAX_AUCTION_WINDOW = int(os.getenv("DATAVIS_AUCTION_MAX_WINDOW", "10000"))
 DEFAULT_STRUCTURE_WINDOW = int(os.getenv("DATAVIS_STRUCTURE_WINDOW", "50"))
 MAX_STRUCTURE_WINDOW = int(os.getenv("DATAVIS_STRUCTURE_MAX_WINDOW", "200000"))
 MAX_STRUCTURE_SOURCE_TICKS = int(os.getenv("DATAVIS_STRUCTURE_SOURCE_MAX_TICKS", "200000"))
@@ -869,6 +872,54 @@ def query_rows_between(cur: Any, start_id: int, end_id: int, limit: int) -> List
     return [dict(row) for row in cur.fetchall()]
 
 
+def query_tick_by_id(cur: Any, tick_id: int) -> Optional[Dict[str, Any]]:
+    cur.execute(
+        """
+        SELECT id, symbol, timestamp, bid, ask, mid, spread
+        FROM public.ticks
+        WHERE symbol = %s AND id = %s
+        LIMIT 1
+        """,
+        (TICK_SYMBOL, tick_id),
+    )
+    row = cur.fetchone()
+    return dict(row) if row else None
+
+
+def query_rows_between_timestamps(
+    cur: Any,
+    *,
+    start_ts: datetime,
+    end_ts: datetime,
+) -> List[Dict[str, Any]]:
+    select_sql = tick_columns()
+    cur.execute(
+        """
+        SELECT {select_sql}
+        FROM public.ticks
+        WHERE symbol = %s
+          AND timestamp >= %s
+          AND timestamp <= %s
+        ORDER BY id ASC
+        """.format(select_sql=select_sql),
+        (TICK_SYMBOL, start_ts, end_ts),
+    )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def query_window_ending_at_timestamp(
+    cur: Any,
+    *,
+    end_ts: datetime,
+    seconds: int,
+) -> List[Dict[str, Any]]:
+    return query_rows_between_timestamps(
+        cur,
+        start_ts=end_ts - timedelta(seconds=max(1, int(seconds))),
+        end_ts=end_ts,
+    )
+
+
 def resolve_tick_at_timestamp(timestamp_value: datetime) -> Dict[str, Any]:
     with db_connection(readonly=True) as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -1504,6 +1555,103 @@ def load_structure_previous_payload(
     return payload
 
 
+def normalize_auction_focus_kind(value: str) -> str:
+    normalized = (value or "brokerday").strip().lower()
+    valid = {"rolling15m", "rolling60m", "rolling240m", "rolling24h", "brokerday", "london", "newyork"}
+    return normalized if normalized in valid else "brokerday"
+
+
+def build_auction_view_payload(
+    *,
+    mode: str,
+    window: int,
+    rows: List[Dict[str, Any]],
+    review_end_id: Optional[int],
+    review_end_timestamp: Optional[datetime],
+    bounds: Dict[str, Any],
+    fetch_ms: float,
+    snapshot: Dict[str, Any],
+) -> Dict[str, Any]:
+    serialize_started = time.perf_counter()
+    first_row = rows[0] if rows else None
+    last_row = rows[-1] if rows else None
+    payload = {
+        "rows": serialize_tick_rows(rows),
+        "rowCount": len(rows),
+        "firstId": first_row.get("id") if first_row else None,
+        "lastId": last_row.get("id") if last_row else None,
+        "firstTimestamp": serialize_value(first_row.get("timestamp") if first_row else None),
+        "lastTimestamp": serialize_value(last_row.get("timestamp") if last_row else None),
+        "firstTimestampMs": dt_to_ms(first_row.get("timestamp") if first_row else None),
+        "lastTimestampMs": dt_to_ms(last_row.get("timestamp") if last_row else None),
+        "mode": mode,
+        "window": window,
+        "symbol": TICK_SYMBOL,
+        "reviewEndId": review_end_id,
+        "reviewEndTimestamp": serialize_value(review_end_timestamp),
+        "hasMoreLeft": bool(bounds.get("firstId") and first_row and first_row.get("id") and int(first_row["id"]) > int(bounds["firstId"])),
+        "endReached": bool(mode == "review" and review_end_id is not None and last_row and int(last_row["id"]) >= int(review_end_id)),
+        "auction": snapshot,
+    }
+    payload["metrics"] = serialize_metrics_payload(
+        fetch_ms=fetch_ms,
+        serialize_ms=elapsed_ms(serialize_started),
+        latest_row=last_row,
+    )
+    return payload
+
+
+def load_auction_bootstrap_payload(
+    *,
+    mode: str,
+    start_id: Optional[int],
+    window: int,
+    focus_kind: str,
+) -> Dict[str, Any]:
+    effective_window = clamp_int(window, 1, MAX_AUCTION_WINDOW)
+    normalized_focus = normalize_auction_focus_kind(focus_kind)
+    fetch_started = time.perf_counter()
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            bounds_row = query_tick_bounds(cur)
+            bounds = {
+                "firstId": bounds_row.get("first_id"),
+                "lastId": bounds_row.get("last_id"),
+                "firstTimestamp": bounds_row.get("first_timestamp"),
+                "lastTimestamp": bounds_row.get("last_timestamp"),
+            }
+            review_end_id = bounds["lastId"] if mode == "review" else None
+            review_end_timestamp = bounds["lastTimestamp"] if mode == "review" else None
+            rows = query_bootstrap_rows(
+                cur,
+                mode=mode,
+                start_id=start_id,
+                window=effective_window,
+                end_id=review_end_id,
+            )
+            if mode == "live":
+                snapshot = AUCTION_SERVICE.sync_live(focus_kind=normalized_focus)
+            else:
+                if start_id is None:
+                    raise HTTPException(status_code=400, detail="Review mode requires an id value.")
+                last_chart_row = rows[-1] if rows else query_tick_by_id(cur, start_id)
+                if not last_chart_row:
+                    raise HTTPException(status_code=404, detail="Review start could not be resolved.")
+                end_ts = last_chart_row["timestamp"]
+                context_rows = query_window_ending_at_timestamp(cur, end_ts=end_ts, seconds=48 * 60 * 60)
+                snapshot = AUCTION_SERVICE.build_review_snapshot(rows=context_rows, focus_kind=normalized_focus)
+    return build_auction_view_payload(
+        mode=mode,
+        window=effective_window,
+        rows=rows,
+        review_end_id=review_end_id,
+        review_end_timestamp=review_end_timestamp,
+        bounds=bounds,
+        fetch_ms=elapsed_ms(fetch_started),
+        snapshot=snapshot,
+    )
+
+
 def stream_events(
     *,
     after_id: int,
@@ -1719,6 +1867,149 @@ def stream_review_events(
         return
 
 
+def stream_auction_events(
+    *,
+    after_id: int,
+    limit: int,
+    focus_kind: str,
+) -> Generator[str, None, None]:
+    last_id = max(0, after_id)
+    effective_limit = clamp_int(limit, 1, MAX_STREAM_BATCH)
+    normalized_focus = normalize_auction_focus_kind(focus_kind)
+    last_heartbeat = time.monotonic()
+    idle_sleep = STREAM_POLL_SECONDS
+    try:
+        with db_connection(readonly=True, autocommit=True) as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                while True:
+                    fetch_started = time.perf_counter()
+                    tick_rows = query_rows_after(cur, last_id, effective_limit)
+                    fetch_ms = elapsed_ms(fetch_started)
+                    if tick_rows:
+                        serialize_started = time.perf_counter()
+                        last_id = int(tick_rows[-1]["id"])
+                        snapshot = AUCTION_SERVICE.apply_live_rows(tick_rows, focus_kind=normalized_focus)
+                        payload = {
+                            "rows": serialize_tick_rows(tick_rows),
+                            "rowCount": len(tick_rows),
+                            "lastId": last_id,
+                            "streamMode": "delta",
+                            "auction": snapshot,
+                            **serialize_metrics_payload(
+                                fetch_ms=fetch_ms,
+                                serialize_ms=elapsed_ms(serialize_started),
+                                latest_row=tick_rows[-1],
+                            ),
+                        }
+                        yield format_sse(payload)
+                        last_heartbeat = time.monotonic()
+                        idle_sleep = STREAM_POLL_SECONDS
+                        continue
+
+                    now = time.monotonic()
+                    if now - last_heartbeat >= STREAM_HEARTBEAT_SECONDS:
+                        latest_row = query_latest_tick(cur)
+                        snapshot = AUCTION_SERVICE.sync_live(focus_kind=normalized_focus)
+                        payload = {
+                            "rows": [],
+                            "rowCount": 0,
+                            "lastId": last_id,
+                            "streamMode": "heartbeat",
+                            "auction": snapshot,
+                            **serialize_metrics_payload(
+                                fetch_ms=fetch_ms,
+                                serialize_ms=0.0,
+                                latest_row=latest_row,
+                            ),
+                        }
+                        yield format_sse(payload, event_name="heartbeat")
+                        last_heartbeat = now
+                    time.sleep(idle_sleep)
+                    idle_sleep = STREAM_IDLE_POLL_SECONDS
+    except GeneratorExit:
+        return
+
+
+def stream_auction_review_events(
+    *,
+    after_id: int,
+    end_id: int,
+    speed: float,
+    focus_kind: str,
+) -> Generator[str, None, None]:
+    last_id = max(0, after_id)
+    effective_batch = clamp_int(REVIEW_STREAM_BATCH, 1, MAX_STREAM_BATCH)
+    speed_multiplier = max(0.1, float(speed or 1.0))
+    normalized_focus = normalize_auction_focus_kind(focus_kind)
+    review_store = AuctionStateStore(symbol=TICK_SYMBOL)
+    previous_row: Optional[Dict[str, Any]] = None
+
+    try:
+        with db_connection(readonly=True, autocommit=True) as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                if last_id > 0:
+                    anchor_row = query_tick_by_id(cur, last_id)
+                    if anchor_row:
+                        seed_rows = query_window_ending_at_timestamp(cur, end_ts=anchor_row["timestamp"], seconds=48 * 60 * 60)
+                        review_store.apply_rows(seed_rows)
+                        previous_row = seed_rows[-1] if seed_rows else anchor_row
+
+                while last_id < end_id:
+                    fetch_started = time.perf_counter()
+                    batch_rows = query_rows_after(cur, last_id, effective_batch, end_id=end_id)
+                    fetch_ms = elapsed_ms(fetch_started)
+                    if not batch_rows:
+                        payload = {
+                            "rows": [],
+                            "rowCount": 0,
+                            "lastId": last_id,
+                            "endId": end_id,
+                            "endReached": True,
+                            "streamMode": "complete",
+                            "auction": review_store.build_snapshot(focus_kind=normalized_focus),
+                            **serialize_metrics_payload(
+                                fetch_ms=fetch_ms,
+                                serialize_ms=0.0,
+                                latest_row=query_latest_tick(cur),
+                            ),
+                        }
+                        yield format_sse(payload)
+                        return
+
+                    for row in batch_rows:
+                        delay_ms = 0
+                        if previous_row and previous_row.get("timestamp") and row.get("timestamp"):
+                            delta_ms = max(0, dt_to_ms(row["timestamp"]) - dt_to_ms(previous_row["timestamp"]))
+                            delay_ms = min(REVIEW_MAX_DELAY_MS, int(round(delta_ms / speed_multiplier)))
+                        if delay_ms > 0:
+                            time.sleep(max(REVIEW_MIN_DELAY_MS, delay_ms) / 1000.0)
+
+                        serialize_started = time.perf_counter()
+                        review_store.apply_rows([row])
+                        last_id = int(row["id"])
+                        payload = {
+                            "rows": serialize_tick_rows([row]),
+                            "rowCount": 1,
+                            "lastId": last_id,
+                            "endId": end_id,
+                            "endReached": bool(last_id >= end_id),
+                            "streamMode": "delta",
+                            "auction": review_store.build_snapshot(focus_kind=normalized_focus),
+                            "playbackDelayMs": delay_ms,
+                            **serialize_metrics_payload(
+                                fetch_ms=fetch_ms,
+                                serialize_ms=elapsed_ms(serialize_started),
+                                latest_row=row,
+                            ),
+                        }
+                        yield format_sse(payload)
+                        previous_row = row
+                        if last_id >= end_id:
+                            return
+    except GeneratorExit:
+        return
+
+
 def smart_scalp_ticks_after(after_id: int, limit: int) -> List[Dict[str, Any]]:
     effective_after_id = max(0, int(after_id or 0))
     effective_limit = clamp_int(limit, 1, MAX_STREAM_BATCH)
@@ -1830,6 +2121,7 @@ SMART_SCALP_SERVICE = SmartScalpService(
     smart_lot_size=0.01,
 )
 RECT_PAPER_SERVICE = RectPaperService(db_factory=db_connection, symbol=TICK_SYMBOL)
+AUCTION_SERVICE = AuctionService(db_factory=db_connection, symbol=TICK_SYMBOL)
 
 
 def _trade_not_configured() -> bool:
@@ -1913,12 +2205,14 @@ def _handle_rect_error(exc: Exception) -> None:
 def app_startup() -> None:
     SMART_SCALP_SERVICE.start()
     RECT_PAPER_SERVICE.start()
+    AUCTION_SERVICE.start()
 
 
 @app.on_event("shutdown")
 def app_shutdown() -> None:
     SMART_SCALP_SERVICE.stop()
     RECT_PAPER_SERVICE.stop()
+    AUCTION_SERVICE.stop()
 
 
 @app.get("/", include_in_schema=False)
@@ -1934,6 +2228,11 @@ def live_page() -> FileResponse:
 @app.get("/structure", include_in_schema=False)
 def structure_page() -> FileResponse:
     return FileResponse(FRONTEND_DIR / "structure.html")
+
+
+@app.get("/auction", include_in_schema=False)
+def auction_page() -> FileResponse:
+    return FileResponse(FRONTEND_DIR / "auction.html")
 
 
 @app.get("/sql", include_in_schema=False)
@@ -2324,6 +2623,29 @@ def structure_review_start(
     return live_review_start(timestamp=timestamp, timezoneName=timezoneName)
 
 
+@app.get("/api/auction/review-start")
+def auction_review_start(
+    timestamp: str = Query(..., min_length=1),
+    timezoneName: str = Query(DEFAULT_REVIEW_TIMEZONE, min_length=1),
+) -> Dict[str, Any]:
+    return live_review_start(timestamp=timestamp, timezoneName=timezoneName)
+
+
+@app.get("/api/auction/bootstrap")
+def auction_bootstrap(
+    mode: str = Query("live", pattern="^(live|review)$"),
+    id: Optional[int] = Query(None, ge=1),
+    window: int = Query(DEFAULT_AUCTION_WINDOW, ge=1, le=MAX_AUCTION_WINDOW),
+    focusKind: str = Query("brokerday", min_length=1, max_length=32),
+) -> Dict[str, Any]:
+    return load_auction_bootstrap_payload(
+        mode=mode,
+        start_id=id,
+        window=window,
+        focus_kind=focusKind,
+    )
+
+
 @app.get("/api/live/bootstrap")
 def live_bootstrap(
     mode: str = Query("live", pattern="^(live|review)$"),
@@ -2444,6 +2766,50 @@ def live_review_stream(
             show_structure=showStructure,
             show_ranges=showRanges,
             rect_mode="review",
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.get("/api/auction/stream")
+def auction_stream(
+    afterId: int = Query(0, ge=0),
+    limit: int = Query(250, ge=1, le=MAX_STREAM_BATCH),
+    focusKind: str = Query("brokerday", min_length=1, max_length=32),
+) -> StreamingResponse:
+    return StreamingResponse(
+        stream_auction_events(
+            after_id=afterId,
+            limit=limit,
+            focus_kind=focusKind,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.get("/api/auction/review-stream")
+def auction_review_stream(
+    afterId: int = Query(0, ge=0),
+    endId: int = Query(..., ge=1),
+    speed: float = Query(1.0, gt=0),
+    focusKind: str = Query("brokerday", min_length=1, max_length=32),
+) -> StreamingResponse:
+    return StreamingResponse(
+        stream_auction_review_events(
+            after_id=afterId,
+            end_id=endId,
+            speed=speed,
+            focus_kind=focusKind,
         ),
         media_type="text/event-stream",
         headers={

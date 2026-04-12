@@ -29,6 +29,7 @@ a {
 
 button,
 input,
+select,
 textarea {
   font: inherit;
 }
@@ -266,7 +267,8 @@ label,
   font-size: 0.82rem;
 }
 
-input {
+input,
+select {
   width: 100%;
   min-width: 0;
   border: 1px solid var(--line);
@@ -405,6 +407,198 @@ input {
 .chart-tip-note {
   margin-top: 0.35rem;
   color: #b7c8dd;
+}
+
+.auction-stage {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 0.75rem;
+}
+
+.auction-status-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0.6rem;
+}
+
+.auction-status-card,
+.auction-context-block,
+.auction-ladder-row,
+.auction-ref-row,
+.auction-event-chip {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(8, 14, 23, 0.94);
+}
+
+.auction-status-card {
+  padding: 0.85rem;
+}
+
+.auction-status-card strong,
+.auction-panel-head,
+.auction-ladder-head,
+.auction-ref-price,
+.auction-event-title {
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.auction-status-label,
+.auction-panel-muted,
+.auction-ref-meta,
+.auction-event-meta {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.auction-status-value {
+  margin-top: 0.32rem;
+  font-size: 1.02rem;
+  font-weight: 700;
+}
+
+.auction-status-card.is-positive .auction-status-value,
+.auction-ladder-row.is-positive .auction-ladder-value,
+.auction-ref-row.is-support .auction-ref-price {
+  color: #baf7df;
+}
+
+.auction-status-card.is-negative .auction-status-value,
+.auction-ladder-row.is-negative .auction-ladder-value,
+.auction-ref-row.is-risk .auction-ref-price {
+  color: #ff9fb2;
+}
+
+.auction-status-card.is-neutral .auction-status-value {
+  color: var(--accent-strong);
+}
+
+.auction-content-grid {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr) 240px;
+  gap: 0.75rem;
+}
+
+.auction-context-panel,
+.auction-profile-panel,
+.auction-events-panel {
+  padding: 0.85rem;
+}
+
+.auction-context-panel,
+.auction-profile-panel {
+  min-height: 0;
+  overflow: auto;
+}
+
+.auction-chart-panel {
+  padding: 0.45rem;
+}
+
+.auction-profile-host {
+  min-height: 520px;
+}
+
+.auction-panel-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.75rem;
+  margin-bottom: 0.65rem;
+  color: var(--accent-strong);
+  font-size: 0.76rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.auction-context-block {
+  padding: 0.7rem;
+  margin-bottom: 0.8rem;
+}
+
+.auction-context-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.45rem 0.75rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.auction-context-grid strong {
+  color: var(--text);
+  font-weight: 600;
+  text-align: right;
+}
+
+.auction-reference-list,
+.auction-ladder {
+  display: grid;
+  gap: 0.45rem;
+  margin-bottom: 0.9rem;
+}
+
+.auction-ref-row,
+.auction-ladder-row {
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.6rem 0.7rem;
+}
+
+.auction-ref-head,
+.auction-ladder-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.6rem;
+  align-items: baseline;
+}
+
+.auction-ref-kind,
+.auction-ladder-label {
+  color: var(--accent-strong);
+  font-size: 0.76rem;
+}
+
+.auction-ref-price,
+.auction-ladder-value {
+  color: var(--text);
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.auction-event-ribbon {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+}
+
+.auction-event-chip {
+  min-width: 180px;
+  max-width: 280px;
+  padding: 0.65rem 0.75rem;
+}
+
+.auction-event-title {
+  color: var(--accent-strong);
+  font-size: 0.76rem;
+}
+
+.auction-event-price {
+  margin-top: 0.22rem;
+  color: var(--text);
+  font-size: 0.92rem;
+  font-weight: 600;
+}
+
+.auction-event-chip.is-up .auction-event-price {
+  color: #baf7df;
+}
+
+.auction-event-chip.is-down .auction-event-price {
+  color: #ff9fb2;
 }
 
 .trade-sidebar-section {
@@ -1099,5 +1293,14 @@ input {
   .sql-panel-toolbar {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .auction-status-strip,
+  .auction-content-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .auction-profile-host {
+    min-height: 260px;
   }
 }

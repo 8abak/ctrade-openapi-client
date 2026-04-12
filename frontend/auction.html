@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>datavis.au | Auction</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body class="page-live page-auction">
+  <div class="live-workspace is-sidebar-collapsed" id="auctionWorkspace">
+    <button
+      class="ghost-button live-sidebar-toggle"
+      id="sidebarToggle"
+      type="button"
+      aria-controls="auctionSidebar"
+      aria-expanded="false"
+      aria-label="Open auction controls"
+    >
+      <span class="live-sidebar-toggle-bars" aria-hidden="true">
+        <span></span>
+        <span></span>
+        <span></span>
+      </span>
+      <span class="sr-only">Toggle auction controls</span>
+    </button>
+
+    <button
+      class="live-sidebar-backdrop"
+      id="sidebarBackdrop"
+      type="button"
+      aria-hidden="true"
+      tabindex="-1"
+    ></button>
+
+    <aside class="panel live-sidebar" id="auctionSidebar">
+      <div class="live-sidebar-scroll">
+        <header class="live-sidebar-header">
+          <a class="back-link" href="/">datavis.au</a>
+          <h1>Auction</h1>
+          <p class="live-sidebar-copy">Tick-native auction intelligence over raw XAUUSD flow. Value, acceptance, references, and action gating update live or in review.</p>
+          <div class="meta-strip" id="auctionMeta">Waiting for auction context...</div>
+          <div class="meta-strip" id="auctionPerf">Stream down.</div>
+          <div class="status-line live-status" id="statusLine">Ready.</div>
+        </header>
+
+        <section class="live-sidebar-section">
+          <div class="live-form-grid">
+            <div class="live-control-field live-control-field-wide">
+              <span>mode</span>
+              <div class="segmented" id="modeToggle">
+                <button type="button" data-value="live">Live</button>
+                <button type="button" data-value="review">Review</button>
+              </div>
+            </div>
+
+            <div class="live-control-field live-control-field-wide">
+              <span>run state</span>
+              <div class="segmented" id="runToggle">
+                <button type="button" data-value="run">Run</button>
+                <button type="button" data-value="stop">Stop</button>
+              </div>
+            </div>
+
+            <label class="live-control-field-wide">
+              <span>focus window</span>
+              <select id="focusKind">
+                <option value="brokerday">Broker Day</option>
+                <option value="london">London Session</option>
+                <option value="newyork">New York Session</option>
+                <option value="rolling15m">Rolling 15m</option>
+                <option value="rolling60m">Rolling 60m</option>
+                <option value="rolling240m">Rolling 240m</option>
+                <option value="rolling24h">Rolling 24h</option>
+              </select>
+            </label>
+
+            <label>
+              <span>review start id</span>
+              <input id="tickId" type="number" min="1" inputmode="numeric" placeholder="start id">
+            </label>
+
+            <label>
+              <span>chart window</span>
+              <input id="windowSize" type="number" min="200" max="10000" inputmode="numeric" value="2000">
+            </label>
+
+            <label class="live-control-field-wide review-start-field">
+              <span>review start (Sydney)</span>
+              <input id="reviewStart" type="datetime-local" step="1">
+            </label>
+
+            <div class="live-control-field live-control-field-wide review-speed-control">
+              <span>review speed</span>
+              <div class="segmented single-select" id="reviewSpeedToggle" aria-label="Review speed">
+                <button type="button" data-value="0.5">0.5x</button>
+                <button type="button" data-value="1">1x</button>
+                <button type="button" data-value="2">2x</button>
+                <button type="button" data-value="3">3x</button>
+                <button type="button" data-value="5">5x</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="live-inline-actions">
+            <button class="primary-button compact-button" id="applyButton" type="button">Load</button>
+          </div>
+        </section>
+      </div>
+    </aside>
+
+    <section class="auction-stage">
+      <section class="auction-status-strip" id="statusStrip"></section>
+
+      <div class="auction-content-grid">
+        <aside class="panel auction-context-panel">
+          <div class="auction-panel-head">
+            <span>Context</span>
+            <span class="auction-panel-muted" id="focusLabel">Broker Day</span>
+          </div>
+          <div class="auction-context-block" id="focusSummary"></div>
+          <div class="auction-panel-head">
+            <span>Nearest References</span>
+          </div>
+          <div class="auction-reference-list" id="referenceList">
+            <div class="sql-empty">No references yet.</div>
+          </div>
+          <div class="auction-panel-head">
+            <span>Multi-Window Ladder</span>
+          </div>
+          <div class="auction-ladder" id="ladderList">
+            <div class="sql-empty">No ladder rows yet.</div>
+          </div>
+        </aside>
+
+        <div class="panel chart-panel live-chart-panel auction-chart-panel" id="chartPanel">
+          <div id="auctionChart" class="chart-host"></div>
+        </div>
+
+        <aside class="panel auction-profile-panel">
+          <div class="auction-panel-head">
+            <span>Profile</span>
+            <span class="auction-panel-muted" id="profileLabel">Activity</span>
+          </div>
+          <div id="auctionProfileChart" class="chart-host auction-profile-host"></div>
+        </aside>
+      </div>
+
+      <section class="panel auction-events-panel">
+        <div class="auction-panel-head">
+          <span>Recent Events</span>
+          <span class="auction-panel-muted" id="eventCount">0</span>
+        </div>
+        <div class="auction-event-ribbon" id="eventRibbon">
+          <div class="sql-empty">No auction events yet.</div>
+        </div>
+      </section>
+    </section>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+  <script src="/assets/auction.js"></script>
+</body>
+</html>
