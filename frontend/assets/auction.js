@@ -17,6 +17,12 @@
   const MAX_WINDOW = 10000;
   const REVIEW_SPEEDS = [0.5, 1, 2, 3, 5];
   const HISTORY_REFRESH_DELAY_MS = 160;
+  const MIN_VISIBLE_PRICE_RANGE = 6;
+  const MAX_DEFAULT_PRICE_RANGE = 28;
+  const DEFAULT_PRICE_RANGE_PER_PIXEL = 0.024;
+  const MIN_NAVIGATION_PRICE_MARGIN = 4;
+  const LIVE_EDGE_TOLERANCE_MS = 5000;
+  const EVENT_PREVIEW_COUNT = 3;
   const FOCUS_LABELS = {
     brokerday: "Broker Day",
     london: "London Session",
@@ -49,6 +55,15 @@
       lastRangeKey: "",
     },
     loadToken: 0,
+    view: {
+      followLive: true,
+      fitMode: "price",
+      yRange: null,
+      xRange: null,
+      userLockedY: false,
+      eventsCollapsed: true,
+      applyingZoom: false,
+    },
     ui: { sidebarCollapsed: true },
   };
 
@@ -80,8 +95,17 @@
     referenceList: document.getElementById("referenceList"),
     ladderList: document.getElementById("ladderList"),
     profileLabel: document.getElementById("profileLabel"),
+    followLiveButton: document.getElementById("followLiveButton"),
+    fitPriceActionButton: document.getElementById("fitPriceActionButton"),
+    fitAuctionRefsButton: document.getElementById("fitAuctionRefsButton"),
+    resetViewButton: document.getElementById("resetViewButton"),
+    chartViewLabel: document.getElementById("chartViewLabel"),
+    eventsPanel: document.getElementById("eventsPanel"),
+    eventsToggle: document.getElementById("eventsToggle"),
     eventCount: document.getElementById("eventCount"),
+    eventPreview: document.getElementById("eventPreview"),
     eventRibbon: document.getElementById("eventRibbon"),
+    eventListShell: document.getElementById("eventListShell"),
     chartHost: document.getElementById("auctionChart"),
     profileChartHost: document.getElementById("auctionProfileChart"),
   };
@@ -123,6 +147,92 @@
       return "neutral";
     }
     return number > 0 ? "positive" : "negative";
+  }
+
+  function collectNumbers(values) {
+    return (values || []).map(function (value) { return Number(value); }).filter(function (value) { return Number.isFinite(value); });
+  }
+
+  function normalizeRange(minValue, maxValue, fallbackSpan) {
+    const min = Number(minValue);
+    const max = Number(maxValue);
+    const span = Math.max(0.5, Number(fallbackSpan) || 1);
+    if (!Number.isFinite(min) && !Number.isFinite(max)) {
+      return null;
+    }
+    if (!Number.isFinite(min)) {
+      return { min: max - span, max: max };
+    }
+    if (!Number.isFinite(max)) {
+      return { min: min, max: min + span };
+    }
+    if (min === max) {
+      return { min: min - (span / 2), max: max + (span / 2) };
+    }
+    return min < max ? { min: min, max: max } : { min: max, max: min };
+  }
+
+  function clampRange(range, bounds) {
+    if (!range || !bounds) {
+      return range || bounds || null;
+    }
+    const boundSpan = Math.max(0.5, bounds.max - bounds.min);
+    const targetSpan = Math.min(Math.max(0.5, range.max - range.min), boundSpan);
+    let min = range.min;
+    let max = range.max;
+    if (!Number.isFinite(min) || !Number.isFinite(max)) {
+      return { min: bounds.min, max: bounds.max };
+    }
+    if (targetSpan >= boundSpan) {
+      return { min: bounds.min, max: bounds.max };
+    }
+    if (min < bounds.min) {
+      max += bounds.min - min;
+      min = bounds.min;
+    }
+    if (max > bounds.max) {
+      min -= max - bounds.max;
+      max = bounds.max;
+    }
+    if (min < bounds.min) {
+      min = bounds.min;
+    }
+    if (max > bounds.max) {
+      max = bounds.max;
+    }
+    return { min: min, max: max };
+  }
+
+  function rangeFromNumbers(values, padding) {
+    const numbers = collectNumbers(values);
+    if (!numbers.length) {
+      return null;
+    }
+    const min = Math.min.apply(null, numbers);
+    const max = Math.max.apply(null, numbers);
+    const pad = Math.max(0.4, Number(padding) || 0);
+    return normalizeRange(min - pad, max + pad, pad * 2);
+  }
+
+  function readDataZoomWindow(id) {
+    if (!state.chart) {
+      return null;
+    }
+    const option = state.chart.getOption();
+    const zoom = (option.dataZoom || []).find(function (item) { return item.id === id; });
+    if (!zoom) {
+      return null;
+    }
+    const startValue = Number(zoom.startValue);
+    const endValue = Number(zoom.endValue);
+    if (!Number.isFinite(startValue) || !Number.isFinite(endValue)) {
+      return null;
+    }
+    return normalizeRange(startValue, endValue, 1);
+  }
+
+  function chartHeight() {
+    return Math.max(320, elements.chartHost?.clientHeight || 0);
   }
 
   function currentFocusLabel() {
@@ -499,9 +609,290 @@
     }).join("");
   }
 
+  function setEventsCollapsed(collapsed) {
+    state.view.eventsCollapsed = Boolean(collapsed);
+    elements.eventsPanel.classList.toggle("is-collapsed", state.view.eventsCollapsed);
+    elements.eventsToggle.textContent = state.view.eventsCollapsed ? "Expand" : "Collapse";
+    elements.eventsToggle.setAttribute("aria-expanded", String(!state.view.eventsCollapsed));
+    elements.eventListShell.hidden = state.view.eventsCollapsed;
+  }
+
+  function renderViewControls() {
+    elements.followLiveButton.classList.toggle("is-active", state.view.followLive);
+    elements.fitPriceActionButton.classList.toggle("is-active", state.view.fitMode === "price" && !state.view.userLockedY);
+    elements.fitAuctionRefsButton.classList.toggle("is-active", state.view.fitMode === "refs" && !state.view.userLockedY);
+    if (state.view.userLockedY) {
+      elements.chartViewLabel.textContent = "Custom chart view preserved on live updates.";
+      return;
+    }
+    if (state.view.fitMode === "refs") {
+      elements.chartViewLabel.textContent = "Showing price action with auction references in frame.";
+      return;
+    }
+    elements.chartViewLabel.textContent = state.view.followLive
+      ? "Centered on active price action while following live."
+      : "Centered on active price action without snapping back.";
+  }
+
+  function resetChartView() {
+    state.view.followLive = true;
+    state.view.fitMode = "price";
+    state.view.xRange = null;
+    state.view.yRange = null;
+    state.view.userLockedY = false;
+  }
+
+  function fitPriceActionView() {
+    state.view.fitMode = "price";
+    state.view.yRange = null;
+    state.view.userLockedY = false;
+    renderChart();
+  }
+
+  function fitAuctionReferenceView() {
+    state.view.fitMode = "refs";
+    state.view.yRange = null;
+    state.view.userLockedY = false;
+    renderChart();
+  }
+
+  function priceValuesFromRows(rows) {
+    return (rows || []).map(function (row) { return Number(row.mid); }).filter(function (value) { return Number.isFinite(value); });
+  }
+
+  function activeRowsForVisibleWindow() {
+    if (!state.rows.length || !state.view.xRange) {
+      return state.rows.slice();
+    }
+    const visibleRows = state.rows.filter(function (row) {
+      const ts = Number(row.timestampMs);
+      return ts >= state.view.xRange.min && ts <= state.view.xRange.max;
+    });
+    return visibleRows.length ? visibleRows : state.rows.slice();
+  }
+
+  function focusReferencePrices(config) {
+    const focus = state.auction?.focusWindow || null;
+    const prices = [];
+    if (!focus) {
+      return prices;
+    }
+    if (config.showValueArea) {
+      prices.push(focus.vahPrice, focus.valPrice);
+    }
+    if (config.showPoc) {
+      prices.push(focus.pocPrice);
+    }
+    if (config.showRefs) {
+      (focus.references || []).forEach(function (ref) {
+        prices.push(ref.price);
+      });
+    }
+    return collectNumbers(prices);
+  }
+
+  function historyReferencePrices(config) {
+    if (!config.showHistory) {
+      return [];
+    }
+    const prices = [];
+    state.history.sessions.forEach(function (session) {
+      if (config.showValueArea) {
+        prices.push(session.vahPrice, session.valPrice);
+      }
+      if (config.showPoc) {
+        prices.push(session.pocPrice);
+      }
+      if (config.showRefs) {
+        (session.refs || []).forEach(function (ref) {
+          prices.push(ref.price);
+        });
+      }
+      prices.push(session.highPrice, session.lowPrice);
+      if (config.showEvents) {
+        (session.events || []).forEach(function (event) {
+          prices.push(event.price1, event.price2);
+        });
+      }
+    });
+    return collectNumbers(prices);
+  }
+
+  function auctionEventPrices(config) {
+    if (!config.showEvents) {
+      return [];
+    }
+    return collectNumbers((state.auction?.events || []).flatMap(function (event) {
+      return [event.price1, event.price2];
+    }));
+  }
+
+  function computeNavigationYRange(config) {
+    const prices = []
+      .concat(priceValuesFromRows(state.rows))
+      .concat(focusReferencePrices(config))
+      .concat(historyReferencePrices(config))
+      .concat(auctionEventPrices(config));
+    const numeric = collectNumbers(prices);
+    if (!numeric.length) {
+      return null;
+    }
+    const min = Math.min.apply(null, numeric);
+    const max = Math.max.apply(null, numeric);
+    const margin = Math.max(MIN_NAVIGATION_PRICE_MARGIN, (max - min) * 0.12);
+    return normalizeRange(min - margin, max + margin, margin * 2);
+  }
+
+  function anchorVisiblePrice(rows, focus) {
+    const lastRow = rows.length ? rows[rows.length - 1] : null;
+    return Number(lastRow?.mid ?? focus?.closePrice ?? focus?.pocPrice ?? 0);
+  }
+
+  function centeredRange(anchor, span, requiredMin, requiredMax) {
+    const safeSpan = Math.max(0.5, span);
+    let min = anchor - (safeSpan / 2);
+    let max = anchor + (safeSpan / 2);
+    if (Number.isFinite(requiredMin) && requiredMin < min) {
+      max += min - requiredMin;
+      min = requiredMin;
+    }
+    if (Number.isFinite(requiredMax) && requiredMax > max) {
+      min -= requiredMax - max;
+      max = requiredMax;
+    }
+    return normalizeRange(min, max, safeSpan);
+  }
+
+  function computePriceActionYRange(config, navigationRange) {
+    const focus = state.auction?.focusWindow || null;
+    const visibleRows = activeRowsForVisibleWindow();
+    const rowPrices = priceValuesFromRows(visibleRows);
+    if (!rowPrices.length) {
+      return navigationRange;
+    }
+    const rowMin = Math.min.apply(null, rowPrices);
+    const rowMax = Math.max.apply(null, rowPrices);
+    const rowSpan = Math.max(0.6, rowMax - rowMin);
+    const padding = Math.max(0.8, rowSpan * 0.5);
+    const baseSpan = Math.min(
+      MAX_DEFAULT_PRICE_RANGE,
+      Math.max(MIN_VISIBLE_PRICE_RANGE, rowSpan + (padding * 2), chartHeight() * DEFAULT_PRICE_RANGE_PER_PIXEL)
+    );
+    const nearbyLimit = Math.max(baseSpan * 0.7, 4);
+    const anchor = anchorVisiblePrice(visibleRows, focus);
+    const nearbyRefs = focusReferencePrices(config).filter(function (price) {
+      return Math.abs(price - anchor) <= nearbyLimit;
+    });
+    const nearbyEvents = auctionEventPrices(config).filter(function (price) {
+      return Math.abs(price - anchor) <= nearbyLimit;
+    });
+    const requiredValues = rowPrices.concat(nearbyRefs).concat(nearbyEvents);
+    const requiredMin = Math.min.apply(null, requiredValues);
+    const requiredMax = Math.max.apply(null, requiredValues);
+    return clampRange(centeredRange(anchor, baseSpan, requiredMin - 0.5, requiredMax + 0.5), navigationRange);
+  }
+
+  function computeReferenceFitYRange(config, navigationRange) {
+    const focus = state.auction?.focusWindow || null;
+    const prices = priceValuesFromRows(activeRowsForVisibleWindow())
+      .concat(focusReferencePrices(config))
+      .concat(auctionEventPrices(config));
+    if (config.showHistory) {
+      prices.push.apply(prices, historyReferencePrices(config));
+    }
+    const fitRange = rangeFromNumbers(prices, 0.9);
+    return clampRange(fitRange || navigationRange, navigationRange);
+  }
+
+  function resolveXRange(xBounds) {
+    if (!xBounds) {
+      return null;
+    }
+    if (!state.view.xRange) {
+      return { min: xBounds.min, max: xBounds.max };
+    }
+    if (state.view.followLive) {
+      const span = Math.max(1000, state.view.xRange.max - state.view.xRange.min);
+      return clampRange({ min: xBounds.max - span, max: xBounds.max }, xBounds);
+    }
+    return clampRange(state.view.xRange, xBounds);
+  }
+
+  function resolveYRange(config, navigationRange) {
+    if (!navigationRange) {
+      return null;
+    }
+    if (state.view.userLockedY && state.view.yRange) {
+      return clampRange(state.view.yRange, navigationRange);
+    }
+    return state.view.fitMode === "refs"
+      ? computeReferenceFitYRange(config, navigationRange)
+      : computePriceActionYRange(config, navigationRange);
+  }
+
+  function syncChartViewState(eventInfo) {
+    if (!state.chart || state.view.applyingZoom) {
+      return;
+    }
+    const ids = []
+      .concat(eventInfo?.dataZoomId || [])
+      .concat((eventInfo?.batch || []).map(function (item) { return item.dataZoomId; }).filter(Boolean));
+    const touchedY = !ids.length || ids.some(function (id) { return String(id).indexOf("auction-y-") === 0; });
+    const xRange = readDataZoomWindow("auction-x-slider");
+    const yRange = readDataZoomWindow("auction-y-slider");
+    if (xRange) {
+      state.view.xRange = xRange;
+      const latestTs = Number(state.rows[state.rows.length - 1]?.timestampMs || 0);
+      state.view.followLive = latestTs > 0 && Math.abs(latestTs - xRange.max) <= LIVE_EDGE_TOLERANCE_MS;
+    }
+    const yChanged = yRange && (
+      !state.view.yRange
+      || Math.abs(state.view.yRange.min - yRange.min) > 0.0001
+      || Math.abs(state.view.yRange.max - yRange.max) > 0.0001
+    );
+    if (touchedY && yRange && yChanged) {
+      state.view.yRange = yRange;
+      state.view.userLockedY = true;
+      state.view.fitMode = "manual";
+    }
+    renderViewControls();
+    syncProfileViewport();
+  }
+
+  function syncProfileViewport() {
+    if (!state.profileChart) {
+      return;
+    }
+    const yRange = state.view.yRange;
+    if (!yRange) {
+      return;
+    }
+    state.profileChart.setOption({
+      yAxis: {
+        min: yRange.min,
+        max: yRange.max,
+      },
+    });
+  }
+
   function renderEvents() {
     const events = state.auction?.events || [];
     elements.eventCount.textContent = String(events.length);
+    const preview = events.slice(0, EVENT_PREVIEW_COUNT);
+    if (!preview.length) {
+      elements.eventPreview.innerHTML = "<div class=\"sql-empty\">No auction events yet.</div>";
+    } else {
+      elements.eventPreview.innerHTML = preview.map(function (event) {
+        const tone = String(event.direction || "").toLowerCase() === "down" ? "down" : "up";
+        return [
+          "<article class=\"auction-event-preview-chip is-", tone, "\">",
+          "<div class=\"auction-event-title\">", escapeHtml(event.eventKind || "Event"), "</div>",
+          "<div class=\"auction-event-price\">", escapeHtml(formatPrice(event.price1)), event.price2 != null ? " -> " + escapeHtml(formatPrice(event.price2)) : "", "</div>",
+          "<div class=\"auction-event-meta\">", escapeHtml(event.windowLabel || event.windowKind || "window"), "</div>",
+          "</article>",
+        ].join("");
+      }).join("");
+    }
     if (!events.length) {
       elements.eventRibbon.innerHTML = "<div class=\"sql-empty\">No auction events yet.</div>";
       return;
@@ -509,10 +900,15 @@
     elements.eventRibbon.innerHTML = events.map(function (event) {
       const tone = String(event.direction || "").toLowerCase() === "down" ? "down" : "up";
       return [
-        "<article class=\"auction-event-chip is-", tone, "\">",
+        "<article class=\"auction-event-row is-", tone, "\">",
+        "<div class=\"auction-event-main\">",
         "<div class=\"auction-event-title\">", escapeHtml(event.eventKind || "Event"), "</div>",
+        "<div class=\"auction-event-meta\">", escapeHtml(event.windowLabel || event.windowKind || "window"), "</div>",
+        "</div>",
+        "<div class=\"auction-event-side\">",
         "<div class=\"auction-event-price\">", escapeHtml(formatPrice(event.price1)), event.price2 != null ? " -> " + escapeHtml(formatPrice(event.price2)) : "", "</div>",
-        "<div class=\"auction-event-meta\">", escapeHtml([(event.windowLabel || event.windowKind || "window"), "strength " + String(event.strength ?? "-")].join(" | ")), "</div>",
+        "<div class=\"auction-event-meta\">strength ", escapeHtml(String(event.strength ?? "-")), "</div>",
+        "</div>",
         "</article>",
       ].join("");
     }).join("");
@@ -547,11 +943,60 @@
         animation: false,
         backgroundColor: "transparent",
         tooltip: { trigger: "axis", axisPointer: { type: "cross" }, formatter: chartTooltip },
-        grid: { left: 56, right: 18, top: 24, bottom: 44 },
-        xAxis: { type: "time", axisLabel: { color: "#91a1b8" }, axisLine: { lineStyle: { color: "rgba(147,181,255,0.16)" } } },
-        yAxis: { type: "value", scale: true, axisLabel: { color: "#91a1b8" }, splitLine: { lineStyle: { color: "rgba(147,181,255,0.08)" } } },
-        dataZoom: [{ type: "inside", zoomOnMouseWheel: true, moveOnMouseWheel: true }, { type: "slider", height: 20, bottom: 10 }],
+        grid: { left: 56, right: 36, top: 24, bottom: 44 },
+        xAxis: {
+          type: "time",
+          axisLabel: { color: "#91a1b8" },
+          axisLine: { lineStyle: { color: "rgba(147,181,255,0.16)" } },
+        },
+        yAxis: {
+          type: "value",
+          scale: true,
+          axisLabel: { color: "#91a1b8" },
+          splitLine: { lineStyle: { color: "rgba(147,181,255,0.08)" } },
+        },
+        dataZoom: [
+          {
+            id: "auction-x-inside",
+            type: "inside",
+            xAxisIndex: 0,
+            filterMode: "none",
+            zoomOnMouseWheel: false,
+            moveOnMouseMove: true,
+            moveOnMouseWheel: false,
+          },
+          {
+            id: "auction-x-slider",
+            type: "slider",
+            xAxisIndex: 0,
+            filterMode: "none",
+            height: 20,
+            bottom: 10,
+          },
+          {
+            id: "auction-y-inside",
+            type: "inside",
+            yAxisIndex: 0,
+            filterMode: "none",
+            zoomOnMouseWheel: true,
+            moveOnMouseMove: true,
+            moveOnMouseWheel: false,
+          },
+          {
+            id: "auction-y-slider",
+            type: "slider",
+            yAxisIndex: 0,
+            filterMode: "none",
+            width: 14,
+            right: 10,
+            top: 24,
+            bottom: 44,
+          },
+        ],
         series: [],
+      });
+      state.chart.on("datazoom", function (eventInfo) {
+        syncChartViewState(eventInfo);
       });
     }
     if (!state.profileChart) {
@@ -655,24 +1100,14 @@
         });
       })
       : [];
-
-    const priceValues = rowData.map(function (item) { return Number(item.value[1]); });
-    if (focus?.highPrice != null) {
-      [focus.highPrice, focus.lowPrice, focus.vahPrice, focus.valPrice, focus.pocPrice].forEach(function (value) {
-        if (value != null) {
-          priceValues.push(Number(value));
-        }
-      });
-    }
-    state.history.sessions.forEach(function (session) {
-      [session.pocPrice, session.vahPrice, session.valPrice, session.highPrice, session.lowPrice].forEach(function (value) {
-        if (value != null) {
-          priceValues.push(Number(value));
-        }
-      });
-    });
-    const minPrice = priceValues.length ? Math.min.apply(null, priceValues) - 0.4 : null;
-    const maxPrice = priceValues.length ? Math.max.apply(null, priceValues) + 0.4 : null;
+    const xBounds = rowData.length
+      ? normalizeRange(rowData[0].value[0], rowData[rowData.length - 1].value[0], 1000)
+      : null;
+    const navigationYRange = computeNavigationYRange(config);
+    const xRange = resolveXRange(xBounds);
+    const yRange = resolveYRange(config, navigationYRange);
+    state.view.xRange = xRange;
+    state.view.yRange = yRange;
 
     const lineStyleByRef = {
       POC: { color: "#ffb35c", type: "solid" },
@@ -768,10 +1203,20 @@
       });
     }
 
+    state.view.applyingZoom = true;
     state.chart.setOption({
-      yAxis: { min: minPrice, max: maxPrice },
+      xAxis: xBounds ? { min: xBounds.min, max: xBounds.max } : {},
+      yAxis: navigationYRange ? { min: navigationYRange.min, max: navigationYRange.max } : {},
+      dataZoom: [
+        xRange ? { id: "auction-x-inside", startValue: xRange.min, endValue: xRange.max } : { id: "auction-x-inside" },
+        xRange ? { id: "auction-x-slider", startValue: xRange.min, endValue: xRange.max } : { id: "auction-x-slider" },
+        yRange ? { id: "auction-y-inside", startValue: yRange.min, endValue: yRange.max } : { id: "auction-y-inside" },
+        yRange ? { id: "auction-y-slider", startValue: yRange.min, endValue: yRange.max } : { id: "auction-y-slider" },
+      ],
       series: series,
     });
+    state.view.applyingZoom = false;
+    renderViewControls();
 
     const profile = focus?.profile || [];
     elements.profileLabel.textContent = focus?.label || "Activity";
@@ -782,8 +1227,8 @@
       xAxis: { type: "value", axisLabel: { color: "#91a1b8" }, splitLine: { show: false } },
       yAxis: {
         type: "value",
-        min: minPrice,
-        max: maxPrice,
+        min: yRange?.min,
+        max: yRange?.max,
         axisLabel: { color: "#91a1b8", formatter: function (value) { return Number(value).toFixed(2); } },
         splitLine: { lineStyle: { color: "rgba(147,181,255,0.08)" } },
       },
@@ -925,6 +1370,8 @@
     const token = state.loadToken + 1;
     state.loadToken = token;
     clearActivity();
+    resetChartView();
+    renderViewControls();
     writeQuery();
     try {
       await loadBootstrap();
@@ -950,9 +1397,12 @@
     elements.windowSize.value = String(config.window);
     elements.reviewStart.value = config.reviewStart;
     setSidebarCollapsed(true);
+    setEventsCollapsed(true);
+    resetChartView();
     updateReviewFields();
     renderMeta();
     renderPerf();
+    renderViewControls();
     writeQuery();
   }
 
@@ -1007,12 +1457,35 @@
   elements.sidebarToggle.addEventListener("click", function () { setSidebarCollapsed(!state.ui.sidebarCollapsed); });
   elements.sidebarBackdrop.addEventListener("click", function () { setSidebarCollapsed(true); });
   elements.applyButton.addEventListener("click", function () { loadAll(); });
+  elements.followLiveButton.addEventListener("click", function () {
+    state.view.followLive = !state.view.followLive;
+    if (state.view.followLive) {
+      state.view.xRange = null;
+      renderChart();
+    } else {
+      renderViewControls();
+    }
+  });
+  elements.fitPriceActionButton.addEventListener("click", function () { fitPriceActionView(); });
+  elements.fitAuctionRefsButton.addEventListener("click", function () { fitAuctionReferenceView(); });
+  elements.resetViewButton.addEventListener("click", function () {
+    resetChartView();
+    renderChart();
+  });
+  elements.eventsToggle.addEventListener("click", function () {
+    setEventsCollapsed(!state.view.eventsCollapsed);
+  });
   window.addEventListener("resize", function () {
     if (state.chart) {
       state.chart.resize();
     }
     if (state.profileChart) {
       state.profileChart.resize();
+    }
+    if (state.rows.length && !state.view.userLockedY) {
+      renderChart();
+    } else {
+      syncProfileViewport();
     }
   });
   window.addEventListener("keydown", function (event) {

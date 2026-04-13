@@ -168,6 +168,15 @@
         </aside>
 
         <div class="panel chart-panel live-chart-panel auction-chart-panel" id="chartPanel">
+          <div class="auction-chart-toolbar">
+            <div class="auction-chart-actions">
+              <button class="ghost-button compact-button auction-chart-button" id="followLiveButton" type="button">Follow Live</button>
+              <button class="ghost-button compact-button auction-chart-button" id="fitPriceActionButton" type="button">Fit Price Action</button>
+              <button class="ghost-button compact-button auction-chart-button" id="fitAuctionRefsButton" type="button">Fit Auction References</button>
+              <button class="ghost-button compact-button auction-chart-button" id="resetViewButton" type="button">Reset View</button>
+            </div>
+            <div class="auction-chart-note" id="chartViewLabel">Centered on active price action.</div>
+          </div>
           <div id="auctionChart" class="chart-host"></div>
         </div>
 
@@ -180,13 +189,21 @@
         </aside>
       </div>
 
-      <section class="panel auction-events-panel">
-        <div class="auction-panel-head">
-          <span>Recent Events</span>
-          <span class="auction-panel-muted" id="eventCount">0</span>
+      <section class="panel auction-events-panel is-collapsed" id="eventsPanel">
+        <div class="auction-panel-head auction-events-head">
+          <div class="auction-events-title-group">
+            <span>Recent Events</span>
+            <span class="auction-panel-muted" id="eventCount">0</span>
+          </div>
+          <button class="ghost-button compact-button auction-events-toggle" id="eventsToggle" type="button" aria-controls="eventListShell" aria-expanded="false">Expand</button>
         </div>
-        <div class="auction-event-ribbon" id="eventRibbon">
+        <div class="auction-event-preview" id="eventPreview">
           <div class="sql-empty">No auction events yet.</div>
+        </div>
+        <div class="auction-event-list-shell" id="eventListShell" hidden>
+          <div class="auction-event-ribbon" id="eventRibbon">
+            <div class="sql-empty">No auction events yet.</div>
+          </div>
         </div>
       </section>
     </section>
