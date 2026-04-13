@@ -413,7 +413,7 @@ select {
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 0.75rem;
 }
 
@@ -479,20 +479,8 @@ select {
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-columns: 280px minmax(0, 1fr) 240px;
+  grid-template-columns: minmax(208px, 240px) minmax(0, 1fr) minmax(260px, 320px);
   gap: 0.75rem;
-}
-
-.auction-context-panel,
-.auction-profile-panel,
-.auction-events-panel {
-  padding: 0.85rem;
-}
-
-.auction-context-panel,
-.auction-profile-panel {
-  min-height: 0;
-  overflow: auto;
 }
 
 .auction-chart-panel {
@@ -502,8 +490,93 @@ select {
   gap: 0.45rem;
 }
 
+.auction-utility-panel,
+.auction-profile-panel {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.auction-utility-panel {
+  padding: 0.55rem;
+  display: grid;
+  align-content: start;
+  gap: 0.55rem;
+}
+
+.auction-accordion {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(8, 14, 23, 0.94);
+  overflow: hidden;
+}
+
+.auction-accordion-toggle {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.72rem 0.78rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.auction-accordion-toggle::-webkit-details-marker {
+  display: none;
+}
+
+.auction-accordion-toggle::after {
+  content: "+";
+  color: var(--muted);
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.88rem;
+}
+
+.auction-accordion[open] > .auction-accordion-toggle::after {
+  content: "-";
+}
+
+.auction-accordion-title-group {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.auction-accordion-title {
+  color: var(--accent-strong);
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.75rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.auction-accordion-summary {
+  min-width: 0;
+  color: var(--muted);
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.7rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.auction-accordion-body {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0 0.78rem 0.78rem;
+}
+
+.auction-profile-panel {
+  padding: 0.7rem 0.75rem 0.8rem;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 0.5rem;
+}
+
 .auction-profile-host {
-  min-height: 520px;
+  min-height: 0;
+  height: 100%;
 }
 
 .auction-chart-toolbar {
@@ -541,7 +614,7 @@ select {
 }
 
 .auction-chart-panel .chart-host {
-  min-height: 560px;
+  min-height: 0;
 }
 
 .auction-panel-head {
@@ -579,7 +652,6 @@ select {
 .auction-ladder {
   display: grid;
   gap: 0.45rem;
-  margin-bottom: 0.9rem;
 }
 
 .auction-ref-row,
@@ -610,63 +682,15 @@ select {
   font-weight: 600;
 }
 
-.auction-events-panel {
-  display: grid;
-  gap: 0.55rem;
-  align-content: start;
-}
-
-.auction-events-head {
-  margin-bottom: 0;
-}
-
-.auction-events-title-group {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 0.55rem;
-}
-
-.auction-events-toggle {
-  min-width: 96px;
-  justify-self: end;
-  font-size: 0.76rem;
-}
-
-.auction-event-preview {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.45rem;
-}
-
-.auction-events-panel:not(.is-collapsed) .auction-event-preview {
-  display: none;
-}
-
-.auction-event-preview-chip,
 .auction-event-row {
   border: 1px solid var(--line);
   border-radius: 10px;
   background: rgba(8, 14, 23, 0.94);
 }
 
-.auction-event-preview-chip {
-  display: grid;
-  gap: 0.2rem;
-  min-width: 0;
-  max-width: 260px;
-  padding: 0.45rem 0.6rem;
-}
-
-.auction-event-preview-chip .auction-event-title {
-  font-size: 0.72rem;
-}
-
-.auction-event-preview-chip .auction-event-price {
-  font-size: 0.82rem;
-}
-
 .auction-event-list-shell {
-  max-height: 220px;
+  min-height: 0;
+  max-height: 42vh;
   overflow: auto;
   padding-right: 0.1rem;
 }
@@ -711,13 +735,11 @@ select {
   line-height: 1.35;
 }
 
-.auction-event-row.is-up .auction-event-price,
-.auction-event-preview-chip.is-up .auction-event-price {
+.auction-event-row.is-up .auction-event-price {
   color: #baf7df;
 }
 
-.auction-event-row.is-down .auction-event-price,
-.auction-event-preview-chip.is-down .auction-event-price {
+.auction-event-row.is-down .auction-event-price {
   color: #ff9fb2;
 }
 
@@ -1423,6 +1445,15 @@ select {
   .auction-chart-toolbar,
   .auction-chart-actions {
     align-items: stretch;
+  }
+
+  .auction-accordion-toggle {
+    grid-template-columns: 1fr auto;
+  }
+
+  .auction-accordion-summary {
+    grid-column: 1 / 2;
+    white-space: normal;
   }
 
   .auction-chart-note {

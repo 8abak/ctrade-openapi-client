@@ -17,12 +17,8 @@
   const MAX_WINDOW = 10000;
   const REVIEW_SPEEDS = [0.5, 1, 2, 3, 5];
   const HISTORY_REFRESH_DELAY_MS = 160;
-  const MIN_VISIBLE_PRICE_RANGE = 6;
-  const MAX_DEFAULT_PRICE_RANGE = 28;
-  const DEFAULT_PRICE_RANGE_PER_PIXEL = 0.024;
-  const MIN_NAVIGATION_PRICE_MARGIN = 4;
-  const LIVE_EDGE_TOLERANCE_MS = 5000;
-  const EVENT_PREVIEW_COUNT = 3;
+  const MIN_VISIBLE_PRICE_RANGE = 0.6;
+  const DEFAULT_PROFILE_PRICE_STEP = 0.1;
   const FOCUS_LABELS = {
     brokerday: "Broker Day",
     london: "London Session",
@@ -60,8 +56,8 @@
       fitMode: "price",
       yRange: null,
       xRange: null,
+      userLockedX: false,
       userLockedY: false,
-      eventsCollapsed: true,
       applyingZoom: false,
     },
     ui: { sidebarCollapsed: true },
@@ -91,6 +87,7 @@
     auctionPerf: document.getElementById("auctionPerf"),
     statusStrip: document.getElementById("statusStrip"),
     focusLabel: document.getElementById("focusLabel"),
+    contextSummaryLine: document.getElementById("contextSummaryLine"),
     focusSummary: document.getElementById("focusSummary"),
     referenceList: document.getElementById("referenceList"),
     ladderList: document.getElementById("ladderList"),
@@ -101,9 +98,8 @@
     resetViewButton: document.getElementById("resetViewButton"),
     chartViewLabel: document.getElementById("chartViewLabel"),
     eventsPanel: document.getElementById("eventsPanel"),
-    eventsToggle: document.getElementById("eventsToggle"),
     eventCount: document.getElementById("eventCount"),
-    eventPreview: document.getElementById("eventPreview"),
+    eventSummaryLine: document.getElementById("eventSummaryLine"),
     eventRibbon: document.getElementById("eventRibbon"),
     eventListShell: document.getElementById("eventListShell"),
     chartHost: document.getElementById("auctionChart"),
@@ -229,10 +225,6 @@
       return null;
     }
     return normalizeRange(startValue, endValue, 1);
-  }
-
-  function chartHeight() {
-    return Math.max(320, elements.chartHost?.clientHeight || 0);
   }
 
   function currentFocusLabel() {
@@ -557,9 +549,16 @@
     const focus = state.auction?.focusWindow || null;
     elements.focusLabel.textContent = currentFocusLabel();
     if (!focus) {
+      elements.contextSummaryLine.textContent = "No auction context loaded.";
       elements.focusSummary.innerHTML = "<div class=\"sql-empty\">No focus summary yet.</div>";
       return;
     }
+    elements.contextSummaryLine.textContent = [
+      focus.stateKind || "Unknown",
+      focus.locationKind || "Unknown",
+      focus.preferredAction || "NoTrade",
+      formatPrice(focus.lowPrice) + " to " + formatPrice(focus.highPrice),
+    ].join(" | ");
     elements.focusSummary.innerHTML = [
       "<div class=\"auction-context-grid\">",
       "<span>Bracket position</span><strong>" + escapeHtml(formatPercent(focus.bracketPosition)) + "</strong>",
@@ -609,19 +608,12 @@
     }).join("");
   }
 
-  function setEventsCollapsed(collapsed) {
-    state.view.eventsCollapsed = Boolean(collapsed);
-    elements.eventsPanel.classList.toggle("is-collapsed", state.view.eventsCollapsed);
-    elements.eventsToggle.textContent = state.view.eventsCollapsed ? "Expand" : "Collapse";
-    elements.eventsToggle.setAttribute("aria-expanded", String(!state.view.eventsCollapsed));
-    elements.eventListShell.hidden = state.view.eventsCollapsed;
-  }
-
   function renderViewControls() {
-    elements.followLiveButton.classList.toggle("is-active", state.view.followLive);
+    const manualView = state.view.userLockedX || state.view.userLockedY;
+    elements.followLiveButton.classList.toggle("is-active", state.view.followLive && !state.view.userLockedX);
     elements.fitPriceActionButton.classList.toggle("is-active", state.view.fitMode === "price" && !state.view.userLockedY);
     elements.fitAuctionRefsButton.classList.toggle("is-active", state.view.fitMode === "refs" && !state.view.userLockedY);
-    if (state.view.userLockedY) {
+    if (manualView) {
       elements.chartViewLabel.textContent = "Custom chart view preserved on live updates.";
       return;
     }
@@ -629,9 +621,7 @@
       elements.chartViewLabel.textContent = "Showing price action with auction references in frame.";
       return;
     }
-    elements.chartViewLabel.textContent = state.view.followLive
-      ? "Centered on active price action while following live."
-      : "Centered on active price action without snapping back.";
+    elements.chartViewLabel.textContent = "Showing the full " + currentFocusLabel() + " price span across the loaded data window.";
   }
 
   function resetChartView() {
@@ -639,6 +629,7 @@
     state.view.fitMode = "price";
     state.view.xRange = null;
     state.view.yRange = null;
+    state.view.userLockedX = false;
     state.view.userLockedY = false;
   }
 
@@ -739,57 +730,28 @@
     }
     const min = Math.min.apply(null, numeric);
     const max = Math.max.apply(null, numeric);
-    const margin = Math.max(MIN_NAVIGATION_PRICE_MARGIN, (max - min) * 0.12);
+    const margin = Math.max(DEFAULT_PROFILE_PRICE_STEP, (max - min) * 0.03);
     return normalizeRange(min - margin, max + margin, margin * 2);
-  }
-
-  function anchorVisiblePrice(rows, focus) {
-    const lastRow = rows.length ? rows[rows.length - 1] : null;
-    return Number(lastRow?.mid ?? focus?.closePrice ?? focus?.pocPrice ?? 0);
-  }
-
-  function centeredRange(anchor, span, requiredMin, requiredMax) {
-    const safeSpan = Math.max(0.5, span);
-    let min = anchor - (safeSpan / 2);
-    let max = anchor + (safeSpan / 2);
-    if (Number.isFinite(requiredMin) && requiredMin < min) {
-      max += min - requiredMin;
-      min = requiredMin;
-    }
-    if (Number.isFinite(requiredMax) && requiredMax > max) {
-      min -= requiredMax - max;
-      max = requiredMax;
-    }
-    return normalizeRange(min, max, safeSpan);
   }
 
   function computePriceActionYRange(config, navigationRange) {
     const focus = state.auction?.focusWindow || null;
-    const visibleRows = activeRowsForVisibleWindow();
-    const rowPrices = priceValuesFromRows(visibleRows);
+    const focusRange = normalizeRange(focus?.lowPrice, focus?.highPrice, MIN_VISIBLE_PRICE_RANGE);
+    if (focusRange) {
+      return clampRange(focusRange, navigationRange);
+    }
+    const rowPrices = priceValuesFromRows(state.rows);
     if (!rowPrices.length) {
       return navigationRange;
     }
-    const rowMin = Math.min.apply(null, rowPrices);
-    const rowMax = Math.max.apply(null, rowPrices);
-    const rowSpan = Math.max(0.6, rowMax - rowMin);
-    const padding = Math.max(0.8, rowSpan * 0.5);
-    const baseSpan = Math.min(
-      MAX_DEFAULT_PRICE_RANGE,
-      Math.max(MIN_VISIBLE_PRICE_RANGE, rowSpan + (padding * 2), chartHeight() * DEFAULT_PRICE_RANGE_PER_PIXEL)
+    return clampRange(
+      normalizeRange(
+        Math.min.apply(null, rowPrices),
+        Math.max.apply(null, rowPrices),
+        MIN_VISIBLE_PRICE_RANGE
+      ),
+      navigationRange
     );
-    const nearbyLimit = Math.max(baseSpan * 0.7, 4);
-    const anchor = anchorVisiblePrice(visibleRows, focus);
-    const nearbyRefs = focusReferencePrices(config).filter(function (price) {
-      return Math.abs(price - anchor) <= nearbyLimit;
-    });
-    const nearbyEvents = auctionEventPrices(config).filter(function (price) {
-      return Math.abs(price - anchor) <= nearbyLimit;
-    });
-    const requiredValues = rowPrices.concat(nearbyRefs).concat(nearbyEvents);
-    const requiredMin = Math.min.apply(null, requiredValues);
-    const requiredMax = Math.max.apply(null, requiredValues);
-    return clampRange(centeredRange(anchor, baseSpan, requiredMin - 0.5, requiredMax + 0.5), navigationRange);
   }
 
   function computeReferenceFitYRange(config, navigationRange) {
@@ -800,7 +762,7 @@
     if (config.showHistory) {
       prices.push.apply(prices, historyReferencePrices(config));
     }
-    const fitRange = rangeFromNumbers(prices, 0.9);
+    const fitRange = rangeFromNumbers(prices, 0.3);
     return clampRange(fitRange || navigationRange, navigationRange);
   }
 
@@ -808,12 +770,8 @@
     if (!xBounds) {
       return null;
     }
-    if (!state.view.xRange) {
+    if (!state.view.userLockedX || !state.view.xRange) {
       return { min: xBounds.min, max: xBounds.max };
-    }
-    if (state.view.followLive) {
-      const span = Math.max(1000, state.view.xRange.max - state.view.xRange.min);
-      return clampRange({ min: xBounds.max - span, max: xBounds.max }, xBounds);
     }
     return clampRange(state.view.xRange, xBounds);
   }
@@ -837,13 +795,19 @@
     const ids = []
       .concat(eventInfo?.dataZoomId || [])
       .concat((eventInfo?.batch || []).map(function (item) { return item.dataZoomId; }).filter(Boolean));
+    const touchedX = !ids.length || ids.some(function (id) { return String(id).indexOf("auction-x-") === 0; });
     const touchedY = !ids.length || ids.some(function (id) { return String(id).indexOf("auction-y-") === 0; });
     const xRange = readDataZoomWindow("auction-x-slider");
     const yRange = readDataZoomWindow("auction-y-slider");
-    if (xRange) {
+    const xChanged = xRange && (
+      !state.view.xRange
+      || Math.abs(state.view.xRange.min - xRange.min) > 0.0001
+      || Math.abs(state.view.xRange.max - xRange.max) > 0.0001
+    );
+    if (touchedX && xRange && xChanged) {
       state.view.xRange = xRange;
-      const latestTs = Number(state.rows[state.rows.length - 1]?.timestampMs || 0);
-      state.view.followLive = latestTs > 0 && Math.abs(latestTs - xRange.max) <= LIVE_EDGE_TOLERANCE_MS;
+      state.view.userLockedX = true;
+      state.view.followLive = false;
     }
     const yChanged = yRange && (
       !state.view.yRange
@@ -856,54 +820,126 @@
       state.view.fitMode = "manual";
     }
     renderViewControls();
-    syncProfileViewport();
   }
 
-  function syncProfileViewport() {
-    if (!state.profileChart) {
-      return;
+  function profilePriceRange(focus, profile) {
+    const focusRange = normalizeRange(focus?.lowPrice, focus?.highPrice, MIN_VISIBLE_PRICE_RANGE);
+    if (focusRange) {
+      return focusRange;
     }
-    const yRange = state.view.yRange;
-    if (!yRange) {
-      return;
+    const prices = collectNumbers((profile || []).map(function (item) { return item.priceBin; }));
+    if (!prices.length) {
+      return null;
     }
-    state.profileChart.setOption({
-      yAxis: {
-        min: yRange.min,
-        max: yRange.max,
-      },
+    return normalizeRange(
+      Math.min.apply(null, prices),
+      Math.max.apply(null, prices),
+      MIN_VISIBLE_PRICE_RANGE
+    );
+  }
+
+  function profilePriceStep(profile) {
+    const prices = collectNumbers((profile || []).map(function (item) { return item.priceBin; })).sort(function (left, right) {
+      return left - right;
     });
+    if (prices.length < 2) {
+      return DEFAULT_PROFILE_PRICE_STEP;
+    }
+    let step = Number.POSITIVE_INFINITY;
+    for (let index = 1; index < prices.length; index += 1) {
+      const diff = prices[index] - prices[index - 1];
+      if (diff > 0 && diff < step) {
+        step = diff;
+      }
+    }
+    return Number.isFinite(step) ? step : DEFAULT_PROFILE_PRICE_STEP;
+  }
+
+  function nearestProfilePrice(profile, currentPrice) {
+    if (!Number.isFinite(currentPrice) || !(profile || []).length) {
+      return null;
+    }
+    let winner = null;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    profile.forEach(function (item) {
+      const price = Number(item.priceBin);
+      if (!Number.isFinite(price)) {
+        return;
+      }
+      const distance = Math.abs(price - currentPrice);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        winner = price;
+      }
+    });
+    return winner;
+  }
+
+  function profileMaxActivity(profile) {
+    const values = collectNumbers((profile || []).map(function (item) { return item.activityScore; }));
+    return values.length ? Math.max.apply(null, values) : 1;
+  }
+
+  function profileReferenceLines(focus, currentPrice) {
+    const lines = [];
+    if (focus?.pocPrice != null) {
+      lines.push({
+        name: "POC",
+        yAxis: focus.pocPrice,
+        lineStyle: { color: "#ffb35c", width: 1.2, type: "dashed" },
+        label: { formatter: "POC", color: "#ffb35c", fontSize: 10 },
+      });
+    }
+    if (focus?.vahPrice != null) {
+      lines.push({
+        name: "VAH",
+        yAxis: focus.vahPrice,
+        lineStyle: { color: "rgba(109,216,255,0.60)", width: 1, type: "dashed" },
+        label: { show: false },
+      });
+    }
+    if (focus?.valPrice != null) {
+      lines.push({
+        name: "VAL",
+        yAxis: focus.valPrice,
+        lineStyle: { color: "rgba(109,216,255,0.60)", width: 1, type: "dashed" },
+        label: { show: false },
+      });
+    }
+    if (Number.isFinite(currentPrice)) {
+      lines.push({
+        name: "Current",
+        yAxis: currentPrice,
+        lineStyle: { color: "#ff6b88", width: 2.2, type: "solid" },
+        label: { formatter: "Current", color: "#ff9fb2", fontSize: 10 },
+      });
+    }
+    return lines;
   }
 
   function renderEvents() {
     const events = state.auction?.events || [];
     elements.eventCount.textContent = String(events.length);
-    const preview = events.slice(0, EVENT_PREVIEW_COUNT);
-    if (!preview.length) {
-      elements.eventPreview.innerHTML = "<div class=\"sql-empty\">No auction events yet.</div>";
-    } else {
-      elements.eventPreview.innerHTML = preview.map(function (event) {
-        const tone = String(event.direction || "").toLowerCase() === "down" ? "down" : "up";
-        return [
-          "<article class=\"auction-event-preview-chip is-", tone, "\">",
-          "<div class=\"auction-event-title\">", escapeHtml(event.eventKind || "Event"), "</div>",
-          "<div class=\"auction-event-price\">", escapeHtml(formatPrice(event.price1)), event.price2 != null ? " -> " + escapeHtml(formatPrice(event.price2)) : "", "</div>",
-          "<div class=\"auction-event-meta\">", escapeHtml(event.windowLabel || event.windowKind || "window"), "</div>",
-          "</article>",
-        ].join("");
-      }).join("");
-    }
     if (!events.length) {
+      elements.eventSummaryLine.textContent = "No auction events yet.";
       elements.eventRibbon.innerHTML = "<div class=\"sql-empty\">No auction events yet.</div>";
       return;
     }
+    const latest = events[0];
+    elements.eventSummaryLine.textContent = [
+      latest.eventKind || "Event",
+      formatPrice(latest.price1),
+      latest.windowLabel || latest.windowKind || "window",
+      "strength " + String(latest.strength ?? "-"),
+    ].join(" | ");
     elements.eventRibbon.innerHTML = events.map(function (event) {
       const tone = String(event.direction || "").toLowerCase() === "down" ? "down" : "up";
+      const eventTime = event.eventTsMs ? new Date(event.eventTsMs).toLocaleTimeString() : "-";
       return [
         "<article class=\"auction-event-row is-", tone, "\">",
         "<div class=\"auction-event-main\">",
         "<div class=\"auction-event-title\">", escapeHtml(event.eventKind || "Event"), "</div>",
-        "<div class=\"auction-event-meta\">", escapeHtml(event.windowLabel || event.windowKind || "window"), "</div>",
+        "<div class=\"auction-event-meta\">", escapeHtml((event.windowLabel || event.windowKind || "window") + " | " + eventTime), "</div>",
         "</div>",
         "<div class=\"auction-event-side\">",
         "<div class=\"auction-event-price\">", escapeHtml(formatPrice(event.price1)), event.price2 != null ? " -> " + escapeHtml(formatPrice(event.price2)) : "", "</div>",
@@ -1219,40 +1255,80 @@
     renderViewControls();
 
     const profile = focus?.profile || [];
-    elements.profileLabel.textContent = focus?.label || "Activity";
+    const currentPrice = Number(focus?.closePrice ?? state.rows[state.rows.length - 1]?.mid);
+    const profileYRange = profilePriceRange(focus, profile);
+    const activityMax = Math.max(1, profileMaxActivity(profile));
+    const priceStep = profilePriceStep(profile);
+    const currentProfilePrice = nearestProfilePrice(profile, currentPrice);
+    const currentBandHalf = Math.max(DEFAULT_PROFILE_PRICE_STEP, priceStep) / 2;
+    elements.profileLabel.textContent = focus?.label || currentFocusLabel();
     state.profileChart.setOption({
       animation: false,
       backgroundColor: "transparent",
-      grid: { left: 8, right: 18, top: 10, bottom: 18, containLabel: true },
-      xAxis: { type: "value", axisLabel: { color: "#91a1b8" }, splitLine: { show: false } },
+      grid: { left: 56, right: 18, top: 18, bottom: 32, containLabel: false },
+      xAxis: {
+        type: "value",
+        min: 0,
+        max: activityMax,
+        name: "Activity",
+        nameLocation: "middle",
+        nameGap: 24,
+        axisLabel: { color: "#91a1b8" },
+        axisLine: { lineStyle: { color: "rgba(147,181,255,0.16)" } },
+        splitLine: { lineStyle: { color: "rgba(147,181,255,0.08)" } },
+      },
       yAxis: {
         type: "value",
-        min: yRange?.min,
-        max: yRange?.max,
+        min: profileYRange?.min,
+        max: profileYRange?.max,
+        name: "Price",
+        nameLocation: "middle",
+        nameGap: 42,
         axisLabel: { color: "#91a1b8", formatter: function (value) { return Number(value).toFixed(2); } },
+        axisLine: { lineStyle: { color: "rgba(147,181,255,0.16)" } },
         splitLine: { lineStyle: { color: "rgba(147,181,255,0.08)" } },
       },
       tooltip: {
         trigger: "item",
         formatter: function (param) {
           const item = param.data?.raw || {};
-          return "<div class=\"chart-tip\"><div class=\"chart-tip-title\">Profile</div>"
+          return "<div class=\"chart-tip\"><div class=\"chart-tip-title\">Market Profile</div>"
             + "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">Price</span><span class=\"chart-tip-value\">" + escapeHtml(formatPrice(item.priceBin)) + "</span></div>"
             + "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">Activity</span><span class=\"chart-tip-value\">" + escapeHtml(String(item.activityScore || "-")) + "</span></div>"
+            + "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">Time</span><span class=\"chart-tip-value\">" + escapeHtml(String(item.timeMs || 0)) + "ms</span></div>"
             + "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">Ticks</span><span class=\"chart-tip-value\">" + escapeHtml(String(item.tickCount || 0)) + "</span></div>"
             + "</div>";
         },
       },
       series: [{
         type: "bar",
-        barWidth: 6,
+        barMaxWidth: 12,
         data: profile.map(function (item) {
+          const priceBin = Number(item.priceBin);
+          const isCurrentBand = Number.isFinite(currentProfilePrice) && Math.abs(priceBin - currentProfilePrice) <= (priceStep / 2);
           return {
             value: [item.activityScore, item.priceBin],
             raw: item,
-            itemStyle: { color: item.isPoc ? "#ffb35c" : (item.inValue ? "rgba(109,216,255,0.78)" : "rgba(145,161,184,0.28)") },
+            itemStyle: {
+              color: isCurrentBand
+                ? "#ff8ea8"
+                : (item.isPoc ? "#ffb35c" : (item.inValue ? "rgba(109,216,255,0.78)" : "rgba(145,161,184,0.28)")),
+            },
           };
         }),
+        markArea: Number.isFinite(currentPrice) ? {
+          silent: true,
+          itemStyle: { color: "rgba(255,107,136,0.14)" },
+          data: [[
+            { yAxis: currentPrice - currentBandHalf },
+            { yAxis: currentPrice + currentBandHalf },
+          ]],
+        } : { data: [] },
+        markLine: {
+          symbol: ["none", "none"],
+          silent: true,
+          data: profileReferenceLines(focus, currentPrice),
+        },
       }],
     });
   }
@@ -1397,7 +1473,6 @@
     elements.windowSize.value = String(config.window);
     elements.reviewStart.value = config.reviewStart;
     setSidebarCollapsed(true);
-    setEventsCollapsed(true);
     resetChartView();
     updateReviewFields();
     renderMeta();
@@ -1458,12 +1533,18 @@
   elements.sidebarBackdrop.addEventListener("click", function () { setSidebarCollapsed(true); });
   elements.applyButton.addEventListener("click", function () { loadAll(); });
   elements.followLiveButton.addEventListener("click", function () {
-    state.view.followLive = !state.view.followLive;
+    if (state.view.followLive && !state.view.userLockedX) {
+      state.view.followLive = false;
+      state.view.userLockedX = true;
+      state.view.xRange = readDataZoomWindow("auction-x-slider") || state.view.xRange;
+      renderViewControls();
+      return;
+    }
+    state.view.followLive = true;
+    state.view.userLockedX = false;
     if (state.view.followLive) {
       state.view.xRange = null;
       renderChart();
-    } else {
-      renderViewControls();
     }
   });
   elements.fitPriceActionButton.addEventListener("click", function () { fitPriceActionView(); });
@@ -1472,9 +1553,6 @@
     resetChartView();
     renderChart();
   });
-  elements.eventsToggle.addEventListener("click", function () {
-    setEventsCollapsed(!state.view.eventsCollapsed);
-  });
   window.addEventListener("resize", function () {
     if (state.chart) {
       state.chart.resize();
@@ -1482,10 +1560,8 @@
     if (state.profileChart) {
       state.profileChart.resize();
     }
-    if (state.rows.length && !state.view.userLockedY) {
+    if (state.rows.length) {
       renderChart();
-    } else {
-      syncProfileViewport();
     }
   });
   window.addEventListener("keydown", function (event) {

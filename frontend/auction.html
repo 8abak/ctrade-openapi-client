@@ -147,24 +147,48 @@
       <section class="auction-status-strip" id="statusStrip"></section>
 
       <div class="auction-content-grid">
-        <aside class="panel auction-context-panel">
-          <div class="auction-panel-head">
-            <span>Context</span>
-            <span class="auction-panel-muted" id="focusLabel">Broker Day</span>
-          </div>
-          <div class="auction-context-block" id="focusSummary"></div>
-          <div class="auction-panel-head">
-            <span>Nearest References</span>
-          </div>
-          <div class="auction-reference-list" id="referenceList">
-            <div class="sql-empty">No references yet.</div>
-          </div>
-          <div class="auction-panel-head">
-            <span>Multi-Window Ladder</span>
-          </div>
-          <div class="auction-ladder" id="ladderList">
-            <div class="sql-empty">No ladder rows yet.</div>
-          </div>
+        <aside class="panel auction-utility-panel">
+          <details class="auction-accordion" id="contextSection">
+            <summary class="auction-accordion-toggle">
+              <span class="auction-accordion-title-group">
+                <span class="auction-accordion-title">Context</span>
+                <span class="auction-panel-muted" id="focusLabel">Broker Day</span>
+              </span>
+              <span class="auction-accordion-summary" id="contextSummaryLine">Waiting for auction context...</span>
+            </summary>
+            <div class="auction-accordion-body auction-context-body">
+              <div class="auction-context-block" id="focusSummary"></div>
+              <div class="auction-panel-head">
+                <span>Nearest References</span>
+              </div>
+              <div class="auction-reference-list" id="referenceList">
+                <div class="sql-empty">No references yet.</div>
+              </div>
+              <div class="auction-panel-head">
+                <span>Multi-Window Ladder</span>
+              </div>
+              <div class="auction-ladder" id="ladderList">
+                <div class="sql-empty">No ladder rows yet.</div>
+              </div>
+            </div>
+          </details>
+
+          <details class="auction-accordion auction-events-accordion" id="eventsPanel">
+            <summary class="auction-accordion-toggle">
+              <span class="auction-accordion-title-group">
+                <span class="auction-accordion-title">Recent Events</span>
+                <span class="auction-panel-muted" id="eventCount">0</span>
+              </span>
+              <span class="auction-accordion-summary" id="eventSummaryLine">No auction events yet.</span>
+            </summary>
+            <div class="auction-accordion-body auction-events-body">
+              <div class="auction-event-list-shell" id="eventListShell">
+                <div class="auction-event-ribbon" id="eventRibbon">
+                  <div class="sql-empty">No auction events yet.</div>
+                </div>
+              </div>
+            </div>
+          </details>
         </aside>
 
         <div class="panel chart-panel live-chart-panel auction-chart-panel" id="chartPanel">
@@ -188,24 +212,6 @@
           <div id="auctionProfileChart" class="chart-host auction-profile-host"></div>
         </aside>
       </div>
-
-      <section class="panel auction-events-panel is-collapsed" id="eventsPanel">
-        <div class="auction-panel-head auction-events-head">
-          <div class="auction-events-title-group">
-            <span>Recent Events</span>
-            <span class="auction-panel-muted" id="eventCount">0</span>
-          </div>
-          <button class="ghost-button compact-button auction-events-toggle" id="eventsToggle" type="button" aria-controls="eventListShell" aria-expanded="false">Expand</button>
-        </div>
-        <div class="auction-event-preview" id="eventPreview">
-          <div class="sql-empty">No auction events yet.</div>
-        </div>
-        <div class="auction-event-list-shell" id="eventListShell" hidden>
-          <div class="auction-event-ribbon" id="eventRibbon">
-            <div class="sql-empty">No auction events yet.</div>
-          </div>
-        </div>
-      </section>
     </section>
   </div>
 
