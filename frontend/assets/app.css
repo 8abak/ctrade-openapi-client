@@ -479,7 +479,7 @@ select {
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(208px, 240px) minmax(0, 1fr) minmax(260px, 320px);
+  grid-template-columns: minmax(180px, 220px) minmax(0, 1fr) minmax(280px, 340px);
   gap: 0.75rem;
 }
 
@@ -497,10 +497,10 @@ select {
 }
 
 .auction-utility-panel {
-  padding: 0.55rem;
+  padding: 0.45rem;
   display: grid;
   align-content: start;
-  gap: 0.55rem;
+  gap: 0.45rem;
 }
 
 .auction-accordion {
@@ -516,7 +516,7 @@ select {
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 0.55rem;
-  padding: 0.72rem 0.78rem;
+  padding: 0.62rem 0.72rem;
   cursor: pointer;
   list-style: none;
 }
@@ -564,7 +564,7 @@ select {
 .auction-accordion-body {
   display: grid;
   gap: 0.65rem;
-  padding: 0 0.78rem 0.78rem;
+  padding: 0 0.72rem 0.72rem;
 }
 
 .auction-profile-panel {
@@ -631,7 +631,6 @@ select {
 
 .auction-context-block {
   padding: 0.7rem;
-  margin-bottom: 0.8rem;
 }
 
 .auction-context-grid {
@@ -690,7 +689,7 @@ select {
 
 .auction-event-list-shell {
   min-height: 0;
-  max-height: 42vh;
+  max-height: min(36vh, 420px);
   overflow: auto;
   padding-right: 0.1rem;
 }
@@ -705,7 +704,7 @@ select {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 0.7rem;
   align-items: center;
-  padding: 0.55rem 0.7rem;
+  padding: 0.48rem 0.62rem;
 }
 
 .auction-event-main,
@@ -720,19 +719,47 @@ select {
 
 .auction-event-title {
   color: var(--accent-strong);
-  font-size: 0.74rem;
+  font-size: 0.72rem;
 }
 
 .auction-event-price {
   color: var(--text);
-  font-size: 0.84rem;
+  font-size: 0.8rem;
   font-weight: 600;
 }
 
 .auction-event-meta {
   color: var(--muted);
-  font-size: 0.7rem;
+  font-size: 0.68rem;
   line-height: 1.35;
+}
+
+.auction-login-body,
+.auction-buttons-body {
+  gap: 0.55rem;
+}
+
+.auction-trade-login-form {
+  gap: 0.55rem;
+}
+
+.auction-login-session {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.auction-smart-actions {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.auction-smart-actions .chart-trade-button {
+  width: 100%;
+  justify-content: center;
+}
+
+.auction-smart-summary {
+  min-height: 0;
 }
 
 .auction-event-row.is-up .auction-event-price {
@@ -1474,5 +1501,9 @@ select {
 
   .auction-profile-host {
     min-height: 260px;
+  }
+
+  .auction-smart-actions {
+    grid-template-columns: 1fr;
   }
 }

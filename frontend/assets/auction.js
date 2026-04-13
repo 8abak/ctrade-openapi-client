@@ -19,6 +19,8 @@
   const HISTORY_REFRESH_DELAY_MS = 160;
   const MIN_VISIBLE_PRICE_RANGE = 0.6;
   const DEFAULT_PROFILE_PRICE_STEP = 0.1;
+  const TRADE_POLL_INTERVAL_MS = 15000;
+  const SMART_POLL_INTERVAL_MS = 2000;
   const FOCUS_LABELS = {
     brokerday: "Broker Day",
     london: "London Session",
@@ -50,6 +52,7 @@
       loading: false,
       lastRangeKey: "",
     },
+    renderFrame: 0,
     loadToken: 0,
     view: {
       followLive: true,
@@ -61,6 +64,30 @@
       applyingZoom: false,
     },
     ui: { sidebarCollapsed: true },
+    trade: {
+      authConfigured: true,
+      authError: null,
+      brokerConfigured: false,
+      brokerStatus: null,
+      lastLoggedErrorKey: null,
+      authenticated: false,
+      username: null,
+      loginBusy: false,
+      actionBusy: false,
+      loading: false,
+      pollTimer: 0,
+      refreshPromise: null,
+      pendingRefresh: false,
+      positions: [],
+      volumeInfo: null,
+      lastLoadedAtMs: null,
+      smart: {
+        payload: null,
+        pollTimer: 0,
+        refreshPromise: null,
+        lastTradeMutationId: 0,
+      },
+    },
   };
 
   const elements = {
@@ -86,6 +113,7 @@
     auctionMeta: document.getElementById("auctionMeta"),
     auctionPerf: document.getElementById("auctionPerf"),
     statusStrip: document.getElementById("statusStrip"),
+    contextSection: document.getElementById("contextSection"),
     focusLabel: document.getElementById("focusLabel"),
     contextSummaryLine: document.getElementById("contextSummaryLine"),
     focusSummary: document.getElementById("focusSummary"),
@@ -102,6 +130,26 @@
     eventSummaryLine: document.getElementById("eventSummaryLine"),
     eventRibbon: document.getElementById("eventRibbon"),
     eventListShell: document.getElementById("eventListShell"),
+    loginPanel: document.getElementById("loginPanel"),
+    loginStatePill: document.getElementById("loginStatePill"),
+    loginSummaryLine: document.getElementById("loginSummaryLine"),
+    tradeStatusLine: document.getElementById("tradeStatusLine"),
+    tradeLoginForm: document.getElementById("tradeLoginForm"),
+    tradeUsername: document.getElementById("tradeUsername"),
+    tradePassword: document.getElementById("tradePassword"),
+    tradeLoginButton: document.getElementById("tradeLoginButton"),
+    tradeSessionShell: document.getElementById("tradeSessionShell"),
+    tradeSessionSummary: document.getElementById("tradeSessionSummary"),
+    tradeBrokerSummary: document.getElementById("tradeBrokerSummary"),
+    tradeLogoutButton: document.getElementById("tradeLogoutButton"),
+    buttonsPanel: document.getElementById("buttonsPanel"),
+    buttonStatePill: document.getElementById("buttonStatePill"),
+    buttonsSummaryLine: document.getElementById("buttonsSummaryLine"),
+    auctionSmartBuyButton: document.getElementById("auctionSmartBuyButton"),
+    auctionSmartSellButton: document.getElementById("auctionSmartSellButton"),
+    auctionSmartCloseButton: document.getElementById("auctionSmartCloseButton"),
+    auctionSmartStatus: document.getElementById("auctionSmartStatus"),
+    auctionTradeHint: document.getElementById("auctionTradeHint"),
     chartHost: document.getElementById("auctionChart"),
     profileChartHost: document.getElementById("auctionProfileChart"),
   };
@@ -382,13 +430,44 @@
     });
   }
 
+  function tradePayloadDetail(payload) {
+    return payload?.detail && typeof payload.detail === "object" ? payload.detail : null;
+  }
+
+  function tradeErrorMessage(payload) {
+    const detail = tradePayloadDetail(payload);
+    if (typeof payload?.message === "string" && payload.message) {
+      return payload.message;
+    }
+    if (typeof payload?.detail === "string" && payload.detail) {
+      return payload.detail;
+    }
+    if (typeof detail?.message === "string" && detail.message) {
+      return detail.message;
+    }
+    if (typeof payload?.error === "string" && payload.error) {
+      return payload.error;
+    }
+    if (typeof detail?.error === "string" && detail.error) {
+      return detail.error;
+    }
+    return "Request failed.";
+  }
+
   async function fetchJson(url, options) {
     const response = await fetch(url, options);
     const payload = await response.json().catch(function () {
       return {};
     });
     if (!response.ok) {
-      throw new Error(payload.detail || "Request failed.");
+      const error = new Error(tradeErrorMessage(payload));
+      const detail = tradePayloadDetail(payload);
+      error.status = response.status;
+      error.code = typeof payload?.error === "string"
+        ? payload.error
+        : (typeof detail?.error === "string" ? detail.error : null);
+      error.payload = payload;
+      throw error;
     }
     return payload;
   }
@@ -406,6 +485,680 @@
       return Number.parseInt(config.id, 10);
     }
     throw new Error("Review mode requires a start id or Sydney review start time.");
+  }
+
+  function tradeStatus(message, isError) {
+    if (!elements.tradeStatusLine) {
+      return;
+    }
+    elements.tradeStatusLine.textContent = message;
+    elements.tradeStatusLine.classList.toggle("error", Boolean(isError));
+    elements.tradeStatusLine.classList.toggle("success", Boolean(!isError));
+  }
+
+  function brokerStatusFromPayload(payload) {
+    const detail = tradePayloadDetail(payload);
+    const broker = payload?.broker || detail?.broker || null;
+    const brokerConfigured = Boolean(
+      payload?.brokerConfigured
+      ?? detail?.brokerConfigured
+      ?? payload?.configured
+      ?? detail?.configured
+      ?? broker?.configured
+    );
+    const stateValue = typeof broker?.state === "string" && broker.state
+      ? broker.state
+      : (brokerConfigured ? "unavailable" : "not_configured");
+    const reason = typeof broker?.reason === "string" && broker.reason ? broker.reason : null;
+    return {
+      configured: brokerConfigured,
+      connected: Boolean(broker?.connected),
+      authenticated: Boolean(broker?.authenticated),
+      ready: Boolean(broker?.ready),
+      state: stateValue,
+      reason: reason,
+      code: typeof broker?.code === "string" && broker.code ? broker.code : null,
+      symbol: typeof broker?.symbol === "string" && broker.symbol ? broker.symbol : null,
+      symbolId: broker?.symbolId ?? null,
+      lastError: typeof broker?.lastError === "string" && broker.lastError ? broker.lastError : reason,
+    };
+  }
+
+  function tradeConsole(method, url, error) {
+    const message = String(error?.message || "");
+    const expected = error?.code === "TRADE_AUTH_NOT_CONFIGURED" || message.toLowerCase().includes("trade login required");
+    if (expected || !window.console) {
+      return;
+    }
+    const key = [method, url, error?.status ?? null, error?.code ?? null, message].join("|");
+    if (state.trade.lastLoggedErrorKey === key) {
+      return;
+    }
+    state.trade.lastLoggedErrorKey = key;
+    if (typeof window.console.error === "function") {
+      window.console.error("[auction-trade] " + method + " " + url + " failed", {
+        status: error?.status ?? null,
+        code: error?.code ?? null,
+        message: message,
+      });
+    }
+  }
+
+  async function tradeFetchJson(url, options) {
+    const request = {
+      method: options?.method || "GET",
+      headers: { "Content-Type": "application/json", ...(options?.headers || {}) },
+      body: options?.body,
+    };
+    if (!request.body) {
+      delete request.body;
+    }
+    try {
+      const payload = await fetchJson(url, request);
+      state.trade.lastLoggedErrorKey = null;
+      return payload;
+    } catch (error) {
+      tradeConsole(request.method, url, error);
+      throw error;
+    }
+  }
+
+  function stopTradePolling() {
+    if (state.trade.pollTimer) {
+      window.clearTimeout(state.trade.pollTimer);
+      state.trade.pollTimer = 0;
+    }
+  }
+
+  function stopSmartPolling() {
+    if (state.trade.smart.pollTimer) {
+      window.clearTimeout(state.trade.smart.pollTimer);
+      state.trade.smart.pollTimer = 0;
+    }
+  }
+
+  function scheduleTradePolling() {
+    stopTradePolling();
+    if (!state.trade.authenticated) {
+      return;
+    }
+    state.trade.pollTimer = window.setTimeout(function () {
+      state.trade.pollTimer = 0;
+      refreshTradeData({ silent: true }).catch(function (error) {
+        tradeStatus(error.message || "Trade refresh failed.", true);
+      });
+    }, TRADE_POLL_INTERVAL_MS);
+  }
+
+  function scheduleSmartPolling() {
+    stopSmartPolling();
+    if (!state.trade.authenticated || !smartContextReady()) {
+      return;
+    }
+    state.trade.smart.pollTimer = window.setTimeout(function () {
+      state.trade.smart.pollTimer = 0;
+      refreshSmartState({ silent: true }).catch(function (error) {
+        tradeStatus(error.message || "Smart scalp refresh failed.", true);
+      });
+    }, SMART_POLL_INTERVAL_MS);
+  }
+
+  function clearTradeRuntimeState() {
+    stopTradePolling();
+    stopSmartPolling();
+    state.trade.refreshPromise = null;
+    state.trade.pendingRefresh = false;
+    state.trade.positions = [];
+    state.trade.volumeInfo = null;
+    state.trade.lastLoadedAtMs = null;
+    state.trade.smart.payload = null;
+    state.trade.smart.lastTradeMutationId = 0;
+  }
+
+  function brokerUnavailableReason() {
+    const broker = state.trade.brokerStatus;
+    if (!state.trade.brokerConfigured || broker?.state === "not_configured") {
+      return broker?.reason || "Broker integration is not configured.";
+    }
+    if (broker?.reason) {
+      return broker.reason;
+    }
+    if (state.trade.loading) {
+      return "Loading broker state...";
+    }
+    return "Broker state unavailable.";
+  }
+
+  function smartPayload() {
+    return state.trade.smart.payload || {
+      context: { enabled: false, reason: "Smart scalping unavailable." },
+      state: {
+        armed: { buy: false, sell: false, close: false },
+        backendState: "idle",
+        statusText: "Idle",
+        cooldownRemainingMs: 0,
+        currentPosition: null,
+        openPositionCount: 0,
+      },
+      broker: state.trade.brokerStatus,
+    };
+  }
+
+  function currentSmartArmed(key) {
+    return Boolean(smartPayload()?.state?.armed?.[key]);
+  }
+
+  function smartContextReady() {
+    return currentConfig().mode === "live" && currentConfig().run === "run";
+  }
+
+  function applySmartPayload(payload) {
+    const resolved = payload?.smart || payload;
+    if (!resolved || typeof resolved !== "object") {
+      return;
+    }
+    state.trade.smart.payload = resolved;
+    const mutationId = Number(resolved?.state?.lastTradeMutationId || 0);
+    if (mutationId > Number(state.trade.smart.lastTradeMutationId || 0)) {
+      state.trade.smart.lastTradeMutationId = mutationId;
+      if (state.trade.authenticated) {
+        refreshTradeData({ silent: true }).catch(function () {});
+      }
+    }
+  }
+
+  function smartAvailability(kind) {
+    const smart = smartPayload();
+    if (!state.trade.authConfigured) {
+      return { available: false, reason: "Trade login is not configured on the server." };
+    }
+    if (!state.trade.authenticated) {
+      return { available: false, reason: "Login required." };
+    }
+    if (!state.trade.brokerConfigured || !state.trade.brokerStatus?.ready || !state.trade.lastLoadedAtMs) {
+      return { available: false, reason: brokerUnavailableReason() };
+    }
+    if (!smartContextReady()) {
+      return { available: false, reason: "Smart controls require Live + Run." };
+    }
+    if (!smart.context?.enabled && smart.context?.reason) {
+      return { available: false, reason: smart.context.reason };
+    }
+    if ((kind === "buy" || kind === "sell") && state.trade.positions.length) {
+      return { available: false, reason: "Position already open." };
+    }
+    return { available: true, reason: "" };
+  }
+
+  function smartSummaryText() {
+    const smart = smartPayload();
+    const stateValue = smart.state || {};
+    const armed = [];
+    if (stateValue.armed?.buy) {
+      armed.push("Smart Buy armed");
+    }
+    if (stateValue.armed?.sell) {
+      armed.push("Smart Sell armed");
+    }
+    if (stateValue.armed?.close) {
+      armed.push("Smart Close armed");
+    }
+    if (armed.length) {
+      return armed.join(" | ");
+    }
+    return stateValue.statusText || smart.context?.reason || "Smart scalping idle.";
+  }
+
+  function tradeSessionSummaryText() {
+    if (!state.trade.authConfigured) {
+      return "Trade login is not configured on the server.";
+    }
+    if (!state.trade.authenticated) {
+      return "Trade login required for auction controls.";
+    }
+    return "Session unlocked for " + (state.trade.username || "trade user") + ".";
+  }
+
+  function brokerSummaryText() {
+    const broker = state.trade.brokerStatus;
+    if (!state.trade.authenticated) {
+      return brokerUnavailableReason();
+    }
+    if (!state.trade.brokerConfigured || !broker?.ready) {
+      return brokerUnavailableReason();
+    }
+    const positions = state.trade.positions.length;
+    return [
+      broker.symbol || "Broker ready",
+      positions + " open " + (positions === 1 ? "position" : "positions"),
+      broker.connected ? "connected" : "connection unknown",
+    ].join(" | ");
+  }
+
+  function tradeHintText() {
+    const smart = smartPayload();
+    if (!state.trade.authConfigured) {
+      return "Trade login is not configured on the server.";
+    }
+    if (!state.trade.authenticated) {
+      return "Login required.";
+    }
+    if (!smartContextReady()) {
+      return "Smart controls require Live + Run.";
+    }
+    if (!state.trade.brokerConfigured || !state.trade.brokerStatus?.ready || !state.trade.lastLoadedAtMs) {
+      return brokerUnavailableReason();
+    }
+    if (currentSmartArmed("close") && state.trade.positions.length !== 1) {
+      return "Smart Close is armed and waiting for a single open position.";
+    }
+    return state.trade.positions.length
+      ? (state.trade.positions.length + " open " + (state.trade.positions.length === 1 ? "position." : "positions."))
+      : "No open position. Smart Close can stay armed.";
+  }
+
+  function setTradeBusy(busy) {
+    const disabled = Boolean(busy);
+    state.trade.actionBusy = disabled;
+    [
+      elements.tradeUsername,
+      elements.tradePassword,
+      elements.tradeLoginButton,
+      elements.tradeLogoutButton,
+      elements.auctionSmartBuyButton,
+      elements.auctionSmartSellButton,
+      elements.auctionSmartCloseButton,
+    ].forEach(function (element) {
+      if (element) {
+        element.disabled = disabled;
+      }
+    });
+    renderLoginPanel();
+    renderButtonsPanel();
+  }
+
+  function applyTradeSessionPayload(payload) {
+    state.trade.authConfigured = payload?.authConfigured !== false;
+    state.trade.authError = payload?.error || null;
+    state.trade.brokerStatus = brokerStatusFromPayload(payload);
+    state.trade.brokerConfigured = Boolean(state.trade.brokerStatus?.configured);
+    state.trade.authenticated = state.trade.authConfigured && Boolean(payload?.authenticated);
+    state.trade.username = state.trade.authenticated ? (payload?.username || null) : null;
+    if (!state.trade.authenticated) {
+      clearTradeRuntimeState();
+    }
+    renderLoginPanel();
+    renderButtonsPanel();
+  }
+
+  function renderLoginPanel() {
+    if (!elements.loginPanel) {
+      return;
+    }
+    const authConfigured = state.trade.authConfigured;
+    const authenticated = state.trade.authenticated;
+    if (elements.loginStatePill) {
+      elements.loginStatePill.textContent = authenticated ? "Ready" : (authConfigured ? "Locked" : "Unavailable");
+    }
+    if (elements.loginSummaryLine) {
+      elements.loginSummaryLine.textContent = authenticated
+        ? ((state.trade.username || "trade user") + " | " + brokerSummaryText())
+        : tradeSessionSummaryText();
+    }
+    if (elements.tradeLoginForm) {
+      elements.tradeLoginForm.hidden = authenticated || !authConfigured;
+    }
+    if (elements.tradeSessionShell) {
+      elements.tradeSessionShell.hidden = !authenticated;
+    }
+    if (elements.tradeUsername) {
+      elements.tradeUsername.disabled = !authConfigured || state.trade.loginBusy || state.trade.actionBusy;
+    }
+    if (elements.tradePassword) {
+      elements.tradePassword.disabled = !authConfigured || state.trade.loginBusy || state.trade.actionBusy;
+    }
+    if (elements.tradeLoginButton) {
+      elements.tradeLoginButton.disabled = !authConfigured || state.trade.loginBusy || state.trade.actionBusy;
+      elements.tradeLoginButton.textContent = state.trade.loginBusy ? "Logging in..." : "Login";
+    }
+    if (elements.tradeSessionSummary) {
+      elements.tradeSessionSummary.textContent = tradeSessionSummaryText();
+    }
+    if (elements.tradeBrokerSummary) {
+      elements.tradeBrokerSummary.textContent = brokerSummaryText();
+    }
+  }
+
+  function renderButtonsPanel() {
+    if (!elements.buttonsPanel) {
+      return;
+    }
+    const armedCount = ["buy", "sell", "close"].filter(currentSmartArmed).length;
+    const buyAvailability = smartAvailability("buy");
+    const sellAvailability = smartAvailability("sell");
+    const closeAvailability = smartAvailability("close");
+    const summaryText = state.trade.authenticated ? smartSummaryText() : tradeHintText();
+    if (elements.buttonStatePill) {
+      elements.buttonStatePill.textContent = armedCount ? "ON" : "OFF";
+    }
+    if (elements.buttonsSummaryLine) {
+      elements.buttonsSummaryLine.textContent = summaryText;
+    }
+    [
+      [elements.auctionSmartBuyButton, "buy", buyAvailability],
+      [elements.auctionSmartSellButton, "sell", sellAvailability],
+      [elements.auctionSmartCloseButton, "close", closeAvailability],
+    ].forEach(function (entry) {
+      const button = entry[0];
+      const key = entry[1];
+      const availability = entry[2];
+      if (!button) {
+        return;
+      }
+      button.disabled = state.trade.actionBusy || !availability.available;
+      button.classList.toggle("is-armed", currentSmartArmed(key));
+      button.textContent = "Smart " + key.charAt(0).toUpperCase() + key.slice(1) + " " + (currentSmartArmed(key) ? "ON" : "OFF");
+    });
+    if (elements.auctionSmartStatus) {
+      elements.auctionSmartStatus.textContent = summaryText;
+    }
+    if (elements.auctionTradeHint) {
+      elements.auctionTradeHint.textContent = tradeHintText();
+    }
+  }
+
+  async function refreshTradeData(options) {
+    if (!state.trade.authenticated) {
+      return;
+    }
+    if (state.trade.refreshPromise) {
+      state.trade.pendingRefresh = true;
+      return state.trade.refreshPromise;
+    }
+    const silent = Boolean(options?.silent);
+    state.trade.refreshPromise = (async function () {
+      state.trade.loading = true;
+      if (!silent) {
+        tradeStatus("Loading trade state...", false);
+      }
+      try {
+        const openPayload = await tradeFetchJson("/api/trade/open");
+        state.trade.brokerStatus = brokerStatusFromPayload(openPayload);
+        state.trade.brokerConfigured = Boolean(state.trade.brokerStatus?.configured);
+        state.trade.volumeInfo = openPayload.volumeInfo || null;
+        state.trade.positions = Array.isArray(openPayload.positions) ? openPayload.positions : [];
+        state.trade.lastLoadedAtMs = Date.now();
+        applySmartPayload(openPayload.smart);
+        renderLoginPanel();
+        renderButtonsPanel();
+        if (!silent) {
+          tradeStatus("Trade state updated.", false);
+        }
+        if (smartContextReady()) {
+          scheduleSmartPolling();
+        } else {
+          stopSmartPolling();
+        }
+        scheduleTradePolling();
+      } catch (error) {
+        const message = String(error?.message || "").toLowerCase();
+        if (error?.code === "TRADE_AUTH_NOT_CONFIGURED" || message.includes("trade login is not configured on the server")) {
+          applyTradeSessionPayload({
+            authenticated: false,
+            username: null,
+            authConfigured: false,
+            brokerConfigured: error?.payload?.brokerConfigured ?? tradePayloadDetail(error?.payload)?.brokerConfigured ?? state.trade.brokerConfigured,
+            configured: error?.payload?.configured ?? tradePayloadDetail(error?.payload)?.configured ?? state.trade.brokerConfigured,
+            broker: error?.payload?.broker || tradePayloadDetail(error?.payload)?.broker || state.trade.brokerStatus,
+            error: error?.code || "TRADE_AUTH_NOT_CONFIGURED",
+          });
+        } else if (message.includes("trade login required")) {
+          applyTradeSessionPayload({
+            authenticated: false,
+            username: null,
+            authConfigured: true,
+            brokerConfigured: state.trade.brokerConfigured,
+            configured: state.trade.brokerConfigured,
+            broker: state.trade.brokerStatus,
+          });
+        } else {
+          state.trade.brokerStatus = brokerStatusFromPayload(error?.payload || { broker: state.trade.brokerStatus });
+          state.trade.brokerConfigured = Boolean(state.trade.brokerStatus?.configured);
+          state.trade.positions = [];
+          state.trade.volumeInfo = null;
+          state.trade.lastLoadedAtMs = null;
+          renderLoginPanel();
+          renderButtonsPanel();
+        }
+        throw error;
+      } finally {
+        state.trade.loading = false;
+        state.trade.refreshPromise = null;
+        if (state.trade.pendingRefresh && state.trade.authenticated) {
+          state.trade.pendingRefresh = false;
+          window.setTimeout(function () {
+            refreshTradeData({ silent: true }).catch(function (error) {
+              tradeStatus(error.message || "Trade refresh failed.", true);
+            });
+          }, 0);
+        }
+      }
+    }());
+    return state.trade.refreshPromise;
+  }
+
+  async function refreshSmartState(options) {
+    if (!state.trade.authenticated) {
+      return;
+    }
+    if (state.trade.smart.refreshPromise) {
+      return state.trade.smart.refreshPromise;
+    }
+    state.trade.smart.refreshPromise = (async function () {
+      try {
+        const payload = await tradeFetchJson("/api/trade/smart");
+        applySmartPayload(payload);
+        renderButtonsPanel();
+        if (!options?.silent) {
+          tradeStatus("Smart scalp state updated.", false);
+        }
+        if (smartContextReady()) {
+          scheduleSmartPolling();
+        } else {
+          stopSmartPolling();
+        }
+      } catch (error) {
+        if (!options?.silent) {
+          tradeStatus(error.message || "Smart scalp refresh failed.", true);
+        }
+        throw error;
+      } finally {
+        state.trade.smart.refreshPromise = null;
+      }
+    }());
+    return state.trade.smart.refreshPromise;
+  }
+
+  async function syncSmartContext(options) {
+    if (!state.trade.authenticated) {
+      return;
+    }
+    try {
+      const payload = await tradeFetchJson("/api/trade/smart/context", {
+        method: "POST",
+        body: JSON.stringify({
+          page: "auction",
+          mode: currentConfig().mode,
+          run: currentConfig().run,
+        }),
+      });
+      applySmartPayload(payload);
+      renderButtonsPanel();
+      if (!options?.silent) {
+        tradeStatus("Smart scalp context synced.", false);
+      }
+      scheduleSmartPolling();
+    } catch (error) {
+      if (!options?.silent) {
+        tradeStatus(error.message || "Smart scalp context sync failed.", true);
+      }
+      throw error;
+    }
+  }
+
+  async function requestTradeLogin() {
+    if (state.trade.loginBusy || state.trade.actionBusy) {
+      return;
+    }
+    if (!state.trade.authConfigured) {
+      tradeStatus("Trade login is not configured on the server.", true);
+      return;
+    }
+    const username = (elements.tradeUsername?.value || "").trim();
+    const password = elements.tradePassword?.value || "";
+    if (!username || !password) {
+      tradeStatus("Username and password are required.", true);
+      return;
+    }
+    state.trade.loginBusy = true;
+    renderLoginPanel();
+    try {
+      const payload = await tradeFetchJson("/api/trade/login", {
+        method: "POST",
+        body: JSON.stringify({ username: username, password: password }),
+      });
+      if (elements.tradePassword) {
+        elements.tradePassword.value = "";
+      }
+      applyTradeSessionPayload({
+        authenticated: true,
+        username: payload.username || username,
+        authConfigured: true,
+        brokerConfigured: state.trade.brokerConfigured,
+        configured: state.trade.brokerConfigured,
+        broker: state.trade.brokerStatus,
+      });
+      tradeStatus("Trade login successful.", false);
+      await refreshTradeData({ silent: true }).catch(function (error) {
+        tradeStatus(error.message || "Trade refresh failed.", true);
+      });
+      await syncSmartContext({ silent: true }).catch(function () {});
+    } catch (error) {
+      if (error?.code === "TRADE_AUTH_NOT_CONFIGURED") {
+        applyTradeSessionPayload({
+          authenticated: false,
+          username: null,
+          authConfigured: false,
+          brokerConfigured: error?.payload?.brokerConfigured ?? tradePayloadDetail(error?.payload)?.brokerConfigured ?? state.trade.brokerConfigured,
+          configured: error?.payload?.configured ?? tradePayloadDetail(error?.payload)?.configured ?? state.trade.brokerConfigured,
+          broker: error?.payload?.broker || tradePayloadDetail(error?.payload)?.broker || state.trade.brokerStatus,
+          error: error.code,
+        });
+      }
+      tradeStatus(error.message || "Trade login failed.", true);
+    } finally {
+      state.trade.loginBusy = false;
+      renderLoginPanel();
+    }
+  }
+
+  async function requestTradeLogout() {
+    if (state.trade.actionBusy) {
+      return;
+    }
+    setTradeBusy(true);
+    stopTradePolling();
+    try {
+      await tradeFetchJson("/api/trade/logout", { method: "POST" });
+    } catch (error) {
+      void error;
+    }
+    applyTradeSessionPayload({
+      authenticated: false,
+      username: null,
+      authConfigured: state.trade.authConfigured,
+      brokerConfigured: state.trade.brokerConfigured,
+      configured: state.trade.brokerConfigured,
+      broker: state.trade.brokerStatus,
+    });
+    tradeStatus("Trade session logged out.", false);
+    setTradeBusy(false);
+  }
+
+  async function toggleSmartEntry(side) {
+    if (!state.trade.authenticated || state.trade.actionBusy) {
+      return;
+    }
+    await syncSmartContext({ silent: true }).catch(function () {});
+    const nextArmed = !currentSmartArmed(side);
+    setTradeBusy(true);
+    try {
+      const payload = await tradeFetchJson("/api/trade/smart/entry", {
+        method: "POST",
+        body: JSON.stringify({ side: side, armed: nextArmed }),
+      });
+      applySmartPayload(payload);
+      renderButtonsPanel();
+      tradeStatus(nextArmed ? ("Smart " + side.toUpperCase() + " armed.") : ("Smart " + side.toUpperCase() + " disarmed."), false);
+      scheduleSmartPolling();
+    } catch (error) {
+      tradeStatus(error.message || "Smart entry update failed.", true);
+    } finally {
+      setTradeBusy(false);
+    }
+  }
+
+  async function toggleSmartClose() {
+    if (!state.trade.authenticated || state.trade.actionBusy) {
+      return;
+    }
+    await syncSmartContext({ silent: true }).catch(function () {});
+    const nextArmed = !currentSmartArmed("close");
+    setTradeBusy(true);
+    try {
+      const payload = await tradeFetchJson("/api/trade/smart/close", {
+        method: "POST",
+        body: JSON.stringify({ armed: nextArmed }),
+      });
+      applySmartPayload(payload);
+      renderButtonsPanel();
+      tradeStatus(nextArmed ? "Smart Close armed." : "Smart Close disarmed.", false);
+      scheduleSmartPolling();
+    } catch (error) {
+      tradeStatus(error.message || "Smart close update failed.", true);
+    } finally {
+      setTradeBusy(false);
+    }
+  }
+
+  async function loadTradeSession() {
+    try {
+      const payload = await tradeFetchJson("/api/trade/me");
+      applyTradeSessionPayload(payload);
+      if (payload.authConfigured === false) {
+        tradeStatus(payload.message || "Trade login is not configured on the server.", true);
+        return;
+      }
+      if (payload.authenticated) {
+        tradeStatus("Trade session active.", false);
+        await refreshTradeData({ silent: true }).catch(function (error) {
+          tradeStatus(error.message || "Trade refresh failed.", true);
+        });
+        await syncSmartContext({ silent: true }).catch(function () {});
+        return;
+      }
+      tradeStatus("Trade login required.", false);
+    } catch (error) {
+      applyTradeSessionPayload({
+        authenticated: false,
+        username: null,
+        authConfigured: true,
+        brokerConfigured: state.trade.brokerConfigured,
+        configured: state.trade.brokerConfigured,
+        broker: error?.payload?.broker || tradePayloadDetail(error?.payload)?.broker || state.trade.brokerStatus,
+      });
+      tradeStatus(error.message || "Trade session check failed.", true);
+    }
   }
 
   function clearHistoryTimer() {
@@ -550,7 +1303,9 @@
     elements.focusLabel.textContent = currentFocusLabel();
     if (!focus) {
       elements.contextSummaryLine.textContent = "No auction context loaded.";
-      elements.focusSummary.innerHTML = "<div class=\"sql-empty\">No focus summary yet.</div>";
+      if (elements.contextSection?.open) {
+        elements.focusSummary.innerHTML = "<div class=\"sql-empty\">No focus summary yet.</div>";
+      }
       return;
     }
     elements.contextSummaryLine.textContent = [
@@ -559,6 +1314,9 @@
       focus.preferredAction || "NoTrade",
       formatPrice(focus.lowPrice) + " to " + formatPrice(focus.highPrice),
     ].join(" | ");
+    if (!elements.contextSection?.open) {
+      return;
+    }
     elements.focusSummary.innerHTML = [
       "<div class=\"auction-context-grid\">",
       "<span>Bracket position</span><strong>" + escapeHtml(formatPercent(focus.bracketPosition)) + "</strong>",
@@ -576,6 +1334,9 @@
 
   function renderReferences() {
     const refs = state.auction?.focusWindow?.nearestReferences || [];
+    if (!elements.contextSection?.open) {
+      return;
+    }
     if (!refs.length) {
       elements.referenceList.innerHTML = "<div class=\"sql-empty\">No references yet.</div>";
       return;
@@ -593,6 +1354,9 @@
 
   function renderLadder() {
     const ladder = state.auction?.ladder || [];
+    if (!elements.contextSection?.open) {
+      return;
+    }
     if (!ladder.length) {
       elements.ladderList.innerHTML = "<div class=\"sql-empty\">No ladder rows yet.</div>";
       return;
@@ -922,7 +1686,9 @@
     elements.eventCount.textContent = String(events.length);
     if (!events.length) {
       elements.eventSummaryLine.textContent = "No auction events yet.";
-      elements.eventRibbon.innerHTML = "<div class=\"sql-empty\">No auction events yet.</div>";
+      if (elements.eventsPanel?.open) {
+        elements.eventRibbon.innerHTML = "<div class=\"sql-empty\">No auction events yet.</div>";
+      }
       return;
     }
     const latest = events[0];
@@ -932,6 +1698,9 @@
       latest.windowLabel || latest.windowKind || "window",
       "strength " + String(latest.strength ?? "-"),
     ].join(" | ");
+    if (!elements.eventsPanel?.open) {
+      return;
+    }
     elements.eventRibbon.innerHTML = events.map(function (event) {
       const tone = String(event.direction || "").toLowerCase() === "down" ? "down" : "up";
       const eventTime = event.eventTsMs ? new Date(event.eventTsMs).toLocaleTimeString() : "-";
@@ -1203,6 +1972,8 @@
       name: "mid",
       showSymbol: false,
       smooth: false,
+      animation: false,
+      hoverAnimation: false,
       lineStyle: { width: 1.6, color: "#e8eef8" },
       areaStyle: { color: "rgba(109,216,255,0.05)" },
       data: rowData,
@@ -1215,6 +1986,7 @@
         id: "auction-events",
         type: "scatter",
         symbolSize: 11,
+        animation: false,
         data: currentEventData,
         itemStyle: {
           color: function (params) {
@@ -1229,6 +2001,7 @@
         id: "auction-history-events",
         type: "scatter",
         symbolSize: 8,
+        animation: false,
         data: historicalEventData,
         itemStyle: {
           color: function (params) {
@@ -1250,8 +2023,10 @@
         yRange ? { id: "auction-y-slider", startValue: yRange.min, endValue: yRange.max } : { id: "auction-y-slider" },
       ],
       series: series,
+    }, { replaceMerge: ["series"], lazyUpdate: true });
+    window.requestAnimationFrame(function () {
+      state.view.applyingZoom = false;
     });
-    state.view.applyingZoom = false;
     renderViewControls();
 
     const profile = focus?.profile || [];
@@ -1265,12 +2040,12 @@
     state.profileChart.setOption({
       animation: false,
       backgroundColor: "transparent",
-      grid: { left: 56, right: 18, top: 18, bottom: 32, containLabel: false },
+      grid: { left: 58, right: 18, top: 18, bottom: 38, containLabel: true },
       xAxis: {
         type: "value",
         min: 0,
         max: activityMax,
-        name: "Activity",
+        name: "Time / Activity",
         nameLocation: "middle",
         nameGap: 24,
         axisLabel: { color: "#91a1b8" },
@@ -1284,7 +2059,11 @@
         name: "Price",
         nameLocation: "middle",
         nameGap: 42,
-        axisLabel: { color: "#91a1b8", formatter: function (value) { return Number(value).toFixed(2); } },
+        axisLabel: {
+          color: "#91a1b8",
+          hideOverlap: false,
+          formatter: function (value) { return Number(value).toFixed(2); },
+        },
         axisLine: { lineStyle: { color: "rgba(147,181,255,0.16)" } },
         splitLine: { lineStyle: { color: "rgba(147,181,255,0.08)" } },
       },
@@ -1302,6 +2081,7 @@
       },
       series: [{
         type: "bar",
+        animation: false,
         barMaxWidth: 12,
         data: profile.map(function (item) {
           const priceBin = Number(item.priceBin);
@@ -1330,7 +2110,7 @@
           data: profileReferenceLines(focus, currentPrice),
         },
       }],
-    });
+    }, { lazyUpdate: true });
   }
 
   function renderAll() {
@@ -1341,7 +2121,19 @@
     renderReferences();
     renderLadder();
     renderEvents();
+    renderLoginPanel();
+    renderButtonsPanel();
     renderChart();
+  }
+
+  function queueAuctionRender() {
+    if (state.renderFrame) {
+      return;
+    }
+    state.renderFrame = window.requestAnimationFrame(function () {
+      state.renderFrame = 0;
+      renderAll();
+    });
   }
 
   async function loadBootstrap() {
@@ -1385,7 +2177,7 @@
       appendRows(payload.rows || []);
       state.auction = payload.auction || state.auction;
       state.lastMetrics = payload;
-      renderAll();
+      queueAuctionRender();
       scheduleHistoryRefresh(false);
     };
     source.addEventListener("heartbeat", function (event) {
@@ -1394,6 +2186,7 @@
       state.lastMetrics = payload;
       renderMeta();
       renderPerf();
+      renderButtonsPanel();
     });
     source.onerror = function () {
       state.streamConnected = false;
@@ -1427,7 +2220,7 @@
       appendRows(payload.rows || []);
       state.auction = payload.auction || state.auction;
       state.lastMetrics = payload;
-      renderAll();
+      queueAuctionRender();
       scheduleHistoryRefresh(false);
       if (payload.endReached) {
         clearActivity();
@@ -1481,16 +2274,93 @@
     writeQuery();
   }
 
+  function setupAccordionPanels() {
+    [
+      elements.contextSection,
+      elements.eventsPanel,
+      elements.loginPanel,
+      elements.buttonsPanel,
+    ].forEach(function (panel) {
+      if (!panel) {
+        return;
+      }
+      panel.addEventListener("toggle", function () {
+        if (panel === elements.contextSection) {
+          renderFocusSummary();
+          renderReferences();
+          renderLadder();
+        } else if (panel === elements.eventsPanel) {
+          renderEvents();
+        } else if (panel === elements.loginPanel) {
+          renderLoginPanel();
+        } else if (panel === elements.buttonsPanel) {
+          renderButtonsPanel();
+        }
+        if (state.chart) {
+          requestAnimationFrame(function () {
+            state.chart.resize();
+            if (state.profileChart) {
+              state.profileChart.resize();
+            }
+          });
+        }
+      });
+    });
+  }
+
+  function setupTradePanel() {
+    if (!elements.tradeLoginForm) {
+      return;
+    }
+    applyTradeSessionPayload({
+      authenticated: false,
+      username: null,
+      authConfigured: true,
+      brokerConfigured: false,
+      configured: false,
+      broker: { configured: false, state: "not_configured", reason: "Broker integration is not configured." },
+    });
+    tradeStatus("Trade login required.", false);
+    renderLoginPanel();
+    renderButtonsPanel();
+
+    elements.tradeLoginForm.addEventListener("submit", function (event) {
+      event.preventDefault();
+      requestTradeLogin();
+    });
+    elements.tradeLogoutButton?.addEventListener("click", function () {
+      requestTradeLogout();
+    });
+    elements.auctionSmartBuyButton?.addEventListener("click", function () {
+      toggleSmartEntry("buy");
+    });
+    elements.auctionSmartSellButton?.addEventListener("click", function () {
+      toggleSmartEntry("sell");
+    });
+    elements.auctionSmartCloseButton?.addEventListener("click", function () {
+      toggleSmartClose();
+    });
+    window.addEventListener("beforeunload", function () {
+      stopTradePolling();
+      stopSmartPolling();
+    });
+    loadTradeSession();
+  }
+
   bindSegment(elements.modeToggle, function (value) {
     setSegment(elements.modeToggle, value);
     updateReviewFields();
     writeQuery();
+    renderButtonsPanel();
+    syncSmartContext({ silent: true }).catch(function () {});
     status("Mode updated. Click Load to refresh data.", false);
   });
   bindSegment(elements.runToggle, function (value) {
     setSegment(elements.runToggle, value);
     writeQuery();
     clearActivity();
+    renderButtonsPanel();
+    syncSmartContext({ silent: true }).catch(function () {});
     if (value === "run" && state.rows.length) {
       if (currentConfig().mode === "live") {
         connectStream(state.rows[state.rows.length - 1].id);
@@ -1571,5 +2441,7 @@
   });
 
   applyInitialConfig(parseQuery());
+  setupAccordionPanels();
+  setupTradePanel();
   loadAll();
 }());

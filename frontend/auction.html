@@ -189,6 +189,60 @@
               </div>
             </div>
           </details>
+
+          <details class="auction-accordion" id="loginPanel">
+            <summary class="auction-accordion-toggle">
+              <span class="auction-accordion-title-group">
+                <span class="auction-accordion-title">Login</span>
+                <span class="auction-panel-muted" id="loginStatePill">Locked</span>
+              </span>
+              <span class="auction-accordion-summary" id="loginSummaryLine">Trade login required.</span>
+            </summary>
+            <div class="auction-accordion-body auction-login-body">
+              <div class="status-line" id="tradeStatusLine">Trade login required.</div>
+
+              <form class="trade-login-form auction-trade-login-form" id="tradeLoginForm" autocomplete="off">
+                <label>
+                  <span>username</span>
+                  <input id="tradeUsername" type="text" value="babak" maxlength="64" autocomplete="username">
+                </label>
+                <label>
+                  <span>password</span>
+                  <input id="tradePassword" type="password" maxlength="128" autocomplete="current-password">
+                </label>
+                <div class="live-inline-actions">
+                  <button class="primary-button compact-button" id="tradeLoginButton" type="submit">Login</button>
+                </div>
+              </form>
+
+              <div class="auction-login-session" id="tradeSessionShell" hidden>
+                <div class="trade-session-copy" id="tradeSessionSummary">Trade session idle.</div>
+                <div class="trade-session-copy" id="tradeBrokerSummary">Broker state unavailable.</div>
+                <div class="live-inline-actions">
+                  <button class="ghost-button compact-button" id="tradeLogoutButton" type="button">Logout</button>
+                </div>
+              </div>
+            </div>
+          </details>
+
+          <details class="auction-accordion" id="buttonsPanel">
+            <summary class="auction-accordion-toggle">
+              <span class="auction-accordion-title-group">
+                <span class="auction-accordion-title">Buttons</span>
+                <span class="auction-panel-muted" id="buttonStatePill">OFF</span>
+              </span>
+              <span class="auction-accordion-summary" id="buttonsSummaryLine">Login required.</span>
+            </summary>
+            <div class="auction-accordion-body auction-buttons-body">
+              <div class="auction-smart-actions">
+                <button class="chart-trade-button chart-trade-button-smart" id="auctionSmartBuyButton" type="button">Smart Buy OFF</button>
+                <button class="chart-trade-button chart-trade-button-smart" id="auctionSmartSellButton" type="button">Smart Sell OFF</button>
+                <button class="chart-trade-button chart-trade-button-smart chart-trade-button-smart-close" id="auctionSmartCloseButton" type="button">Smart Close OFF</button>
+              </div>
+              <div class="trade-session-copy auction-smart-summary" id="auctionSmartStatus">Smart scalping unavailable.</div>
+              <div class="trade-session-copy auction-smart-summary" id="auctionTradeHint">Login required.</div>
+            </div>
+          </details>
         </aside>
 
         <div class="panel chart-panel live-chart-panel auction-chart-panel" id="chartPanel">

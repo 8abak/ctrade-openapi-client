@@ -231,7 +231,7 @@ class SmartScalpService:
             "mode": "live",
             "run": "stop",
             "enabled": False,
-            "reason": "Smart scalping requires Live + Run.",
+            "reason": "Smart scalping requires the Live or Auction chart in Live + Run.",
             "updatedAtMs": _now_ms(),
         }
 
@@ -240,7 +240,7 @@ class SmartScalpService:
             "armed": {"buy": False, "sell": False, "close": False},
             "backendState": "idle",
             "statusText": "Idle",
-            "availabilityReason": "Smart scalping requires Live + Run.",
+            "availabilityReason": "Smart scalping requires the Live or Auction chart in Live + Run.",
             "cooldownUntilMs": 0,
             "cooldownRemainingMs": 0,
             "lastTickId": 0,
@@ -279,8 +279,8 @@ class SmartScalpService:
             normalized_page = (page or "live").strip().lower() or "live"
             normalized_mode = (mode or "live").strip().lower() or "live"
             normalized_run = (run or "stop").strip().lower() or "stop"
-            enabled = normalized_page == "live" and normalized_mode == "live" and normalized_run == "run"
-            reason = "" if enabled else "Smart scalping is available only on the live chart in Live + Run."
+            enabled = normalized_page in {"live", "auction"} and normalized_mode == "live" and normalized_run == "run"
+            reason = "" if enabled else "Smart scalping is available only on the Live or Auction chart in Live + Run."
             self._context = {
                 "page": normalized_page,
                 "mode": normalized_mode,
@@ -399,29 +399,26 @@ class SmartScalpService:
             snapshot = self._refresh_snapshot_locked(force=True)
             positions = list(snapshot.get("positions") or [])
             if armed:
-                if len(positions) != 1:
-                    raise SmartScalpError(
-                        "Smart Close requires exactly one open position.",
-                        code="SMART_CLOSE_POSITION_REQUIRED",
-                        status_code=409,
-                    )
                 if not self._broker_ready_locked():
                     raise SmartScalpError(
                         self._broker_reason_locked(),
                         code="SMART_CLOSE_BROKER_UNAVAILABLE",
                         status_code=503,
-                    )
+                )
                 self._state["error"] = None
                 self._seed_recent_ticks_locked()
-                position = positions[0]
+                position = positions[0] if len(positions) == 1 else None
                 self._state["armed"]["buy"] = False
                 self._state["armed"]["sell"] = False
                 self._state["armed"]["close"] = True
                 self._state["lastAutoDisarmReason"] = None
-                self._state["backendState"] = "armed_close"
-                self._state["statusText"] = "Smart Close armed."
-                self._state["currentPosition"] = self._position_summary(position)
-                self._reset_smart_position_locked(position)
+                self._state["backendState"] = "armed_close" if len(positions) == 1 else "armed_close_waiting"
+                self._state["statusText"] = "Smart Close armed." if len(positions) == 1 else "Smart Close armed. Waiting for a single open position."
+                self._state["currentPosition"] = self._position_summary(position) if len(positions) == 1 else None
+                if len(positions) == 1:
+                    self._reset_smart_position_locked(position)
+                else:
+                    self._clear_smart_position_locked()
             else:
                 self._state["armed"]["close"] = False
                 self._state["backendState"] = "idle"
@@ -532,14 +529,6 @@ class SmartScalpService:
         self._state["snapshotAtMs"] = self._last_snapshot_at_ms
         self._state["availabilityReason"] = ""
 
-        if len(positions) != 1 and self._state["armed"].get("close"):
-            self._clear_armed_locked(
-                reason="Smart Close disarmed because no single open position is available.",
-                backend_state="idle",
-                auto_reason="Smart Close disarmed because no single open position is available.",
-            )
-            return
-
         if positions and (self._state["armed"].get("buy") or self._state["armed"].get("sell")):
             self._clear_armed_locked(
                 reason="Smart entry disarmed because a position is already open.",
@@ -566,6 +555,17 @@ class SmartScalpService:
                 self._execute_entry_locked("sell", evaluation)
                 return
         if self._state["armed"].get("close"):
+            if len(positions) != 1:
+                self._state["backendState"] = "armed_close_waiting"
+                self._state["statusText"] = "Smart Close armed. Waiting for a single open position."
+                self._state["availabilityReason"] = "Waiting for a single open position."
+                self._state["evaluation"] = {
+                    "type": "close",
+                    "status": "waiting_position",
+                    "openPositionCount": len(positions),
+                }
+                self._clear_smart_position_locked()
+                return
             evaluation = self._evaluate_close_locked(positions[0] if len(positions) == 1 else None)
             if evaluation:
                 self._execute_close_locked(positions[0], evaluation)
