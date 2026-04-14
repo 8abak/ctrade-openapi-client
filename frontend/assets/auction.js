@@ -16,7 +16,8 @@
   };
   const MAX_WINDOW = 10000;
   const REVIEW_SPEEDS = [0.5, 1, 2, 3, 5];
-  const HISTORY_REFRESH_DELAY_MS = 160;
+  const HISTORY_REFRESH_DELAY_MS = 750;
+  const LIVE_RECONNECT_DELAY_MS = 1000;
   const MIN_VISIBLE_PRICE_RANGE = 0.6;
   const DEFAULT_PROFILE_PRICE_STEP = 0.1;
   const TRADE_POLL_INTERVAL_MS = 15000;
@@ -41,10 +42,15 @@
     profileChart: null,
     rows: [],
     source: null,
+    tickSource: null,
+    auctionSource: null,
     reviewTimer: 0,
+    reconnectTimer: 0,
     reviewEndId: null,
     lastMetrics: null,
+    lastAuctionMetrics: null,
     streamConnected: false,
+    auctionStreamConnected: false,
     auction: null,
     history: {
       sessions: [],
@@ -53,7 +59,13 @@
       lastRangeKey: "",
     },
     renderFrame: 0,
+    tickRenderFrame: 0,
     loadToken: 0,
+    fastTickStats: {
+      appendedCount: 0,
+      browserLatencyMs: null,
+      renderLatencyMs: null,
+    },
     view: {
       followLive: true,
       fitMode: "price",
@@ -415,19 +427,32 @@
   }
 
   function renderPerf() {
-    const metrics = state.lastMetrics || {};
-    const parts = ["Stream " + (state.streamConnected ? "up" : "down")];
-    if (metrics.dbLatestId != null) {
-      parts.push("DB " + metrics.dbLatestId);
+    const tickMetrics = state.lastMetrics || {};
+    const auctionMetrics = state.lastAuctionMetrics || {};
+    const parts = [
+      "Ticks " + (state.streamConnected ? "up" : "down"),
+      "Auction " + (state.auctionStreamConnected ? "up" : "down"),
+    ];
+    if (tickMetrics.dbLatestId != null) {
+      parts.push("DB " + tickMetrics.dbLatestId);
     }
-    if (metrics.fetchLatencyMs != null) {
-      parts.push("Fetch " + Math.round(metrics.fetchLatencyMs * 100) / 100 + "ms");
+    if (tickMetrics.fetchLatencyMs != null) {
+      parts.push("Tick fetch " + Math.round(tickMetrics.fetchLatencyMs * 100) / 100 + "ms");
     }
-    if (metrics.serializeLatencyMs != null) {
-      parts.push("Serialize " + Math.round(metrics.serializeLatencyMs * 100) / 100 + "ms");
+    if (state.fastTickStats.browserLatencyMs != null) {
+      parts.push("Wire " + Math.round(state.fastTickStats.browserLatencyMs) + "ms");
+    }
+    if (state.fastTickStats.appendedCount > 0) {
+      parts.push("Append " + state.fastTickStats.appendedCount);
+    }
+    if (state.fastTickStats.renderLatencyMs != null) {
+      parts.push("Paint " + Math.round(state.fastTickStats.renderLatencyMs) + "ms");
+    }
+    if (auctionMetrics.snapshotBuildLatencyMs != null) {
+      parts.push("Auction build " + Math.round(auctionMetrics.snapshotBuildLatencyMs * 100) / 100 + "ms");
     }
     if (state.auction?.asOfTsMs != null) {
-      parts.push("Auction " + Math.max(0, Date.now() - state.auction.asOfTsMs) + "ms");
+      parts.push("Auction age " + Math.max(0, Date.now() - state.auction.asOfTsMs) + "ms");
     }
     if (state.history.loading) {
       parts.push("History loading");
@@ -1328,7 +1353,29 @@
     }
   }
 
+  function clearReconnectTimer() {
+    if (state.reconnectTimer) {
+      window.clearTimeout(state.reconnectTimer);
+      state.reconnectTimer = 0;
+    }
+  }
+
+  function closeLiveSources() {
+    if (state.tickSource) {
+      state.tickSource.close();
+      state.tickSource = null;
+    }
+    if (state.auctionSource) {
+      state.auctionSource.close();
+      state.auctionSource = null;
+    }
+    state.streamConnected = false;
+    state.auctionStreamConnected = false;
+  }
+
   function clearActivity() {
+    clearReconnectTimer();
+    closeLiveSources();
     if (state.source) {
       state.source.close();
       state.source = null;
@@ -1338,7 +1385,6 @@
       state.reviewTimer = 0;
     }
     clearHistoryTimer();
-    state.streamConnected = false;
     renderPerf();
   }
 
@@ -1347,6 +1393,10 @@
     state.reviewEndId = payload.reviewEndId || null;
     state.auction = payload.auction || null;
     state.lastMetrics = payload.metrics || null;
+    state.lastAuctionMetrics = payload.metrics || null;
+    state.fastTickStats.appendedCount = 0;
+    state.fastTickStats.browserLatencyMs = null;
+    state.fastTickStats.renderLatencyMs = null;
   }
 
   function trimRowsToWindow() {
@@ -1358,14 +1408,17 @@
 
   function appendRows(rows) {
     const knownIds = new Set(state.rows.map(function (row) { return Number(row.id); }));
+    let appendedCount = 0;
     (rows || []).forEach(function (row) {
       const rowId = Number(row.id || 0);
       if (!knownIds.has(rowId)) {
         state.rows.push(row);
         knownIds.add(rowId);
+        appendedCount += 1;
       }
     });
     trimRowsToWindow();
+    return appendedCount;
   }
 
   function currentRange() {
@@ -2219,6 +2272,95 @@
     return graphics;
   }
 
+  function buildChartRowData() {
+    return state.rows.map(function (row) {
+      return { value: [row.timestampMs, row.mid], row: row };
+    });
+  }
+
+  function resolveChartViewport(config, rowData) {
+    const xBounds = rowData.length
+      ? normalizeRange(rowData[0].value[0], rowData[rowData.length - 1].value[0], 1000)
+      : null;
+    const navigationYRange = computeNavigationYRange(config);
+    const xRange = resolveXRange(xBounds);
+    const yRange = resolveYRange(config, navigationYRange);
+    state.view.xRange = xRange;
+    state.view.yRange = yRange;
+    return {
+      xBounds: xBounds,
+      navigationYRange: navigationYRange,
+      xRange: xRange,
+      yRange: yRange,
+    };
+  }
+
+  function resolveFastTickViewport(config, rowData) {
+    const viewport = resolveChartViewport(config, rowData);
+    if (!viewport.navigationYRange) {
+      return viewport;
+    }
+    if (!state.view.userLockedY && state.view.fitMode !== "refs") {
+      const rowPrices = priceValuesFromRows(state.rows).concat(tradeOverlayPrices());
+      const liveRange = rowPrices.length
+        ? clampRange(
+          normalizeRange(
+            Math.min.apply(null, rowPrices),
+            Math.max.apply(null, rowPrices),
+            MIN_VISIBLE_PRICE_RANGE
+          ),
+          viewport.navigationYRange
+        )
+        : viewport.navigationYRange;
+      viewport.yRange = liveRange;
+      state.view.yRange = liveRange;
+    }
+    return viewport;
+  }
+
+  function queueFastTickRender() {
+    if (state.tickRenderFrame) {
+      return;
+    }
+    state.tickRenderFrame = window.requestAnimationFrame(function () {
+      const startedAt = window.performance && typeof window.performance.now === "function"
+        ? window.performance.now()
+        : Date.now();
+      state.tickRenderFrame = 0;
+      if (!state.chart) {
+        renderChart();
+        return;
+      }
+      const config = currentConfig();
+      const rowData = buildChartRowData();
+      const viewport = resolveFastTickViewport(config, rowData);
+      state.view.applyingZoom = true;
+      state.chart.setOption({
+        xAxis: viewport.xBounds ? { min: viewport.xBounds.min, max: viewport.xBounds.max } : {},
+        yAxis: viewport.navigationYRange ? { min: viewport.navigationYRange.min, max: viewport.navigationYRange.max } : {},
+        dataZoom: [
+          viewport.xRange ? { id: "auction-x-inside", startValue: viewport.xRange.min, endValue: viewport.xRange.max } : { id: "auction-x-inside" },
+          viewport.xRange ? { id: "auction-x-slider", startValue: viewport.xRange.min, endValue: viewport.xRange.max } : { id: "auction-x-slider" },
+          viewport.yRange ? { id: "auction-y-inside", startValue: viewport.yRange.min, endValue: viewport.yRange.max } : { id: "auction-y-inside" },
+          viewport.yRange ? { id: "auction-y-slider", startValue: viewport.yRange.min, endValue: viewport.yRange.max } : { id: "auction-y-slider" },
+        ],
+        series: [{
+          id: "price-line",
+          data: rowData,
+        }],
+      }, { lazyUpdate: true });
+      renderViewControls();
+      window.requestAnimationFrame(function () {
+        state.view.applyingZoom = false;
+        const finishedAt = window.performance && typeof window.performance.now === "function"
+          ? window.performance.now()
+          : Date.now();
+        state.fastTickStats.renderLatencyMs = Math.max(0, finishedAt - startedAt);
+        renderPerf();
+      });
+    });
+  }
+
   function profileBarRender(params, api) {
     const activity = Math.max(0, Number(api.value(0) || 0));
     const price = Number(api.value(1));
@@ -2261,9 +2403,7 @@
     ensureCharts();
     const config = currentConfig();
     const focus = state.auction?.focusWindow || null;
-    const rowData = state.rows.map(function (row) {
-      return { value: [row.timestampMs, row.mid], row: row };
-    });
+    const rowData = buildChartRowData();
     const currentEventData = config.showEvents ? (state.auction?.events || []).filter(function (event) {
       return event.price1 != null;
     }).map(function (event) {
@@ -2276,14 +2416,7 @@
         });
       })
       : [];
-    const xBounds = rowData.length
-      ? normalizeRange(rowData[0].value[0], rowData[rowData.length - 1].value[0], 1000)
-      : null;
-    const navigationYRange = computeNavigationYRange(config);
-    const xRange = resolveXRange(xBounds);
-    const yRange = resolveYRange(config, navigationYRange);
-    state.view.xRange = xRange;
-    state.view.yRange = yRange;
+    const viewport = resolveChartViewport(config, rowData);
 
     const lineStyleByRef = {
       POC: { color: "#ffb35c", type: "solid" },
@@ -2412,13 +2545,13 @@
 
     state.view.applyingZoom = true;
     state.chart.setOption({
-      xAxis: xBounds ? { min: xBounds.min, max: xBounds.max } : {},
-      yAxis: navigationYRange ? { min: navigationYRange.min, max: navigationYRange.max } : {},
+      xAxis: viewport.xBounds ? { min: viewport.xBounds.min, max: viewport.xBounds.max } : {},
+      yAxis: viewport.navigationYRange ? { min: viewport.navigationYRange.min, max: viewport.navigationYRange.max } : {},
       dataZoom: [
-        xRange ? { id: "auction-x-inside", startValue: xRange.min, endValue: xRange.max } : { id: "auction-x-inside" },
-        xRange ? { id: "auction-x-slider", startValue: xRange.min, endValue: xRange.max } : { id: "auction-x-slider" },
-        yRange ? { id: "auction-y-inside", startValue: yRange.min, endValue: yRange.max } : { id: "auction-y-inside" },
-        yRange ? { id: "auction-y-slider", startValue: yRange.min, endValue: yRange.max } : { id: "auction-y-slider" },
+        viewport.xRange ? { id: "auction-x-inside", startValue: viewport.xRange.min, endValue: viewport.xRange.max } : { id: "auction-x-inside" },
+        viewport.xRange ? { id: "auction-x-slider", startValue: viewport.xRange.min, endValue: viewport.xRange.max } : { id: "auction-x-slider" },
+        viewport.yRange ? { id: "auction-y-inside", startValue: viewport.yRange.min, endValue: viewport.yRange.max } : { id: "auction-y-inside" },
+        viewport.yRange ? { id: "auction-y-slider", startValue: viewport.yRange.min, endValue: viewport.yRange.max } : { id: "auction-y-slider" },
       ],
       series: series,
     }, { replaceMerge: ["series"], lazyUpdate: true });
@@ -2572,48 +2705,97 @@
     status("Loaded auction view.", false);
     if (config.run === "run") {
       if (config.mode === "live") {
-        connectStream(payload.lastId || 0);
+        connectLiveStreams(payload.lastId || 0);
       } else {
         connectReviewStream(payload.lastId || 0, payload.reviewEndId || 0);
       }
     }
   }
 
-  function connectStream(afterId) {
-    clearActivity();
+  function scheduleLiveReconnect() {
+    if (state.reconnectTimer || currentConfig().mode !== "live" || currentConfig().run !== "run") {
+      return;
+    }
+    state.reconnectTimer = window.setTimeout(function () {
+      state.reconnectTimer = 0;
+      if (currentConfig().mode !== "live" || currentConfig().run !== "run") {
+        return;
+      }
+      connectLiveStreams(state.rows[state.rows.length - 1]?.id || 0);
+    }, LIVE_RECONNECT_DELAY_MS);
+  }
+
+  function handleLiveStreamDisconnect(message) {
+    closeLiveSources();
+    renderPerf();
+    status(message || "Auction live feeds disconnected. Reconnecting...", true);
+    scheduleLiveReconnect();
+  }
+
+  function connectLiveStreams(afterId) {
+    closeLiveSources();
+    clearReconnectTimer();
     const config = currentConfig();
-    const source = new EventSource("/api/auction/stream?" + new URLSearchParams({
+    if (config.mode !== "live" || config.run !== "run") {
+      renderPerf();
+      return;
+    }
+
+    const tickSource = new EventSource("/api/auction/tick-stream?" + new URLSearchParams({
       afterId: String(afterId || 0),
-      focusKind: config.focusKind,
-      limit: "250",
+      limit: "64",
     }).toString());
-    state.source = source;
-    source.onopen = function () {
+    state.tickSource = tickSource;
+    tickSource.onopen = function () {
       state.streamConnected = true;
       renderPerf();
-      status("Auction stream connected.", false);
+      status("Auction tick feed connected.", false);
     };
-    source.onmessage = function (event) {
+    tickSource.onmessage = function (event) {
       const payload = JSON.parse(event.data);
-      appendRows(payload.rows || []);
-      state.auction = payload.auction || state.auction;
+      const appendedCount = appendRows(payload.rows || []);
       state.lastMetrics = payload;
+      state.fastTickStats.appendedCount = appendedCount;
+      state.fastTickStats.browserLatencyMs = payload.serverSentAtMs != null ? Math.max(0, Date.now() - Number(payload.serverSentAtMs)) : null;
+      if (appendedCount > 0) {
+        queueFastTickRender();
+      } else {
+        renderPerf();
+      }
+    };
+    tickSource.addEventListener("heartbeat", function (event) {
+      const payload = JSON.parse(event.data);
+      state.lastMetrics = payload;
+      state.fastTickStats.appendedCount = 0;
+      renderPerf();
+    });
+
+    const auctionSource = new EventSource("/api/auction/stream?" + new URLSearchParams({
+      focusKind: config.focusKind,
+    }).toString());
+    state.auctionSource = auctionSource;
+    auctionSource.onopen = function () {
+      state.auctionStreamConnected = true;
+      renderPerf();
+    };
+    auctionSource.onmessage = function (event) {
+      const payload = JSON.parse(event.data);
+      state.auction = payload.auction || state.auction;
+      state.lastAuctionMetrics = payload;
       queueAuctionRender();
       scheduleHistoryRefresh(false);
     };
-    source.addEventListener("heartbeat", function (event) {
+    auctionSource.addEventListener("heartbeat", function (event) {
       const payload = JSON.parse(event.data);
-      state.auction = payload.auction || state.auction;
-      state.lastMetrics = payload;
-      renderMeta();
+      state.lastAuctionMetrics = payload;
       renderPerf();
-      renderButtonsPanel();
     });
-    source.onerror = function () {
-      state.streamConnected = false;
-      renderPerf();
-      status("Auction stream disconnected. Click Load or Run to reconnect.", true);
-      clearActivity();
+
+    tickSource.onerror = function () {
+      handleLiveStreamDisconnect("Auction tick feed disconnected. Reconnecting...");
+    };
+    auctionSource.onerror = function () {
+      handleLiveStreamDisconnect("Auction snapshot feed disconnected. Reconnecting...");
     };
   }
 
@@ -2781,7 +2963,7 @@
     syncSmartContext({ silent: true }).catch(function () {});
     if (value === "run" && state.rows.length) {
       if (currentConfig().mode === "live") {
-        connectStream(state.rows[state.rows.length - 1].id);
+        connectLiveStreams(state.rows[state.rows.length - 1].id);
       } else {
         connectReviewStream(state.rows[state.rows.length - 1].id, state.reviewEndId);
       }

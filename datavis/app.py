@@ -70,6 +70,10 @@ STREAM_HEARTBEAT_SECONDS = max(
     STREAM_IDLE_POLL_SECONDS,
     float(os.getenv("DATAVIS_STREAM_HEARTBEAT_SECONDS", "5.0")),
 )
+AUCTION_SNAPSHOT_STREAM_SECONDS = max(
+    STREAM_IDLE_POLL_SECONDS,
+    float(os.getenv("DATAVIS_AUCTION_SNAPSHOT_STREAM_SECONDS", "0.75")),
+)
 REVIEW_STREAM_BATCH = int(os.getenv("DATAVIS_REVIEW_STREAM_BATCH", "256"))
 REVIEW_MAX_DELAY_MS = max(50, int(os.getenv("DATAVIS_REVIEW_MAX_DELAY_MS", "1500")))
 REVIEW_MIN_DELAY_MS = max(0, int(os.getenv("DATAVIS_REVIEW_MIN_DELAY_MS", "5")))
@@ -312,6 +316,23 @@ def serialize_tick_row(row: Dict[str, Any]) -> Dict[str, Any]:
 
 def serialize_tick_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [serialize_tick_row(row) for row in rows]
+
+
+def serialize_auction_chart_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    timestamp = row["timestamp"]
+    mid = float(row["mid"]) if row.get("mid") is not None else None
+    spread = float(row["spread"]) if row.get("spread") is not None else None
+    return {
+        "id": int(row["id"]),
+        "timestamp": timestamp.isoformat(),
+        "timestampMs": dt_to_ms(timestamp),
+        "mid": mid,
+        "spread": spread,
+    }
+
+
+def serialize_auction_chart_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [serialize_auction_chart_row(row) for row in rows]
 
 
 def serialize_metrics_payload(
@@ -711,6 +732,10 @@ def tick_columns() -> str:
     return "id, symbol, timestamp, bid, ask, mid, spread"
 
 
+def auction_chart_tick_columns() -> str:
+    return "id, timestamp, mid, spread"
+
+
 def query_tick_bounds(cur: Any) -> Dict[str, Any]:
     cur.execute(
         """
@@ -825,6 +850,25 @@ def query_rows_after(
             """.format(select_sql=select_sql),
             (TICK_SYMBOL, after_id, end_id, limit),
         )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def query_auction_chart_rows_after(
+    cur: Any,
+    after_id: int,
+    limit: int,
+) -> List[Dict[str, Any]]:
+    select_sql = auction_chart_tick_columns()
+    cur.execute(
+        """
+        SELECT {select_sql}
+        FROM public.ticks
+        WHERE symbol = %s AND id > %s
+        ORDER BY id ASC
+        LIMIT %s
+        """.format(select_sql=select_sql),
+        (TICK_SYMBOL, after_id, limit),
+    )
     return [dict(row) for row in cur.fetchall()]
 
 
@@ -2007,7 +2051,7 @@ def build_auction_view_payload(
     first_row = rows[0] if rows else None
     last_row = rows[-1] if rows else None
     payload = {
-        "rows": serialize_tick_rows(rows),
+        "rows": serialize_auction_chart_rows(rows),
         "rowCount": len(rows),
         "firstId": first_row.get("id") if first_row else None,
         "lastId": last_row.get("id") if last_row else None,
@@ -2298,15 +2342,13 @@ def stream_review_events(
         return
 
 
-def stream_auction_events(
+def stream_auction_tick_events(
     *,
     after_id: int,
     limit: int,
-    focus_kind: str,
 ) -> Generator[str, None, None]:
     last_id = max(0, after_id)
     effective_limit = clamp_int(limit, 1, MAX_STREAM_BATCH)
-    normalized_focus = normalize_auction_focus_kind(focus_kind)
     last_heartbeat = time.monotonic()
     idle_sleep = STREAM_POLL_SECONDS
     try:
@@ -2314,18 +2356,16 @@ def stream_auction_events(
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 while True:
                     fetch_started = time.perf_counter()
-                    tick_rows = query_rows_after(cur, last_id, effective_limit)
+                    tick_rows = query_auction_chart_rows_after(cur, last_id, effective_limit)
                     fetch_ms = elapsed_ms(fetch_started)
                     if tick_rows:
                         serialize_started = time.perf_counter()
                         last_id = int(tick_rows[-1]["id"])
-                        snapshot = AUCTION_SERVICE.apply_live_rows(tick_rows, focus_kind=normalized_focus)
                         payload = {
-                            "rows": serialize_tick_rows(tick_rows),
+                            "rows": serialize_auction_chart_rows(tick_rows),
                             "rowCount": len(tick_rows),
                             "lastId": last_id,
                             "streamMode": "delta",
-                            "auction": snapshot,
                             **serialize_metrics_payload(
                                 fetch_ms=fetch_ms,
                                 serialize_ms=elapsed_ms(serialize_started),
@@ -2340,13 +2380,11 @@ def stream_auction_events(
                     now = time.monotonic()
                     if now - last_heartbeat >= STREAM_HEARTBEAT_SECONDS:
                         latest_row = query_latest_tick(cur)
-                        snapshot = AUCTION_SERVICE.sync_live(focus_kind=normalized_focus)
                         payload = {
                             "rows": [],
                             "rowCount": 0,
                             "lastId": last_id,
                             "streamMode": "heartbeat",
-                            "auction": snapshot,
                             **serialize_metrics_payload(
                                 fetch_ms=fetch_ms,
                                 serialize_ms=0.0,
@@ -2357,6 +2395,59 @@ def stream_auction_events(
                         last_heartbeat = now
                     time.sleep(idle_sleep)
                     idle_sleep = STREAM_IDLE_POLL_SECONDS
+    except GeneratorExit:
+        return
+
+
+def stream_auction_events(
+    *,
+    focus_kind: str,
+) -> Generator[str, None, None]:
+    normalized_focus = normalize_auction_focus_kind(focus_kind)
+    last_heartbeat = time.monotonic()
+    last_snapshot_id: Optional[int] = None
+    last_snapshot_ts_ms: Optional[int] = None
+    try:
+        with db_connection(readonly=True, autocommit=True) as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                while True:
+                    build_started = time.perf_counter()
+                    snapshot = AUCTION_SERVICE.sync_live(focus_kind=normalized_focus)
+                    snapshot_build_ms = elapsed_ms(build_started)
+                    latest_row = query_latest_tick(cur)
+                    snapshot_id = int(snapshot.get("lastProcessedId") or 0) if snapshot else 0
+                    snapshot_ts_ms = int(snapshot.get("asOfTsMs") or 0) if snapshot else 0
+                    if snapshot_id != last_snapshot_id or snapshot_ts_ms != last_snapshot_ts_ms:
+                        payload = {
+                            "streamMode": "snapshot",
+                            "auction": snapshot,
+                            "snapshotBuildLatencyMs": snapshot_build_ms,
+                            **serialize_metrics_payload(
+                                fetch_ms=snapshot_build_ms,
+                                serialize_ms=0.0,
+                                latest_row=latest_row,
+                            ),
+                        }
+                        yield format_sse(payload)
+                        last_snapshot_id = snapshot_id
+                        last_snapshot_ts_ms = snapshot_ts_ms
+                        last_heartbeat = time.monotonic()
+                    else:
+                        now = time.monotonic()
+                        if now - last_heartbeat >= STREAM_HEARTBEAT_SECONDS:
+                            payload = {
+                                "streamMode": "heartbeat",
+                                "auction": None,
+                                "snapshotBuildLatencyMs": snapshot_build_ms,
+                                **serialize_metrics_payload(
+                                    fetch_ms=snapshot_build_ms,
+                                    serialize_ms=0.0,
+                                    latest_row=latest_row,
+                                ),
+                            }
+                            yield format_sse(payload, event_name="heartbeat")
+                            last_heartbeat = now
+                    time.sleep(AUCTION_SNAPSHOT_STREAM_SECONDS)
     except GeneratorExit:
         return
 
@@ -2419,7 +2510,7 @@ def stream_auction_review_events(
                         review_store.apply_rows([row])
                         last_id = int(row["id"])
                         payload = {
-                            "rows": serialize_tick_rows([row]),
+                            "rows": serialize_auction_chart_rows([row]),
                             "rowCount": 1,
                             "lastId": last_id,
                             "endId": end_id,
@@ -3251,15 +3342,30 @@ def live_review_stream(
 
 @app.get("/api/auction/stream")
 def auction_stream(
-    afterId: int = Query(0, ge=0),
-    limit: int = Query(250, ge=1, le=MAX_STREAM_BATCH),
     focusKind: str = Query("brokerday", min_length=1, max_length=32),
 ) -> StreamingResponse:
     return StreamingResponse(
         stream_auction_events(
+            focus_kind=focusKind,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.get("/api/auction/tick-stream")
+def auction_tick_stream(
+    afterId: int = Query(0, ge=0),
+    limit: int = Query(64, ge=1, le=MAX_STREAM_BATCH),
+) -> StreamingResponse:
+    return StreamingResponse(
+        stream_auction_tick_events(
             after_id=afterId,
             limit=limit,
-            focus_kind=focusKind,
         ),
         media_type="text/event-stream",
         headers={
