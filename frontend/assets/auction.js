@@ -458,8 +458,56 @@
     });
   }
 
+  function activeFullscreenElement() {
+    return document.fullscreenElement
+      || document.webkitFullscreenElement
+      || document.msFullscreenElement
+      || null;
+  }
+
+  function fullscreenSupported() {
+    const panel = elements.chartPanel;
+    return Boolean(
+      panel
+      && (
+        typeof panel.requestFullscreen === "function"
+        || typeof panel.webkitRequestFullscreen === "function"
+        || typeof panel.msRequestFullscreen === "function"
+      )
+    );
+  }
+
+  function requestElementFullscreen(element) {
+    if (!element) {
+      return Promise.reject(new Error("Fullscreen target is unavailable."));
+    }
+    if (typeof element.requestFullscreen === "function") {
+      return element.requestFullscreen();
+    }
+    if (typeof element.webkitRequestFullscreen === "function") {
+      return element.webkitRequestFullscreen();
+    }
+    if (typeof element.msRequestFullscreen === "function") {
+      return element.msRequestFullscreen();
+    }
+    return Promise.reject(new Error("Fullscreen is not available in this browser."));
+  }
+
+  function exitAnyFullscreen() {
+    if (typeof document.exitFullscreen === "function") {
+      return document.exitFullscreen();
+    }
+    if (typeof document.webkitExitFullscreen === "function") {
+      return document.webkitExitFullscreen();
+    }
+    if (typeof document.msExitFullscreen === "function") {
+      return document.msExitFullscreen();
+    }
+    return Promise.resolve();
+  }
+
   function updateChartFullscreenUi() {
-    const isFullscreen = document.fullscreenElement === elements.chartPanel;
+    const isFullscreen = activeFullscreenElement() === elements.chartPanel;
     state.ui.chartFullscreen = isFullscreen;
     elements.chartPanel?.classList.toggle("is-fullscreen", isFullscreen);
     if (elements.chartFullscreenButton) {
@@ -471,15 +519,15 @@
   }
 
   async function toggleChartFullscreen() {
-    if (!elements.chartPanel || typeof elements.chartPanel.requestFullscreen !== "function") {
+    if (!fullscreenSupported()) {
       status("Fullscreen is not available in this browser.", true);
       return;
     }
     try {
-      if (document.fullscreenElement === elements.chartPanel) {
-        await document.exitFullscreen();
+      if (activeFullscreenElement() === elements.chartPanel) {
+        await exitAnyFullscreen();
       } else {
-        await elements.chartPanel.requestFullscreen();
+        await requestElementFullscreen(elements.chartPanel);
       }
     } catch (error) {
       status(error.message || "Fullscreen request failed.", true);
@@ -1708,18 +1756,22 @@
 
   function profilePriceRange(focus, profile) {
     const focusRange = normalizeRange(focus?.lowPrice, focus?.highPrice, MIN_VISIBLE_PRICE_RANGE);
-    if (focusRange) {
-      return focusRange;
-    }
     const prices = collectNumbers((profile || []).map(function (item) { return item.priceBin; }));
-    if (!prices.length) {
-      return null;
+    const profileRange = prices.length
+      ? normalizeRange(
+        Math.min.apply(null, prices),
+        Math.max.apply(null, prices),
+        MIN_VISIBLE_PRICE_RANGE
+      )
+      : null;
+    if (focusRange && profileRange) {
+      return normalizeRange(
+        Math.min(focusRange.min, profileRange.min),
+        Math.max(focusRange.max, profileRange.max),
+        MIN_VISIBLE_PRICE_RANGE
+      );
     }
-    return normalizeRange(
-      Math.min.apply(null, prices),
-      Math.max.apply(null, prices),
-      MIN_VISIBLE_PRICE_RANGE
-    );
+    return focusRange || profileRange || null;
   }
 
   function profilePriceStep(profile) {
@@ -2067,6 +2119,43 @@
     }).filter(Boolean);
   }
 
+  function auctionOpenPositionEntryLines() {
+    if (!auctionTradeOverlayActive()) {
+      return [];
+    }
+    return state.trade.positions.map(function (position) {
+      const entryPrice = Number(position.entryPrice);
+      if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
+        return null;
+      }
+      const isSell = String(position.side || "").toLowerCase() === "sell";
+      const lineColor = isSell ? "rgba(255,159,178,0.88)" : "rgba(126,240,199,0.88)";
+      const labelColor = isSell ? "#ffd1da" : "#cffff0";
+      const pnlText = position.netUnrealizedPnl != null ? " | " + formatSignedPnl(position.netUnrealizedPnl) : "";
+      return {
+        name: "Open Position",
+        yAxis: entryPrice,
+        lineStyle: {
+          color: lineColor,
+          width: 1.3,
+          type: "dashed",
+        },
+        label: {
+          show: true,
+          position: "end",
+          formatter: formatPositionSide(position.side) + " " + formatPrice(entryPrice) + pnlText,
+          color: labelColor,
+          fontSize: 10,
+          padding: [2, 4],
+          backgroundColor: "rgba(5,9,15,0.92)",
+          borderColor: lineColor,
+          borderWidth: 1,
+          borderRadius: 3,
+        },
+      };
+    }).filter(Boolean);
+  }
+
   function buildAuctionPositionGraphics() {
     const chart = state.chart;
     if (!chart || !auctionTradeOverlayActive()) {
@@ -2094,7 +2183,8 @@
       const isSell = String(position.side || "").toLowerCase() === "sell";
       const lineColor = isSell ? "rgba(255,159,178,0.86)" : "rgba(126,240,199,0.86)";
       const textColor = isSell ? "#ffd1da" : "#cffff0";
-      const pnlText = position.netUnrealizedPnl != null ? " | " + formatSignedPnl(position.netUnrealizedPnl) : "";
+      const lots = positionLots(position);
+      const lotsText = Number.isFinite(lots) ? (formatLots(lots) + "L") : "";
       const labelY = Math.max(rect.y + 10, Math.min(rect.y + rect.height - 10, baseY + (index * 20) - 10));
       graphics.push({
         id: "auction-position-line-" + String(position.positionId),
@@ -2102,11 +2192,6 @@
         silent: true,
         z: 12,
         children: [
-          {
-            type: "line",
-            shape: { x1: rect.x + 2, y1: baseY, x2: rect.x + rect.width - 2, y2: baseY },
-            style: { stroke: lineColor, lineWidth: 1.2, lineDash: [6, 3] },
-          },
           {
             type: "rect",
             shape: { x: rect.x + rect.width - 170, y: labelY - 10, width: 166, height: 20, r: 4 },
@@ -2119,7 +2204,7 @@
           {
             type: "text",
             style: {
-              text: formatPositionSide(position.side) + " " + formatPrice(entryPrice) + pnlText,
+              text: formatPositionSide(position.side) + " #" + String(position.positionId) + (lotsText ? (" " + lotsText) : ""),
               x: rect.x + rect.width - 87,
               y: labelY,
               textAlign: "center",
@@ -2143,14 +2228,17 @@
     const end = api.coord([activity, price]);
     const topPoint = api.coord([0, price + (step / 2)]);
     const bottomPoint = api.coord([0, price - (step / 2)]);
-    const rawHeight = Math.abs(Number(bottomPoint[1]) - Number(topPoint[1]));
-    const barHeight = Math.max(6, Math.min(18, rawHeight > 0 ? rawHeight - 2 : 8));
+    const rowHeight = Math.abs(Number(bottomPoint[1]) - Number(topPoint[1]));
+    const barHeight = Math.max(1, Math.min(20, rowHeight > 0 ? rowHeight * 0.78 : 4));
+    const xStart = Number(start[0]);
+    const xEnd = Number(end[0]);
+    const width = Math.max(1, Math.abs(xEnd - xStart));
     const shape = echarts.graphic.clipRectByRect({
-      x: Math.min(start[0], end[0]),
+      x: Math.min(xStart, xEnd),
       y: Number(start[1]) - (barHeight / 2),
-      width: Math.max(4, Math.abs(Number(end[0]) - Number(start[0]))),
+      width: width,
       height: barHeight,
-      r: 3,
+      r: Math.max(1, Math.min(4, barHeight / 2)),
     }, {
       x: coordSys.x,
       y: coordSys.y,
@@ -2228,6 +2316,9 @@
           label: { formatter: ref.refKind, color: lineStyleByRef[ref.refKind].color, fontSize: 10 },
         });
       });
+    }
+    if (auctionTradeOverlayActive()) {
+      markLines.push.apply(markLines, auctionOpenPositionEntryLines());
     }
 
     const markAreas = [];
@@ -2360,7 +2451,7 @@
       xAxis: {
         type: "value",
         min: 0,
-        max: Math.max(1, activityMax * 1.08),
+        max: Math.max(1, activityMax * 1.12),
         name: "Time / Activity",
         nameLocation: "middle",
         nameGap: 24,
@@ -2410,7 +2501,9 @@
             itemStyle: {
               color: isCurrentBand
                 ? "#ff8ea8"
-                : (item.isPoc ? "#ffb35c" : (item.inValue ? "rgba(109,216,255,0.78)" : "rgba(145,161,184,0.28)")),
+                : (item.isPoc ? "#ffb35c" : (item.inValue ? "rgba(109,216,255,0.82)" : "rgba(145,161,184,0.32)")),
+              borderColor: isCurrentBand ? "#ffb5c5" : "rgba(8,14,23,0.62)",
+              borderWidth: 0.7,
             },
           };
         }),
@@ -2599,7 +2692,7 @@
     renderMeta();
     renderPerf();
     renderViewControls();
-    if (elements.chartFullscreenButton && (!elements.chartPanel || typeof elements.chartPanel.requestFullscreen !== "function")) {
+    if (elements.chartFullscreenButton && !fullscreenSupported()) {
       elements.chartFullscreenButton.disabled = true;
       elements.chartFullscreenButton.textContent = "Fullscreen N/A";
     }
@@ -2755,6 +2848,9 @@
     syncChartLayout();
   });
   document.addEventListener("fullscreenchange", function () {
+    updateChartFullscreenUi();
+  });
+  document.addEventListener("webkitfullscreenchange", function () {
     updateChartFullscreenUi();
   });
   window.addEventListener("keydown", function (event) {

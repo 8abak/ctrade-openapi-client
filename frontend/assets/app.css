@@ -479,7 +479,7 @@ select {
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(180px, 220px) minmax(0, 1fr) minmax(280px, 340px);
+  grid-template-columns: minmax(180px, 220px) minmax(0, 1fr) minmax(300px, 360px);
   gap: 0.75rem;
 }
 
@@ -607,7 +607,8 @@ select {
 }
 
 .auction-chart-panel.is-fullscreen,
-.auction-chart-panel:fullscreen {
+.auction-chart-panel:fullscreen,
+.auction-chart-panel:-webkit-full-screen {
   width: 100vw;
   height: 100vh;
   padding: 0.75rem;
@@ -617,12 +618,14 @@ select {
 }
 
 .auction-chart-panel.is-fullscreen .chart-host,
-.auction-chart-panel:fullscreen .chart-host {
+.auction-chart-panel:fullscreen .chart-host,
+.auction-chart-panel:-webkit-full-screen .chart-host {
   min-height: 0;
 }
 
 .auction-chart-panel.is-fullscreen .auction-chart-toolbar,
-.auction-chart-panel:fullscreen .auction-chart-toolbar {
+.auction-chart-panel:fullscreen .auction-chart-toolbar,
+.auction-chart-panel:-webkit-full-screen .auction-chart-toolbar {
   padding-top: 0;
 }
 
