@@ -21,6 +21,11 @@ Runtime paths used by the deploy flow:
 - virtualenv: `/home/ec2-user/venvs/datavis`
 - env file: `/etc/datavis.env`
 
+Systemd units installed by deploy:
+- `datavis.service` runs `datavis.app:app` from `/home/ec2-user/venvs/datavis/bin/uvicorn`
+- `tickcollector.service` runs `/home/ec2-user/cTrade/tickCollectorRawToDB.py` from `/home/ec2-user/venvs/datavis/bin/python`
+- `tickcollector.service` also reads `/etc/datavis.env` when present so `DATAVIS_CTRADER_CREDS_FILE` and related runtime overrides apply to the collector too
+
 Trading runtime env vars for `/etc/datavis.env`:
 - `DATAVIS_TRADE_USERNAME` (default `babak`)
 - `DATAVIS_TRADE_PASSWORD` (required to enable trade login)
