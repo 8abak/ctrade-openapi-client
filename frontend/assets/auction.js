@@ -63,7 +63,10 @@
       userLockedY: false,
       applyingZoom: false,
     },
-    ui: { sidebarCollapsed: true },
+    ui: {
+      sidebarCollapsed: true,
+      chartFullscreen: false,
+    },
     trade: {
       authConfigured: true,
       authError: null,
@@ -150,8 +153,10 @@
     auctionSmartCloseButton: document.getElementById("auctionSmartCloseButton"),
     auctionSmartStatus: document.getElementById("auctionSmartStatus"),
     auctionTradeHint: document.getElementById("auctionTradeHint"),
+    chartPanel: document.getElementById("chartPanel"),
     chartHost: document.getElementById("auctionChart"),
     profileChartHost: document.getElementById("auctionProfileChart"),
+    chartFullscreenButton: document.getElementById("chartFullscreenButton"),
   };
 
   function sanitizeWindowValue(rawValue) {
@@ -169,6 +174,31 @@
   function formatPrice(value) {
     const number = Number(value);
     return Number.isFinite(number) ? number.toFixed(2) : "-";
+  }
+
+  function formatSignedPnl(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) {
+      return "-";
+    }
+    const fixed = number.toFixed(2);
+    return number > 0 ? "+" + fixed : fixed;
+  }
+
+  function formatCompactNumber(value, digits) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) {
+      return "-";
+    }
+    return number.toFixed(digits).replace(/\.?0+$/, "");
+  }
+
+  function formatLots(value) {
+    return formatCompactNumber(value, 4);
+  }
+
+  function formatPositionSide(side) {
+    return String(side || "").toLowerCase() === "sell" ? "SELL" : "BUY";
   }
 
   function formatSignedPrice(value) {
@@ -411,13 +441,48 @@
     elements.sidebarToggle.setAttribute("aria-expanded", String(!state.ui.sidebarCollapsed));
     elements.sidebarToggle.setAttribute("aria-label", state.ui.sidebarCollapsed ? "Open auction controls" : "Close auction controls");
     elements.sidebarBackdrop.tabIndex = state.ui.sidebarCollapsed ? -1 : 0;
-    if (state.chart) {
-      requestAnimationFrame(function () {
+    syncChartLayout();
+  }
+
+  function syncChartLayout() {
+    window.requestAnimationFrame(function () {
+      if (state.chart) {
         state.chart.resize();
-        if (state.profileChart) {
-          state.profileChart.resize();
-        }
-      });
+      }
+      if (state.profileChart) {
+        state.profileChart.resize();
+      }
+      if (state.rows.length) {
+        renderChart();
+      }
+    });
+  }
+
+  function updateChartFullscreenUi() {
+    const isFullscreen = document.fullscreenElement === elements.chartPanel;
+    state.ui.chartFullscreen = isFullscreen;
+    elements.chartPanel?.classList.toggle("is-fullscreen", isFullscreen);
+    if (elements.chartFullscreenButton) {
+      elements.chartFullscreenButton.textContent = isFullscreen ? "Exit Fullscreen" : "Fullscreen";
+      elements.chartFullscreenButton.classList.toggle("is-active", isFullscreen);
+      elements.chartFullscreenButton.setAttribute("aria-pressed", String(isFullscreen));
+    }
+    syncChartLayout();
+  }
+
+  async function toggleChartFullscreen() {
+    if (!elements.chartPanel || typeof elements.chartPanel.requestFullscreen !== "function") {
+      status("Fullscreen is not available in this browser.", true);
+      return;
+    }
+    try {
+      if (document.fullscreenElement === elements.chartPanel) {
+        await document.exitFullscreen();
+      } else {
+        await elements.chartPanel.requestFullscreen();
+      }
+    } catch (error) {
+      status(error.message || "Fullscreen request failed.", true);
     }
   }
 
@@ -613,6 +678,9 @@
     state.trade.lastLoadedAtMs = null;
     state.trade.smart.payload = null;
     state.trade.smart.lastTradeMutationId = 0;
+    if (state.chart) {
+      renderChart();
+    }
   }
 
   function brokerUnavailableReason() {
@@ -650,6 +718,44 @@
 
   function smartContextReady() {
     return currentConfig().mode === "live" && currentConfig().run === "run";
+  }
+
+  function auctionTradeOverlayActive() {
+    return currentConfig().mode === "live" && state.trade.positions.length > 0;
+  }
+
+  function tradeOverlayPrices() {
+    if (!auctionTradeOverlayActive()) {
+      return [];
+    }
+    return collectNumbers((state.trade.positions || []).map(function (position) {
+      return position.entryPrice;
+    }));
+  }
+
+  function currentTradeVolumeInfo() {
+    return state.trade.volumeInfo || { defaultLotSize: 0.01 };
+  }
+
+  function tradeLotSizeUnits() {
+    return Number(currentTradeVolumeInfo().lotSize || 0);
+  }
+
+  function volumeToLots(volume) {
+    const lotSize = tradeLotSizeUnits();
+    const units = Number(volume);
+    if (!Number.isFinite(units) || !Number.isFinite(lotSize) || lotSize <= 0) {
+      return null;
+    }
+    return units / lotSize;
+  }
+
+  function positionLots(position) {
+    const direct = Number(position?.volumeLots);
+    if (Number.isFinite(direct)) {
+      return direct;
+    }
+    return volumeToLots(position?.volume);
   }
 
   function applySmartPayload(payload) {
@@ -891,6 +997,9 @@
         applySmartPayload(openPayload.smart);
         renderLoginPanel();
         renderButtonsPanel();
+        if (state.chart) {
+          renderChart();
+        }
         if (!silent) {
           tradeStatus("Trade state updated.", false);
         }
@@ -929,6 +1038,9 @@
           state.trade.lastLoadedAtMs = null;
           renderLoginPanel();
           renderButtonsPanel();
+          if (state.chart) {
+            renderChart();
+          }
         }
         throw error;
       } finally {
@@ -1500,7 +1612,14 @@
 
   function computePriceActionYRange(config, navigationRange) {
     const focus = state.auction?.focusWindow || null;
-    const focusRange = normalizeRange(focus?.lowPrice, focus?.highPrice, MIN_VISIBLE_PRICE_RANGE);
+    const focusPrices = collectNumbers([focus?.lowPrice, focus?.highPrice].concat(tradeOverlayPrices()));
+    const focusRange = focusPrices.length
+      ? normalizeRange(
+        Math.min.apply(null, focusPrices),
+        Math.max.apply(null, focusPrices),
+        MIN_VISIBLE_PRICE_RANGE
+      )
+      : null;
     if (focusRange) {
       return clampRange(focusRange, navigationRange);
     }
@@ -1522,6 +1641,7 @@
     const focus = state.auction?.focusWindow || null;
     const prices = priceValuesFromRows(activeRowsForVisibleWindow())
       .concat(focusReferencePrices(config))
+      .concat(tradeOverlayPrices())
       .concat(auctionEventPrices(config));
     if (config.showHistory) {
       prices.push.apply(prices, historyReferencePrices(config));
@@ -1886,6 +2006,169 @@
     };
   }
 
+  function auctionTradeConnectorRender(params, api) {
+    const start = api.coord([api.value(0), api.value(1)]);
+    const end = api.coord([api.value(2), api.value(3)]);
+    const position = params.data?.position || {};
+    const side = String(position.side || "").toLowerCase() === "sell" ? "sell" : "buy";
+    const color = side === "sell" ? "rgba(255,159,178,0.88)" : "rgba(126,240,199,0.88)";
+    return {
+      type: "line",
+      shape: { x1: start[0], y1: start[1], x2: end[0], y2: end[1] },
+      style: {
+        stroke: color,
+        lineWidth: 1.2,
+        lineDash: [5, 3],
+      },
+      silent: true,
+    };
+  }
+
+  function auctionOpenConnectorData() {
+    const latestRow = state.rows[state.rows.length - 1] || null;
+    const currentTsMs = Number(latestRow?.timestampMs);
+    const currentPrice = Number(state.auction?.focusWindow?.closePrice ?? latestRow?.mid);
+    if (!auctionTradeOverlayActive() || !Number.isFinite(currentTsMs) || !Number.isFinite(currentPrice)) {
+      return [];
+    }
+    return state.trade.positions.map(function (position) {
+      const entryTsMs = Number(position.openTimestampMs);
+      const entryPrice = Number(position.entryPrice);
+      if (!Number.isFinite(entryTsMs) || !Number.isFinite(entryPrice) || entryPrice <= 0) {
+        return null;
+      }
+      return {
+        value: [entryTsMs, entryPrice, currentTsMs, currentPrice],
+        position: position,
+      };
+    }).filter(Boolean);
+  }
+
+  function auctionOpenEntryMarkerData() {
+    const firstTsMs = Number(state.rows[0]?.timestampMs);
+    const lastTsMs = Number(state.rows[state.rows.length - 1]?.timestampMs);
+    if (!auctionTradeOverlayActive() || !Number.isFinite(firstTsMs) || !Number.isFinite(lastTsMs)) {
+      return [];
+    }
+    return state.trade.positions.map(function (position) {
+      const entryPrice = Number(position.entryPrice);
+      const rawEntryTsMs = Number(position.openTimestampMs);
+      if (!Number.isFinite(entryPrice) || entryPrice <= 0 || !Number.isFinite(rawEntryTsMs)) {
+        return null;
+      }
+      const entryTsMs = Math.max(firstTsMs, Math.min(lastTsMs, rawEntryTsMs));
+      return {
+        value: [entryTsMs, entryPrice],
+        position: position,
+        itemStyle: {
+          color: String(position.side || "").toLowerCase() === "sell" ? "#ff9fb2" : "#7ef0c7",
+        },
+      };
+    }).filter(Boolean);
+  }
+
+  function buildAuctionPositionGraphics() {
+    const chart = state.chart;
+    if (!chart || !auctionTradeOverlayActive()) {
+      return [];
+    }
+    const grid = chart.getModel()?.getComponent("grid", 0);
+    const rect = grid?.coordinateSystem?.getRect?.();
+    if (!rect) {
+      return [];
+    }
+    const graphics = [];
+    state.trade.positions.forEach(function (position, index) {
+      const entryPrice = Number(position.entryPrice);
+      if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
+        return;
+      }
+      const point = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [Number(state.rows[state.rows.length - 1]?.timestampMs || Date.now()), entryPrice]);
+      if (!Array.isArray(point)) {
+        return;
+      }
+      const baseY = Number(point[1]);
+      if (!Number.isFinite(baseY) || baseY < rect.y || baseY > rect.y + rect.height) {
+        return;
+      }
+      const isSell = String(position.side || "").toLowerCase() === "sell";
+      const lineColor = isSell ? "rgba(255,159,178,0.86)" : "rgba(126,240,199,0.86)";
+      const textColor = isSell ? "#ffd1da" : "#cffff0";
+      const pnlText = position.netUnrealizedPnl != null ? " | " + formatSignedPnl(position.netUnrealizedPnl) : "";
+      const labelY = Math.max(rect.y + 10, Math.min(rect.y + rect.height - 10, baseY + (index * 20) - 10));
+      graphics.push({
+        id: "auction-position-line-" + String(position.positionId),
+        type: "group",
+        silent: true,
+        z: 12,
+        children: [
+          {
+            type: "line",
+            shape: { x1: rect.x + 2, y1: baseY, x2: rect.x + rect.width - 2, y2: baseY },
+            style: { stroke: lineColor, lineWidth: 1.2, lineDash: [6, 3] },
+          },
+          {
+            type: "rect",
+            shape: { x: rect.x + rect.width - 170, y: labelY - 10, width: 166, height: 20, r: 4 },
+            style: {
+              fill: "rgba(5,9,15,0.92)",
+              stroke: lineColor,
+              lineWidth: 1,
+            },
+          },
+          {
+            type: "text",
+            style: {
+              text: formatPositionSide(position.side) + " " + formatPrice(entryPrice) + pnlText,
+              x: rect.x + rect.width - 87,
+              y: labelY,
+              textAlign: "center",
+              textVerticalAlign: "middle",
+              fill: textColor,
+              font: "11px 'IBM Plex Mono'",
+            },
+          },
+        ],
+      });
+    });
+    return graphics;
+  }
+
+  function profileBarRender(params, api) {
+    const activity = Math.max(0, Number(api.value(0) || 0));
+    const price = Number(api.value(1));
+    const step = Math.max(DEFAULT_PROFILE_PRICE_STEP, Number(api.value(2) || DEFAULT_PROFILE_PRICE_STEP));
+    const coordSys = params.coordSys;
+    const start = api.coord([0, price]);
+    const end = api.coord([activity, price]);
+    const topPoint = api.coord([0, price + (step / 2)]);
+    const bottomPoint = api.coord([0, price - (step / 2)]);
+    const rawHeight = Math.abs(Number(bottomPoint[1]) - Number(topPoint[1]));
+    const barHeight = Math.max(6, Math.min(18, rawHeight > 0 ? rawHeight - 2 : 8));
+    const shape = echarts.graphic.clipRectByRect({
+      x: Math.min(start[0], end[0]),
+      y: Number(start[1]) - (barHeight / 2),
+      width: Math.max(4, Math.abs(Number(end[0]) - Number(start[0]))),
+      height: barHeight,
+      r: 3,
+    }, {
+      x: coordSys.x,
+      y: coordSys.y,
+      width: coordSys.width,
+      height: coordSys.height,
+    });
+    if (!shape) {
+      return null;
+    }
+    return {
+      type: "rect",
+      transition: ["shape"],
+      shape: shape,
+      style: api.style(),
+      silent: true,
+    };
+  }
+
   function renderChart() {
     ensureCharts();
     const config = currentConfig();
@@ -1981,6 +2264,30 @@
       markArea: { data: markAreas, silent: true },
       z: 3,
     });
+    if (auctionTradeOverlayActive()) {
+      series.push({
+        id: "auction-open-position-connectors",
+        name: "Open positions",
+        type: "custom",
+        renderItem: auctionTradeConnectorRender,
+        silent: true,
+        animation: false,
+        encode: { x: [0, 2], y: [1, 3] },
+        data: auctionOpenConnectorData(),
+        z: 5,
+      });
+      series.push({
+        id: "auction-open-position-entry",
+        name: "Open position entry",
+        type: "scatter",
+        symbol: "triangle",
+        symbolSize: 12,
+        silent: true,
+        animation: false,
+        data: auctionOpenEntryMarkerData(),
+        z: 6,
+      });
+    }
     if (config.showEvents) {
       series.push({
         id: "auction-events",
@@ -2026,6 +2333,15 @@
     }, { replaceMerge: ["series"], lazyUpdate: true });
     window.requestAnimationFrame(function () {
       state.view.applyingZoom = false;
+      state.chart.setOption({
+        graphic: [{
+          id: "auction-trade-overlay",
+          type: "group",
+          silent: true,
+          z: 12,
+          children: buildAuctionPositionGraphics(),
+        }],
+      }, { replaceMerge: ["graphic"], lazyUpdate: true });
     });
     renderViewControls();
 
@@ -2044,7 +2360,7 @@
       xAxis: {
         type: "value",
         min: 0,
-        max: activityMax,
+        max: Math.max(1, activityMax * 1.08),
         name: "Time / Activity",
         nameLocation: "middle",
         nameGap: 24,
@@ -2080,14 +2396,16 @@
         },
       },
       series: [{
-        type: "bar",
+        type: "custom",
+        renderItem: profileBarRender,
         animation: false,
-        barMaxWidth: 12,
+        encode: { x: 0, y: 1 },
+        clip: true,
         data: profile.map(function (item) {
           const priceBin = Number(item.priceBin);
           const isCurrentBand = Number.isFinite(currentProfilePrice) && Math.abs(priceBin - currentProfilePrice) <= (priceStep / 2);
           return {
-            value: [item.activityScore, item.priceBin],
+            value: [item.activityScore, item.priceBin, priceStep],
             raw: item,
             itemStyle: {
               color: isCurrentBand
@@ -2095,6 +2413,15 @@
                 : (item.isPoc ? "#ffb35c" : (item.inValue ? "rgba(109,216,255,0.78)" : "rgba(145,161,184,0.28)")),
             },
           };
+        }),
+      }, {
+        type: "line",
+        silent: true,
+        animation: false,
+        showSymbol: false,
+        lineStyle: { opacity: 0 },
+        data: profile.map(function (item) {
+          return [0, item.priceBin];
         }),
         markArea: Number.isFinite(currentPrice) ? {
           silent: true,
@@ -2109,6 +2436,7 @@
           silent: true,
           data: profileReferenceLines(focus, currentPrice),
         },
+        tooltip: { show: false },
       }],
     }, { lazyUpdate: true });
   }
@@ -2271,6 +2599,10 @@
     renderMeta();
     renderPerf();
     renderViewControls();
+    if (elements.chartFullscreenButton && (!elements.chartPanel || typeof elements.chartPanel.requestFullscreen !== "function")) {
+      elements.chartFullscreenButton.disabled = true;
+      elements.chartFullscreenButton.textContent = "Fullscreen N/A";
+    }
     writeQuery();
   }
 
@@ -2296,14 +2628,7 @@
         } else if (panel === elements.buttonsPanel) {
           renderButtonsPanel();
         }
-        if (state.chart) {
-          requestAnimationFrame(function () {
-            state.chart.resize();
-            if (state.profileChart) {
-              state.profileChart.resize();
-            }
-          });
-        }
+        syncChartLayout();
       });
     });
   }
@@ -2423,16 +2748,14 @@
     resetChartView();
     renderChart();
   });
+  elements.chartFullscreenButton?.addEventListener("click", function () {
+    toggleChartFullscreen();
+  });
   window.addEventListener("resize", function () {
-    if (state.chart) {
-      state.chart.resize();
-    }
-    if (state.profileChart) {
-      state.profileChart.resize();
-    }
-    if (state.rows.length) {
-      renderChart();
-    }
+    syncChartLayout();
+  });
+  document.addEventListener("fullscreenchange", function () {
+    updateChartFullscreenUi();
   });
   window.addEventListener("keydown", function (event) {
     if (event.key === "Escape" && !state.ui.sidebarCollapsed) {
@@ -2441,6 +2764,7 @@
   });
 
   applyInitialConfig(parseQuery());
+  updateChartFullscreenUi();
   setupAccordionPanels();
   setupTradePanel();
   loadAll();
