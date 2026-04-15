@@ -26,7 +26,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
-from datavis.auction import AuctionService, AuctionStateStore
+from datavis.auction import AuctionService, AuctionStateStore, current_session_window
 from datavis.db import db_connect as shared_db_connect
 from datavis.rects import RectPaperService, RectServiceError
 from datavis.smart_scalp import SmartScalpError, SmartScalpService
@@ -774,23 +774,48 @@ def query_bootstrap_rows(
     start_id: Optional[int],
     window: int,
     end_id: Optional[int],
+    focus_kind: str = "",
 ) -> List[Dict[str, Any]]:
     select_sql = tick_columns()
     if mode == "live":
-        cur.execute(
-            """
-            SELECT {select_sql}
-            FROM (
+        normalized_focus = str(focus_kind or "").strip().lower()
+        if normalized_focus == "brokerday":
+            latest_row = query_latest_tick(cur)
+            latest_timestamp = latest_row.get("timestamp") if latest_row else None
+            if latest_timestamp is None:
+                return []
+            _, session_start_dt, session_end_dt = current_session_window("brokerday", latest_timestamp)
+            cur.execute(
+                """
                 SELECT {select_sql}
-                FROM public.ticks
-                WHERE symbol = %s
-                ORDER BY id DESC
-                LIMIT %s
-            ) recent
-            ORDER BY id ASC
-            """.format(select_sql=select_sql),
-            (TICK_SYMBOL, window),
-        )
+                FROM (
+                    SELECT {select_sql}
+                    FROM public.ticks
+                    WHERE symbol = %s
+                      AND timestamp >= %s
+                      AND timestamp <= %s
+                    ORDER BY id DESC
+                    LIMIT %s
+                ) recent
+                ORDER BY id ASC
+                """.format(select_sql=select_sql),
+                (TICK_SYMBOL, session_start_dt, session_end_dt, window),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT {select_sql}
+                FROM (
+                    SELECT {select_sql}
+                    FROM public.ticks
+                    WHERE symbol = %s
+                    ORDER BY id DESC
+                    LIMIT %s
+                ) recent
+                ORDER BY id ASC
+                """.format(select_sql=select_sql),
+                (TICK_SYMBOL, window),
+            )
         return [dict(row) for row in cur.fetchall()]
 
     if start_id is None:
@@ -2103,6 +2128,7 @@ def load_auction_bootstrap_payload(
                 start_id=start_id,
                 window=effective_window,
                 end_id=review_end_id,
+                focus_kind=normalized_focus,
             )
             if mode == "live":
                 snapshot = AUCTION_SERVICE.sync_live(focus_kind=normalized_focus)

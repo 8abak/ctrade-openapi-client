@@ -22,6 +22,7 @@
   const DEFAULT_PROFILE_PRICE_STEP = 0.1;
   const TRADE_POLL_INTERVAL_MS = 15000;
   const SMART_POLL_INTERVAL_MS = 2000;
+  const SYDNEY_TIMEZONE = "Australia/Sydney";
   const FOCUS_LABELS = {
     brokerday: "Broker Day",
     london: "London Session",
@@ -36,6 +37,31 @@
     london: { line: "rgba(109, 216, 255, 0.84)", area: "rgba(109, 216, 255, 0.07)" },
     newyork: { line: "rgba(126, 240, 199, 0.84)", area: "rgba(126, 240, 199, 0.07)" },
   };
+  const SYDNEY_DATE_TIME_FORMATTER = new Intl.DateTimeFormat("en-AU", {
+    timeZone: SYDNEY_TIMEZONE,
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+  const SYDNEY_TIME_FORMATTER = new Intl.DateTimeFormat("en-AU", {
+    timeZone: SYDNEY_TIMEZONE,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+  const SYDNEY_AXIS_TIME_FORMATTER = new Intl.DateTimeFormat("en-AU", {
+    timeZone: SYDNEY_TIMEZONE,
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
 
   const state = {
     chart: null,
@@ -227,6 +253,36 @@
     return Number.isFinite(number) ? Math.round(number * 100) + "%" : "-";
   }
 
+  function toDate(value) {
+    if (value == null || value === "") {
+      return null;
+    }
+    const date = value instanceof Date ? value : new Date(value);
+    return Number.isFinite(date.getTime()) ? date : null;
+  }
+
+  function formatSydneyDateTime(value) {
+    const date = toDate(value);
+    return date ? (SYDNEY_DATE_TIME_FORMATTER.format(date) + " Sydney") : "-";
+  }
+
+  function formatSydneyTime(value) {
+    const date = toDate(value);
+    return date ? (SYDNEY_TIME_FORMATTER.format(date) + " Sydney") : "-";
+  }
+
+  function formatSydneyAxisTime(value) {
+    const date = toDate(value);
+    return date ? SYDNEY_AXIS_TIME_FORMATTER.format(date).replace(",", "") : "";
+  }
+
+  function focusRangeText(focus) {
+    if (!focus?.startTs || !focus?.endTs) {
+      return "";
+    }
+    return formatSydneyDateTime(focus.startTs) + " -> " + formatSydneyDateTime(focus.endTs);
+  }
+
   function toneFromDirection(value) {
     const number = Number(value);
     if (!Number.isFinite(number) || number === 0) {
@@ -321,6 +377,27 @@
     return FOCUS_LABELS[elements.focusKind.value] || "Auction";
   }
 
+  function clipRowsToBrokerdayWindow() {
+    const focus = state.auction?.focusWindow || null;
+    if (currentConfig().focusKind !== "brokerday" || focus?.sessionKind !== "brokerday") {
+      return;
+    }
+    const startTsMs = Number(focus.startTsMs);
+    const endTsMs = Number(focus.endTsMs);
+    if (!Number.isFinite(startTsMs) || !Number.isFinite(endTsMs)) {
+      return;
+    }
+    state.rows = state.rows.filter(function (row) {
+      const rowTsMs = Number(row?.timestampMs);
+      return Number.isFinite(rowTsMs) && rowTsMs >= startTsMs && rowTsMs <= endTsMs;
+    });
+  }
+
+  function setAuctionSnapshot(snapshot) {
+    state.auction = snapshot || null;
+    clipRowsToBrokerdayWindow();
+  }
+
   function parseQuery() {
     const params = new URLSearchParams(window.location.search);
     const speed = Number.parseFloat(params.get("speed") || String(DEFAULTS.reviewSpeed));
@@ -411,7 +488,7 @@
     }
     const parts = [
       currentConfig().mode.toUpperCase(),
-      currentFocusLabel(),
+      focus.label || currentFocusLabel(),
       "ticks " + state.rows.length,
       "state " + (focus.stateKind || "Unknown"),
       "location " + (focus.locationKind || "Unknown"),
@@ -420,8 +497,8 @@
     if (state.history.sessions.length) {
       parts.push("history " + state.history.sessions.length);
     }
-    if (focus.startTs) {
-      parts.push("from " + new Date(focus.startTs).toLocaleString());
+    if (focus.startTs && focus.endTs) {
+      parts.push(focusRangeText(focus));
     }
     elements.auctionMeta.textContent = parts.join(" | ");
   }
@@ -1391,7 +1468,7 @@
   function applyPayload(payload) {
     state.rows = Array.isArray(payload.rows) ? payload.rows.slice() : [];
     state.reviewEndId = payload.reviewEndId || null;
-    state.auction = payload.auction || null;
+    setAuctionSnapshot(payload.auction || null);
     state.lastMetrics = payload.metrics || null;
     state.lastAuctionMetrics = payload.metrics || null;
     state.fastTickStats.appendedCount = 0;
@@ -1513,7 +1590,7 @@
 
   function renderFocusSummary() {
     const focus = state.auction?.focusWindow || null;
-    elements.focusLabel.textContent = currentFocusLabel();
+    elements.focusLabel.textContent = focus?.label || currentFocusLabel();
     if (!focus) {
       elements.contextSummaryLine.textContent = "No auction context loaded.";
       if (elements.contextSection?.open) {
@@ -1540,6 +1617,7 @@
       "<span>POC / VAH / VAL</span><strong>" + escapeHtml([formatPrice(focus.pocPrice), formatPrice(focus.vahPrice), formatPrice(focus.valPrice)].join(" / ")) + "</strong>",
       "<span>Invalidation</span><strong>" + escapeHtml(formatPrice(focus.invalidationPrice)) + "</strong>",
       "<span>Targets</span><strong>" + escapeHtml([formatPrice(focus.targetPrice1), formatPrice(focus.targetPrice2)].join(" / ")) + "</strong>",
+      "<span>Window</span><strong>" + escapeHtml(focusRangeText(focus) || "-") + "</strong>",
       "<span>Window note</span><strong>" + escapeHtml(focus.summaryText || "-") + "</strong>",
       "</div>",
     ].join("");
@@ -1928,7 +2006,7 @@
     }
     elements.eventRibbon.innerHTML = events.map(function (event) {
       const tone = String(event.direction || "").toLowerCase() === "down" ? "down" : "up";
-      const eventTime = event.eventTsMs ? new Date(event.eventTsMs).toLocaleTimeString() : "-";
+      const eventTime = formatSydneyTime(event.eventTsMs);
       return [
         "<article class=\"auction-event-row is-", tone, "\">",
         "<div class=\"auction-event-main\">",
@@ -1953,7 +2031,7 @@
     if (row) {
       lines.push("<div class=\"chart-tip-title\">Tick</div>");
       lines.push("<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">Id</span><span class=\"chart-tip-value\">" + escapeHtml(row.id) + "</span></div>");
-      lines.push("<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">Time</span><span class=\"chart-tip-value\">" + escapeHtml(new Date(row.timestampMs).toLocaleString()) + "</span></div>");
+      lines.push("<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">Time</span><span class=\"chart-tip-value\">" + escapeHtml(formatSydneyDateTime(row.timestampMs)) + "</span></div>");
       lines.push("<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">Mid</span><span class=\"chart-tip-value\">" + escapeHtml(formatPrice(row.mid)) + "</span></div>");
       lines.push("<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">Spread</span><span class=\"chart-tip-value\">" + escapeHtml(formatPrice(row.spread)) + "</span></div>");
     }
@@ -1976,7 +2054,10 @@
         grid: { left: 56, right: 36, top: 24, bottom: 44 },
         xAxis: {
           type: "time",
-          axisLabel: { color: "#91a1b8" },
+          axisLabel: {
+            color: "#91a1b8",
+            formatter: function (value) { return formatSydneyAxisTime(value); },
+          },
           axisLine: { lineStyle: { color: "rgba(147,181,255,0.16)" } },
         },
         yAxis: {
@@ -2450,6 +2531,14 @@
         });
       });
     }
+    if (focus?.sessionKind === "brokerday" && focus?.startTsMs != null) {
+      markLines.push({
+        name: "Broker Day Start",
+        xAxis: focus.startTsMs,
+        lineStyle: { color: "rgba(255,179,92,0.42)", width: 1, type: "dashed" },
+        label: { formatter: "08:00 Sydney", color: "rgba(255,179,92,0.86)", fontSize: 10 },
+      });
+    }
     if (auctionTradeOverlayActive()) {
       markLines.push.apply(markLines, auctionOpenPositionEntryLines());
     }
@@ -2780,7 +2869,9 @@
     };
     auctionSource.onmessage = function (event) {
       const payload = JSON.parse(event.data);
-      state.auction = payload.auction || state.auction;
+      if (payload.auction) {
+        setAuctionSnapshot(payload.auction);
+      }
       state.lastAuctionMetrics = payload;
       queueAuctionRender();
       scheduleHistoryRefresh(false);
@@ -2821,7 +2912,9 @@
     source.onmessage = function (event) {
       const payload = JSON.parse(event.data);
       appendRows(payload.rows || []);
-      state.auction = payload.auction || state.auction;
+      if (payload.auction) {
+        setAuctionSnapshot(payload.auction);
+      }
       state.lastMetrics = payload;
       queueAuctionRender();
       scheduleHistoryRefresh(false);

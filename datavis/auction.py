@@ -22,6 +22,7 @@ PERSIST_INTERVAL_SECONDS = 15.0
 SYDNEY_TZ = ZoneInfo("Australia/Sydney")
 LONDON_TZ = ZoneInfo("Europe/London")
 NEW_YORK_TZ = ZoneInfo("America/New_York")
+BROKERDAY_START_HOUR = 8
 
 ACTIVE_SESSION_KINDS = {"brokerday", "london", "newyork"}
 HISTORY_SESSION_KINDS = ("brokerday", "london", "newyork")
@@ -980,7 +981,9 @@ def current_session_window(kind: str, as_of: datetime) -> Tuple[str, datetime, d
         return label, start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
     label = WINDOW_LABELS["brokerday"]
     local = as_of.astimezone(SYDNEY_TZ)
-    start_local = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    start_local = local.replace(hour=BROKERDAY_START_HOUR, minute=0, second=0, microsecond=0)
+    if local < start_local:
+        start_local -= timedelta(days=1)
     end_local = min(local, start_local + timedelta(days=1))
     return label, start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
 
