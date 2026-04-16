@@ -48,8 +48,12 @@ CREATE TABLE IF NOT EXISTS public.separationstate (
     directioncandidate TEXT,
     unitprice NUMERIC(18, 8) NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'open',
+    statejson JSONB NOT NULL DEFAULT '{}'::jsonb,
     updatedat TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE public.separationstate
+    ADD COLUMN IF NOT EXISTS statejson JSONB NOT NULL DEFAULT '{}'::jsonb;
 
 CREATE TABLE IF NOT EXISTS public.separationruns (
     id BIGSERIAL PRIMARY KEY,

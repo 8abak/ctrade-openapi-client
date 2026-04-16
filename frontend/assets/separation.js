@@ -27,7 +27,15 @@
     median: { z: 5, alpha: 0.28, lineWidth: 1.5, emphasis: 0.96 },
     macro: { z: 2, alpha: 0.20, lineWidth: 1.9, emphasis: 0.98 },
   };
-  const SHAPE_LABELS = { spike: "Spike", drift: "Drift", oval: "Oval", balance: "Balance", transition: "Transition" };
+  const SHAPE_LABELS = {
+    impulse_up: "Impulse Up",
+    impulse_down: "Impulse Down",
+    drift_up: "Drift Up",
+    drift_down: "Drift Down",
+    balance: "Balance",
+    churn: "Churn",
+    transition: "Transition",
+  };
   const DIRECTION_COLORS = {
     up: { fill: "255,179,92", stroke: "#ffb35c", center: "#ffd29a" },
     down: { fill: "126,240,199", stroke: "#7ef0c7", center: "#9ff7d5" },
