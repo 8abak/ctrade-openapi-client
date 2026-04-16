@@ -5,8 +5,8 @@ APP_DIR="/home/ec2-user/cTrade"
 VENV_ACTIVATE="/home/ec2-user/venvs/datavis/bin/activate"
 ENV_FILE="/etc/datavis.env"
 DEFAULT_DATABASE_URL="postgresql://babak:babak33044@localhost:5432/trading"
-UNIT_FILES=("datavis" "tickcollector")
-RESTART_SERVICES=("datavis")
+UNIT_FILES=("datavis" "tickcollector" "separation")
+RESTART_SERVICES=("datavis" "separation")
 LEGACY_SERVICES=(
   "ottprocessor"
   "envelopeprocessor"
@@ -20,6 +20,7 @@ MIGRATION_FILES=(
   "deploy/sql/20260408_layer_zero_structure.sql"
   "deploy/sql/20260411_layer_zero_rects.sql"
   "deploy/sql/20260412_auction_framework.sql"
+  "deploy/sql/20260416_separation.sql"
 )
 HEALTH_URL="http://127.0.0.1:8000/api/health"
 

@@ -24,6 +24,7 @@ Runtime paths used by the deploy flow:
 Systemd units installed by deploy:
 - `datavis.service` runs `datavis.app:app` from `/home/ec2-user/venvs/datavis/bin/uvicorn`
 - `tickcollector.service` runs `/home/ec2-user/cTrade/tickCollectorRawToDB.py` from `/home/ec2-user/venvs/datavis/bin/python`
+- `separation.service` runs `python -m datavis.separation_runtime` from `/home/ec2-user/venvs/datavis/bin/python`
 - `tickcollector.service` also reads `/etc/datavis.env` when present so `DATAVIS_CTRADER_CREDS_FILE` and related runtime overrides apply to the collector too
 
 Trading runtime env vars for `/etc/datavis.env`:
@@ -46,11 +47,13 @@ The deploy workflow resets and cleans the EC2 checkout, so do not store runtime-
 The deploy script:
 - activates `/home/ec2-user/venvs/datavis/bin/activate`
 - runs `pip install -r requirements.txt`
-- installs only the `datavis` and `tickcollector` systemd units
+- installs the `datavis`, `tickcollector`, and `separation` systemd units
 - disables and removes old processor services, including `fastzig` and `zonebuilder`
 - applies `deploy/sql/20260408_layer_zero_structure.sql`
+- applies `deploy/sql/20260416_separation.sql`
 - enables `datavis` and `tickcollector`
-- restarts and verifies `datavis`
+- enables `separation`
+- restarts and verifies `datavis` and `separation`
 - never restarts `tickcollector`
 - performs a local health check at `http://127.0.0.1:8000/api/health` when `curl` is available
 

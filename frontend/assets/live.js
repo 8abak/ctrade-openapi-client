@@ -75,7 +75,7 @@
       busy: false,
       drawState: "idle",
       firstPoint: null,
-      defaultSmartCloseEnabled: false,
+      defaultSmartCloseEnabled: true,
     },
     trade: {
       authConfigured: true,
@@ -959,9 +959,9 @@
       context: { enabled: false, reason: "Smart scalping unavailable." },
       config: { showSummary: true, minimumProfit: 0.30 },
       state: {
-        armed: { buy: false, sell: false, close: false },
-        backendState: "idle",
-        statusText: "Idle",
+        armed: { buy: false, sell: false, close: true },
+        backendState: "armed_close_waiting",
+        statusText: "Smart Close armed. Waiting for a single open position.",
         cooldownRemainingMs: 0,
         lastAction: null,
         lastTriggerReason: null,
@@ -1024,9 +1024,6 @@
     }
     if ((kind === "buy" || kind === "sell") && state.trade.positions.length) {
       return { available: false, reason: "Position already open." };
-    }
-    if (kind === "close" && !smartOpenPosition()) {
-      return { available: false, reason: "Open position required." };
     }
     if (smartCooldownRemainingMs() > 0 && !currentSmartArmed(kind)) {
       return { available: false, reason: "Cooldown " + String(Math.ceil(smartCooldownRemainingMs() / 1000)) + "s" };

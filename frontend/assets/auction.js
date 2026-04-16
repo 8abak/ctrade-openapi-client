@@ -851,9 +851,9 @@
     return state.trade.smart.payload || {
       context: { enabled: false, reason: "Smart scalping unavailable." },
       state: {
-        armed: { buy: false, sell: false, close: false },
-        backendState: "idle",
-        statusText: "Idle",
+        armed: { buy: false, sell: false, close: true },
+        backendState: "armed_close_waiting",
+        statusText: "Smart Close armed. Waiting for a single open position.",
         cooldownRemainingMs: 0,
         currentPosition: null,
         openPositionCount: 0,

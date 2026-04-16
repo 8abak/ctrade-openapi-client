@@ -200,6 +200,7 @@ class SmartScalpService:
         self._poll_seconds = 0.05
         self._idle_seconds = 0.20
         self._auth_valid_until_ms = 0
+        self._close_preference_armed = True
 
     def _default_config(self) -> Dict[str, Any]:
         return {
@@ -231,7 +232,7 @@ class SmartScalpService:
             "mode": "live",
             "run": "stop",
             "enabled": False,
-            "reason": "Smart scalping requires the Live or Auction chart in Live + Run.",
+            "reason": "Smart scalping requires the Live, Auction, or Separation chart in Live + Run.",
             "updatedAtMs": _now_ms(),
         }
 
@@ -240,7 +241,7 @@ class SmartScalpService:
             "armed": {"buy": False, "sell": False, "close": False},
             "backendState": "idle",
             "statusText": "Idle",
-            "availabilityReason": "Smart scalping requires the Live or Auction chart in Live + Run.",
+            "availabilityReason": "Smart scalping requires the Live, Auction, or Separation chart in Live + Run.",
             "cooldownUntilMs": 0,
             "cooldownRemainingMs": 0,
             "lastTickId": 0,
@@ -279,8 +280,8 @@ class SmartScalpService:
             normalized_page = (page or "live").strip().lower() or "live"
             normalized_mode = (mode or "live").strip().lower() or "live"
             normalized_run = (run or "stop").strip().lower() or "stop"
-            enabled = normalized_page in {"live", "auction"} and normalized_mode == "live" and normalized_run == "run"
-            reason = "" if enabled else "Smart scalping is available only on the Live or Auction chart in Live + Run."
+            enabled = normalized_page in {"live", "auction", "separation"} and normalized_mode == "live" and normalized_run == "run"
+            reason = "" if enabled else "Smart scalping is available only on the Live, Auction, or Separation chart in Live + Run."
             self._context = {
                 "page": normalized_page,
                 "mode": normalized_mode,
@@ -298,6 +299,7 @@ class SmartScalpService:
                 )
             else:
                 self._touch_locked("Context synced.")
+                self._apply_close_preference_locked()
             return self.snapshot_state()
 
     def touch_auth(self, *, ttl_ms: int = 30000) -> None:
@@ -395,6 +397,7 @@ class SmartScalpService:
 
     def arm_close(self, *, armed: bool) -> Dict[str, Any]:
         with self._lock:
+            self._close_preference_armed = bool(armed)
             self._require_context_enabled_locked()
             snapshot = self._refresh_snapshot_locked(force=True)
             positions = list(snapshot.get("positions") or [])
@@ -427,9 +430,12 @@ class SmartScalpService:
             self._touch_locked(self._state["statusText"])
             return self.snapshot_state()
 
-    def reset(self, *, reason: str) -> Dict[str, Any]:
+    def reset(self, *, reason: str, restore_close_preference: bool = False) -> Dict[str, Any]:
         with self._lock:
+            if restore_close_preference:
+                self._close_preference_armed = True
             self._clear_armed_locked(reason=reason, backend_state="idle", auto_reason=reason)
+            self._apply_close_preference_locked()
             return self.snapshot_state()
 
     def snapshot_state(self) -> Dict[str, Any]:
@@ -779,6 +785,7 @@ class SmartScalpService:
                 "enteredAtMs": _now_ms(),
                 "peakProfit": 0.0,
             }
+            self._apply_close_preference_locked()
         except Exception as exc:
             self._state["armed"] = {"buy": False, "sell": False, "close": False}
             self._state["lastAutoDisarmReason"] = str(exc) or "Smart entry failed."
@@ -825,6 +832,7 @@ class SmartScalpService:
                 result=result,
             )
             self._clear_smart_position_locked()
+            self._apply_close_preference_locked()
         except Exception as exc:
             self._state["armed"] = {"buy": False, "sell": False, "close": False}
             self._state["lastAutoDisarmReason"] = str(exc) or "Smart close failed."
@@ -968,6 +976,31 @@ class SmartScalpService:
 
     def _auth_active_locked(self) -> bool:
         return int(self._auth_valid_until_ms or 0) > _now_ms()
+
+    def _apply_close_preference_locked(self) -> None:
+        if not self._context.get("enabled") or not self._close_preference_armed:
+            return
+        armed = self._state.get("armed") or {}
+        if armed.get("buy") or armed.get("sell"):
+            return
+        try:
+            snapshot = self._refresh_snapshot_locked(force=True)
+            positions = list(snapshot.get("positions") or [])
+        except Exception:
+            positions = []
+        position = positions[0] if len(positions) == 1 else None
+        self._state["armed"]["buy"] = False
+        self._state["armed"]["sell"] = False
+        self._state["armed"]["close"] = True
+        self._state["backendState"] = "armed_close" if len(positions) == 1 else "armed_close_waiting"
+        self._state["statusText"] = "Smart Close armed." if len(positions) == 1 else "Smart Close armed. Waiting for a single open position."
+        self._state["availabilityReason"] = "" if len(positions) == 1 else "Waiting for a single open position."
+        self._state["currentPosition"] = self._position_summary(position) if position else None
+        if position:
+            self._reset_smart_position_locked(position)
+        else:
+            self._clear_smart_position_locked()
+        self._touch_locked(self._state["statusText"])
 
     def _clear_armed_locked(self, *, reason: str, backend_state: str, auto_reason: Optional[str] = None) -> None:
         self._state["armed"] = {"buy": False, "sell": False, "close": False}

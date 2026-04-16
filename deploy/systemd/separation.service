@@ -1,0 +1,18 @@
+[Unit]
+Description=datavis separation incremental worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/home/ec2-user/cTrade
+EnvironmentFile=-/etc/datavis.env
+ExecStart=/home/ec2-user/venvs/datavis/bin/python -u -m datavis.separation_runtime
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

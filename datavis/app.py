@@ -29,6 +29,8 @@ from pydantic import BaseModel, Field, field_validator
 from datavis.auction import AuctionService, AuctionStateStore, current_session_window
 from datavis.db import db_connect as shared_db_connect
 from datavis.rects import RectPaperService, RectServiceError
+from datavis.separation import LEVELS as SEPARATION_LEVELS
+from datavis.separation import brokerday_for_timestamp
 from datavis.smart_scalp import SmartScalpError, SmartScalpService
 from datavis.structure import StructureEngine, replay_ticks
 from datavis.trading import CTraderGateway, load_broker_config
@@ -51,6 +53,8 @@ MAX_AUCTION_WINDOW = int(os.getenv("DATAVIS_AUCTION_MAX_WINDOW", "10000"))
 DEFAULT_STRUCTURE_WINDOW = int(os.getenv("DATAVIS_STRUCTURE_WINDOW", "50"))
 MAX_STRUCTURE_WINDOW = int(os.getenv("DATAVIS_STRUCTURE_MAX_WINDOW", "200000"))
 MAX_STRUCTURE_SOURCE_TICKS = int(os.getenv("DATAVIS_STRUCTURE_SOURCE_MAX_TICKS", "200000"))
+DEFAULT_SEPARATION_WINDOW = int(os.getenv("DATAVIS_SEPARATION_WINDOW", "160"))
+MAX_SEPARATION_WINDOW = int(os.getenv("DATAVIS_SEPARATION_MAX_WINDOW", "4000"))
 DEFAULT_HISTORY_LIMIT = 2000
 DEFAULT_BIGPICTURE_POINTS = 2000
 MAX_BIGPICTURE_POINTS = int(os.getenv("DATAVIS_BIGPICTURE_MAX_POINTS", "2400"))
@@ -193,7 +197,7 @@ class RectCreateRequest(BaseModel):
     rightx: int = Field(..., ge=1)
     firstprice: float = Field(..., gt=0)
     secondprice: float = Field(..., gt=0)
-    smartcloseenabled: bool = False
+    smartcloseenabled: bool = True
     metadata: Optional[Dict[str, Any]] = None
 
     @field_validator("mode")
@@ -211,7 +215,7 @@ class RectUpdateRequest(RectCreateRequest):
 
 class RectSmartCloseRequest(BaseModel):
     mode: str = Field("review", min_length=1, max_length=16)
-    enabled: bool = False
+    enabled: bool = True
 
     @field_validator("mode")
     @classmethod
@@ -2055,6 +2059,602 @@ def load_structure_previous_payload(
     return payload
 
 
+def normalize_separation_levels(levels: str, show_all: bool) -> List[str]:
+    if show_all:
+        return list(SEPARATION_LEVELS)
+    requested = [part.strip().lower() for part in str(levels or "").split(",") if part.strip()]
+    filtered = [level for level in requested if level in SEPARATION_LEVELS]
+    return filtered or list(SEPARATION_LEVELS)
+
+
+def separation_segment_columns() -> str:
+    return (
+        "id, symbol, brokerday, level, status, sourcemode, starttickid, endtickid, "
+        "starttime, endtime, startprice, endprice, highprice, lowprice, tickcount, "
+        "netmove, rangeprice, pathlength, efficiency, thickness, direction, shapetype, "
+        "angle, unitprice, version, createdat, updatedat"
+    )
+
+
+def query_current_separation_brokerday(cur: Any) -> Optional[date]:
+    latest = query_latest_tick(cur)
+    latest_timestamp = latest.get("timestamp") if latest else None
+    if latest_timestamp is None:
+        return None
+    return brokerday_for_timestamp(latest_timestamp)
+
+
+def query_separation_bounds(
+    cur: Any,
+    *,
+    levels: List[str],
+    include_open: bool,
+    brokerday: Optional[date] = None,
+) -> Dict[str, Any]:
+    where = [
+        "symbol = %s",
+        "level = ANY(%s)",
+    ]
+    params: List[Any] = [TICK_SYMBOL, levels]
+    if not include_open:
+        where.append("status = 'closed'")
+    if brokerday is not None:
+        where.append("brokerday = %s")
+        params.append(brokerday)
+    cur.execute(
+        """
+        SELECT
+            MIN(starttickid) AS first_id,
+            MAX(endtickid) AS last_id,
+            MIN(starttime) AS first_timestamp,
+            MAX(endtime) AS last_timestamp
+        FROM public.separationsegments
+        WHERE {where_sql}
+        """.format(where_sql=" AND ".join(where)),
+        tuple(params),
+    )
+    return dict(cur.fetchone() or {})
+
+
+def query_live_separation_segments(
+    cur: Any,
+    *,
+    levels: List[str],
+    window: int,
+    include_open: bool,
+) -> tuple[Optional[date], List[Dict[str, Any]], Dict[str, Any]]:
+    brokerday = query_current_separation_brokerday(cur)
+    if brokerday is None:
+        return None, [], {"first_id": None, "last_id": None, "first_timestamp": None, "last_timestamp": None}
+    select_sql = separation_segment_columns()
+    cur.execute(
+        """
+        SELECT {select_sql}
+        FROM (
+            SELECT {select_sql}
+            FROM public.separationsegments
+            WHERE symbol = %s
+              AND brokerday = %s
+              AND level = ANY(%s)
+              AND (%s OR status = 'closed')
+            ORDER BY endtickid DESC, starttickid DESC, id DESC
+            LIMIT %s
+        ) recent
+        ORDER BY endtickid ASC, starttickid ASC, id ASC
+        """.format(select_sql=select_sql),
+        (TICK_SYMBOL, brokerday, levels, include_open, window),
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    bounds = query_separation_bounds(cur, levels=levels, include_open=include_open, brokerday=brokerday)
+    return brokerday, rows, bounds
+
+
+def query_review_separation_segments(
+    cur: Any,
+    *,
+    start_id: int,
+    window: int,
+    levels: List[str],
+    include_open: bool,
+) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    select_sql = separation_segment_columns()
+    cur.execute(
+        """
+        SELECT {select_sql}
+        FROM public.separationsegments
+        WHERE symbol = %s
+          AND endtickid >= %s
+          AND level = ANY(%s)
+          AND (%s OR status = 'closed')
+        ORDER BY endtickid ASC, starttickid ASC, id ASC
+        LIMIT %s
+        """.format(select_sql=select_sql),
+        (TICK_SYMBOL, start_id, levels, include_open, window),
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    bounds = query_separation_bounds(cur, levels=levels, include_open=include_open)
+    return rows, bounds
+
+
+def query_separation_segments_after(
+    cur: Any,
+    *,
+    after_id: int,
+    limit: int,
+    levels: List[str],
+    include_open: bool,
+    end_id: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    select_sql = separation_segment_columns()
+    if end_id is None:
+        cur.execute(
+            """
+            SELECT {select_sql}
+            FROM public.separationsegments
+            WHERE symbol = %s
+              AND endtickid > %s
+              AND level = ANY(%s)
+              AND (%s OR status = 'closed')
+            ORDER BY endtickid ASC, starttickid ASC, id ASC
+            LIMIT %s
+            """.format(select_sql=select_sql),
+            (TICK_SYMBOL, after_id, levels, include_open, limit),
+        )
+    else:
+        cur.execute(
+            """
+            SELECT {select_sql}
+            FROM public.separationsegments
+            WHERE symbol = %s
+              AND endtickid > %s
+              AND endtickid <= %s
+              AND level = ANY(%s)
+              AND (%s OR status = 'closed')
+            ORDER BY endtickid ASC, starttickid ASC, id ASC
+            LIMIT %s
+            """.format(select_sql=select_sql),
+            (TICK_SYMBOL, after_id, end_id, levels, include_open, limit),
+        )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def query_separation_segments_before(
+    cur: Any,
+    *,
+    before_id: int,
+    limit: int,
+    levels: List[str],
+    include_open: bool,
+) -> List[Dict[str, Any]]:
+    select_sql = separation_segment_columns()
+    cur.execute(
+        """
+        SELECT {select_sql}
+        FROM (
+            SELECT {select_sql}
+            FROM public.separationsegments
+            WHERE symbol = %s
+              AND endtickid < %s
+              AND level = ANY(%s)
+              AND (%s OR status = 'closed')
+            ORDER BY endtickid DESC, starttickid DESC, id DESC
+            LIMIT %s
+        ) older
+        ORDER BY endtickid ASC, starttickid ASC, id ASC
+        """.format(select_sql=select_sql),
+        (TICK_SYMBOL, before_id, levels, include_open, limit),
+    )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def serialize_separation_segment_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    starttime = row.get("starttime")
+    endtime = row.get("endtime")
+    return {
+        "id": int(row["id"]),
+        "symbol": row.get("symbol", TICK_SYMBOL),
+        "brokerday": serialize_value(row.get("brokerday")),
+        "level": row.get("level"),
+        "status": row.get("status"),
+        "sourcemode": row.get("sourcemode"),
+        "starttickid": int(row.get("starttickid") or 0),
+        "endtickid": int(row.get("endtickid") or 0),
+        "starttime": serialize_value(starttime),
+        "endtime": serialize_value(endtime),
+        "starttimeMs": dt_to_ms(starttime),
+        "endtimeMs": dt_to_ms(endtime),
+        "startprice": float(row.get("startprice") or 0.0),
+        "endprice": float(row.get("endprice") or 0.0),
+        "highprice": float(row.get("highprice") or 0.0),
+        "lowprice": float(row.get("lowprice") or 0.0),
+        "tickcount": int(row.get("tickcount") or 0),
+        "netmove": float(row.get("netmove") or 0.0),
+        "rangeprice": float(row.get("rangeprice") or 0.0),
+        "pathlength": float(row.get("pathlength") or 0.0),
+        "efficiency": float(row.get("efficiency") or 0.0),
+        "thickness": float(row.get("thickness") or 0.0),
+        "direction": row.get("direction"),
+        "shapetype": row.get("shapetype"),
+        "angle": float(row.get("angle") or 0.0),
+        "unitprice": float(row.get("unitprice") or 0.0),
+        "version": int(row.get("version") or 0),
+        "durationMs": max(0, (dt_to_ms(endtime) or 0) - (dt_to_ms(starttime) or 0)),
+    }
+
+
+def serialize_separation_segment_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [serialize_separation_segment_row(row) for row in rows]
+
+
+def build_separation_payload(
+    *,
+    mode: str,
+    window: int,
+    levels: List[str],
+    segments: List[Dict[str, Any]],
+    tick_rows: List[Dict[str, Any]],
+    bounds: Dict[str, Any],
+    brokerday: Optional[date],
+    review_end_id: Optional[int],
+    review_end_timestamp: Optional[datetime],
+    include_open: bool,
+    show_ticks: bool,
+    fetch_ms: float,
+) -> Dict[str, Any]:
+    serialize_started = time.perf_counter()
+    first_segment = segments[0] if segments else None
+    last_segment = segments[-1] if segments else None
+    first_id = int(first_segment["starttickid"]) if first_segment and first_segment.get("starttickid") is not None else None
+    last_id = int(last_segment["endtickid"]) if last_segment and last_segment.get("endtickid") is not None else None
+    payload = {
+        "segments": serialize_separation_segment_rows(segments),
+        "itemCount": len(segments),
+        "rows": serialize_tick_rows(tick_rows) if show_ticks else [],
+        "rowCount": len(tick_rows) if show_ticks else 0,
+        "firstId": first_id,
+        "lastId": last_id,
+        "firstTimestamp": serialize_value(first_segment.get("starttime") if first_segment else None),
+        "lastTimestamp": serialize_value(last_segment.get("endtime") if last_segment else None),
+        "firstTimestampMs": dt_to_ms(first_segment.get("starttime") if first_segment else None),
+        "lastTimestampMs": dt_to_ms(last_segment.get("endtime") if last_segment else None),
+        "mode": mode,
+        "window": window,
+        "symbol": TICK_SYMBOL,
+        "brokerday": serialize_value(brokerday),
+        "levels": levels,
+        "includeOpen": include_open,
+        "reviewEndId": review_end_id,
+        "reviewEndTimestamp": serialize_value(review_end_timestamp),
+        "hasMoreLeft": bool(bounds.get("first_id") and first_id and first_id > bounds["first_id"]),
+        "endReached": bool(mode == "review" and review_end_id is not None and last_id is not None and last_id >= review_end_id),
+    }
+    payload["metrics"] = serialize_metrics_payload(
+        fetch_ms=fetch_ms,
+        serialize_ms=elapsed_ms(serialize_started),
+        latest_row=tick_rows[-1] if tick_rows else query_like_tick_from_segment(last_segment),
+    )
+    return payload
+
+
+def query_like_tick_from_segment(segment: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not segment:
+        return None
+    return {"id": segment.get("endtickid"), "timestamp": segment.get("endtime")}
+
+
+def load_separation_bootstrap_payload(
+    *,
+    mode: str,
+    start_id: Optional[int],
+    window: int,
+    levels: List[str],
+    include_open: bool,
+    show_ticks: bool,
+) -> Dict[str, Any]:
+    effective_window = clamp_int(window, 1, MAX_SEPARATION_WINDOW)
+    fetch_started = time.perf_counter()
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            if mode == "live":
+                brokerday, segments, bounds = query_live_separation_segments(
+                    cur,
+                    levels=levels,
+                    window=effective_window,
+                    include_open=include_open,
+                )
+            else:
+                if start_id is None:
+                    raise HTTPException(status_code=400, detail="Review mode requires an id value.")
+                brokerday = None
+                segments, bounds = query_review_separation_segments(
+                    cur,
+                    start_id=start_id,
+                    window=effective_window,
+                    levels=levels,
+                    include_open=include_open,
+                )
+            tick_rows = []
+            if show_ticks and segments:
+                tick_rows = query_rows_between(
+                    cur,
+                    int(segments[0]["starttickid"]),
+                    int(segments[-1]["endtickid"]),
+                    MAX_TICK_WINDOW,
+                )
+            tick_bounds = query_tick_bounds(cur)
+            review_end_id = tick_bounds.get("last_id") if mode == "review" else None
+            review_end_timestamp = tick_bounds.get("last_timestamp") if mode == "review" else None
+    return build_separation_payload(
+        mode=mode,
+        window=effective_window,
+        levels=levels,
+        segments=segments,
+        tick_rows=tick_rows,
+        bounds=bounds,
+        brokerday=brokerday,
+        review_end_id=review_end_id,
+        review_end_timestamp=review_end_timestamp,
+        include_open=include_open,
+        show_ticks=show_ticks,
+        fetch_ms=elapsed_ms(fetch_started),
+    )
+
+
+def load_separation_next_payload(
+    *,
+    after_id: int,
+    limit: int,
+    end_id: Optional[int],
+    levels: List[str],
+    include_open: bool,
+    show_ticks: bool,
+) -> Dict[str, Any]:
+    effective_limit = clamp_int(limit, 1, MAX_STREAM_BATCH)
+    fetch_started = time.perf_counter()
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            segments = query_separation_segments_after(
+                cur,
+                after_id=after_id,
+                limit=effective_limit,
+                levels=levels,
+                include_open=include_open,
+                end_id=end_id,
+            )
+            tick_rows = query_rows_after(cur, after_id, effective_limit, end_id=end_id) if show_ticks else []
+    last_id = after_id
+    if segments:
+        last_id = max(last_id, max(int(row.get("endtickid") or 0) for row in segments))
+    if tick_rows:
+        last_id = max(last_id, int(tick_rows[-1]["id"]))
+    return {
+        "segments": serialize_separation_segment_rows(segments),
+        "itemCount": len(segments),
+        "rows": serialize_tick_rows(tick_rows) if show_ticks else [],
+        "rowCount": len(tick_rows) if show_ticks else 0,
+        "lastId": last_id,
+        "endId": end_id,
+        "endReached": bool(end_id is not None and last_id >= end_id),
+        "levels": levels,
+        "includeOpen": include_open,
+        "metrics": serialize_metrics_payload(
+            fetch_ms=elapsed_ms(fetch_started),
+            serialize_ms=0.0,
+            latest_row=(tick_rows[-1] if tick_rows else query_like_tick_from_segment(segments[-1] if segments else None)),
+        ),
+    }
+
+
+def load_separation_previous_payload(
+    *,
+    before_id: int,
+    limit: int,
+    levels: List[str],
+    include_open: bool,
+    show_ticks: bool,
+) -> Dict[str, Any]:
+    effective_limit = clamp_int(limit, 1, MAX_SEPARATION_WINDOW)
+    fetch_started = time.perf_counter()
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            segments = query_separation_segments_before(
+                cur,
+                before_id=before_id,
+                limit=effective_limit,
+                levels=levels,
+                include_open=include_open,
+            )
+            bounds = query_separation_bounds(cur, levels=levels, include_open=include_open)
+            tick_rows = []
+            if show_ticks and segments:
+                tick_rows = query_rows_between(
+                    cur,
+                    int(segments[0]["starttickid"]),
+                    int(segments[-1]["endtickid"]),
+                    MAX_TICK_WINDOW,
+                )
+    first_id = int(segments[0]["starttickid"]) if segments else None
+    last_id = int(segments[-1]["endtickid"]) if segments else None
+    return {
+        "segments": serialize_separation_segment_rows(segments),
+        "itemCount": len(segments),
+        "rows": serialize_tick_rows(tick_rows) if show_ticks else [],
+        "rowCount": len(tick_rows) if show_ticks else 0,
+        "firstId": first_id,
+        "lastId": last_id,
+        "beforeId": before_id,
+        "hasMoreLeft": bool(bounds.get("first_id") and first_id and first_id > bounds["first_id"]),
+        "levels": levels,
+        "includeOpen": include_open,
+        "metrics": serialize_metrics_payload(
+            fetch_ms=elapsed_ms(fetch_started),
+            serialize_ms=0.0,
+            latest_row=(tick_rows[-1] if tick_rows else query_like_tick_from_segment(segments[-1] if segments else None)),
+        ),
+    }
+
+
+def stream_separation_events(
+    *,
+    after_id: int,
+    limit: int,
+    levels: List[str],
+    include_open: bool,
+    show_ticks: bool,
+) -> Generator[str, None, None]:
+    last_id = max(0, after_id)
+    effective_limit = clamp_int(limit, 1, MAX_STREAM_BATCH)
+    last_heartbeat = time.monotonic()
+    idle_sleep = STREAM_POLL_SECONDS
+    try:
+        with db_connection(readonly=True, autocommit=True) as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                while True:
+                    fetch_started = time.perf_counter()
+                    segments = query_separation_segments_after(
+                        cur,
+                        after_id=last_id,
+                        limit=effective_limit,
+                        levels=levels,
+                        include_open=include_open,
+                    )
+                    tick_rows = query_rows_after(cur, last_id, effective_limit) if show_ticks else []
+                    fetch_ms = elapsed_ms(fetch_started)
+                    if segments or tick_rows:
+                        last_id = max(
+                            last_id,
+                            max((int(row.get("endtickid") or 0) for row in segments), default=last_id),
+                            max((int(row.get("id") or 0) for row in tick_rows), default=last_id),
+                        )
+                        payload = {
+                            "segmentUpdates": serialize_separation_segment_rows(segments),
+                            "itemCount": len(segments),
+                            "rows": serialize_tick_rows(tick_rows) if show_ticks else [],
+                            "rowCount": len(tick_rows) if show_ticks else 0,
+                            "lastId": last_id,
+                            "streamMode": "delta",
+                            "levels": levels,
+                            "includeOpen": include_open,
+                            **serialize_metrics_payload(
+                                fetch_ms=fetch_ms,
+                                serialize_ms=0.0,
+                                latest_row=(tick_rows[-1] if tick_rows else query_like_tick_from_segment(segments[-1] if segments else None)),
+                            ),
+                        }
+                        yield format_sse(payload)
+                        last_heartbeat = time.monotonic()
+                        idle_sleep = STREAM_POLL_SECONDS
+                        continue
+
+                    now = time.monotonic()
+                    if now - last_heartbeat >= STREAM_HEARTBEAT_SECONDS:
+                        latest_row = query_latest_tick(cur)
+                        payload = {
+                            "segmentUpdates": [],
+                            "itemCount": 0,
+                            "rows": [],
+                            "rowCount": 0,
+                            "lastId": last_id,
+                            "streamMode": "heartbeat",
+                            "levels": levels,
+                            "includeOpen": include_open,
+                            **serialize_metrics_payload(fetch_ms=fetch_ms, serialize_ms=0.0, latest_row=latest_row),
+                        }
+                        yield format_sse(payload, event_name="heartbeat")
+                        last_heartbeat = now
+                    time.sleep(idle_sleep)
+                    idle_sleep = STREAM_IDLE_POLL_SECONDS
+    except GeneratorExit:
+        return
+
+
+def stream_separation_review_events(
+    *,
+    after_id: int,
+    end_id: int,
+    speed: float,
+    levels: List[str],
+    include_open: bool,
+    show_ticks: bool,
+) -> Generator[str, None, None]:
+    last_id = max(0, after_id)
+    effective_batch = clamp_int(REVIEW_STREAM_BATCH, 1, MAX_STREAM_BATCH)
+    speed_multiplier = max(0.1, float(speed or 1.0))
+    previous_time_ms: Optional[int] = None
+    try:
+        with db_connection(readonly=True, autocommit=True) as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                while last_id < end_id:
+                    fetch_started = time.perf_counter()
+                    batch_segments = query_separation_segments_after(
+                        cur,
+                        after_id=last_id,
+                        limit=effective_batch,
+                        levels=levels,
+                        include_open=include_open,
+                        end_id=end_id,
+                    )
+                    fetch_ms = elapsed_ms(fetch_started)
+                    if not batch_segments:
+                        latest_row = query_latest_tick(cur)
+                        yield format_sse(
+                            {
+                                "segmentUpdates": [],
+                                "itemCount": 0,
+                                "rows": [],
+                                "rowCount": 0,
+                                "lastId": last_id,
+                                "endId": end_id,
+                                "endReached": True,
+                                "streamMode": "complete",
+                                "levels": levels,
+                                "includeOpen": include_open,
+                                **serialize_metrics_payload(fetch_ms=fetch_ms, serialize_ms=0.0, latest_row=latest_row),
+                            }
+                        )
+                        return
+
+                    grouped: Dict[int, List[Dict[str, Any]]] = {}
+                    for segment in batch_segments:
+                        grouped.setdefault(int(segment.get("endtickid") or 0), []).append(segment)
+
+                    for group_end_id in sorted(grouped):
+                        group = grouped[group_end_id]
+                        group_time_ms = max((dt_to_ms(item.get("endtime")) or 0) for item in group)
+                        delay_ms = 0
+                        if previous_time_ms is not None and group_time_ms:
+                            delta_ms = max(0, group_time_ms - previous_time_ms)
+                            delay_ms = min(REVIEW_MAX_DELAY_MS, int(round(delta_ms / speed_multiplier)))
+                        if delay_ms > 0:
+                            time.sleep(max(REVIEW_MIN_DELAY_MS, delay_ms) / 1000.0)
+                        tick_rows = query_rows_between(cur, last_id + 1, group_end_id, MAX_STREAM_BATCH) if show_ticks else []
+                        last_id = max(last_id, group_end_id)
+                        previous_time_ms = group_time_ms or previous_time_ms
+                        yield format_sse(
+                            {
+                                "segmentUpdates": serialize_separation_segment_rows(group),
+                                "itemCount": len(group),
+                                "rows": serialize_tick_rows(tick_rows) if show_ticks else [],
+                                "rowCount": len(tick_rows) if show_ticks else 0,
+                                "lastId": last_id,
+                                "endId": end_id,
+                                "endReached": bool(last_id >= end_id),
+                                "streamMode": "delta",
+                                "levels": levels,
+                                "includeOpen": include_open,
+                                "playbackDelayMs": delay_ms,
+                                **serialize_metrics_payload(
+                                    fetch_ms=fetch_ms,
+                                    serialize_ms=0.0,
+                                    latest_row=(tick_rows[-1] if tick_rows else query_like_tick_from_segment(group[-1])),
+                                ),
+                            }
+                        )
+                        if last_id >= end_id:
+                            return
+    except GeneratorExit:
+        return
+
 def normalize_auction_focus_kind(value: str) -> str:
     normalized = (value or "brokerday").strip().lower()
     valid = {"rolling15m", "rolling60m", "rolling240m", "rolling24h", "brokerday", "london", "newyork"}
@@ -2778,6 +3378,11 @@ def structure_page() -> FileResponse:
     return FileResponse(FRONTEND_DIR / "structure.html")
 
 
+@app.get("/separation", include_in_schema=False)
+def separation_page() -> FileResponse:
+    return FileResponse(FRONTEND_DIR / "separation.html")
+
+
 @app.get("/auction", include_in_schema=False)
 def auction_page() -> FileResponse:
     return FileResponse(FRONTEND_DIR / "auction.html")
@@ -2837,7 +3442,7 @@ def trade_login(payload: TradeLoginRequest, response: Response) -> Any:
     if not (valid_user and valid_password):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid trade credentials.")
     _set_trade_cookie(response, username)
-    SMART_SCALP_SERVICE.reset(reason="Trade login successful. Smart modes default to OFF.")
+    SMART_SCALP_SERVICE.reset(reason="Trade login successful. Smart Close defaults to ON.", restore_close_preference=True)
     SMART_SCALP_SERVICE.touch_auth()
     return {"ok": True, "username": username}
 
@@ -2863,7 +3468,7 @@ def trade_me(request: Request, response: Response) -> Dict[str, Any]:
     payload = _trade_session_decode(request.cookies.get(TRADE_COOKIE_NAME, ""))
     username = str(payload["u"]) if payload else None
     if username:
-        SMART_SCALP_SERVICE.reset(reason="Trade session restored. Smart modes default to OFF.")
+        SMART_SCALP_SERVICE.reset(reason="Trade session restored. Smart Close defaults to ON.", restore_close_preference=True)
         SMART_SCALP_SERVICE.touch_auth()
     return trade_auth_status_payload(authenticated=bool(username), username=username)
 
@@ -3170,6 +3775,14 @@ def live_rect_manual_close(rect_id: int, payload: RectModeRequest) -> Dict[str, 
 
 @app.get("/api/structure/review-start")
 def structure_review_start(
+    timestamp: str = Query(..., min_length=1),
+    timezoneName: str = Query(DEFAULT_REVIEW_TIMEZONE, min_length=1),
+) -> Dict[str, Any]:
+    return live_review_start(timestamp=timestamp, timezoneName=timezoneName)
+
+
+@app.get("/api/separation/review-start")
+def separation_review_start(
     timestamp: str = Query(..., min_length=1),
     timezoneName: str = Query(DEFAULT_REVIEW_TIMEZONE, min_length=1),
 ) -> Dict[str, Any]:
@@ -3504,6 +4117,174 @@ def structure_stream(
             show_ranges=showRanges,
             max_window=MAX_STRUCTURE_WINDOW,
             seed_by_item_window=True,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.get("/api/separation/status")
+def separation_status(
+    levels: str = Query("micro,median,macro"),
+    showAll: bool = Query(True),
+    includeOpen: bool = Query(True),
+) -> Dict[str, Any]:
+    resolved_levels = normalize_separation_levels(levels, showAll)
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            brokerday = query_current_separation_brokerday(cur)
+            latest_tick = query_latest_tick(cur)
+            bounds = query_separation_bounds(cur, levels=resolved_levels, include_open=includeOpen, brokerday=brokerday)
+            state_rows = []
+            if brokerday is not None:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM public.separationstate
+                    WHERE symbol = %s
+                      AND brokerday = %s
+                      AND level = ANY(%s)
+                    ORDER BY level
+                    """,
+                    (TICK_SYMBOL, brokerday, resolved_levels),
+                )
+                state_rows = [dict(row) for row in cur.fetchall()]
+            cur.execute(
+                """
+                SELECT *
+                FROM public.separationruns
+                WHERE symbol = %s
+                ORDER BY startedat DESC
+                LIMIT 10
+                """,
+                (TICK_SYMBOL,),
+            )
+            runs = [dict(row) for row in cur.fetchall()]
+    return {
+        "symbol": TICK_SYMBOL,
+        "brokerday": serialize_value(brokerday),
+        "levels": resolved_levels,
+        "includeOpen": includeOpen,
+        "latestTickId": latest_tick.get("id") if latest_tick else None,
+        "latestTickTimestamp": serialize_value(latest_tick.get("timestamp")) if latest_tick else None,
+        "bounds": {
+            "firstId": bounds.get("first_id"),
+            "lastId": bounds.get("last_id"),
+            "firstTimestamp": serialize_value(bounds.get("first_timestamp")),
+            "lastTimestamp": serialize_value(bounds.get("last_timestamp")),
+        },
+        "state": [{key: serialize_value(value) for key, value in row.items()} for row in state_rows],
+        "runs": [{key: serialize_value(value) for key, value in row.items()} for row in runs],
+        "serverTimeMs": now_ms(),
+    }
+
+
+@app.get("/api/separation/bootstrap")
+def separation_bootstrap(
+    mode: str = Query("live", pattern="^(live|review)$"),
+    id: Optional[int] = Query(None, ge=1),
+    window: int = Query(DEFAULT_SEPARATION_WINDOW, ge=1, le=MAX_SEPARATION_WINDOW),
+    levels: str = Query("micro,median,macro"),
+    showAll: bool = Query(True),
+    includeOpen: bool = Query(True),
+    showTicks: bool = Query(False),
+) -> Dict[str, Any]:
+    return load_separation_bootstrap_payload(
+        mode=mode,
+        start_id=id,
+        window=window,
+        levels=normalize_separation_levels(levels, showAll),
+        include_open=includeOpen,
+        show_ticks=showTicks,
+    )
+
+
+@app.get("/api/separation/next")
+def separation_next(
+    afterId: int = Query(..., ge=0),
+    limit: int = Query(250, ge=1, le=MAX_STREAM_BATCH),
+    endId: Optional[int] = Query(None, ge=1),
+    levels: str = Query("micro,median,macro"),
+    showAll: bool = Query(True),
+    includeOpen: bool = Query(True),
+    showTicks: bool = Query(False),
+) -> Dict[str, Any]:
+    return load_separation_next_payload(
+        after_id=afterId,
+        limit=limit,
+        end_id=endId,
+        levels=normalize_separation_levels(levels, showAll),
+        include_open=includeOpen,
+        show_ticks=showTicks,
+    )
+
+
+@app.get("/api/separation/previous")
+def separation_previous(
+    beforeId: int = Query(..., ge=1),
+    limit: int = Query(DEFAULT_SEPARATION_WINDOW, ge=1, le=MAX_SEPARATION_WINDOW),
+    levels: str = Query("micro,median,macro"),
+    showAll: bool = Query(True),
+    includeOpen: bool = Query(True),
+    showTicks: bool = Query(False),
+) -> Dict[str, Any]:
+    return load_separation_previous_payload(
+        before_id=beforeId,
+        limit=limit,
+        levels=normalize_separation_levels(levels, showAll),
+        include_open=includeOpen,
+        show_ticks=showTicks,
+    )
+
+
+@app.get("/api/separation/stream")
+def separation_stream(
+    afterId: int = Query(0, ge=0),
+    limit: int = Query(250, ge=1, le=MAX_STREAM_BATCH),
+    levels: str = Query("micro,median,macro"),
+    showAll: bool = Query(True),
+    includeOpen: bool = Query(True),
+    showTicks: bool = Query(False),
+) -> StreamingResponse:
+    return StreamingResponse(
+        stream_separation_events(
+            after_id=afterId,
+            limit=limit,
+            levels=normalize_separation_levels(levels, showAll),
+            include_open=includeOpen,
+            show_ticks=showTicks,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.get("/api/separation/review-stream")
+def separation_review_stream(
+    afterId: int = Query(0, ge=0),
+    endId: int = Query(..., ge=1),
+    speed: float = Query(1.0, gt=0),
+    levels: str = Query("micro,median,macro"),
+    showAll: bool = Query(True),
+    includeOpen: bool = Query(True),
+    showTicks: bool = Query(False),
+) -> StreamingResponse:
+    return StreamingResponse(
+        stream_separation_review_events(
+            after_id=afterId,
+            end_id=endId,
+            speed=speed,
+            levels=normalize_separation_levels(levels, showAll),
+            include_open=includeOpen,
+            show_ticks=showTicks,
         ),
         media_type="text/event-stream",
         headers={
