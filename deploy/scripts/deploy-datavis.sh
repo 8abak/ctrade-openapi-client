@@ -6,6 +6,7 @@ VENV_ACTIVATE="/home/ec2-user/venvs/datavis/bin/activate"
 ENV_FILE="/etc/datavis.env"
 DEFAULT_DATABASE_URL="postgresql://babak:babak33044@localhost:5432/trading"
 UNIT_FILES=("datavis" "tickcollector" "separation")
+RESEARCH_UNIT_FILES=("research-worker" "research-orchestrator" "research-supervisor")
 RESTART_SERVICES=("datavis" "separation")
 LEGACY_SERVICES=(
   "ottprocessor"
@@ -18,6 +19,7 @@ LEGACY_SERVICES=(
 )
 MIGRATION_FILES=(
   "deploy/sql/20260418_remove_legacy_structure_layer.sql"
+  "deploy/sql/20260418_entry_research_loop.sql"
   "deploy/sql/20260411_layer_zero_rects.sql"
   "deploy/sql/20260412_auction_framework.sql"
   "deploy/sql/20260416_separation.sql"
@@ -35,7 +37,7 @@ show_service_status() {
 
 install_systemd_units() {
   log "Installing systemd units"
-  for service_name in "${UNIT_FILES[@]}"; do
+  for service_name in "${UNIT_FILES[@]}" "${RESEARCH_UNIT_FILES[@]}"; do
     sudo install -m 0644 "deploy/systemd/${service_name}.service" "/etc/systemd/system/${service_name}.service"
   done
   sudo systemctl daemon-reload
@@ -99,6 +101,21 @@ for service_name in "${UNIT_FILES[@]}"; do
   log "Enabling ${service_name}"
   sudo systemctl enable "${service_name}.service" >/dev/null 2>&1 || true
 done
+
+if [[ "${DATAVIS_RESEARCH_ENABLE_ON_DEPLOY:-0}" == "1" ]]; then
+  for service_name in "${RESEARCH_UNIT_FILES[@]}"; do
+    log "Enabling ${service_name}"
+    sudo systemctl enable "${service_name}.service" >/dev/null 2>&1 || true
+    log "Restarting ${service_name}"
+    sudo systemctl restart "${service_name}.service"
+    if ! sudo systemctl is-active --quiet "${service_name}.service"; then
+      show_service_status "${service_name}.service"
+      exit 1
+    fi
+  done
+else
+  log "Research services installed but not enabled; set DATAVIS_RESEARCH_ENABLE_ON_DEPLOY=1 to activate them during deploy"
+fi
 
 for service_name in "${RESTART_SERVICES[@]}"; do
   log "Restarting ${service_name}"
