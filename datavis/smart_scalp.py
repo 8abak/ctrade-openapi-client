@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 import math
 import threading
 import time
@@ -180,6 +181,7 @@ class SmartScalpService:
         smart_lot_size: float = 0.01,
     ):
         self._symbol = symbol
+        self._logger = logging.getLogger("datavis.smart_scalp")
         self._fetch_ticks_after = fetch_ticks_after
         self._fetch_recent_ticks = fetch_recent_ticks
         self._fetch_latest_tick = fetch_latest_tick
@@ -199,6 +201,10 @@ class SmartScalpService:
         self._last_snapshot_at_ms = 0
         self._poll_seconds = 0.05
         self._idle_seconds = 0.20
+        self._max_empty_poll_seconds = 0.25
+        self._position_wait_seconds = 1.00
+        self._slow_eval_ms = 25.0
+        self._summary_log_interval_ms = 30000
         self._auth_valid_until_ms = 0
         self._close_preference_armed = True
 
@@ -258,12 +264,35 @@ class SmartScalpService:
             "snapshotAtMs": None,
             "evaluation": None,
             "error": None,
+            "workerMetrics": {
+                "duplicateStartCount": 0,
+                "lastPollAtMs": None,
+                "lastPollRows": 0,
+                "lastSleepMs": 0,
+                "rowsFetchedTotal": 0,
+                "evaluationCount": 0,
+                "evaluationTotalMs": 0.0,
+                "averageEvaluationMs": 0.0,
+                "lastEvaluationMs": None,
+                "slowEvaluationCount": 0,
+                "lastSlowEvaluationMs": None,
+                "lastSummaryLogAtMs": None,
+                "waitingForPosition": False,
+            },
             "updatedAtMs": _now_ms(),
         }
 
     def start(self) -> None:
         with self._lock:
             if self._thread and self._thread.is_alive():
+                metrics = dict(self._state.get("workerMetrics") or {})
+                metrics["duplicateStartCount"] = int(metrics.get("duplicateStartCount") or 0) + 1
+                self._state["workerMetrics"] = metrics
+                self._logger.warning(
+                    "smart_scalp worker_start_skipped symbol=%s duplicate_start_count=%s",
+                    self._symbol,
+                    metrics["duplicateStartCount"],
+                )
                 return
             self._stop_event.clear()
             self._thread = threading.Thread(target=self._run_loop, name="datavis-smart-scalp", daemon=True)
@@ -459,25 +488,45 @@ class SmartScalpService:
             }
 
     def _run_loop(self) -> None:
+        empty_polls = 0
+        self._logger.info("smart_scalp worker_started symbol=%s", self._symbol)
         while not self._stop_event.is_set():
             try:
-                should_work = self._should_work()
-                if not should_work:
-                    time.sleep(self._idle_seconds)
+                plan = self._work_plan()
+                sleep_seconds = float(plan.get("sleep") or self._idle_seconds)
+                if not plan.get("shouldWork"):
+                    self._record_poll_state(rows_fetched=0, sleep_seconds=sleep_seconds, waiting_for_position=False)
+                    time.sleep(sleep_seconds)
                     continue
+
+                if plan.get("snapshotOnly"):
+                    with self._lock:
+                        self._evaluate_locked()
+                    self._record_poll_state(rows_fetched=0, sleep_seconds=sleep_seconds, waiting_for_position=True)
+                    time.sleep(sleep_seconds)
+                    continue
+
                 with self._lock:
                     current_last_id = int(self._state.get("lastTickId") or 0)
                     batch_size = int(self._config.get("evaluationBatchSize") or 32)
                 rows = self._fetch_ticks_after(current_last_id, batch_size)
                 if not rows:
-                    time.sleep(self._poll_seconds)
+                    empty_polls += 1
+                    sleep_seconds = min(self._max_empty_poll_seconds, self._poll_seconds * max(1, empty_polls))
+                    self._record_poll_state(rows_fetched=0, sleep_seconds=sleep_seconds, waiting_for_position=False)
+                    time.sleep(sleep_seconds)
                     continue
+
+                empty_polls = 0
+                self._record_poll_state(rows_fetched=len(rows), sleep_seconds=self._poll_seconds, waiting_for_position=False)
                 for row in rows:
                     if self._stop_event.is_set():
                         break
                     with self._lock:
                         self._ingest_tick_locked(row)
+                        evaluation_started = time.perf_counter()
                         self._evaluate_locked()
+                        self._record_evaluation_metrics_locked((time.perf_counter() - evaluation_started) * 1000.0)
             except Exception as exc:
                 with self._lock:
                     message = str(exc) or "Smart scalp worker error."
@@ -487,7 +536,33 @@ class SmartScalpService:
                         backend_state="idle",
                         auto_reason=message,
                     )
+                self._logger.warning("smart_scalp worker_error symbol=%s error=%s", self._symbol, message)
                 time.sleep(self._idle_seconds)
+        self._logger.info("smart_scalp worker_stopped symbol=%s", self._symbol)
+
+    def _work_plan(self) -> Dict[str, Any]:
+        with self._lock:
+            if not self._context.get("enabled"):
+                return {"shouldWork": False, "sleep": self._idle_seconds}
+            if not self._auth_active_locked():
+                self._clear_armed_locked(
+                    reason="Trade session heartbeat expired.",
+                    backend_state="idle",
+                    auto_reason="Trade session heartbeat expired.",
+                )
+                return {"shouldWork": False, "sleep": self._idle_seconds}
+            armed = self._state.get("armed") or {}
+            if not (armed.get("buy") or armed.get("sell") or armed.get("close")):
+                return {"shouldWork": False, "sleep": self._idle_seconds}
+            if armed.get("close") and not armed.get("buy") and not armed.get("sell"):
+                snapshot = self._refresh_snapshot_locked()
+                positions = list(snapshot.get("positions") or [])
+                self._state["openPositionCount"] = len(positions)
+                self._state["currentPosition"] = self._position_summary(positions[0]) if len(positions) == 1 else None
+                self._state["snapshotAtMs"] = self._last_snapshot_at_ms
+                if len(positions) != 1:
+                    return {"shouldWork": True, "snapshotOnly": True, "sleep": self._position_wait_seconds}
+            return {"shouldWork": True, "snapshotOnly": False, "sleep": self._poll_seconds}
 
     def _should_work(self) -> bool:
         with self._lock:
@@ -502,6 +577,53 @@ class SmartScalpService:
                 return False
             armed = self._state.get("armed") or {}
             return bool(armed.get("buy") or armed.get("sell") or armed.get("close"))
+
+    def _record_poll_state(self, *, rows_fetched: int, sleep_seconds: float, waiting_for_position: bool) -> None:
+        with self._lock:
+            metrics = dict(self._state.get("workerMetrics") or {})
+            metrics["lastPollAtMs"] = _now_ms()
+            metrics["lastPollRows"] = int(rows_fetched)
+            metrics["lastSleepMs"] = int(max(0.0, float(sleep_seconds)) * 1000.0)
+            metrics["rowsFetchedTotal"] = int(metrics.get("rowsFetchedTotal") or 0) + int(max(0, rows_fetched))
+            metrics["waitingForPosition"] = bool(waiting_for_position)
+            self._state["workerMetrics"] = metrics
+
+    def _record_evaluation_metrics_locked(self, elapsed_ms: float) -> None:
+        metrics = dict(self._state.get("workerMetrics") or {})
+        metrics["evaluationCount"] = int(metrics.get("evaluationCount") or 0) + 1
+        metrics["evaluationTotalMs"] = float(metrics.get("evaluationTotalMs") or 0.0) + float(elapsed_ms)
+        metrics["averageEvaluationMs"] = round(
+            float(metrics["evaluationTotalMs"]) / float(max(1, metrics["evaluationCount"])),
+            3,
+        )
+        metrics["lastEvaluationMs"] = round(float(elapsed_ms), 3)
+        now_ms = _now_ms()
+        if elapsed_ms >= self._slow_eval_ms:
+            metrics["slowEvaluationCount"] = int(metrics.get("slowEvaluationCount") or 0) + 1
+            metrics["lastSlowEvaluationMs"] = round(float(elapsed_ms), 3)
+            self._logger.info(
+                "smart_scalp eval_slow symbol=%s elapsed_ms=%.3f state=%s armed=%s last_tick_id=%s",
+                self._symbol,
+                elapsed_ms,
+                self._state.get("backendState"),
+                self._state.get("armed"),
+                self._state.get("lastTickId"),
+            )
+        last_summary_log_at_ms = int(metrics.get("lastSummaryLogAtMs") or 0)
+        if now_ms - last_summary_log_at_ms >= self._summary_log_interval_ms:
+            self._logger.info(
+                "smart_scalp eval_summary symbol=%s evaluations=%s avg_ms=%.3f slow=%s rows_fetched_total=%s state=%s armed=%s waiting_for_position=%s",
+                self._symbol,
+                metrics["evaluationCount"],
+                metrics["averageEvaluationMs"],
+                int(metrics.get("slowEvaluationCount") or 0),
+                int(metrics.get("rowsFetchedTotal") or 0),
+                self._state.get("backendState"),
+                self._state.get("armed"),
+                bool(metrics.get("waitingForPosition")),
+            )
+            metrics["lastSummaryLogAtMs"] = now_ms
+        self._state["workerMetrics"] = metrics
 
     def _ingest_tick_locked(self, row: Dict[str, Any]) -> None:
         normalized = {

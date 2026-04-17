@@ -49,7 +49,7 @@ The deploy script:
 - runs `pip install -r requirements.txt`
 - installs the `datavis`, `tickcollector`, and `separation` systemd units
 - disables and removes old processor services, including `fastzig` and `zonebuilder`
-- applies `deploy/sql/20260408_layer_zero_structure.sql`
+- applies `deploy/sql/20260418_remove_legacy_structure_layer.sql`
 - applies `deploy/sql/20260416_separation.sql`
 - enables `datavis` and `tickcollector`
 - enables `separation`
@@ -57,7 +57,7 @@ The deploy script:
 - never restarts `tickcollector`
 - performs a local health check at `http://127.0.0.1:8000/api/health` when `curl` is available
 
-Layer Zero cleanup:
+Legacy cleanup:
 - `deploy/scripts/cleanup-layer0.sh` creates a public-schema backup before applying the same cleanup SQL
-- the cleanup SQL drops old derived-layer tables and preserves the raw `ticks` table plus tick indexes
-- the new structure layer is rebuilt by replaying raw ticks through the app's streaming engine, so no extra structure tables are required
+- the cleanup SQL drops old derived-layer tables, preserves the raw `ticks` table, and keeps the hot-path tick indexes
+- the dedicated structure page and `/api/structure/*` routes are no longer deployed

@@ -8,6 +8,7 @@ import secrets
 import base64
 import hmac
 import hashlib
+import threading
 import time
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
@@ -50,9 +51,6 @@ DEFAULT_WINDOW = int(os.getenv("DATAVIS_WINDOW", "2000"))
 MAX_TICK_WINDOW = int(os.getenv("DATAVIS_MAX_WINDOW", "10000"))
 DEFAULT_AUCTION_WINDOW = int(os.getenv("DATAVIS_AUCTION_WINDOW", "2000"))
 MAX_AUCTION_WINDOW = int(os.getenv("DATAVIS_AUCTION_MAX_WINDOW", "10000"))
-DEFAULT_STRUCTURE_WINDOW = int(os.getenv("DATAVIS_STRUCTURE_WINDOW", "50"))
-MAX_STRUCTURE_WINDOW = int(os.getenv("DATAVIS_STRUCTURE_MAX_WINDOW", "200000"))
-MAX_STRUCTURE_SOURCE_TICKS = int(os.getenv("DATAVIS_STRUCTURE_SOURCE_MAX_TICKS", "200000"))
 DEFAULT_SEPARATION_WINDOW = int(os.getenv("DATAVIS_SEPARATION_WINDOW", "160"))
 MAX_SEPARATION_WINDOW = int(os.getenv("DATAVIS_SEPARATION_MAX_WINDOW", "4000"))
 DEFAULT_HISTORY_LIMIT = 2000
@@ -99,6 +97,14 @@ RUNTIME_TRADE_SESSION_SECRET = TRADE_SESSION_SECRET or secrets.token_bytes(32)
 BROKER_CONFIG = load_broker_config(BASE_DIR)
 TRADE_GATEWAY = CTraderGateway(BROKER_CONFIG)
 AUDIT_LOGGER = logging.getLogger("datavis.trade.audit")
+PERF_LOGGER = logging.getLogger("datavis.perf")
+STREAM_LOGGER = logging.getLogger("datavis.stream")
+SQL_SCHEMA_CACHE_TTL_MS = max(1000, int(os.getenv("DATAVIS_SQL_SCHEMA_CACHE_MS", "30000")))
+HOT_PATH_LOG_THRESHOLD_MS = max(5.0, float(os.getenv("DATAVIS_HOT_PATH_LOG_MS", "75")))
+STREAM_ACTIVITY_LOCK = threading.Lock()
+STREAM_ACTIVITY_COUNTS: Dict[str, int] = {}
+SQL_SCHEMA_CACHE_LOCK = threading.Lock()
+SQL_SCHEMA_CACHE: Dict[str, Any] = {"expiresAtMs": 0, "payload": None}
 
 
 class QueryRequest(BaseModel):
@@ -268,6 +274,36 @@ def now_ms() -> int:
 
 def elapsed_ms(started: float) -> float:
     return round((time.perf_counter() - started) * 1000.0, 2)
+
+
+def hot_path_log(name: str, *, elapsed: float, **fields: Any) -> None:
+    if elapsed < HOT_PATH_LOG_THRESHOLD_MS:
+        return
+    extra = " ".join(
+        "{0}={1}".format(key, fields[key])
+        for key in sorted(fields)
+        if fields[key] is not None
+    )
+    PERF_LOGGER.info("%s elapsed_ms=%.2f%s", name, elapsed, (" " + extra) if extra else "")
+
+
+def stream_open(name: str) -> int:
+    with STREAM_ACTIVITY_LOCK:
+        active = int(STREAM_ACTIVITY_COUNTS.get(name) or 0) + 1
+        STREAM_ACTIVITY_COUNTS[name] = active
+    STREAM_LOGGER.info("stream_open name=%s active=%s duplicate=%s", name, active, active > 1)
+    return active
+
+
+def stream_close(name: str) -> int:
+    with STREAM_ACTIVITY_LOCK:
+        active = max(0, int(STREAM_ACTIVITY_COUNTS.get(name) or 0) - 1)
+        if active:
+            STREAM_ACTIVITY_COUNTS[name] = active
+        else:
+            STREAM_ACTIVITY_COUNTS.pop(name, None)
+    STREAM_LOGGER.info("stream_close name=%s active=%s", name, active)
+    return active
 
 
 def dt_to_ms(value: Optional[datetime]) -> Optional[int]:
@@ -623,6 +659,14 @@ def fetch_sql_context(conn: Any) -> Dict[str, Any]:
 
 
 def list_public_tables() -> Dict[str, Any]:
+    now = now_ms()
+    with SQL_SCHEMA_CACHE_LOCK:
+        cached = SQL_SCHEMA_CACHE.get("payload")
+        expires_at = int(SQL_SCHEMA_CACHE.get("expiresAtMs") or 0)
+        if cached is not None and now < expires_at:
+            return json.loads(json.dumps(cached))
+
+    started = time.perf_counter()
     with db_connection(readonly=True) as conn:
         context = fetch_sql_context(conn)
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -661,7 +705,12 @@ def list_public_tables() -> Dict[str, Any]:
                 }
                 for row in cur.fetchall()
             ]
-    return {"context": context, "tables": tables}
+    payload = {"context": context, "tables": tables}
+    with SQL_SCHEMA_CACHE_LOCK:
+        SQL_SCHEMA_CACHE["payload"] = payload
+        SQL_SCHEMA_CACHE["expiresAtMs"] = now_ms() + SQL_SCHEMA_CACHE_TTL_MS
+    hot_path_log("sql_schema", elapsed=elapsed_ms(started), table_count=len(tables))
+    return json.loads(json.dumps(payload))
 
 
 def execute_query(sql_text: str) -> Dict[str, Any]:
@@ -705,13 +754,24 @@ def execute_query(sql_text: str) -> Dict[str, Any]:
                 detail=serialize_pg_error(exc, statement=active_statement),
             ) from exc
 
-    return {
+    payload = {
         "success": True,
         "statementCount": len(statements),
         "elapsedMs": elapsed_ms(started),
         "context": context,
         "results": results,
     }
+    with SQL_SCHEMA_CACHE_LOCK:
+        SQL_SCHEMA_CACHE["expiresAtMs"] = 0
+        SQL_SCHEMA_CACHE["payload"] = None
+    hot_path_log(
+        "sql_query",
+        elapsed=float(payload["elapsedMs"]),
+        statement_count=len(statements),
+        result_sets=sum(1 for item in results if item.get("hasResultSet")),
+        rows_returned=sum(int(item.get("rowCount") or 0) for item in results if item.get("hasResultSet")),
+    )
+    return payload
 
 
 def parse_review_timestamp(raw_value: str, timezone_name: str) -> datetime:
@@ -1219,6 +1279,7 @@ def load_auction_history_payload(
     include_events: bool,
     limit_sessions: int,
 ) -> Dict[str, Any]:
+    started = time.perf_counter()
     start_ts = ms_to_dt(start_ts_ms)
     end_ts = ms_to_dt(end_ts_ms)
     if start_ts is None or end_ts is None:
@@ -1321,13 +1382,21 @@ def load_auction_history_payload(
             }
         )
 
-    return {
+    payload = {
         "symbol": TICK_SYMBOL,
         "requestedStartTsMs": start_ts_ms,
         "requestedEndTsMs": end_ts_ms,
         "sessions": sessions,
         "sessionCount": len(sessions),
     }
+    hot_path_log(
+        "auction_history",
+        elapsed=elapsed_ms(started),
+        session_count=len(sessions),
+        include_refs=include_refs,
+        include_events=include_events,
+    )
+    return payload
 
 
 def build_bigpicture_payload(
@@ -1496,171 +1565,6 @@ def rect_snapshot_for_mode(mode: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def structure_item_entries(snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
-    entries: List[Dict[str, Any]] = []
-    for bar in snapshot.get("structureBars", []):
-        entries.append(
-            {
-                "kind": "structure",
-                "id": bar.get("id"),
-                "startTickId": bar.get("startTickId"),
-                "endTickId": bar.get("endTickId"),
-                "startTimestamp": bar.get("startTimestamp"),
-                "endTimestamp": bar.get("endTimestamp"),
-                "startTimestampMs": bar.get("startTimestampMs"),
-                "endTimestampMs": bar.get("endTimestampMs"),
-            }
-        )
-    for box in snapshot.get("rangeBoxes", []):
-        entries.append(
-            {
-                "kind": "range",
-                "id": box.get("id"),
-                "startTickId": box.get("startTickId"),
-                "endTickId": box.get("endTickId"),
-                "startTimestamp": box.get("startTimestamp"),
-                "endTimestamp": box.get("endTimestamp"),
-                "startTimestampMs": box.get("startTimestampMs"),
-                "endTimestampMs": box.get("endTimestampMs"),
-            }
-        )
-    return sorted(
-        entries,
-        key=lambda item: (
-            int(item.get("endTickId") or 0),
-            int(item.get("startTickId") or 0),
-            0 if item.get("kind") == "structure" else 1,
-            int(item.get("id") or 0),
-        ),
-    )
-
-
-def structure_item_count(snapshot: Dict[str, Any]) -> int:
-    return len(snapshot.get("structureBars", [])) + len(snapshot.get("rangeBoxes", []))
-
-
-def trim_structure_snapshot(snapshot: Dict[str, Any], item_window: int, *, side: str) -> tuple[Dict[str, Any], Dict[str, Any]]:
-    entries = structure_item_entries(snapshot)
-    if not entries:
-        return empty_structure_payload(), {
-            "itemCount": 0,
-            "firstId": None,
-            "lastId": None,
-            "firstTimestamp": None,
-            "lastTimestamp": None,
-            "firstTimestampMs": None,
-            "lastTimestampMs": None,
-        }
-
-    kept_entries = entries[:item_window] if side == "head" else entries[-item_window:]
-    kept_structure_ids = {entry["id"] for entry in kept_entries if entry.get("kind") == "structure"}
-    kept_range_ids = {entry["id"] for entry in kept_entries if entry.get("kind") == "range"}
-    trimmed = {
-        "structureBars": [bar for bar in snapshot.get("structureBars", []) if bar.get("id") in kept_structure_ids],
-        "rangeBoxes": [box for box in snapshot.get("rangeBoxes", []) if box.get("id") in kept_range_ids],
-        "structureEvents": [],
-    }
-
-    first_id = min(int(entry.get("startTickId") or 0) for entry in kept_entries) if kept_entries else None
-    last_id = max(int(entry.get("endTickId") or 0) for entry in kept_entries) if kept_entries else None
-    first_entry = min(
-        kept_entries,
-        key=lambda entry: (
-            int(entry.get("startTimestampMs") or 0),
-            int(entry.get("startTickId") or 0),
-        ),
-    )
-    last_entry = max(
-        kept_entries,
-        key=lambda entry: (
-            int(entry.get("endTimestampMs") or 0),
-            int(entry.get("endTickId") or 0),
-        ),
-    )
-    if first_id is not None and last_id is not None:
-        trimmed["structureEvents"] = [
-            event
-            for event in snapshot.get("structureEvents", [])
-            if first_id <= int(event.get("tickId") or 0) <= last_id
-        ]
-
-    return trimmed, {
-        "itemCount": len(kept_entries),
-        "firstId": first_id,
-        "lastId": last_id,
-        "firstTimestamp": first_entry.get("startTimestamp"),
-        "lastTimestamp": last_entry.get("endTimestamp"),
-        "firstTimestampMs": first_entry.get("startTimestampMs"),
-        "lastTimestampMs": last_entry.get("endTimestampMs"),
-    }
-
-
-def structure_scan_batch_size(item_window: int) -> int:
-    return max(2000, min(20000, max(1, item_window) * 200))
-
-
-def collect_structure_rows_ending_at(
-    cur: Any,
-    *,
-    end_id: int,
-    item_window: int,
-    lower_bound_id: Optional[int] = None,
-) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    batch_size = structure_scan_batch_size(item_window)
-    max_rows = min(MAX_STRUCTURE_SOURCE_TICKS, max(batch_size, item_window * 4000))
-    rows = query_window_ending_at(cur, end_id, min(batch_size, max_rows))
-    if lower_bound_id is not None:
-        rows = [row for row in rows if int(row["id"]) >= lower_bound_id]
-    snapshot = structure_snapshot(rows, enabled=True)
-
-    while structure_item_count(snapshot) < item_window and rows and len(rows) < max_rows:
-        first_id = int(rows[0]["id"])
-        if lower_bound_id is not None and first_id <= lower_bound_id:
-            break
-        fetch_limit = min(batch_size, max_rows - len(rows))
-        older_rows = query_rows_before(cur, first_id, fetch_limit)
-        if lower_bound_id is not None:
-            older_rows = [row for row in older_rows if int(row["id"]) >= lower_bound_id]
-        if not older_rows:
-            break
-        rows = older_rows + rows
-        snapshot = structure_snapshot(rows, enabled=True)
-
-    return rows, snapshot
-
-
-def collect_structure_rows_starting_at(
-    cur: Any,
-    *,
-    start_id: int,
-    item_window: int,
-    end_id: Optional[int],
-) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    batch_size = structure_scan_batch_size(item_window)
-    max_rows = min(MAX_STRUCTURE_SOURCE_TICKS, max(batch_size, item_window * 4000))
-    rows = query_bootstrap_rows(
-        cur,
-        mode="review",
-        start_id=start_id,
-        window=min(batch_size, max_rows),
-        end_id=end_id,
-    )
-    snapshot = structure_snapshot(rows, enabled=True)
-
-    while structure_item_count(snapshot) < item_window and rows and len(rows) < max_rows:
-        last_id = int(rows[-1]["id"])
-        if end_id is not None and last_id >= end_id:
-            break
-        fetch_limit = min(batch_size, max_rows - len(rows))
-        newer_rows = query_rows_after(cur, last_id, fetch_limit, end_id=end_id)
-        if not newer_rows:
-            break
-        rows.extend(newer_rows)
-        snapshot = structure_snapshot(rows, enabled=True)
-
-    return rows, snapshot
-
-
 def build_range_payload(
     *,
     mode: str,
@@ -1713,62 +1617,6 @@ def build_range_payload(
     return payload
 
 
-def build_structure_view_payload(
-    *,
-    mode: str,
-    window: int,
-    replay_rows: List[Dict[str, Any]],
-    snapshot: Dict[str, Any],
-    trim_side: str,
-    review_end_id: Optional[int],
-    review_end_timestamp: Optional[datetime],
-    bounds: Dict[str, Any],
-    fetch_ms: float,
-    show_events: bool,
-    show_structure: bool,
-    show_ranges: bool,
-) -> Dict[str, Any]:
-    serialize_started = time.perf_counter()
-    trimmed_snapshot, trimmed_meta = trim_structure_snapshot(snapshot, window, side=trim_side)
-    first_row_id = trimmed_meta["firstId"]
-    last_row_id = trimmed_meta["lastId"]
-    duration_ms = 0
-    if trimmed_meta["firstTimestampMs"] is not None and trimmed_meta["lastTimestampMs"] is not None:
-        duration_ms = max(0, int(trimmed_meta["lastTimestampMs"]) - int(trimmed_meta["firstTimestampMs"]))
-    display_snapshot = apply_structure_flags(
-        trimmed_snapshot,
-        show_events=show_events,
-        show_structure=show_structure,
-        show_ranges=show_ranges,
-    )
-    payload = {
-        "sourceTickCount": len(replay_rows),
-        "itemCount": trimmed_meta["itemCount"],
-        "tickSpan": max(0, (int(last_row_id) - int(first_row_id) + 1)) if first_row_id and last_row_id else 0,
-        "durationMs": duration_ms,
-        "firstId": first_row_id,
-        "lastId": last_row_id,
-        "firstTimestamp": trimmed_meta["firstTimestamp"],
-        "lastTimestamp": trimmed_meta["lastTimestamp"],
-        "firstTimestampMs": trimmed_meta["firstTimestampMs"],
-        "lastTimestampMs": trimmed_meta["lastTimestampMs"],
-        "mode": mode,
-        "window": window,
-        "symbol": TICK_SYMBOL,
-        "reviewEndId": review_end_id,
-        "reviewEndTimestamp": serialize_value(review_end_timestamp),
-        "hasMoreLeft": bool(bounds.get("firstId") and first_row_id and first_row_id > bounds["firstId"]),
-        "endReached": bool(mode == "review" and review_end_id is not None and last_row_id is not None and last_row_id >= review_end_id),
-        **display_snapshot,
-    }
-    payload["metrics"] = serialize_metrics_payload(
-        fetch_ms=fetch_ms,
-        serialize_ms=elapsed_ms(serialize_started),
-        latest_row=replay_rows[-1] if replay_rows else None,
-    )
-    return payload
-
-
 def load_bootstrap_payload(
     *,
     mode: str,
@@ -1815,60 +1663,6 @@ def load_bootstrap_payload(
     )
     payload["rect"] = rect_snapshot_for_mode(mode)
     return payload
-
-
-def load_structure_bootstrap_payload(
-    *,
-    mode: str,
-    start_id: Optional[int],
-    window: int,
-    show_events: bool,
-    show_structure: bool,
-    show_ranges: bool,
-) -> Dict[str, Any]:
-    effective_window = clamp_int(window, 1, MAX_STRUCTURE_WINDOW)
-    fetch_started = time.perf_counter()
-    with db_connection(readonly=True) as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            bounds_row = query_tick_bounds(cur)
-            bounds = {
-                "firstId": bounds_row.get("first_id"),
-                "lastId": bounds_row.get("last_id"),
-                "firstTimestamp": bounds_row.get("first_timestamp"),
-                "lastTimestamp": bounds_row.get("last_timestamp"),
-            }
-            review_end_id = bounds["lastId"] if mode == "review" else None
-            review_end_timestamp = bounds["lastTimestamp"] if mode == "review" else None
-            if mode == "review":
-                if start_id is None:
-                    raise HTTPException(status_code=400, detail="Review mode requires an id value.")
-                replay_rows, snapshot = collect_structure_rows_starting_at(
-                    cur,
-                    start_id=start_id,
-                    item_window=effective_window,
-                    end_id=review_end_id,
-                )
-            else:
-                live_end_id = int(bounds["lastId"] or 0)
-                replay_rows, snapshot = collect_structure_rows_ending_at(
-                    cur,
-                    end_id=live_end_id,
-                    item_window=effective_window,
-                )
-    return build_structure_view_payload(
-        mode=mode,
-        window=effective_window,
-        replay_rows=replay_rows,
-        snapshot=snapshot,
-        trim_side="head" if mode == "review" else "tail",
-        review_end_id=review_end_id,
-        review_end_timestamp=review_end_timestamp,
-        bounds=bounds,
-        fetch_ms=elapsed_ms(fetch_started),
-        show_events=show_events,
-        show_structure=show_structure,
-        show_ranges=show_ranges,
-    )
 
 
 def load_next_payload(
@@ -1918,52 +1712,6 @@ def load_next_payload(
     return payload
 
 
-def load_structure_next_payload(
-    *,
-    after_id: int,
-    limit: int,
-    end_id: Optional[int],
-    window: int,
-    show_events: bool,
-    show_structure: bool,
-    show_ranges: bool,
-) -> Dict[str, Any]:
-    effective_limit = clamp_int(limit, 1, MAX_STREAM_BATCH)
-    effective_window = clamp_int(window, 1, MAX_STRUCTURE_WINDOW)
-    fetch_started = time.perf_counter()
-    with db_connection(readonly=True) as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            tick_rows = query_rows_after(cur, after_id, effective_limit, end_id=end_id)
-            last_seen_id = int(tick_rows[-1]["id"]) if tick_rows else after_id
-            replay_rows, snapshot = (
-                collect_structure_rows_ending_at(cur, end_id=last_seen_id, item_window=effective_window)
-                if last_seen_id
-                else ([], empty_structure_payload())
-            )
-            bounds_row = query_tick_bounds(cur)
-            bounds = {
-                "firstId": bounds_row.get("first_id"),
-                "lastId": bounds_row.get("last_id"),
-            }
-    payload = build_structure_view_payload(
-        mode="review" if end_id is not None else "live",
-        window=effective_window,
-        replay_rows=replay_rows,
-        snapshot=snapshot,
-        trim_side="tail",
-        review_end_id=end_id,
-        review_end_timestamp=None,
-        bounds=bounds,
-        fetch_ms=elapsed_ms(fetch_started),
-        show_events=show_events,
-        show_structure=show_structure,
-        show_ranges=show_ranges,
-    )
-    payload["endId"] = end_id
-    payload["endReached"] = bool(end_id is not None and last_seen_id >= end_id)
-    return payload
-
-
 def load_previous_payload(
     *,
     before_id: int,
@@ -2009,53 +1757,6 @@ def load_previous_payload(
             latest_row=(replay_rows[-1] if replay_rows else (previous_rows[-1] if previous_rows else None)),
         ),
     }
-    return payload
-
-
-def load_structure_previous_payload(
-    *,
-    before_id: int,
-    current_last_id: Optional[int],
-    window: int,
-    show_events: bool,
-    show_structure: bool,
-    show_ranges: bool,
-) -> Dict[str, Any]:
-    effective_window = clamp_int(window, 1, MAX_STRUCTURE_WINDOW)
-    fetch_started = time.perf_counter()
-    with db_connection(readonly=True) as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            bounds_row = query_tick_bounds(cur)
-            bounds = {
-                "firstId": bounds_row.get("first_id"),
-                "lastId": bounds_row.get("last_id"),
-                "firstTimestamp": bounds_row.get("first_timestamp"),
-                "lastTimestamp": bounds_row.get("last_timestamp"),
-            }
-            range_end_id = current_last_id
-            if range_end_id:
-                replay_rows, snapshot = collect_structure_rows_ending_at(
-                    cur,
-                    end_id=int(range_end_id),
-                    item_window=effective_window,
-                )
-            else:
-                replay_rows, snapshot = [], empty_structure_payload()
-    payload = build_structure_view_payload(
-        mode="review",
-        window=effective_window,
-        replay_rows=replay_rows,
-        snapshot=snapshot,
-        trim_side="tail",
-        review_end_id=None,
-        review_end_timestamp=None,
-        bounds=bounds,
-        fetch_ms=elapsed_ms(fetch_started),
-        show_events=show_events,
-        show_structure=show_structure,
-        show_ranges=show_ranges,
-    )
-    payload["beforeId"] = before_id
     return payload
 
 
@@ -2741,7 +2442,7 @@ def load_auction_bootstrap_payload(
                 end_ts = last_chart_row["timestamp"]
                 context_rows = query_window_ending_at_timestamp(cur, end_ts=end_ts, seconds=48 * 60 * 60)
                 snapshot = AUCTION_SERVICE.build_review_snapshot(rows=context_rows, focus_kind=normalized_focus)
-    return build_auction_view_payload(
+    payload = build_auction_view_payload(
         mode=mode,
         window=effective_window,
         rows=rows,
@@ -2751,6 +2452,15 @@ def load_auction_bootstrap_payload(
         fetch_ms=elapsed_ms(fetch_started),
         snapshot=snapshot,
     )
+    hot_path_log(
+        "auction_bootstrap",
+        elapsed=elapsed_ms(fetch_started),
+        mode=mode,
+        row_count=len(rows),
+        focus_kind=normalized_focus,
+        last_processed_id=(snapshot or {}).get("lastProcessedId"),
+    )
+    return payload
 
 
 def stream_events(
@@ -2763,8 +2473,8 @@ def stream_events(
     show_structure: bool,
     show_ranges: bool,
     max_window: int = MAX_TICK_WINDOW,
-    seed_by_item_window: bool = False,
     rect_mode: Optional[str] = None,
+    stream_name: str = "live_stream",
 ) -> Generator[str, None, None]:
     last_id = max(0, after_id)
     effective_limit = clamp_int(limit, 1, MAX_STREAM_BATCH)
@@ -2774,92 +2484,92 @@ def stream_events(
     structure_enabled = show_events or show_structure or show_ranges
     engine = StructureEngine(symbol=TICK_SYMBOL) if structure_enabled else None
 
+    stream_open(stream_name)
     try:
-        with db_connection(readonly=True, autocommit=True) as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                if engine is not None and last_id:
-                    seed_rows = (
-                        collect_structure_rows_ending_at(cur, end_id=last_id, item_window=effective_window)[0]
-                        if seed_by_item_window
-                        else query_window_ending_at(cur, last_id, effective_window)
-                    )
-                    for row in seed_rows:
-                        try:
-                            engine.process_tick(row)
-                        except Exception:
-                            engine = None
-                            break
-
-                while True:
-                    fetch_started = time.perf_counter()
-                    tick_rows = query_rows_after(cur, last_id, effective_limit)
-                    fetch_ms = elapsed_ms(fetch_started)
-                    if tick_rows:
-                        serialize_started = time.perf_counter()
-                        latest_tick_row = tick_rows[-1]
-                        payload_rows = serialize_tick_rows(tick_rows) if show_ticks else []
-                        updates = {"bars": [], "rangeBoxes": [], "events": []}
-                        if engine is not None:
+        try:
+            with db_connection(readonly=True, autocommit=True) as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    if engine is not None and last_id:
+                        seed_rows = query_window_ending_at(cur, last_id, effective_window)
+                        for row in seed_rows:
                             try:
-                                for row in tick_rows:
-                                    delta = engine.process_tick(row)
-                                    updates["bars"].extend(delta["bars"])
-                                    updates["rangeBoxes"].extend(delta["rangeBoxes"])
-                                    updates["events"].extend(delta["events"])
+                                engine.process_tick(row)
                             except Exception:
-                                updates = {"bars": [], "rangeBoxes": [], "events": []}
                                 engine = None
-                        rect_snapshot = rect_snapshot_for_mode(rect_mode) if rect_mode else None
-                        if rect_mode:
-                            for row in tick_rows:
-                                rect_snapshot = RECT_PAPER_SERVICE.process_tick(rect_mode, row) or rect_snapshot
+                                break
 
-                        last_id = int(latest_tick_row["id"])
-                        payload = {
-                            "rows": payload_rows,
-                            "rowCount": len(payload_rows),
-                            "structureBarUpdates": updates["bars"] if show_structure else [],
-                            "rangeBoxUpdates": updates["rangeBoxes"] if show_ranges else [],
-                            "structureEvents": updates["events"] if show_events else [],
-                            "lastId": last_id,
-                            "streamMode": "delta",
-                            "rect": rect_snapshot,
-                            **serialize_metrics_payload(
-                                fetch_ms=fetch_ms,
-                                serialize_ms=elapsed_ms(serialize_started),
-                                latest_row=latest_tick_row,
-                            ),
-                        }
-                        yield format_sse(payload)
-                        last_heartbeat = time.monotonic()
-                        idle_sleep = STREAM_POLL_SECONDS
-                        continue
+                    while True:
+                        fetch_started = time.perf_counter()
+                        tick_rows = query_rows_after(cur, last_id, effective_limit)
+                        fetch_ms = elapsed_ms(fetch_started)
+                        if tick_rows:
+                            serialize_started = time.perf_counter()
+                            latest_tick_row = tick_rows[-1]
+                            payload_rows = serialize_tick_rows(tick_rows) if show_ticks else []
+                            updates = {"bars": [], "rangeBoxes": [], "events": []}
+                            if engine is not None:
+                                try:
+                                    for row in tick_rows:
+                                        delta = engine.process_tick(row)
+                                        updates["bars"].extend(delta["bars"])
+                                        updates["rangeBoxes"].extend(delta["rangeBoxes"])
+                                        updates["events"].extend(delta["events"])
+                                except Exception:
+                                    updates = {"bars": [], "rangeBoxes": [], "events": []}
+                                    engine = None
+                            rect_snapshot = rect_snapshot_for_mode(rect_mode) if rect_mode else None
+                            if rect_mode:
+                                for row in tick_rows:
+                                    rect_snapshot = RECT_PAPER_SERVICE.process_tick(rect_mode, row) or rect_snapshot
 
-                    now = time.monotonic()
-                    if now - last_heartbeat >= STREAM_HEARTBEAT_SECONDS:
-                        latest_row = query_latest_tick(cur)
-                        payload = {
-                            "rows": [],
-                            "rowCount": 0,
-                            "structureBarUpdates": [],
-                            "rangeBoxUpdates": [],
-                            "structureEvents": [],
-                            "lastId": last_id,
-                            "streamMode": "heartbeat",
-                            "rect": rect_snapshot_for_mode(rect_mode) if rect_mode else None,
-                            "pollSleepMs": round(idle_sleep * 1000.0, 2),
-                            **serialize_metrics_payload(
-                                fetch_ms=fetch_ms,
-                                serialize_ms=0.0,
-                                latest_row=latest_row,
-                            ),
-                        }
-                        yield format_sse(payload, event_name="heartbeat")
-                        last_heartbeat = now
-                    time.sleep(idle_sleep)
-                    idle_sleep = STREAM_IDLE_POLL_SECONDS
-    except GeneratorExit:
-        return
+                            last_id = int(latest_tick_row["id"])
+                            payload = {
+                                "rows": payload_rows,
+                                "rowCount": len(payload_rows),
+                                "structureBarUpdates": updates["bars"] if show_structure else [],
+                                "rangeBoxUpdates": updates["rangeBoxes"] if show_ranges else [],
+                                "structureEvents": updates["events"] if show_events else [],
+                                "lastId": last_id,
+                                "streamMode": "delta",
+                                "rect": rect_snapshot,
+                                **serialize_metrics_payload(
+                                    fetch_ms=fetch_ms,
+                                    serialize_ms=elapsed_ms(serialize_started),
+                                    latest_row=latest_tick_row,
+                                ),
+                            }
+                            yield format_sse(payload)
+                            last_heartbeat = time.monotonic()
+                            idle_sleep = STREAM_POLL_SECONDS
+                            continue
+
+                        now = time.monotonic()
+                        if now - last_heartbeat >= STREAM_HEARTBEAT_SECONDS:
+                            latest_row = query_latest_tick(cur)
+                            payload = {
+                                "rows": [],
+                                "rowCount": 0,
+                                "structureBarUpdates": [],
+                                "rangeBoxUpdates": [],
+                                "structureEvents": [],
+                                "lastId": last_id,
+                                "streamMode": "heartbeat",
+                                "rect": rect_snapshot_for_mode(rect_mode) if rect_mode else None,
+                                "pollSleepMs": round(idle_sleep * 1000.0, 2),
+                                **serialize_metrics_payload(
+                                    fetch_ms=fetch_ms,
+                                    serialize_ms=0.0,
+                                    latest_row=latest_row,
+                                ),
+                            }
+                            yield format_sse(payload, event_name="heartbeat")
+                            last_heartbeat = now
+                        time.sleep(idle_sleep)
+                        idle_sleep = STREAM_IDLE_POLL_SECONDS
+        except GeneratorExit:
+            return
+    finally:
+        stream_close(stream_name)
 
 
 def stream_review_events(
@@ -2873,6 +2583,7 @@ def stream_review_events(
     show_structure: bool,
     show_ranges: bool,
     rect_mode: str = "review",
+    stream_name: str = "live_review_stream",
 ) -> Generator[str, None, None]:
     last_id = max(0, after_id)
     effective_window = clamp_int(window, 1, MAX_TICK_WINDOW)
@@ -2882,188 +2593,183 @@ def stream_review_events(
     engine = StructureEngine(symbol=TICK_SYMBOL) if structure_enabled else None
     previous_row: Optional[Dict[str, Any]] = None
 
+    stream_open(stream_name)
     try:
-        with db_connection(readonly=True, autocommit=True) as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                if engine is not None and last_id:
-                    seed_rows = query_window_ending_at(cur, last_id, effective_window)
-                    for row in seed_rows:
-                        try:
-                            engine.process_tick(row)
-                        except Exception:
-                            engine = None
-                            break
-                    previous_row = seed_rows[-1] if seed_rows else None
-
-                while last_id < end_id:
-                    fetch_started = time.perf_counter()
-                    batch_rows = query_rows_after(cur, last_id, effective_batch, end_id=end_id)
-                    fetch_ms = elapsed_ms(fetch_started)
-                    if not batch_rows:
-                        payload = {
-                            "rows": [],
-                            "rowCount": 0,
-                            "structureBarUpdates": [],
-                            "rangeBoxUpdates": [],
-                            "structureEvents": [],
-                            "lastId": last_id,
-                            "endId": end_id,
-                            "endReached": True,
-                            "streamMode": "complete",
-                            "rect": rect_snapshot_for_mode(rect_mode),
-                            **serialize_metrics_payload(
-                                fetch_ms=fetch_ms,
-                                serialize_ms=0.0,
-                                latest_row=query_latest_tick(cur),
-                            ),
-                        }
-                        yield format_sse(payload)
-                        return
-
-                    for row in batch_rows:
-                        delay_ms = 0
-                        if previous_row and previous_row.get("timestamp") and row.get("timestamp"):
-                            delta_ms = max(0, dt_to_ms(row["timestamp"]) - dt_to_ms(previous_row["timestamp"]))
-                            delay_ms = min(REVIEW_MAX_DELAY_MS, int(round(delta_ms / speed_multiplier)))
-                        if delay_ms > 0:
-                            time.sleep(max(REVIEW_MIN_DELAY_MS, delay_ms) / 1000.0)
-
-                        serialize_started = time.perf_counter()
-                        updates = {"bars": [], "rangeBoxes": [], "events": []}
-                        if engine is not None:
+        try:
+            with db_connection(readonly=True, autocommit=True) as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    if engine is not None and last_id:
+                        seed_rows = query_window_ending_at(cur, last_id, effective_window)
+                        for row in seed_rows:
                             try:
-                                delta = engine.process_tick(row)
-                                updates["bars"].extend(delta["bars"])
-                                updates["rangeBoxes"].extend(delta["rangeBoxes"])
-                                updates["events"].extend(delta["events"])
+                                engine.process_tick(row)
                             except Exception:
-                                updates = {"bars": [], "rangeBoxes": [], "events": []}
                                 engine = None
+                                break
+                        previous_row = seed_rows[-1] if seed_rows else None
 
-                        last_id = int(row["id"])
-                        rect_snapshot = RECT_PAPER_SERVICE.process_tick(rect_mode, row)
-                        payload = {
-                            "rows": serialize_tick_rows([row]) if show_ticks else [],
-                            "rowCount": 1 if show_ticks else 0,
-                            "structureBarUpdates": updates["bars"] if show_structure else [],
-                            "rangeBoxUpdates": updates["rangeBoxes"] if show_ranges else [],
-                            "structureEvents": updates["events"] if show_events else [],
-                            "lastId": last_id,
-                            "endId": end_id,
-                            "endReached": bool(last_id >= end_id),
-                            "streamMode": "delta",
-                            "rect": rect_snapshot or rect_snapshot_for_mode(rect_mode),
-                            "playbackDelayMs": delay_ms,
-                            **serialize_metrics_payload(
-                                fetch_ms=fetch_ms,
-                                serialize_ms=elapsed_ms(serialize_started),
-                                latest_row=row,
-                            ),
-                        }
-                        yield format_sse(payload)
-                        previous_row = row
-                        if last_id >= end_id:
+                    while last_id < end_id:
+                        fetch_started = time.perf_counter()
+                        batch_rows = query_rows_after(cur, last_id, effective_batch, end_id=end_id)
+                        fetch_ms = elapsed_ms(fetch_started)
+                        if not batch_rows:
+                            payload = {
+                                "rows": [],
+                                "rowCount": 0,
+                                "structureBarUpdates": [],
+                                "rangeBoxUpdates": [],
+                                "structureEvents": [],
+                                "lastId": last_id,
+                                "endId": end_id,
+                                "endReached": True,
+                                "streamMode": "complete",
+                                "rect": rect_snapshot_for_mode(rect_mode),
+                                **serialize_metrics_payload(
+                                    fetch_ms=fetch_ms,
+                                    serialize_ms=0.0,
+                                    latest_row=query_latest_tick(cur),
+                                ),
+                            }
+                            yield format_sse(payload)
                             return
-    except GeneratorExit:
-        return
+
+                        for row in batch_rows:
+                            delay_ms = 0
+                            if previous_row and previous_row.get("timestamp") and row.get("timestamp"):
+                                delta_ms = max(0, dt_to_ms(row["timestamp"]) - dt_to_ms(previous_row["timestamp"]))
+                                delay_ms = min(REVIEW_MAX_DELAY_MS, int(round(delta_ms / speed_multiplier)))
+                            if delay_ms > 0:
+                                time.sleep(max(REVIEW_MIN_DELAY_MS, delay_ms) / 1000.0)
+
+                            serialize_started = time.perf_counter()
+                            updates = {"bars": [], "rangeBoxes": [], "events": []}
+                            if engine is not None:
+                                try:
+                                    delta = engine.process_tick(row)
+                                    updates["bars"].extend(delta["bars"])
+                                    updates["rangeBoxes"].extend(delta["rangeBoxes"])
+                                    updates["events"].extend(delta["events"])
+                                except Exception:
+                                    updates = {"bars": [], "rangeBoxes": [], "events": []}
+                                    engine = None
+
+                            last_id = int(row["id"])
+                            rect_snapshot = RECT_PAPER_SERVICE.process_tick(rect_mode, row)
+                            payload = {
+                                "rows": serialize_tick_rows([row]) if show_ticks else [],
+                                "rowCount": 1 if show_ticks else 0,
+                                "structureBarUpdates": updates["bars"] if show_structure else [],
+                                "rangeBoxUpdates": updates["rangeBoxes"] if show_ranges else [],
+                                "structureEvents": updates["events"] if show_events else [],
+                                "lastId": last_id,
+                                "endId": end_id,
+                                "endReached": bool(last_id >= end_id),
+                                "streamMode": "delta",
+                                "rect": rect_snapshot or rect_snapshot_for_mode(rect_mode),
+                                "playbackDelayMs": delay_ms,
+                                **serialize_metrics_payload(
+                                    fetch_ms=fetch_ms,
+                                    serialize_ms=elapsed_ms(serialize_started),
+                                    latest_row=row,
+                                ),
+                            }
+                            yield format_sse(payload)
+                            previous_row = row
+                            if last_id >= end_id:
+                                return
+        except GeneratorExit:
+            return
+    finally:
+        stream_close(stream_name)
 
 
 def stream_auction_tick_events(
     *,
     after_id: int,
     limit: int,
+    stream_name: str = "auction_tick_stream",
 ) -> Generator[str, None, None]:
     last_id = max(0, after_id)
     effective_limit = clamp_int(limit, 1, MAX_STREAM_BATCH)
     last_heartbeat = time.monotonic()
     idle_sleep = STREAM_POLL_SECONDS
+    stream_open(stream_name)
     try:
-        with db_connection(readonly=True, autocommit=True) as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                while True:
-                    fetch_started = time.perf_counter()
-                    tick_rows = query_auction_chart_rows_after(cur, last_id, effective_limit)
-                    fetch_ms = elapsed_ms(fetch_started)
-                    if tick_rows:
-                        serialize_started = time.perf_counter()
-                        last_id = int(tick_rows[-1]["id"])
-                        payload = {
-                            "rows": serialize_auction_chart_rows(tick_rows),
-                            "rowCount": len(tick_rows),
-                            "lastId": last_id,
-                            "streamMode": "delta",
-                            **serialize_metrics_payload(
-                                fetch_ms=fetch_ms,
-                                serialize_ms=elapsed_ms(serialize_started),
-                                latest_row=tick_rows[-1],
-                            ),
-                        }
-                        yield format_sse(payload)
-                        last_heartbeat = time.monotonic()
-                        idle_sleep = STREAM_POLL_SECONDS
-                        continue
+        try:
+            with db_connection(readonly=True, autocommit=True) as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    while True:
+                        fetch_started = time.perf_counter()
+                        tick_rows = query_auction_chart_rows_after(cur, last_id, effective_limit)
+                        fetch_ms = elapsed_ms(fetch_started)
+                        if tick_rows:
+                            serialize_started = time.perf_counter()
+                            last_id = int(tick_rows[-1]["id"])
+                            payload = {
+                                "rows": serialize_auction_chart_rows(tick_rows),
+                                "rowCount": len(tick_rows),
+                                "lastId": last_id,
+                                "streamMode": "delta",
+                                **serialize_metrics_payload(
+                                    fetch_ms=fetch_ms,
+                                    serialize_ms=elapsed_ms(serialize_started),
+                                    latest_row=tick_rows[-1],
+                                ),
+                            }
+                            yield format_sse(payload)
+                            last_heartbeat = time.monotonic()
+                            idle_sleep = STREAM_POLL_SECONDS
+                            continue
 
-                    now = time.monotonic()
-                    if now - last_heartbeat >= STREAM_HEARTBEAT_SECONDS:
-                        latest_row = query_latest_tick(cur)
-                        payload = {
-                            "rows": [],
-                            "rowCount": 0,
-                            "lastId": last_id,
-                            "streamMode": "heartbeat",
-                            **serialize_metrics_payload(
-                                fetch_ms=fetch_ms,
-                                serialize_ms=0.0,
-                                latest_row=latest_row,
-                            ),
-                        }
-                        yield format_sse(payload, event_name="heartbeat")
-                        last_heartbeat = now
-                    time.sleep(idle_sleep)
-                    idle_sleep = STREAM_IDLE_POLL_SECONDS
-    except GeneratorExit:
-        return
+                        now = time.monotonic()
+                        if now - last_heartbeat >= STREAM_HEARTBEAT_SECONDS:
+                            latest_row = query_latest_tick(cur)
+                            payload = {
+                                "rows": [],
+                                "rowCount": 0,
+                                "lastId": last_id,
+                                "streamMode": "heartbeat",
+                                **serialize_metrics_payload(
+                                    fetch_ms=fetch_ms,
+                                    serialize_ms=0.0,
+                                    latest_row=latest_row,
+                                ),
+                            }
+                            yield format_sse(payload, event_name="heartbeat")
+                            last_heartbeat = now
+                        time.sleep(idle_sleep)
+                        idle_sleep = STREAM_IDLE_POLL_SECONDS
+        except GeneratorExit:
+            return
+    finally:
+        stream_close(stream_name)
 
 
 def stream_auction_events(
     *,
     focus_kind: str,
+    stream_name: str = "auction_snapshot_stream",
 ) -> Generator[str, None, None]:
     normalized_focus = normalize_auction_focus_kind(focus_kind)
     last_heartbeat = time.monotonic()
     last_snapshot_id: Optional[int] = None
     last_snapshot_ts_ms: Optional[int] = None
+    stream_open(stream_name)
     try:
-        with db_connection(readonly=True, autocommit=True) as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                while True:
-                    build_started = time.perf_counter()
-                    snapshot = AUCTION_SERVICE.sync_live(focus_kind=normalized_focus)
-                    snapshot_build_ms = elapsed_ms(build_started)
-                    latest_row = query_latest_tick(cur)
-                    snapshot_id = int(snapshot.get("lastProcessedId") or 0) if snapshot else 0
-                    snapshot_ts_ms = int(snapshot.get("asOfTsMs") or 0) if snapshot else 0
-                    if snapshot_id != last_snapshot_id or snapshot_ts_ms != last_snapshot_ts_ms:
-                        payload = {
-                            "streamMode": "snapshot",
-                            "auction": snapshot,
-                            "snapshotBuildLatencyMs": snapshot_build_ms,
-                            **serialize_metrics_payload(
-                                fetch_ms=snapshot_build_ms,
-                                serialize_ms=0.0,
-                                latest_row=latest_row,
-                            ),
-                        }
-                        yield format_sse(payload)
-                        last_snapshot_id = snapshot_id
-                        last_snapshot_ts_ms = snapshot_ts_ms
-                        last_heartbeat = time.monotonic()
-                    else:
-                        now = time.monotonic()
-                        if now - last_heartbeat >= STREAM_HEARTBEAT_SECONDS:
+        try:
+            with db_connection(readonly=True, autocommit=True) as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    while True:
+                        build_started = time.perf_counter()
+                        snapshot = AUCTION_SERVICE.sync_live(focus_kind=normalized_focus)
+                        snapshot_build_ms = elapsed_ms(build_started)
+                        latest_row = query_latest_tick(cur)
+                        snapshot_id = int(snapshot.get("lastProcessedId") or 0) if snapshot else 0
+                        snapshot_ts_ms = int(snapshot.get("asOfTsMs") or 0) if snapshot else 0
+                        if snapshot_id != last_snapshot_id or snapshot_ts_ms != last_snapshot_ts_ms:
                             payload = {
-                                "streamMode": "heartbeat",
-                                "auction": None,
+                                "streamMode": "snapshot",
+                                "auction": snapshot,
                                 "snapshotBuildLatencyMs": snapshot_build_ms,
                                 **serialize_metrics_payload(
                                     fetch_ms=snapshot_build_ms,
@@ -3071,11 +2777,30 @@ def stream_auction_events(
                                     latest_row=latest_row,
                                 ),
                             }
-                            yield format_sse(payload, event_name="heartbeat")
-                            last_heartbeat = now
-                    time.sleep(AUCTION_SNAPSHOT_STREAM_SECONDS)
-    except GeneratorExit:
-        return
+                            yield format_sse(payload)
+                            last_snapshot_id = snapshot_id
+                            last_snapshot_ts_ms = snapshot_ts_ms
+                            last_heartbeat = time.monotonic()
+                        else:
+                            now = time.monotonic()
+                            if now - last_heartbeat >= STREAM_HEARTBEAT_SECONDS:
+                                payload = {
+                                    "streamMode": "heartbeat",
+                                    "auction": None,
+                                    "snapshotBuildLatencyMs": snapshot_build_ms,
+                                    **serialize_metrics_payload(
+                                        fetch_ms=snapshot_build_ms,
+                                        serialize_ms=0.0,
+                                        latest_row=latest_row,
+                                    ),
+                                }
+                                yield format_sse(payload, event_name="heartbeat")
+                                last_heartbeat = now
+                        time.sleep(AUCTION_SNAPSHOT_STREAM_SECONDS)
+        except GeneratorExit:
+            return
+    finally:
+        stream_close(stream_name)
 
 
 def stream_auction_review_events(
@@ -3084,6 +2809,7 @@ def stream_auction_review_events(
     end_id: int,
     speed: float,
     focus_kind: str,
+    stream_name: str = "auction_review_stream",
 ) -> Generator[str, None, None]:
     last_id = max(0, after_id)
     effective_batch = clamp_int(REVIEW_STREAM_BATCH, 1, MAX_STREAM_BATCH)
@@ -3092,70 +2818,74 @@ def stream_auction_review_events(
     review_store = AuctionStateStore(symbol=TICK_SYMBOL)
     previous_row: Optional[Dict[str, Any]] = None
 
+    stream_open(stream_name)
     try:
-        with db_connection(readonly=True, autocommit=True) as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                if last_id > 0:
-                    anchor_row = query_tick_by_id(cur, last_id)
-                    if anchor_row:
-                        seed_rows = query_window_ending_at_timestamp(cur, end_ts=anchor_row["timestamp"], seconds=48 * 60 * 60)
-                        review_store.apply_rows(seed_rows)
-                        previous_row = seed_rows[-1] if seed_rows else anchor_row
+        try:
+            with db_connection(readonly=True, autocommit=True) as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    if last_id > 0:
+                        anchor_row = query_tick_by_id(cur, last_id)
+                        if anchor_row:
+                            seed_rows = query_window_ending_at_timestamp(cur, end_ts=anchor_row["timestamp"], seconds=48 * 60 * 60)
+                            review_store.apply_rows(seed_rows)
+                            previous_row = seed_rows[-1] if seed_rows else anchor_row
 
-                while last_id < end_id:
-                    fetch_started = time.perf_counter()
-                    batch_rows = query_rows_after(cur, last_id, effective_batch, end_id=end_id)
-                    fetch_ms = elapsed_ms(fetch_started)
-                    if not batch_rows:
-                        payload = {
-                            "rows": [],
-                            "rowCount": 0,
-                            "lastId": last_id,
-                            "endId": end_id,
-                            "endReached": True,
-                            "streamMode": "complete",
-                            "auction": review_store.build_snapshot(focus_kind=normalized_focus),
-                            **serialize_metrics_payload(
-                                fetch_ms=fetch_ms,
-                                serialize_ms=0.0,
-                                latest_row=query_latest_tick(cur),
-                            ),
-                        }
-                        yield format_sse(payload)
-                        return
-
-                    for row in batch_rows:
-                        delay_ms = 0
-                        if previous_row and previous_row.get("timestamp") and row.get("timestamp"):
-                            delta_ms = max(0, dt_to_ms(row["timestamp"]) - dt_to_ms(previous_row["timestamp"]))
-                            delay_ms = min(REVIEW_MAX_DELAY_MS, int(round(delta_ms / speed_multiplier)))
-                        if delay_ms > 0:
-                            time.sleep(max(REVIEW_MIN_DELAY_MS, delay_ms) / 1000.0)
-
-                        serialize_started = time.perf_counter()
-                        review_store.apply_rows([row])
-                        last_id = int(row["id"])
-                        payload = {
-                            "rows": serialize_auction_chart_rows([row]),
-                            "rowCount": 1,
-                            "lastId": last_id,
-                            "endId": end_id,
-                            "endReached": bool(last_id >= end_id),
-                            "streamMode": "delta",
-                            "auction": review_store.build_snapshot(focus_kind=normalized_focus),
-                            "playbackDelayMs": delay_ms,
-                            **serialize_metrics_payload(
-                                fetch_ms=fetch_ms,
-                                serialize_ms=elapsed_ms(serialize_started),
-                                latest_row=row,
-                            ),
-                        }
-                        yield format_sse(payload)
-                        previous_row = row
-                        if last_id >= end_id:
+                    while last_id < end_id:
+                        fetch_started = time.perf_counter()
+                        batch_rows = query_rows_after(cur, last_id, effective_batch, end_id=end_id)
+                        fetch_ms = elapsed_ms(fetch_started)
+                        if not batch_rows:
+                            payload = {
+                                "rows": [],
+                                "rowCount": 0,
+                                "lastId": last_id,
+                                "endId": end_id,
+                                "endReached": True,
+                                "streamMode": "complete",
+                                "auction": review_store.build_snapshot(focus_kind=normalized_focus),
+                                **serialize_metrics_payload(
+                                    fetch_ms=fetch_ms,
+                                    serialize_ms=0.0,
+                                    latest_row=query_latest_tick(cur),
+                                ),
+                            }
+                            yield format_sse(payload)
                             return
-    except GeneratorExit:
-        return
+
+                        for row in batch_rows:
+                            delay_ms = 0
+                            if previous_row and previous_row.get("timestamp") and row.get("timestamp"):
+                                delta_ms = max(0, dt_to_ms(row["timestamp"]) - dt_to_ms(previous_row["timestamp"]))
+                                delay_ms = min(REVIEW_MAX_DELAY_MS, int(round(delta_ms / speed_multiplier)))
+                            if delay_ms > 0:
+                                time.sleep(max(REVIEW_MIN_DELAY_MS, delay_ms) / 1000.0)
+
+                            serialize_started = time.perf_counter()
+                            review_store.apply_rows([row])
+                            last_id = int(row["id"])
+                            payload = {
+                                "rows": serialize_auction_chart_rows([row]),
+                                "rowCount": 1,
+                                "lastId": last_id,
+                                "endId": end_id,
+                                "endReached": bool(last_id >= end_id),
+                                "streamMode": "delta",
+                                "auction": review_store.build_snapshot(focus_kind=normalized_focus),
+                                "playbackDelayMs": delay_ms,
+                                **serialize_metrics_payload(
+                                    fetch_ms=fetch_ms,
+                                    serialize_ms=elapsed_ms(serialize_started),
+                                    latest_row=row,
+                                ),
+                            }
+                            yield format_sse(payload)
+                            previous_row = row
+                            if last_id >= end_id:
+                                return
+        except GeneratorExit:
+            return
+    finally:
+        stream_close(stream_name)
 
 
 def smart_scalp_ticks_after(after_id: int, limit: int) -> List[Dict[str, Any]]:
@@ -3371,11 +3101,6 @@ def home_page() -> FileResponse:
 @app.get("/live", include_in_schema=False)
 def live_page() -> FileResponse:
     return FileResponse(FRONTEND_DIR / "live.html")
-
-
-@app.get("/structure", include_in_schema=False)
-def structure_page() -> FileResponse:
-    return FileResponse(FRONTEND_DIR / "structure.html")
 
 
 @app.get("/separation", include_in_schema=False)
@@ -3773,14 +3498,6 @@ def live_rect_manual_close(rect_id: int, payload: RectModeRequest) -> Dict[str, 
         _handle_rect_error(exc)
 
 
-@app.get("/api/structure/review-start")
-def structure_review_start(
-    timestamp: str = Query(..., min_length=1),
-    timezoneName: str = Query(DEFAULT_REVIEW_TIMEZONE, min_length=1),
-) -> Dict[str, Any]:
-    return live_review_start(timestamp=timestamp, timezoneName=timezoneName)
-
-
 @app.get("/api/separation/review-start")
 def separation_review_start(
     timestamp: str = Query(..., min_length=1),
@@ -4028,95 +3745,6 @@ def auction_review_stream(
             end_id=endId,
             speed=speed,
             focus_kind=focusKind,
-        ),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
-
-
-@app.get("/api/structure/bootstrap")
-def structure_bootstrap(
-    mode: str = Query("live", pattern="^(live|review)$"),
-    id: Optional[int] = Query(None, ge=1),
-    window: int = Query(DEFAULT_STRUCTURE_WINDOW, ge=1, le=MAX_STRUCTURE_WINDOW),
-    showEvents: bool = Query(False),
-    showStructure: bool = Query(True),
-    showRanges: bool = Query(True),
-) -> Dict[str, Any]:
-    return load_structure_bootstrap_payload(
-        mode=mode,
-        start_id=id,
-        window=window,
-        show_events=showEvents,
-        show_structure=showStructure,
-        show_ranges=showRanges,
-    )
-
-
-@app.get("/api/structure/next")
-def structure_next(
-    afterId: int = Query(..., ge=0),
-    limit: int = Query(250, ge=1, le=MAX_STREAM_BATCH),
-    endId: Optional[int] = Query(None, ge=1),
-    window: int = Query(DEFAULT_STRUCTURE_WINDOW, ge=1, le=MAX_STRUCTURE_WINDOW),
-    showEvents: bool = Query(False),
-    showStructure: bool = Query(True),
-    showRanges: bool = Query(True),
-) -> Dict[str, Any]:
-    return load_structure_next_payload(
-        after_id=afterId,
-        limit=limit,
-        end_id=endId,
-        window=window,
-        show_events=showEvents,
-        show_structure=showStructure,
-        show_ranges=showRanges,
-    )
-
-
-@app.get("/api/structure/previous")
-def structure_previous(
-    beforeId: int = Query(..., ge=1),
-    currentLastId: Optional[int] = Query(None, ge=1),
-    window: int = Query(DEFAULT_STRUCTURE_WINDOW, ge=1, le=MAX_STRUCTURE_WINDOW),
-    showEvents: bool = Query(False),
-    showStructure: bool = Query(True),
-    showRanges: bool = Query(True),
-) -> Dict[str, Any]:
-    return load_structure_previous_payload(
-        before_id=beforeId,
-        current_last_id=currentLastId,
-        window=window,
-        show_events=showEvents,
-        show_structure=showStructure,
-        show_ranges=showRanges,
-    )
-
-
-@app.get("/api/structure/stream")
-def structure_stream(
-    afterId: int = Query(0, ge=0),
-    limit: int = Query(250, ge=1, le=MAX_STREAM_BATCH),
-    window: int = Query(DEFAULT_STRUCTURE_WINDOW, ge=1, le=MAX_STRUCTURE_WINDOW),
-    showEvents: bool = Query(False),
-    showStructure: bool = Query(True),
-    showRanges: bool = Query(True),
-) -> StreamingResponse:
-    return StreamingResponse(
-        stream_events(
-            after_id=afterId,
-            limit=limit,
-            window=window,
-            show_ticks=False,
-            show_events=showEvents,
-            show_structure=showStructure,
-            show_ranges=showRanges,
-            max_window=MAX_STRUCTURE_WINDOW,
-            seed_by_item_window=True,
         ),
         media_type="text/event-stream",
         headers={

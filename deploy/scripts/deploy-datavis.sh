@@ -17,7 +17,7 @@ LEGACY_SERVICES=(
   "zonebuilder"
 )
 MIGRATION_FILES=(
-  "deploy/sql/20260408_layer_zero_structure.sql"
+  "deploy/sql/20260418_remove_legacy_structure_layer.sql"
   "deploy/sql/20260411_layer_zero_rects.sql"
   "deploy/sql/20260412_auction_framework.sql"
   "deploy/sql/20260416_separation.sql"

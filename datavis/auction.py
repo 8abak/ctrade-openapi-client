@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import logging
 import threading
 import time
 from collections import deque
@@ -18,6 +19,8 @@ CONTEXT_SECONDS = 48 * 60 * 60
 DWELL_CAP_MS = 4000
 SNAPSHOT_VALUE_PERCENT = 0.70
 PERSIST_INTERVAL_SECONDS = 15.0
+AUCTION_SYNC_BATCH_ROWS = 4000
+AUCTION_SLOW_SYNC_MS = 75.0
 
 SYDNEY_TZ = ZoneInfo("Australia/Sydney")
 LONDON_TZ = ZoneInfo("Europe/London")
@@ -1544,11 +1547,13 @@ class AuctionService:
     def __init__(self, *, db_factory: Callable[..., Any], symbol: str) -> None:
         self._db_factory = db_factory
         self._symbol = symbol
+        self._logger = logging.getLogger("datavis.auction")
         self._lock = threading.RLock()
         self._store = AuctionStateStore(symbol=symbol)
         self._cache_loaded = False
         self._last_persist_monotonic = 0.0
         self._last_live_snapshot: Optional[Dict[str, Any]] = None
+        self._live_snapshot_cache: Dict[str, Dict[str, Any]] = {}
 
     def start(self) -> None:
         self._restore_from_db()
@@ -1582,9 +1587,11 @@ class AuctionService:
         with self._lock:
             self._store.restore(service_state)
             self._last_live_snapshot = snapshot_payload.get("liveSnapshot") if isinstance(snapshot_payload.get("liveSnapshot"), dict) else None
+            if self._last_live_snapshot:
+                self._live_snapshot_cache["brokerday"] = self._last_live_snapshot
             self._cache_loaded = True
 
-    def _query_rows_after(self, after_id: int) -> List[Dict[str, Any]]:
+    def _query_rows_after(self, after_id: int, *, limit: int) -> List[Dict[str, Any]]:
         with self._db_factory(readonly=True) as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
@@ -1593,10 +1600,21 @@ class AuctionService:
                     FROM public.ticks
                     WHERE symbol = %s AND id > %s
                     ORDER BY id ASC
+                    LIMIT %s
                     """,
-                    (self._symbol, int(after_id)),
+                    (self._symbol, int(after_id), int(limit)),
                 )
                 return [dict(row) for row in cur.fetchall()]
+
+    def _cached_snapshot_locked(self, *, focus_kind: str) -> Optional[Dict[str, Any]]:
+        snapshot = self._live_snapshot_cache.get(focus_kind)
+        if not snapshot:
+            return None
+        if int(snapshot.get("lastProcessedId") or 0) != int(self._store.last_processed_id or 0):
+            return None
+        if int(snapshot.get("asOfTsMs") or 0) != int(self._store.last_processed_ts_ms or 0):
+            return None
+        return snapshot
 
     def _seed_recent_rows(self) -> List[Dict[str, Any]]:
         with self._db_factory(readonly=True) as conn:
@@ -1626,24 +1644,49 @@ class AuctionService:
                 return [dict(row) for row in cur.fetchall()]
 
     def sync_live(self, *, focus_kind: str = "brokerday") -> Dict[str, Any]:
+        started = time.perf_counter()
         with self._lock:
+            rows_applied = 0
+            changed = False
             if not self._cache_loaded:
                 seed_rows = self._seed_recent_rows()
                 if seed_rows:
                     self._store.apply_rows(seed_rows)
+                    rows_applied = len(seed_rows)
+                    changed = True
                 self._cache_loaded = True
             else:
-                delta_rows = self._query_rows_after(self._store.last_processed_id)
+                delta_rows = self._query_rows_after(self._store.last_processed_id, limit=AUCTION_SYNC_BATCH_ROWS)
                 if delta_rows:
                     self._store.apply_rows(delta_rows)
-            self._last_live_snapshot = self._store.build_snapshot(focus_kind=focus_kind)
-            self.persist(force=False)
-            return self._last_live_snapshot
+                    rows_applied = len(delta_rows)
+                    changed = True
+            cached = self._cached_snapshot_locked(focus_kind=focus_kind)
+            if not changed and cached is not None:
+                return cached
+            snapshot = self._store.build_snapshot(focus_kind=focus_kind)
+            self._live_snapshot_cache[focus_kind] = snapshot
+            if focus_kind == "brokerday":
+                self._last_live_snapshot = snapshot
+            if changed:
+                self.persist(force=False)
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        if rows_applied or elapsed_ms >= AUCTION_SLOW_SYNC_MS:
+            self._logger.info(
+                "auction sync_live focus=%s rows_applied=%s last_processed_id=%s elapsed_ms=%.2f",
+                focus_kind,
+                rows_applied,
+                self._store.last_processed_id,
+                elapsed_ms,
+            )
+        return snapshot
 
     def apply_live_rows(self, rows: Iterable[Dict[str, Any]], *, focus_kind: str) -> Dict[str, Any]:
         with self._lock:
             self._store.apply_rows(rows)
+            self._live_snapshot_cache = {}
             self._last_live_snapshot = self._store.build_snapshot(focus_kind=focus_kind)
+            self._live_snapshot_cache[focus_kind] = self._last_live_snapshot
             self.persist(force=False)
             return self._last_live_snapshot
 
@@ -1656,6 +1699,7 @@ class AuctionService:
         now_monotonic = time.monotonic()
         if not force and now_monotonic - self._last_persist_monotonic < PERSIST_INTERVAL_SECONDS:
             return
+        started = time.perf_counter()
         snapshot = self._last_live_snapshot or self._store.build_snapshot(focus_kind="brokerday")
         history_snapshots = build_history_snapshots(self._store)
         payload = {
@@ -1667,6 +1711,14 @@ class AuctionService:
         except psycopg2.Error:
             return
         self._last_persist_monotonic = now_monotonic
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        if elapsed_ms >= AUCTION_SLOW_SYNC_MS:
+            self._logger.info(
+                "auction persist last_processed_id=%s history_windows=%s elapsed_ms=%.2f",
+                self._store.last_processed_id,
+                len(history_snapshots),
+                elapsed_ms,
+            )
 
     def _persist_snapshot(
         self,

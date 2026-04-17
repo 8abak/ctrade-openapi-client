@@ -4,7 +4,7 @@ set -euo pipefail
 APP_DIR="/home/ec2-user/cTrade"
 ENV_FILE="/etc/datavis.env"
 BACKUP_DIR="/home/ec2-user/backups/datavis"
-CLEANUP_SQL="${APP_DIR}/deploy/sql/20260408_layer_zero_structure.sql"
+CLEANUP_SQL="${APP_DIR}/deploy/sql/20260418_remove_legacy_structure_layer.sql"
 LEGACY_SERVICES=(
   "ottprocessor"
   "envelopeprocessor"
@@ -50,5 +50,5 @@ done
 
 sudo systemctl daemon-reload
 
-log "Layer Zero cleanup complete"
+log "Legacy structure cleanup complete"
 log "Backup written to ${BACKUP_PATH}"
