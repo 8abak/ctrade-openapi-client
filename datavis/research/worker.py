@@ -22,6 +22,8 @@ class ResearchWorker:
         self._limits = SearchGuardrails(
             max_slice_rows=settings.max_slice_rows,
             max_warmup_rows=settings.max_warmup_rows,
+            max_slice_offset_rows=settings.max_slice_offset_rows,
+            max_next_actions=settings.max_next_jobs,
         )
 
     def run_forever(self, conn_factory: Any) -> None:
@@ -301,7 +303,7 @@ class ResearchWorker:
                     run_id,
                     summary_payload["verdictHint"],
                     summary_payload["headline"],
-                    Json(summary_payload.get("bestCandidate") or {}),
+                    Json((summary_payload.get("bestCandidate") or {}).get("validationMetrics") or {}),
                     Json(summary_payload.get("briefing") or {}),
                     Json(summary_payload.get("candidateResults") or []),
                     Json((summary_payload.get("bestCandidate") or {}).get("positiveExamples") or []),
@@ -328,6 +330,7 @@ class ResearchWorker:
         control = get_state(conn, "entry_loop_control")
         control["iterations_completed"] = int(control.get("iterations_completed") or 0) + 1
         control["last_run_id"] = run_id
+        control["last_selected_fingerprint"] = (summary.get("config") or {}).get("config_fingerprint")
         with conn.cursor() as cur:
             cur.execute(
                 """

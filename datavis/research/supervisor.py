@@ -20,6 +20,8 @@ class ResearchSupervisor:
         self._limits = SearchGuardrails(
             max_slice_rows=settings.max_slice_rows,
             max_warmup_rows=settings.max_warmup_rows,
+            max_slice_offset_rows=settings.max_slice_offset_rows,
+            max_next_actions=settings.max_next_jobs,
         )
 
     def run_forever(self, conn_factory: Any) -> None:
@@ -60,7 +62,7 @@ class ResearchSupervisor:
                     conn=conn,
                 )
                 return True
-            validated_decision, _ = validate_supervisor_decision(decision_payload, base_parameters=base_params, limits=self._limits)
+            validated_decision = validate_supervisor_decision(decision_payload)
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -89,7 +91,12 @@ class ResearchSupervisor:
                 message=f"completed decision {decision_id}",
                 decision_id=decision_id,
                 run_id=int(row["run_id"]),
-                payload={"decision": validated_decision.decision, "stopReason": validated_decision.stop_reason},
+                payload={
+                    "decision": validated_decision.decision,
+                    "stopReason": validated_decision.stop_reason,
+                    "nextActionCount": len(validated_decision.next_actions),
+                    "baseFingerprint": base_params.config_fingerprint,
+                },
                 conn=conn,
             )
         except Exception as exc:

@@ -6,15 +6,39 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, field_validator
 
 
-DecisionType = Literal["continue", "refine", "stop"]
-NextActionType = Literal["run_entry_research", "stop"]
+DecisionType = Literal["continue", "refine", "explore_new_family", "increase_slice", "split_by_pattern", "stop"]
+NextActionType = Literal["continue", "refine", "explore_new_family", "increase_slice", "split_by_pattern"]
 JobType = Literal["entry_research"]
+SideLock = Literal["both", "long", "short"]
+PredicateOperator = Literal[">=", "<="]
+
+
+class PredicateSpec(BaseModel):
+    feature: str = Field(..., min_length=1, max_length=64)
+    operator: PredicateOperator
+    threshold: float = Field(..., ge=-1_000_000.0, le=1_000_000.0)
+
+
+class CandidateSeed(BaseModel):
+    name: str = Field(..., min_length=1, max_length=128)
+    family: str = Field(..., min_length=1, max_length=64)
+    side: Literal["long", "short"]
+    predicates: List[PredicateSpec] = Field(default_factory=list, max_length=6)
+
+
+class ContrastHint(BaseModel):
+    feature: str = Field(..., min_length=1, max_length=64)
+    operator: PredicateOperator
+    threshold: float = Field(..., ge=-1_000_000.0, le=1_000_000.0)
+    score: float = Field(0.0, ge=0.0, le=1_000_000.0)
+    reason: Optional[str] = Field(None, max_length=512)
 
 
 class EntryResearchParameters(BaseModel):
     symbol: str = Field(..., min_length=1, max_length=32)
     iteration: int = Field(1, ge=1, le=512)
     slice_rows: int = Field(..., ge=500, le=50000)
+    slice_offset_rows: int = Field(0, ge=0, le=250000)
     warmup_rows: int = Field(..., ge=20, le=5000)
     label_variant: str = Field(..., min_length=1, max_length=64)
     candidate_family: str = Field(..., min_length=1, max_length=64)
@@ -24,6 +48,12 @@ class EntryResearchParameters(BaseModel):
     spread_filter: str = Field(..., min_length=1, max_length=64)
     dedup_rule: str = Field(..., min_length=1, max_length=64)
     train_validation_plan: str = Field(..., min_length=1, max_length=64)
+    side_lock: SideLock = "both"
+    seed_rule: Optional[CandidateSeed] = None
+    contrast_hints: List[ContrastHint] = Field(default_factory=list, max_length=6)
+    source_run_id: Optional[int] = Field(None, ge=1)
+    mutation_note: Optional[str] = Field(None, max_length=512)
+    config_fingerprint: Optional[str] = Field(None, max_length=64)
 
     @field_validator("symbol")
     @classmethod
@@ -51,6 +81,7 @@ class EntryResearchParameterPatch(BaseModel):
     symbol: Optional[str] = Field(None, min_length=1, max_length=32)
     iteration: Optional[int] = Field(None, ge=1, le=512)
     slice_rows: Optional[int] = Field(None, ge=500, le=50000)
+    slice_offset_rows: Optional[int] = Field(None, ge=0, le=250000)
     warmup_rows: Optional[int] = Field(None, ge=20, le=5000)
     label_variant: Optional[str] = Field(None, min_length=1, max_length=64)
     candidate_family: Optional[str] = Field(None, min_length=1, max_length=64)
@@ -60,10 +91,17 @@ class EntryResearchParameterPatch(BaseModel):
     spread_filter: Optional[str] = Field(None, min_length=1, max_length=64)
     dedup_rule: Optional[str] = Field(None, min_length=1, max_length=64)
     train_validation_plan: Optional[str] = Field(None, min_length=1, max_length=64)
+    side_lock: Optional[SideLock] = None
+    seed_rule: Optional[CandidateSeed] = None
+    contrast_hints: Optional[List[ContrastHint]] = Field(None, max_length=6)
+    source_run_id: Optional[int] = Field(None, ge=1)
+    mutation_note: Optional[str] = Field(None, max_length=512)
+    config_fingerprint: Optional[str] = Field(None, max_length=64)
 
 
 class SupervisorNextAction(BaseModel):
-    type: NextActionType
+    action: NextActionType
+    reason: str = Field(..., min_length=1, max_length=2000)
     parameters: Optional[EntryResearchParameterPatch] = None
 
 
@@ -73,7 +111,7 @@ class SupervisorDecision(BaseModel):
     confidence_note: str = Field(..., min_length=1, max_length=2000)
     stop_reason: Optional[str] = Field(None, max_length=128)
     verdict: Optional[str] = Field(None, max_length=256)
-    next_action: Optional[SupervisorNextAction] = None
+    next_actions: List[SupervisorNextAction] = Field(default_factory=list, max_length=8)
 
 
 class JobRecord(BaseModel):
@@ -106,4 +144,3 @@ class DecisionRecord(BaseModel):
     briefing: Dict[str, Any]
     decision_json: Optional[Dict[str, Any]] = None
     raw_response: Optional[str] = None
-

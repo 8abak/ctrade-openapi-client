@@ -7,8 +7,9 @@ It does not touch live order placement, trading routes, frontend pages, the SQL 
 - one worker job at a time
 - bounded recent slices only
 - bounded label horizons
+- bounded hypothesis batches
 - bounded feature families
-- bounded threshold search
+- bounded search families
 - compact supervisor briefings only
 - DB state plus append-only JSONL journals
 
@@ -16,17 +17,20 @@ It does not touch live order placement, trading routes, frontend pages, the SQL 
 
 - `datavis/research/config.py`: env loading and runtime limits
 - `datavis/research/db.py`: research DB connections with timeouts
-- `datavis/research/entry.py`: executable entry labels, past-only features, candidate search
+- `datavis/research/entry.py`: executable entry labels, past-only features, bounded search families, contrast summaries
+- `datavis/research/mutation.py`: bounded next-hypothesis generation, novelty filtering, stop guardrail evaluation
 - `datavis/research/worker.py`: bounded worker job execution and persistence
-- `datavis/research/orchestrator.py`: loop seeding, decision queueing, decision application
-- `datavis/research/supervisor.py`: pending decision polling and validation
-- `datavis/research/supervisor_client.py`: OpenAI HTTP adapter with structured JSON schema
+- `datavis/research/orchestrator.py`: loop seeding, decision queueing, stop overrides, next-job insertion
+- `datavis/research/supervisor.py`: pending decision polling and tolerant validation
+- `datavis/research/supervisor_client.py`: OpenAI HTTP adapter with endpoint normalization and bounded JSON decisions
 - `datavis/research/journal.py`: DB journals and JSONL artifact writing
 - `datavis/research/state.py`: loop control state helpers
 
 ## DB Objects
 
 Migration: `deploy/sql/20260418_entry_research_loop.sql`
+
+This patch keeps the same schema and stores the new search-history, fingerprints, mutation rationale, and decision artifacts inside existing JSON columns plus filesystem artifacts. No new migration is required.
 
 Objects created:
 
@@ -68,6 +72,10 @@ Important optional knobs:
 
 - `DATAVIS_RESEARCH_SEED_SLICE_ROWS`
 - `DATAVIS_RESEARCH_MAX_SLICE_ROWS`
+- `DATAVIS_RESEARCH_SLICE_LADDER`
+- `DATAVIS_RESEARCH_MIN_RUNS_BEFORE_STOP`
+- `DATAVIS_RESEARCH_MAX_NEXT_JOBS`
+- `DATAVIS_RESEARCH_FAILED_DIRECTION_STOP_COUNT`
 - `DATAVIS_RESEARCH_ITERATION_BUDGET`
 - `DATAVIS_RESEARCH_WRITE_BATCH_ROWS`
 - `DATAVIS_RESEARCH_CHUNK_SLEEP_SECONDS`
@@ -83,6 +91,13 @@ Important optional knobs:
 5. Start `research-orchestrator.service`
 
 The orchestrator seeds the first calm job automatically when `research.state.entry_loop_control` shows `seeded=false`.
+
+After that, the loop is multi-pass by default:
+
+- each completed run produces contrast summaries and bounded mutation proposals
+- the supervisor chooses among `continue`, `refine`, `explore_new_family`, `increase_slice`, `split_by_pattern`, or `stop`
+- the orchestrator only honors `stop` after policy guardrails pass
+- otherwise it enqueues the next bounded jobs automatically and journals why
 
 ## Local Run Commands
 
@@ -209,3 +224,22 @@ WHERE key = 'entry_loop_control';
 ```
 
 Run-level hints are also stored in `research.runsummary.verdict_hint`.
+
+## Search Families
+
+- `threshold_grid`: bounded single-threshold search
+- `pair_combo`: bounded 2-predicate conjunctions
+- `triad_combo`: bounded 3-predicate conjunctions
+- `contrast_gate`: contrast-driven gates from positive vs false-positive deltas
+- `regime_split`: same search but narrowed by spread/session regime
+- `tighten_winner`: prior winner plus one or two contrast gates
+- `slice_expand`: same promising regime on a larger slice or shifted slice
+- `side_locked_refine`: long-only or short-only refinement when one side dominates
+
+## Stop Guardrails
+
+- `stop` is rejected before `DATAVIS_RESEARCH_MIN_RUNS_BEFORE_STOP`
+- `stop` is accepted early only for a strong stable regime
+- weak or inconclusive results are converted into new bounded jobs
+- repeated failure across distinct search directions can stop the loop
+- budget exhaustion, explicit stop requests, and hard technical failures still stop the loop

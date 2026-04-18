@@ -99,15 +99,45 @@ def write_run_artifacts(
     run_dir.mkdir(parents=True, exist_ok=True)
     json_path = run_dir / "summary.json"
     md_path = run_dir / "summary.md"
+    contrast_path = run_dir / "contrast_summary.json"
+    mutation_path = run_dir / "mutation_proposals.json"
     json_path.write_text(json.dumps(summary_payload, indent=2, sort_keys=True, default=str), encoding="utf-8")
     md_path.write_text(_render_markdown_summary(run_id=run_id, summary_payload=summary_payload), encoding="utf-8")
-    return {"json": str(json_path), "markdown": str(md_path)}
+    contrast_path.write_text(json.dumps(summary_payload.get("analysis", {}).get("contrastSummary") or {}, indent=2, sort_keys=True, default=str), encoding="utf-8")
+    mutation_path.write_text(json.dumps(summary_payload.get("mutationProposals") or [], indent=2, sort_keys=True, default=str), encoding="utf-8")
+    return {
+        "json": str(json_path),
+        "markdown": str(md_path),
+        "contrast_json": str(contrast_path),
+        "mutation_json": str(mutation_path),
+    }
+
+
+def write_decision_artifacts(
+    settings: ResearchSettings,
+    *,
+    run_id: int,
+    decision_id: int,
+    payload: Dict[str, Any],
+) -> Dict[str, str]:
+    ensure_runtime_dirs(settings)
+    run_dir = settings.artifact_dir / f"run-{int(run_id):06d}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    json_path = run_dir / f"decision-{int(decision_id):06d}.json"
+    md_path = run_dir / f"decision-{int(decision_id):06d}.md"
+    json_path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str), encoding="utf-8")
+    md_path.write_text(_render_decision_markdown(run_id=run_id, decision_id=decision_id, payload=payload), encoding="utf-8")
+    return {"decision_json": str(json_path), "decision_markdown": str(md_path)}
 
 
 def _render_markdown_summary(*, run_id: int, summary_payload: Dict[str, Any]) -> str:
     best = summary_payload.get("bestCandidate") or {}
     headline = summary_payload.get("headline") or "Entry research run summary"
     metrics = best.get("validationMetrics") or {}
+    analysis = summary_payload.get("analysis") or {}
+    contrast = analysis.get("contrastSummary") or {}
+    top_features = contrast.get("topFeatures") or []
+    mutation_proposals = summary_payload.get("mutationProposals") or []
     lines = [
         f"# Research Run {run_id}",
         "",
@@ -121,10 +151,58 @@ def _render_markdown_summary(*, run_id: int, summary_payload: Dict[str, Any]) ->
         f"- Entries/day: {metrics.get('entriesPerDay', 'n/a')}",
         f"- Stability range: {metrics.get('walkForwardRange', 'n/a')}",
         "",
-        "## Supervisor Briefing",
+        "## Contrast Summary",
         "",
-        "```json",
-        json.dumps(summary_payload.get("briefing") or {}, indent=2, sort_keys=True, default=str),
-        "```",
     ]
+    if top_features:
+        for item in top_features[:5]:
+            lines.append(
+                f"- {item.get('feature')}: delta {item.get('delta')} suggested {item.get('preferredOperator')} {item.get('suggestedThreshold')}"
+            )
+    else:
+        lines.append("- No contrast summary available.")
+    lines.extend(
+        [
+            "",
+            "## Mutation Proposals",
+            "",
+        ]
+    )
+    if mutation_proposals:
+        for item in mutation_proposals:
+            lines.append(f"- {item.get('action')}: {item.get('reason')}")
+    else:
+        lines.append("- No bounded mutation proposals generated.")
+    lines.extend(
+        [
+            "",
+            "## Supervisor Briefing",
+            "",
+            "```json",
+            json.dumps(summary_payload.get("briefing") or {}, indent=2, sort_keys=True, default=str),
+            "```",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _render_decision_markdown(*, run_id: int, decision_id: int, payload: Dict[str, Any]) -> str:
+    lines = [
+        f"# Decision {decision_id} For Run {run_id}",
+        "",
+        f"- Supervisor decision: {payload.get('decision')}",
+        f"- Final action: {payload.get('appliedAction')}",
+        f"- Stop accepted: {payload.get('stopAccepted')}",
+        f"- Reason: {payload.get('reason')}",
+        f"- Policy note: {payload.get('policyNote')}",
+        "",
+        "## Selected Next Jobs",
+        "",
+    ]
+    next_jobs = payload.get("nextJobs") or []
+    if next_jobs:
+        for item in next_jobs:
+            lines.append(f"- {item.get('action')}: {item.get('reason')} ({item.get('configFingerprint')})")
+    else:
+        lines.append("- No next jobs were enqueued.")
     return "\n".join(lines) + "\n"

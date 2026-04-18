@@ -17,9 +17,12 @@ def default_control_state(settings: ResearchSettings) -> Dict[str, Any]:
         "final_verdict": None,
         "final_reason": None,
         "iteration_budget": settings.iteration_budget,
+        "min_runs_before_stop": settings.min_runs_before_stop,
         "iterations_completed": 0,
         "last_run_id": None,
         "last_decision_id": None,
+        "last_stop_override_reason": None,
+        "last_selected_fingerprint": None,
         "seeded": False,
     }
 
