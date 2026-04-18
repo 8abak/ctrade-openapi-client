@@ -1242,6 +1242,18 @@ select {
   padding-right: 0.15rem;
 }
 
+.sql-table-section {
+  display: grid;
+  align-content: start;
+  gap: 0.35rem;
+}
+
+.sql-table-section-list {
+  display: grid;
+  align-content: start;
+  gap: 0.35rem;
+}
+
 .sql-table-button {
   width: 100%;
   display: grid;

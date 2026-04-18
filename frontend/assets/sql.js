@@ -1,6 +1,7 @@
 (function () {
   const state = {
-    tables: [],
+    publicTables: [],
+    researchTables: [],
     activeTable: null,
     running: false,
   };
@@ -9,6 +10,8 @@
     connectionMeta: document.getElementById("connectionMeta"),
     tableFilter: document.getElementById("tableFilter"),
     tableList: document.getElementById("tableList"),
+    publicTableList: document.getElementById("publicTableList"),
+    researchTableList: document.getElementById("researchTableList"),
     editor: document.getElementById("sqlEditor"),
     runButton: document.getElementById("runQueryButton"),
     status: document.getElementById("queryStatus"),
@@ -101,7 +104,7 @@
 
   function renderConnection(context) {
     if (!context) {
-      elements.connectionMeta.textContent = "Public schema";
+      elements.connectionMeta.textContent = "Public + research schemas";
       return;
     }
     elements.connectionMeta.textContent = [
@@ -111,18 +114,12 @@
     ].join(" / ");
   }
 
-  function renderTables() {
-    const filter = elements.tableFilter.value.trim().toLowerCase();
-    const tables = state.tables.filter((table) => {
-      return !filter || (table.schema + "." + table.name).toLowerCase().includes(filter);
-    });
+  function allTables() {
+    return state.publicTables.concat(state.researchTables);
+  }
 
-    if (!tables.length) {
-      elements.tableList.innerHTML = "<div class=\"sql-empty\">No matching public tables.</div>";
-      return;
-    }
-
-    elements.tableList.innerHTML = tables.map((table) => {
+  function renderTableButtons(tables) {
+    return tables.map((table) => {
       const key = table.schema + "." + table.name;
       const active = state.activeTable && state.activeTable.schema === table.schema && state.activeTable.name === table.name;
       return [
@@ -134,6 +131,36 @@
         "</button>",
       ].join("");
     }).join("");
+  }
+
+  function renderTableSection(host, tables, options) {
+    const filter = elements.tableFilter.value.trim().toLowerCase();
+    const filteredTables = tables.filter((table) => {
+      return !filter || (table.schema + "." + table.name).toLowerCase().includes(filter);
+    });
+
+    if (!tables.length) {
+      host.innerHTML = "<div class=\"sql-empty\">" + escapeHtml(options.emptyMessage) + "</div>";
+      return;
+    }
+
+    if (!filteredTables.length) {
+      host.innerHTML = "<div class=\"sql-empty\">" + escapeHtml(options.noMatchesMessage) + "</div>";
+      return;
+    }
+
+    host.innerHTML = renderTableButtons(filteredTables);
+  }
+
+  function renderTables() {
+    renderTableSection(elements.publicTableList, state.publicTables, {
+      emptyMessage: "No public tables found.",
+      noMatchesMessage: "No matching public tables.",
+    });
+    renderTableSection(elements.researchTableList, state.researchTables, {
+      emptyMessage: "No research tables found.",
+      noMatchesMessage: "No matching research tables.",
+    });
   }
 
   function renderResultGrid(result) {
@@ -185,10 +212,14 @@
   async function loadTables() {
     clearError();
     const payload = await fetchJson("/api/sql/schema");
-    state.tables = payload.tables || [];
+    state.publicTables = Array.isArray(payload.public) ? payload.public : (payload.tables || []).filter((table) => table.schema === "public");
+    state.researchTables = Array.isArray(payload.research) ? payload.research : (payload.tables || []).filter((table) => table.schema === "research");
     renderConnection(payload.context);
     renderTables();
-    setStatus("Loaded " + state.tables.length + " public table(s).", "success");
+    setStatus(
+      "Loaded " + state.publicTables.length + " public table(s) and " + state.researchTables.length + " research table(s).",
+      "success"
+    );
   }
 
   async function runQuery() {
@@ -222,7 +253,7 @@
   }
 
   function selectTable(schema, name) {
-    const table = state.tables.find((candidate) => candidate.schema === schema && candidate.name === name);
+    const table = allTables().find((candidate) => candidate.schema === schema && candidate.name === name);
     if (!table) {
       return;
     }
@@ -260,6 +291,7 @@
 
   loadTables().catch((error) => {
     showError(error);
-    elements.tableList.innerHTML = "<div class=\"sql-empty\">Could not load public tables.</div>";
+    elements.publicTableList.innerHTML = "<div class=\"sql-empty\">Could not load public tables.</div>";
+    elements.researchTableList.innerHTML = "<div class=\"sql-empty\">Could not load research tables.</div>";
   });
 }());

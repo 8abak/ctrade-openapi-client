@@ -658,7 +658,7 @@ def fetch_sql_context(conn: Any) -> Dict[str, Any]:
     }
 
 
-def list_public_tables() -> Dict[str, Any]:
+def list_sql_tables() -> Dict[str, Any]:
     now = now_ms()
     with SQL_SCHEMA_CACHE_LOCK:
         cached = SQL_SCHEMA_CACHE.get("payload")
@@ -690,9 +690,9 @@ def list_public_tables() -> Dict[str, Any]:
                   ON n.oid = c.relnamespace
                 LEFT JOIN pg_stat_user_tables s
                   ON s.relid = c.oid
-                WHERE n.nspname = 'public'
+                WHERE n.nspname IN ('public', 'research')
                   AND c.relkind IN ('r', 'p')
-                ORDER BY c.relname ASC
+                ORDER BY n.nspname ASC, c.relname ASC
                 """
             )
             tables = [
@@ -705,11 +705,24 @@ def list_public_tables() -> Dict[str, Any]:
                 }
                 for row in cur.fetchall()
             ]
-    payload = {"context": context, "tables": tables}
+    public_tables = [table for table in tables if table["schema"] == "public"]
+    research_tables = [table for table in tables if table["schema"] == "research"]
+    payload = {
+        "context": context,
+        "tables": public_tables,
+        "public": public_tables,
+        "research": research_tables,
+    }
     with SQL_SCHEMA_CACHE_LOCK:
         SQL_SCHEMA_CACHE["payload"] = payload
         SQL_SCHEMA_CACHE["expiresAtMs"] = now_ms() + SQL_SCHEMA_CACHE_TTL_MS
-    hot_path_log("sql_schema", elapsed=elapsed_ms(started), table_count=len(tables))
+    hot_path_log(
+        "sql_schema",
+        elapsed=elapsed_ms(started),
+        public_count=len(public_tables),
+        research_count=len(research_tables),
+        table_count=len(tables),
+    )
     return json.loads(json.dumps(payload))
 
 
@@ -3148,7 +3161,7 @@ def api_health() -> Dict[str, Any]:
 
 @app.get("/api/sql/schema")
 def sql_schema(_: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
-    return list_public_tables()
+    return list_sql_tables()
 
 
 @app.post("/api/sql/query")
