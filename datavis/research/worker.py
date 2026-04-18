@@ -7,12 +7,19 @@ from typing import Any, Dict, Iterable, List, Optional
 import psycopg2.extras
 from psycopg2.extras import Json
 
+from datavis.control.config import load_settings as load_control_settings
+from datavis.control.panel import _setup_fingerprint
+from datavis.control.panel_state import resolve_research_runtime
 from datavis.research.config import ResearchSettings
 from datavis.research.entry import execute_entry_research
 from datavis.research.guardrails import SearchGuardrails, sanitize_parameters
 from datavis.research.journal import ResearchJournal, write_run_artifacts
 from datavis.research.models import JobRecord
 from datavis.research.state import ensure_control_state, get_state
+from datavis.separation import brokerday_for_timestamp
+
+
+CONTROL_SETTINGS = load_control_settings()
 
 
 class ResearchWorker:
@@ -36,6 +43,9 @@ class ResearchWorker:
                 time.sleep(self._settings.worker_poll_seconds)
 
     def run_once(self, conn: Any) -> bool:
+        runtime_policy = resolve_research_runtime(conn, CONTROL_SETTINGS, self._settings)
+        if not runtime_policy.get("enabled", True):
+            return False
         control = ensure_control_state(conn, self._settings)
         if control.get("paused") or control.get("stop_requested") or control.get("final_verdict"):
             return False
@@ -149,7 +159,7 @@ class ResearchWorker:
         self._insert_feature_rows(conn, feature_rows)
         self._insert_label_rows(conn, label_rows)
         self._insert_candidate_rows(conn, candidate_rows)
-        self._update_run_metadata(conn, run_id=run_id, slice_bounds=result["sliceBounds"])
+        self._update_run_metadata(conn, run_id=run_id, slice_bounds=result["sliceBounds"], result=result)
         self._insert_run_summary(conn, run_id=run_id, summary_payload=summary_payload)
         artifact_paths = write_run_artifacts(self._settings, run_id=run_id, summary_payload=summary_payload)
         self._insert_artifacts(conn, run_id=run_id, artifact_paths=artifact_paths, job_id=job.id)
@@ -256,7 +266,7 @@ class ResearchWorker:
                 cur,
                 """
                 INSERT INTO research.candidate_result (
-                    run_id, rank, candidate_name, family, side, is_selected, rule_json, train_metrics, validation_metrics
+                    run_id, rank, candidate_name, family, side, is_selected, rule_json, train_metrics, validation_metrics, setup_fingerprint
                 )
                 VALUES %s
                 """,
@@ -271,22 +281,28 @@ class ResearchWorker:
                         Json(row["rule"]),
                         Json(row["trainMetrics"]),
                         Json(row["validationMetrics"]),
+                        _setup_fingerprint(row["rule"], fallback_name=str(row["candidateName"] or "")),
                     )
                     for row in rows
                 ],
                 page_size=min(len(rows), self._settings.write_batch_rows),
             )
 
-    def _update_run_metadata(self, conn: Any, *, run_id: int, slice_bounds: Dict[str, Any]) -> None:
+    def _update_run_metadata(self, conn: Any, *, run_id: int, slice_bounds: Dict[str, Any], result: Dict[str, Any]) -> None:
+        brokerday = None
+        cases = list(result.get("cases") or [])
+        if cases:
+            brokerday = brokerday_for_timestamp(cases[-1]["timestamp"])
         with conn.cursor() as cur:
             cur.execute(
                 """
                 UPDATE research.run
                 SET slice_start_tick_id = %s,
-                    slice_end_tick_id = %s
+                    slice_end_tick_id = %s,
+                    brokerday = COALESCE(%s, brokerday)
                 WHERE id = %s
                 """,
-                (slice_bounds["start_tick_id"], slice_bounds["end_tick_id"], run_id),
+                (slice_bounds["start_tick_id"], slice_bounds["end_tick_id"], brokerday, run_id),
             )
 
     def _insert_run_summary(self, conn: Any, *, run_id: int, summary_payload: Dict[str, Any]) -> None:

@@ -7,6 +7,7 @@ from datavis.control.config import ControlSettings
 from datavis.control.executor import RepairExecutor
 from datavis.control.failure_detector import FailureDetector
 from datavis.control.journal import EngineeringJournal
+from datavis.control.panel_state import mission_briefing_payload, resolve_engineering_runtime
 from datavis.control.research_manager import ResearchManager
 from datavis.control.smoke import SmokeRunner
 from datavis.control.store import EngineeringStore
@@ -44,8 +45,11 @@ class EngineeringOrchestrator:
                 time.sleep(self._settings.poll_seconds)
 
     def run_once(self, conn: Any) -> bool:
+        runtime_policy = resolve_engineering_runtime(conn, self._settings, self._settings.research_settings)
+        if not runtime_policy.get("enabled", True):
+            return False
         state = self._store.ensure_state(conn)
-        if not state.get("enabled", True) or state.get("paused", False):
+        if not state.get("enabled", True) or state.get("paused", False) or state.get("manual_takeover", False):
             return False
         incident = self._store.get_active_incident(conn)
         if not incident:
@@ -70,7 +74,15 @@ class EngineeringOrchestrator:
         try:
             self._store.transition_incident(conn, incident_id=incident_id, status="analyzing")
             briefing = self._detector.build_briefing(conn, incident)
-            decision, raw_response = self._supervisor.review_incident(briefing)
+            briefing["operatorMission"] = mission_briefing_payload(runtime_policy["mission"])
+            briefing["engineeringPolicy"] = {
+                "maxRetriesPerIncident": runtime_policy["maxRetriesPerIncident"],
+                "restartRateLimitPerHour": runtime_policy["restartRateLimitPerHour"],
+                "maxPatchFiles": runtime_policy["maxPatchFiles"],
+                "maxPatchLineChanges": runtime_policy["maxPatchLineChanges"],
+                "maxPatchBytes": runtime_policy["maxPatchBytes"],
+            }
+            decision, raw_response = self._supervisor.review_incident(briefing, conn=conn)
             action_id = self._store.start_action(
                 conn,
                 incident_id=incident_id,

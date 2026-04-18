@@ -10,6 +10,7 @@ import requests
 from datavis.control.config import ControlSettings
 from datavis.control.journal import EngineeringJournal
 from datavis.control.models import EngineeringSupervisorDecision
+from datavis.control.panel_state import resolve_engineering_runtime
 
 
 DECISION_JSON_SCHEMA: Dict[str, Any] = {
@@ -85,11 +86,21 @@ class EngineeringSupervisor:
         self._settings = settings
         self._journal = EngineeringJournal(settings, "engineering-supervisor")
 
-    def is_enabled(self) -> bool:
-        return bool(self._settings.openai_api_key and self._settings.openai_model)
+    def is_enabled(self, *, model_override: str = "") -> bool:
+        return bool(self._settings.openai_api_key and (model_override or self._settings.openai_model))
 
-    def review_incident(self, briefing: Dict[str, Any], *, force_fallback: bool = False) -> Tuple[EngineeringSupervisorDecision, str]:
-        if force_fallback or not self.is_enabled():
+    def review_incident(
+        self,
+        briefing: Dict[str, Any],
+        *,
+        conn: Any | None = None,
+        force_fallback: bool = False,
+    ) -> Tuple[EngineeringSupervisorDecision, str]:
+        model_name = self._settings.openai_model
+        if conn is not None:
+            runtime_policy = resolve_engineering_runtime(conn, self._settings, self._settings.research_settings)
+            model_name = str(runtime_policy.get("engineeringModelOverride") or self._settings.openai_model)
+        if force_fallback or not self.is_enabled(model_override=model_name):
             decision = self._heuristic_decision(briefing)
             self._journal.write(
                 level="INFO",
@@ -98,7 +109,11 @@ class EngineeringSupervisor:
                 payload={"decision": decision.model_dump(), "incident": briefing.get("incident") or {}},
             )
             return decision, json.dumps(decision.model_dump(), separators=(",", ":"), sort_keys=True)
-        raw_response = self._invoke_openai(system_prompt=self._system_prompt(), user_prompt=self._truncate_briefing(briefing))
+        raw_response = self._invoke_openai(
+            system_prompt=self._system_prompt(),
+            user_prompt=self._truncate_briefing(briefing),
+            model_name=model_name,
+        )
         decision_text = self._extract_text(raw_response)
         parsed = self._load_json_text(decision_text)
         decision = EngineeringSupervisorDecision.model_validate(parsed)
@@ -209,7 +224,7 @@ class EngineeringSupervisor:
             "All repairs must remain within datavis/research, datavis/control, or the configured research env files."
         )
 
-    def _invoke_openai(self, *, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
+    def _invoke_openai(self, *, system_prompt: str, user_prompt: str, model_name: str) -> Dict[str, Any]:
         endpoint = self._normalize_endpoint(self._settings.openai_endpoint, self._settings.openai_api_style)
         headers = {
             "Authorization": f"Bearer {self._settings.openai_api_key}",
@@ -217,7 +232,7 @@ class EngineeringSupervisor:
         }
         if self._settings.openai_api_style == "chat_completions":
             payload = {
-                "model": self._settings.openai_model,
+                "model": model_name,
                 "temperature": self._settings.openai_temperature,
                 "max_completion_tokens": self._settings.openai_max_output_tokens,
                 "messages": [
@@ -228,7 +243,7 @@ class EngineeringSupervisor:
             }
         else:
             payload = {
-                "model": self._settings.openai_model,
+                "model": model_name,
                 "max_output_tokens": self._settings.openai_max_output_tokens,
                 "temperature": self._settings.openai_temperature,
                 "input": [

@@ -6,12 +6,17 @@ from typing import Any, Dict, List, Optional, Sequence
 import psycopg2.extras
 from psycopg2.extras import Json
 
+from datavis.control.config import load_settings as load_control_settings
+from datavis.control.panel_state import mission_briefing_payload, resolve_research_runtime
 from datavis.research.config import ResearchSettings
 from datavis.research.guardrails import SearchGuardrails, default_parameters, sanitize_parameters, validate_supervisor_decision
 from datavis.research.journal import ResearchJournal, write_decision_artifacts
 from datavis.research.models import EntryResearchParameterPatch, EntryResearchParameters, SupervisorDecision
 from datavis.research.mutation import evaluate_stop_guardrails, generate_mutation_proposals, summarize_history
 from datavis.research.state import CONTROL_STATE_KEY, ensure_control_state, get_state, set_state
+
+
+CONTROL_SETTINGS = load_control_settings()
 
 
 class ResearchOrchestrator:
@@ -35,25 +40,28 @@ class ResearchOrchestrator:
                 time.sleep(self._settings.orchestrator_poll_seconds)
 
     def run_once(self, conn: Any) -> bool:
+        runtime_policy = resolve_research_runtime(conn, CONTROL_SETTINGS, self._settings)
+        if not runtime_policy.get("enabled", True):
+            return False
         control = ensure_control_state(conn, self._settings)
         if control.get("final_verdict"):
             return False
-        if self._apply_budget_stop(conn, control):
+        if self._apply_budget_stop(conn, control, runtime_policy=runtime_policy):
             return True
         if not control.get("seeded"):
-            self._seed_first_job(conn, control)
+            self._seed_first_job(conn, control, runtime_policy=runtime_policy)
             return True
-        if self._queue_pending_decision(conn):
+        if self._queue_pending_decision(conn, runtime_policy=runtime_policy):
             return True
-        if self._apply_completed_decision(conn, control):
+        if self._apply_completed_decision(conn, control, runtime_policy=runtime_policy):
             return True
         if self._handle_rejected_decision(conn, control):
             return True
         return False
 
-    def _apply_budget_stop(self, conn: Any, control: Dict[str, Any]) -> bool:
+    def _apply_budget_stop(self, conn: Any, control: Dict[str, Any], *, runtime_policy: Dict[str, Any]) -> bool:
         iterations_completed = int(control.get("iterations_completed") or 0)
-        iteration_budget = int(control.get("iteration_budget") or self._settings.iteration_budget)
+        iteration_budget = int(runtime_policy.get("iterationBudget") or control.get("iteration_budget") or self._settings.iteration_budget)
         if iterations_completed < iteration_budget:
             return False
         control["final_verdict"] = "stopped_by_budget_guardrail"
@@ -68,13 +76,17 @@ class ResearchOrchestrator:
         )
         return True
 
-    def _seed_first_job(self, conn: Any, control: Dict[str, Any]) -> None:
+    def _seed_first_job(self, conn: Any, control: Dict[str, Any], *, runtime_policy: Dict[str, Any]) -> None:
+        slice_ladder = list(runtime_policy.get("approvedSliceLadder") or self._settings.slice_ladder)
+        seed_slice = int(slice_ladder[0] if slice_ladder else self._settings.seed_slice_rows)
         params = default_parameters(
             symbol=self._settings.symbol,
-            slice_rows=self._settings.seed_slice_rows,
+            slice_rows=seed_slice,
             warmup_rows=self._settings.seed_warmup_rows,
             iteration=1,
         )
+        if runtime_policy.get("preferredSideLock") in {"long", "short"}:
+            params = params.model_copy(update={"side_lock": runtime_policy["preferredSideLock"]})
         self._insert_job(conn, params, requested_by="orchestrator.seed", parent_decision_id=None, parent_job_id=None, action="continue", reason="initial seed job")
         control["seeded"] = True
         set_state(conn, CONTROL_STATE_KEY, control)
@@ -86,7 +98,7 @@ class ResearchOrchestrator:
             conn=conn,
         )
 
-    def _queue_pending_decision(self, conn: Any) -> bool:
+    def _queue_pending_decision(self, conn: Any, *, runtime_policy: Dict[str, Any]) -> bool:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
@@ -121,14 +133,16 @@ class ResearchOrchestrator:
                 source_run_id=int(payload["run_id"]),
                 seen_fingerprints=history_summary.get("seenFingerprints") or [],
                 pending_fingerprints=pending_fingerprints,
+                policy=runtime_policy,
             )
             briefing["config"] = base_params.model_dump()
             briefing["priorDecisions"] = self._fetch_prior_decisions(conn)
             briefing["searchHistory"] = history_summary
+            briefing["mission"] = mission_briefing_payload(runtime_policy["mission"])
             briefing["stopPolicy"] = {
-                "minRunsBeforeStop": self._settings.min_runs_before_stop,
-                "failedDirectionStopCount": self._settings.failed_direction_stop_count,
-                "iterationBudget": self._settings.iteration_budget,
+                "minRunsBeforeStop": runtime_policy["minRunsBeforeStop"],
+                "failedDirectionStopCount": runtime_policy["failedDirectionStopCount"],
+                "iterationBudget": runtime_policy["iterationBudget"],
             }
             briefing["proposedNextJobs"] = proposals
             cur.execute(
@@ -148,7 +162,7 @@ class ResearchOrchestrator:
         )
         return True
 
-    def _apply_completed_decision(self, conn: Any, control: Dict[str, Any]) -> bool:
+    def _apply_completed_decision(self, conn: Any, control: Dict[str, Any], *, runtime_policy: Dict[str, Any]) -> bool:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
@@ -185,8 +199,16 @@ class ResearchOrchestrator:
                 latest_metrics=latest_metrics,
                 history_summary=history_summary,
                 settings=self._settings,
+                policy=runtime_policy,
             )
-            next_jobs = self._resolve_next_jobs(conn, decision=decision, base_params=base_params, briefing=briefing, run_id=run_id)
+            next_jobs = self._resolve_next_jobs(
+                conn,
+                decision=decision,
+                base_params=base_params,
+                briefing=briefing,
+                run_id=run_id,
+                runtime_policy=runtime_policy,
+            )
             stop_accepted = bool(decision.decision == "stop" and stop_policy["allowStop"])
             applied_action = decision.decision
             if decision.decision == "stop" and not stop_accepted:
@@ -206,7 +228,7 @@ class ResearchOrchestrator:
                 control["final_reason"] = decision.reason
             if not stop_accepted:
                 inserted_jobs = []
-                for job in next_jobs[: self._settings.max_next_jobs]:
+                for job in next_jobs[: int(runtime_policy.get("maxNextJobs") or self._settings.max_next_jobs)]:
                     inserted = self._insert_job(
                         conn,
                         sanitize_parameters(job["parameters"], limits=self._limits),
@@ -262,11 +284,12 @@ class ResearchOrchestrator:
         base_params: EntryResearchParameters,
         briefing: Dict[str, Any],
         run_id: int,
+        runtime_policy: Dict[str, Any],
     ) -> List[Dict[str, Any]]:
         next_jobs: List[Dict[str, Any]] = []
         pending_fingerprints = self._fetch_pending_job_fingerprints(conn)
         seen_fingerprints = summarize_history(self._fetch_recent_runs(conn)).get("seenFingerprints") or []
-        for action in decision.next_actions[: self._settings.max_next_jobs]:
+        for action in decision.next_actions[: int(runtime_policy.get("maxNextJobs") or self._settings.max_next_jobs)]:
             patch = action.parameters or EntryResearchParameterPatch()
             next_params = sanitize_parameters(
                 base_params.model_copy(

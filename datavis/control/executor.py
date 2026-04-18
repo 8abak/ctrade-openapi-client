@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from datavis.control.config import BASE_DIR, ControlSettings, ensure_runtime_dirs
+from datavis.control.panel_state import resolve_engineering_runtime
 from datavis.control.journal import EngineeringJournal
 from datavis.control.models import EngineeringSupervisorDecision
 from datavis.control.research_manager import ResearchManager
@@ -157,7 +158,8 @@ class RepairExecutor:
         return {"paths": repaired_paths}
 
     def _restart_services(self, conn: Any, service_names: List[str]) -> List[Dict[str, Any]]:
-        if self._store.restart_actions_last_hour(conn) >= self._settings.max_restarts_per_hour:
+        runtime_policy = resolve_engineering_runtime(conn, self._settings, self._settings.research_settings)
+        if self._store.restart_actions_last_hour(conn) >= int(runtime_policy["restartRateLimitPerHour"]):
             raise RuntimeError("restart budget exceeded for the last hour")
         snapshots = []
         for service_name in service_names:
@@ -341,6 +343,7 @@ def coerce_supervisor_decision_payload(decision_payload: Mapping[str, Any]) -> D
         patch_type: str,
         mutations: List[Tuple[Path, str]],
     ) -> Dict[str, Any]:
+        runtime_policy = resolve_engineering_runtime(conn, self._settings, self._settings.research_settings)
         changed = []
         total_lines = 0
         total_bytes = 0
@@ -368,11 +371,11 @@ def coerce_supervisor_decision_payload(decision_payload: Mapping[str, Any]) -> D
             total_lines += line_changes
             total_bytes += byte_changes
             changed.append((path, old_text, new_text, diff, line_changes, byte_changes))
-        if len(changed) > self._settings.max_patch_files:
+        if len(changed) > int(runtime_policy["maxPatchFiles"]):
             raise RuntimeError("patch exceeds allowed file count")
-        if total_lines > self._settings.max_patch_line_changes:
+        if total_lines > int(runtime_policy["maxPatchLineChanges"]):
             raise RuntimeError("patch exceeds allowed line-change budget")
-        if total_bytes > self._settings.max_patch_bytes:
+        if total_bytes > int(runtime_policy["maxPatchBytes"]):
             raise RuntimeError("patch exceeds allowed byte-change budget")
         if not changed:
             return {"applied": False, "reason": "already in known-good state"}

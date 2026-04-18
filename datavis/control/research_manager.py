@@ -6,7 +6,9 @@ import psycopg2.extras
 from psycopg2.extras import Json
 
 from datavis.control.config import ControlSettings
+from datavis.control.panel_state import resolve_research_runtime
 from datavis.control.service_manager import ServiceManager
+from datavis.research.guardrails import default_parameters
 from datavis.research.guardrails import sanitize_parameters
 from datavis.research.state import CONTROL_STATE_KEY, default_control_state, ensure_control_state, set_state
 
@@ -215,6 +217,60 @@ class ResearchManager:
             snapshots.append(self._service_manager.restart(service_name).model_dump())
         return snapshots
 
+    def seed_next_job(self, conn: Any, *, reason: str) -> Dict[str, Any]:
+        runtime_policy = resolve_research_runtime(conn, self._settings, self._settings.research_settings)
+        slice_ladder = list(runtime_policy.get("approvedSliceLadder") or self._settings.research_settings.slice_ladder)
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT config, iteration
+                FROM research.run
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            )
+            latest = dict(cur.fetchone() or {})
+            if latest:
+                latest_config = sanitize_parameters(latest.get("config") or {}, limits=self._build_limits())
+                next_payload = latest_config.model_copy(
+                    update={
+                        "iteration": int(latest.get("iteration") or latest_config.iteration) + 1,
+                        "slice_rows": int(slice_ladder[0] if slice_ladder else latest_config.slice_rows),
+                        "side_lock": runtime_policy.get("preferredSideLock") or latest_config.side_lock,
+                        "mutation_note": reason[:512],
+                    }
+                ).model_dump()
+            else:
+                params = default_parameters(
+                    symbol=self._settings.research_settings.symbol,
+                    slice_rows=int(slice_ladder[0] if slice_ladder else self._settings.research_settings.seed_slice_rows),
+                    warmup_rows=self._settings.research_settings.seed_warmup_rows,
+                    iteration=1,
+                )
+                next_payload = params.model_copy(
+                    update={
+                        "side_lock": runtime_policy.get("preferredSideLock") or params.side_lock,
+                        "mutation_note": reason[:512],
+                    }
+                ).model_dump()
+            params = sanitize_parameters(next_payload, limits=self._build_limits())
+            cur.execute(
+                """
+                INSERT INTO research.job (
+                    job_type, status, priority, requested_by, config, guardrails, max_attempts
+                )
+                VALUES ('entry_research', 'pending', 100, %s, %s, %s, 2)
+                RETURNING id
+                """,
+                (
+                    "control-panel",
+                    Json(params.model_dump()),
+                    Json({"bounded": True, "action": "seed_next_job", "reason": reason[:512]}),
+                ),
+            )
+            job_id = int(cur.fetchone()["id"])
+        return {"jobId": job_id, "config": params.model_dump()}
+
     def _build_limits(self):  # type: ignore[no-untyped-def]
         from datavis.research.guardrails import SearchGuardrails
 
@@ -225,4 +281,3 @@ class ResearchManager:
             max_slice_offset_rows=settings.max_slice_offset_rows,
             max_next_actions=settings.max_next_jobs,
         )
-

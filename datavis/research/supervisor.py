@@ -6,10 +6,15 @@ from typing import Any, Dict, Optional
 import psycopg2.extras
 from psycopg2.extras import Json
 
+from datavis.control.config import load_settings as load_control_settings
 from datavis.research.config import ResearchSettings
 from datavis.research.guardrails import SearchGuardrails, sanitize_parameters, validate_supervisor_decision
 from datavis.research.journal import ResearchJournal
 from datavis.research.supervisor_client import OpenAISupervisorClient
+from datavis.control.panel_state import resolve_research_runtime
+
+
+CONTROL_SETTINGS = load_control_settings()
 
 
 class ResearchSupervisor:
@@ -27,21 +32,32 @@ class ResearchSupervisor:
     def run_forever(self, conn_factory: Any) -> None:
         self._journal.write(level="INFO", event_type="supervisor.start", message="supervisor loop started")
         while True:
-            if not self._client.is_enabled():
-                self._journal.write(
-                    level="WARNING",
-                    event_type="supervisor.disabled",
-                    message="supervisor idle because model or API key is missing",
-                )
-                time.sleep(max(30.0, self._settings.supervisor_poll_seconds))
-                continue
             with conn_factory(readonly=False, autocommit=False) as conn:
+                runtime_policy = resolve_research_runtime(conn, CONTROL_SETTINGS, self._settings)
+                model_override = str(runtime_policy.get("researchModelOverride") or "")
+                if not runtime_policy.get("enabled", True):
+                    conn.commit()
+                    time.sleep(self._settings.supervisor_poll_seconds)
+                    continue
+                if not self._client.is_enabled(model_override=model_override):
+                    self._journal.write(
+                        level="WARNING",
+                        event_type="supervisor.disabled",
+                        message="supervisor idle because model or API key is missing",
+                        conn=conn,
+                    )
+                    conn.commit()
+                    time.sleep(max(30.0, self._settings.supervisor_poll_seconds))
+                    continue
                 did_work = self.run_once(conn)
                 conn.commit()
             if not did_work:
                 time.sleep(self._settings.supervisor_poll_seconds)
 
     def run_once(self, conn: Any) -> bool:
+        runtime_policy = resolve_research_runtime(conn, CONTROL_SETTINGS, self._settings)
+        if not runtime_policy.get("enabled", True):
+            return False
         row = self._claim_decision(conn)
         if row is None:
             return False
@@ -49,7 +65,10 @@ class ResearchSupervisor:
         try:
             base_params = sanitize_parameters((row.get("briefing") or {}).get("config") or {}, limits=self._limits)
             try:
-                decision_payload, raw_text = self._client.review(dict(row["briefing"] or {}))
+                decision_payload, raw_text = self._client.review(
+                    dict(row["briefing"] or {}),
+                    model_override=str(runtime_policy.get("researchModelOverride") or ""),
+                )
             except Exception as exc:
                 self._requeue_decision(conn, decision_id=decision_id, error_text=str(exc))
                 self._journal.write(

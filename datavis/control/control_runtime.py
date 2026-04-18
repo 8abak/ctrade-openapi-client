@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import uvicorn
 
-from datavis.control.config import ensure_runtime_dirs, load_settings
+from datavis.control.runtime import get_control_runtime
 
 
 def main() -> int:
-    settings = load_settings()
-    ensure_runtime_dirs(settings)
+    settings = get_control_runtime().settings
     uvicorn.run(
         "datavis.control.api:app",
         host=settings.api_host,
@@ -20,4 +19,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

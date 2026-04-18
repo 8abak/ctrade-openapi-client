@@ -6,6 +6,7 @@ import psycopg2.extras
 from psycopg2.extras import Json
 
 from datavis.control.config import ControlSettings
+from datavis.control.panel_state import resolve_engineering_runtime
 from datavis.control.models import IncidentCandidate
 
 
@@ -21,6 +22,7 @@ class EngineeringStore:
         return {
             "enabled": self._settings.enable_loop,
             "paused": False,
+            "manual_takeover": False,
             "current_incident_id": None,
             "last_incident_id": None,
             "last_action_id": None,
@@ -72,6 +74,7 @@ class EngineeringStore:
         existing = self.get_active_incident(conn)
         if existing:
             return existing
+        runtime_policy = resolve_engineering_runtime(conn, self._settings, self._settings.research_settings)
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
@@ -104,7 +107,7 @@ class EngineeringStore:
                     candidate.related_run_id,
                     candidate.related_decision_id,
                     Json(candidate.affected_services),
-                    self._settings.incident_max_retries,
+                    int(runtime_policy["maxRetriesPerIncident"]),
                 ),
             )
             row = dict(cur.fetchone())
@@ -113,6 +116,69 @@ class EngineeringStore:
         state["last_incident_id"] = int(row["id"])
         self.set_state(conn, state)
         return row
+
+    def update_loop_state(
+        self,
+        conn: Any,
+        *,
+        paused: Optional[bool] = None,
+        enabled: Optional[bool] = None,
+        manual_takeover: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        state = self.ensure_state(conn)
+        if paused is not None:
+            state["paused"] = bool(paused)
+        if enabled is not None:
+            state["enabled"] = bool(enabled)
+        if manual_takeover is not None:
+            state["manual_takeover"] = bool(manual_takeover)
+        self.set_state(conn, state)
+        return state
+
+    def latest_action(self, conn: Any) -> Dict[str, Any]:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM research.engineering_action
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            )
+            row = cur.fetchone()
+        return dict(row) if row else {}
+
+    def retry_incident(self, conn: Any, *, incident_id: int) -> Dict[str, Any]:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                UPDATE research.engineering_incident
+                SET status = 'open',
+                    updated_at = NOW(),
+                    current_action_id = NULL,
+                    summary = COALESCE(summary, 'manual retry requested')
+                WHERE id = %s
+                RETURNING *
+                """,
+                (incident_id,),
+            )
+            row = cur.fetchone()
+        return dict(row) if row else {}
+
+    def acknowledge_incident(self, conn: Any, *, incident_id: int, actor: str) -> Dict[str, Any]:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                UPDATE research.engineering_incident
+                SET resolution = resolution || %s::jsonb,
+                    updated_at = NOW()
+                WHERE id = %s
+                RETURNING *
+                """,
+                (Json({"acknowledgedBy": actor[:128], "acknowledgedAt": "now"}), incident_id),
+            )
+            row = cur.fetchone()
+        return dict(row) if row else {}
 
     def transition_incident(
         self,

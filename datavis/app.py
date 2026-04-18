@@ -28,6 +28,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
 from datavis.auction import AuctionService, AuctionStateStore, current_session_window
+from datavis.control.panel import ControlPanelService
+from datavis.control.runtime import get_control_runtime
 from datavis.db import db_connect as shared_db_connect
 from datavis.rects import RectPaperService, RectServiceError
 from datavis.separation import LEVELS as SEPARATION_LEVELS
@@ -105,6 +107,8 @@ STREAM_ACTIVITY_LOCK = threading.Lock()
 STREAM_ACTIVITY_COUNTS: Dict[str, int] = {}
 SQL_SCHEMA_CACHE_LOCK = threading.Lock()
 SQL_SCHEMA_CACHE: Dict[str, Any] = {"expiresAtMs": 0, "payload": None}
+CONTROL_RUNTIME = get_control_runtime()
+CONTROL_PANEL = ControlPanelService(CONTROL_RUNTIME)
 
 
 class QueryRequest(BaseModel):
@@ -242,6 +246,33 @@ class RectModeRequest(BaseModel):
         if normalized not in {"live", "review"}:
             raise ValueError("mode must be live or review")
         return normalized
+
+
+class ControlReasonRequest(BaseModel):
+    reason: str = Field("manual control action", min_length=1, max_length=512)
+
+
+class ControlRestartRequest(BaseModel):
+    services: List[str] = Field(default_factory=list, max_length=8)
+
+
+class ControlRequeueRequest(BaseModel):
+    jobId: Optional[int] = Field(None, ge=1)
+    reason: str = Field("manual control requeue", min_length=1, max_length=512)
+
+
+class ControlResetRequest(BaseModel):
+    mode: str = Field("soft", pattern="^(soft|hard)$")
+    reason: str = Field("manual control reset", min_length=1, max_length=512)
+
+
+class ControlSmokeRequest(BaseModel):
+    tests: List[str] = Field(default_factory=list, max_length=8)
+
+
+class ControlCandidateUpdateRequest(BaseModel):
+    status: str = Field("active", min_length=1, max_length=32)
+    operatorNotes: str = Field("", max_length=4000)
 
 def ensure_database_url() -> str:
     if not DATABASE_URL:
@@ -418,6 +449,10 @@ def require_sql_admin(credentials: Optional[HTTPBasicCredentials] = Depends(secu
         )
 
     return credentials.username
+
+
+def control_actor_name(username: Optional[str]) -> str:
+    return str(username or "private-admin")
 
 
 def _trade_session_sign(raw_payload: str) -> str:
@@ -3136,6 +3171,13 @@ def sql_page(_: Optional[str] = Depends(require_sql_admin)) -> FileResponse:
     return FileResponse(FRONTEND_DIR / "sql.html")
 
 
+@app.get("/control", include_in_schema=False)
+@app.get("/control/{control_path:path}", include_in_schema=False)
+def control_page(control_path: str = "", _: Optional[str] = Depends(require_sql_admin)) -> FileResponse:
+    _ = control_path
+    return FileResponse(FRONTEND_DIR / "control.html")
+
+
 @app.get("/api/health")
 def api_health() -> Dict[str, Any]:
     with db_connection(readonly=True) as conn:
@@ -3167,6 +3209,417 @@ def sql_schema(_: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
 @app.post("/api/sql/query")
 def sql_query(payload: QueryRequest, _: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
     return execute_query(payload.sql)
+
+
+@app.get("/api/control/health")
+def control_health(username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
+    _ = username
+    with db_connection(readonly=True) as conn:
+        return CONTROL_PANEL.health(conn)
+
+
+@app.get("/api/control/overview")
+def control_overview(username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
+    _ = username
+    with db_connection(readonly=True) as conn:
+        return CONTROL_PANEL.overview(conn)
+
+
+@app.get("/api/control/mission")
+def control_mission(username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
+    _ = username
+    with db_connection(readonly=True) as conn:
+        return CONTROL_PANEL.get_mission(conn)
+
+
+@app.put("/api/control/mission")
+def control_mission_update(payload: Dict[str, Any], username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
+    with db_connection(readonly=False) as conn:
+        mission = CONTROL_PANEL.update_mission(conn, payload, actor=control_actor_name(username))
+        conn.commit()
+        return mission
+
+
+@app.get("/api/control/settings")
+def control_settings(username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
+    _ = username
+    with db_connection(readonly=True) as conn:
+        return CONTROL_PANEL.get_settings(conn)
+
+
+@app.put("/api/control/settings")
+def control_settings_update(payload: Dict[str, Any], username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
+    with db_connection(readonly=False) as conn:
+        settings = CONTROL_PANEL.update_settings(conn, payload, actor=control_actor_name(username))
+        CONTROL_RUNTIME.store.update_loop_state(conn, enabled=bool(settings.get("engineeringLoopEnabled", True)))
+        conn.commit()
+        return settings
+
+
+@app.get("/api/control/research/status")
+def control_research_status(username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
+    _ = username
+    with db_connection(readonly=True) as conn:
+        return CONTROL_PANEL.research_status(conn)
+
+
+@app.get("/api/control/research/runs")
+def control_research_runs(
+    limit: int = Query(20, ge=1, le=100),
+    username: Optional[str] = Depends(require_sql_admin),
+) -> List[Dict[str, Any]]:
+    _ = username
+    with db_connection(readonly=True) as conn:
+        return CONTROL_PANEL.list_research_runs(conn, limit=limit)
+
+
+@app.get("/api/control/research/jobs")
+def control_research_jobs(
+    limit: int = Query(40, ge=1, le=200),
+    statusFilter: Optional[str] = Query(None),
+    username: Optional[str] = Depends(require_sql_admin),
+) -> List[Dict[str, Any]]:
+    _ = username
+    with db_connection(readonly=True) as conn:
+        return CONTROL_PANEL.list_research_jobs(conn, limit=limit, status_filter=statusFilter)
+
+
+@app.post("/api/control/research/pause")
+def control_research_pause(payload: ControlReasonRequest, username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
+    with db_connection(readonly=False) as conn:
+        result = CONTROL_RUNTIME.research_manager.pause(conn, reason=payload.reason)
+        CONTROL_PANEL.record_action(
+            conn,
+            actor=control_actor_name(username),
+            action_type="research.pause",
+            scope="research",
+            target_id=None,
+            payload=payload.model_dump(),
+            result=result,
+        )
+        conn.commit()
+        return {"state": result}
+
+
+@app.post("/api/control/research/resume")
+def control_research_resume(payload: ControlReasonRequest, username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
+    with db_connection(readonly=False) as conn:
+        result = CONTROL_RUNTIME.research_manager.resume(conn, reason=payload.reason)
+        CONTROL_PANEL.record_action(
+            conn,
+            actor=control_actor_name(username),
+            action_type="research.resume",
+            scope="research",
+            target_id=None,
+            payload=payload.model_dump(),
+            result=result,
+        )
+        conn.commit()
+        return {"state": result}
+
+
+@app.post("/api/control/research/reset")
+def control_research_reset(payload: ControlResetRequest, username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
+    with db_connection(readonly=False) as conn:
+        result = CONTROL_RUNTIME.research_manager.reset(conn, mode=payload.mode, reason=payload.reason)
+        CONTROL_PANEL.record_action(
+            conn,
+            actor=control_actor_name(username),
+            action_type="research.reset",
+            scope="research",
+            target_id=None,
+            payload=payload.model_dump(),
+            result=result,
+        )
+        conn.commit()
+        return {"state": result}
+
+
+@app.post("/api/control/research/requeue")
+def control_research_requeue(payload: ControlRequeueRequest, username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
+    with db_connection(readonly=False) as conn:
+        try:
+            result = CONTROL_RUNTIME.research_manager.requeue(conn, job_id=payload.jobId, reason=payload.reason)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        CONTROL_PANEL.record_action(
+            conn,
+            actor=control_actor_name(username),
+            action_type="research.requeue",
+            scope="research",
+            target_id=str(payload.jobId) if payload.jobId else None,
+            payload=payload.model_dump(),
+            result=result,
+        )
+        conn.commit()
+        return result
+
+
+@app.post("/api/control/research/restart")
+def control_research_restart(payload: ControlRestartRequest, username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
+    with db_connection(readonly=False) as conn:
+        services = payload.services or list(CONTROL_RUNTIME.settings.research_services)
+        result = CONTROL_RUNTIME.research_manager.restart_services(services)
+        CONTROL_PANEL.record_action(
+            conn,
+            actor=control_actor_name(username),
+            action_type="research.restart_services",
+            scope="research",
+            target_id=",".join(services),
+            payload={"services": services},
+            result={"services": result},
+        )
+        conn.commit()
+        return {"services": result}
+
+
+@app.post("/api/control/research/seed-next")
+def control_research_seed_next(payload: ControlReasonRequest, username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
+    with db_connection(readonly=False) as conn:
+        result = CONTROL_RUNTIME.research_manager.seed_next_job(conn, reason=payload.reason)
+        CONTROL_PANEL.record_action(
+            conn,
+            actor=control_actor_name(username),
+            action_type="research.seed_next",
+            scope="research",
+            target_id=str(result.get("jobId") or ""),
+            payload=payload.model_dump(),
+            result=result,
+        )
+        conn.commit()
+        return result
+
+
+@app.get("/api/control/incidents")
+def control_incidents(
+    limit: int = Query(30, ge=1, le=100),
+    statusFilter: Optional[str] = Query(None),
+    username: Optional[str] = Depends(require_sql_admin),
+) -> List[Dict[str, Any]]:
+    _ = username
+    with db_connection(readonly=True) as conn:
+        return CONTROL_PANEL.list_incidents(conn, limit=limit, status_filter=statusFilter)
+
+
+@app.get("/api/control/incidents/current")
+def control_current_incident(username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
+    _ = username
+    with db_connection(readonly=True) as conn:
+        return CONTROL_PANEL.current_incident(conn)
+
+
+@app.post("/api/control/engineering/pause")
+def control_engineering_pause(payload: ControlReasonRequest, username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
+    with db_connection(readonly=False) as conn:
+        state = CONTROL_RUNTIME.store.update_loop_state(conn, paused=True)
+        CONTROL_PANEL.record_action(
+            conn,
+            actor=control_actor_name(username),
+            action_type="engineering.pause",
+            scope="engineering",
+            target_id=None,
+            payload=payload.model_dump(),
+            result=state,
+        )
+        conn.commit()
+        return {"state": state}
+
+
+@app.post("/api/control/engineering/resume")
+def control_engineering_resume(payload: ControlReasonRequest, username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
+    with db_connection(readonly=False) as conn:
+        state = CONTROL_RUNTIME.store.update_loop_state(conn, paused=False, manual_takeover=False)
+        CONTROL_PANEL.record_action(
+            conn,
+            actor=control_actor_name(username),
+            action_type="engineering.resume",
+            scope="engineering",
+            target_id=None,
+            payload=payload.model_dump(),
+            result=state,
+        )
+        conn.commit()
+        return {"state": state}
+
+
+@app.post("/api/control/engineering/retry")
+def control_engineering_retry(payload: ControlReasonRequest, username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
+    with db_connection(readonly=False) as conn:
+        incident = CONTROL_RUNTIME.store.get_active_incident(conn) or CONTROL_PANEL.current_incident(conn)
+        if not incident:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No incident available to retry.")
+        result = CONTROL_RUNTIME.store.retry_incident(conn, incident_id=int(incident["id"]))
+        CONTROL_RUNTIME.store.update_loop_state(conn, paused=False, manual_takeover=False)
+        CONTROL_PANEL.record_action(
+            conn,
+            actor=control_actor_name(username),
+            action_type="engineering.retry_incident",
+            scope="engineering",
+            target_id=str(incident["id"]),
+            payload=payload.model_dump(),
+            result=result,
+        )
+        conn.commit()
+        return result
+
+
+@app.post("/api/control/engineering/manual-takeover")
+def control_engineering_manual_takeover(payload: ControlReasonRequest, username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
+    with db_connection(readonly=False) as conn:
+        state = CONTROL_RUNTIME.store.update_loop_state(conn, paused=True, manual_takeover=True)
+        incident = CONTROL_RUNTIME.store.get_active_incident(conn)
+        if incident:
+            CONTROL_RUNTIME.store.transition_incident(
+                conn,
+                incident_id=int(incident["id"]),
+                status="escalated",
+                summary=f"Manual takeover requested: {payload.reason[:200]}",
+            )
+        CONTROL_PANEL.record_action(
+            conn,
+            actor=control_actor_name(username),
+            action_type="engineering.manual_takeover",
+            scope="engineering",
+            target_id=str((incident or {}).get("id") or ""),
+            payload=payload.model_dump(),
+            result=state,
+        )
+        conn.commit()
+        return {"state": state, "incidentId": (incident or {}).get("id")}
+
+
+@app.post("/api/control/engineering/acknowledge")
+def control_engineering_acknowledge(payload: ControlReasonRequest, username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
+    with db_connection(readonly=False) as conn:
+        incident = CONTROL_PANEL.current_incident(conn)
+        if not incident:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No incident available to acknowledge.")
+        result = CONTROL_RUNTIME.store.acknowledge_incident(conn, incident_id=int(incident["id"]), actor=control_actor_name(username))
+        CONTROL_PANEL.record_action(
+            conn,
+            actor=control_actor_name(username),
+            action_type="engineering.acknowledge",
+            scope="engineering",
+            target_id=str(incident["id"]),
+            payload=payload.model_dump(),
+            result=result,
+        )
+        conn.commit()
+        return result
+
+
+@app.post("/api/control/repair/run-smoke-tests")
+def control_smoke_tests(payload: ControlSmokeRequest, username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
+    tests = payload.tests or ["import_modules", "engineering_supervisor_schema", "control_api_boot", "patch_roundtrip"]
+    with db_connection(readonly=False) as conn:
+        results = CONTROL_RUNTIME.smoke_runner.run(test_names=tests, incident_id=None, action_id=None, conn=conn)
+        serialized = [item.model_dump() for item in results]
+        CONTROL_PANEL.record_action(
+            conn,
+            actor=control_actor_name(username),
+            action_type="repair.run_smoke_tests",
+            scope="repair",
+            target_id=",".join(tests),
+            payload={"tests": tests},
+            result={"results": serialized},
+        )
+        conn.commit()
+        return {"results": serialized}
+
+
+@app.post("/api/control/services/restart")
+def control_services_restart(payload: ControlRestartRequest, username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
+    allowed = {
+        CONTROL_RUNTIME.settings.control_service_name,
+        CONTROL_RUNTIME.settings.engineering_orchestrator_service_name,
+    }
+    services = payload.services or list(allowed)
+    if any(service not in allowed for service in services):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported control service restart target.")
+    with db_connection(readonly=False) as conn:
+        snapshots = []
+        for service in services:
+            CONTROL_RUNTIME.service_manager.reset_failed(service)
+            snapshots.append(CONTROL_RUNTIME.service_manager.restart(service).model_dump())
+        CONTROL_PANEL.record_action(
+            conn,
+            actor=control_actor_name(username),
+            action_type="services.restart",
+            scope="control",
+            target_id=",".join(services),
+            payload={"services": services},
+            result={"services": snapshots},
+        )
+        conn.commit()
+        return {"services": snapshots}
+
+
+@app.get("/api/control/candidates")
+def control_candidates(
+    day: Optional[str] = Query(None),
+    side: Optional[str] = Query(None),
+    family: Optional[str] = Query(None),
+    promotedStatus: Optional[str] = Query(None),
+    spreadRegime: Optional[str] = Query(None),
+    sessionBucket: Optional[str] = Query(None),
+    limit: int = Query(150, ge=1, le=400),
+    username: Optional[str] = Depends(require_sql_admin),
+) -> List[Dict[str, Any]]:
+    _ = username
+    with db_connection(readonly=True) as conn:
+        return CONTROL_PANEL.list_candidates(
+            conn,
+            brokerday=day,
+            side=side,
+            family=family,
+            status_filter=promotedStatus,
+            spread_regime=spreadRegime,
+            session_bucket=sessionBucket,
+            limit=limit,
+        )
+
+
+@app.put("/api/control/candidates/{fingerprint}")
+def control_candidate_update(
+    fingerprint: str,
+    payload: ControlCandidateUpdateRequest,
+    username: Optional[str] = Depends(require_sql_admin),
+) -> Dict[str, Any]:
+    with db_connection(readonly=False) as conn:
+        result = CONTROL_PANEL.update_candidate_library(
+            conn,
+            fingerprint=fingerprint,
+            status=payload.status,
+            operator_notes=payload.operatorNotes,
+            actor=control_actor_name(username),
+        )
+        conn.commit()
+        return result
+
+
+@app.get("/api/control/day-review")
+def control_day_review(
+    day: Optional[str] = Query(None),
+    runId: Optional[int] = Query(None, ge=1),
+    setupFingerprint: Optional[str] = Query(None),
+    username: Optional[str] = Depends(require_sql_admin),
+) -> Dict[str, Any]:
+    _ = username
+    with db_connection(readonly=True) as conn:
+        return CONTROL_PANEL.day_review(conn, brokerday_text=day, run_id=runId, setup_fingerprint=setupFingerprint)
+
+
+@app.get("/api/control/journals")
+def control_journals(
+    component: Optional[str] = Query(None),
+    level: Optional[str] = Query(None),
+    eventType: Optional[str] = Query(None),
+    limit: int = Query(120, ge=1, le=400),
+    username: Optional[str] = Depends(require_sql_admin),
+) -> List[Dict[str, Any]]:
+    _ = username
+    with db_connection(readonly=True) as conn:
+        return CONTROL_PANEL.list_journals(conn, component=component, level=level, event_type=eventType, limit=limit)
 
 
 @app.post("/api/trade/login")

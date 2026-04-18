@@ -82,13 +82,17 @@ class OpenAISupervisorClient:
     def __init__(self, settings: ResearchSettings) -> None:
         self._settings = settings
 
-    def is_enabled(self) -> bool:
-        return bool(self._settings.supervisor_api_key and self._settings.supervisor_model)
+    def is_enabled(self, *, model_override: str = "") -> bool:
+        return bool(self._settings.supervisor_api_key and (model_override or self._settings.supervisor_model))
 
-    def review(self, briefing: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
+    def review(self, briefing: Dict[str, Any], *, model_override: str = "") -> Tuple[Dict[str, Any], str]:
         payload_text = self._truncate_briefing(briefing)
         system_prompt = self._system_prompt()
-        raw_response = self._invoke_openai(system_prompt=system_prompt, user_prompt=payload_text)
+        raw_response = self._invoke_openai(
+            system_prompt=system_prompt,
+            user_prompt=payload_text,
+            model_name=model_override or self._settings.supervisor_model,
+        )
         decision_text = self._extract_text(raw_response)
         parsed = self._load_json_text(decision_text)
         return coerce_supervisor_decision_payload(parsed), decision_text
@@ -113,7 +117,7 @@ class OpenAISupervisorClient:
             "Never request live trading, hold/close logic, money management, unbounded scans, heavy ML, or broad brute force."
         )
 
-    def _invoke_openai(self, *, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
+    def _invoke_openai(self, *, system_prompt: str, user_prompt: str, model_name: str) -> Dict[str, Any]:
         endpoint = self._normalize_endpoint(self._settings.supervisor_endpoint, self._settings.supervisor_api_style)
         headers = {
             "Authorization": f"Bearer {self._settings.supervisor_api_key}",
@@ -121,7 +125,7 @@ class OpenAISupervisorClient:
         }
         if self._settings.supervisor_api_style == "chat_completions":
             payload = {
-                "model": self._settings.supervisor_model,
+                "model": model_name,
                 "temperature": self._settings.supervisor_temperature,
                 "max_completion_tokens": self._settings.supervisor_max_output_tokens,
                 "messages": [
@@ -132,7 +136,7 @@ class OpenAISupervisorClient:
             }
         else:
             payload = {
-                "model": self._settings.supervisor_model,
+                "model": model_name,
                 "max_output_tokens": self._settings.supervisor_max_output_tokens,
                 "temperature": self._settings.supervisor_temperature,
                 "input": [

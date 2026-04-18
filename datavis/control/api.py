@@ -5,17 +5,9 @@ from typing import Any, Dict, List, Optional
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
-from datavis.control.config import ensure_runtime_dirs, load_settings
 from datavis.control.db import connection
-from datavis.control.executor import RepairExecutor
-from datavis.control.failure_detector import FailureDetector
 from datavis.control.models import EngineeringSupervisorDecision, IncidentCandidate, PatchTemplateName
-from datavis.control.orchestrator import EngineeringOrchestrator
-from datavis.control.research_manager import ResearchManager
-from datavis.control.service_manager import ServiceManager
-from datavis.control.smoke import SmokeRunner
-from datavis.control.store import EngineeringStore
-from datavis.control.supervisor import EngineeringSupervisor
+from datavis.control.runtime import get_control_runtime
 
 
 class RestartRequest(BaseModel):
@@ -45,31 +37,16 @@ class PatchRequest(BaseModel):
     restartServices: List[str] = Field(default_factory=list, max_length=8)
 
 
-SETTINGS = load_settings()
-ensure_runtime_dirs(SETTINGS)
-SERVICE_MANAGER = ServiceManager(SETTINGS)
-STORE = EngineeringStore(SETTINGS)
-RESEARCH_MANAGER = ResearchManager(SETTINGS, SERVICE_MANAGER)
-SUPERVISOR = EngineeringSupervisor(SETTINGS)
-EXECUTOR = RepairExecutor(SETTINGS, store=STORE, research_manager=RESEARCH_MANAGER, service_manager=SERVICE_MANAGER)
-SMOKE_RUNNER = SmokeRunner(
-    SETTINGS,
-    store=STORE,
-    research_manager=RESEARCH_MANAGER,
-    service_manager=SERVICE_MANAGER,
-    supervisor=SUPERVISOR,
-    executor=EXECUTOR,
-)
-DETECTOR = FailureDetector(SETTINGS, store=STORE, research_manager=RESEARCH_MANAGER, service_manager=SERVICE_MANAGER)
-ORCHESTRATOR = EngineeringOrchestrator(
-    SETTINGS,
-    store=STORE,
-    detector=DETECTOR,
-    supervisor=SUPERVISOR,
-    executor=EXECUTOR,
-    smoke_runner=SMOKE_RUNNER,
-    research_manager=RESEARCH_MANAGER,
-)
+RUNTIME = get_control_runtime()
+SETTINGS = RUNTIME.settings
+SERVICE_MANAGER = RUNTIME.service_manager
+STORE = RUNTIME.store
+RESEARCH_MANAGER = RUNTIME.research_manager
+SUPERVISOR = RUNTIME.supervisor
+EXECUTOR = RUNTIME.executor
+SMOKE_RUNNER = RUNTIME.smoke_runner
+DETECTOR = RUNTIME.detector
+ORCHESTRATOR = RUNTIME.orchestrator
 
 app = FastAPI(title="datavis research control", version="1.0.0")
 

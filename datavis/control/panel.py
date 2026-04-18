@@ -1,0 +1,910 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from datetime import date, datetime
+from decimal import Decimal
+from typing import Any, Dict, Iterable, List, Mapping, Optional
+
+import psycopg2.extras
+
+from datavis.control.panel_state import (
+    audit_operator_action,
+    load_mission,
+    load_panel_settings,
+    mission_briefing_payload,
+    resolve_engineering_runtime,
+    resolve_research_runtime,
+    save_mission,
+    save_panel_settings,
+)
+from datavis.control.runtime import ControlRuntime
+from datavis.research.guardrails import APPROVED_CANDIDATE_FAMILIES
+from datavis.separation import brokerday_bounds, brokerday_for_timestamp
+
+
+def serialize_value(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return value.hex()
+    return value
+
+
+def serialize_mapping(payload: Mapping[str, Any]) -> Dict[str, Any]:
+    return {key: serialize_value(value) for key, value in payload.items()}
+
+
+def _setup_fingerprint(rule_json: Mapping[str, Any], *, fallback_name: str = "") -> str:
+    encoded = json.dumps(dict(rule_json or {}), sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    digest = hashlib.sha1(encoded).hexdigest()[:16]
+    name = str(fallback_name or (rule_json or {}).get("name") or "setup").lower().replace(" ", "-")
+    name = "".join(ch for ch in name if ch.isalnum() or ch in {"-", "_", ":"})[:48] or "setup"
+    return f"{name}-{digest}"
+
+
+def _dominant_bucket(payload: Mapping[str, Any]) -> Optional[str]:
+    best_key = None
+    best_score = None
+    for key, value in dict(payload or {}).items():
+        item = dict(value or {})
+        score = (
+            float(item.get("cleanPrecision") or 0.0),
+            int(item.get("signals") or item.get("signalCount") or 0),
+        )
+        if best_score is None or score > best_score:
+            best_score = score
+            best_key = str(key)
+    return best_key
+
+
+def _candidate_passed(metrics: Mapping[str, Any]) -> bool:
+    return (
+        float(metrics.get("cleanPrecision") or 0.0) >= 0.55
+        and int(metrics.get("signalCount") or 0) >= 4
+        and float(metrics.get("walkForwardRange") or 0.0) <= 0.25
+    )
+
+
+def _compile_predicates(rule_json: Mapping[str, Any]) -> Any:
+    predicates = list((rule_json or {}).get("predicates") or [])
+
+    def predicate(features: Mapping[str, Any]) -> bool:
+        for item in predicates:
+            feature = str(item.get("feature") or "")
+            if feature not in features:
+                return False
+            value = float(features[feature])
+            threshold = float(item.get("threshold") or 0.0)
+            operator = str(item.get("operator") or ">=")
+            if operator == ">=" and value < threshold:
+                return False
+            if operator == "<=" and value > threshold:
+                return False
+        return True
+
+    return predicate
+
+
+def _downsample_rows(rows: List[Dict[str, Any]], *, max_points: int) -> List[Dict[str, Any]]:
+    if len(rows) <= max_points:
+        return rows
+    step = max(1, len(rows) // max_points)
+    sampled = [rows[index] for index in range(0, len(rows), step)]
+    if sampled[-1]["id"] != rows[-1]["id"]:
+        sampled.append(rows[-1])
+    return sampled
+
+
+class ControlPanelService:
+    def __init__(self, runtime: ControlRuntime) -> None:
+        self._runtime = runtime
+        self._settings = runtime.settings
+
+    def health(self, conn: Any) -> Dict[str, Any]:
+        overview = self.overview(conn)
+        return {
+            "ok": True,
+            "researchLoopEnabled": overview["research"]["policy"]["enabled"],
+            "engineeringLoopEnabled": overview["engineering"]["policy"]["enabled"],
+            "activeIncidentId": (overview["engineering"].get("activeIncident") or {}).get("id"),
+            "latestRunId": (overview["research"].get("latestRun") or {}).get("id"),
+            "latestBrokerday": overview["brokerday"],
+            "missionTitle": overview["mission"]["missionTitle"],
+        }
+
+    def get_mission(self, conn: Any) -> Dict[str, Any]:
+        return load_mission(conn, self._settings.research_settings)
+
+    def update_mission(self, conn: Any, payload: Mapping[str, Any], *, actor: str) -> Dict[str, Any]:
+        mission = save_mission(conn, payload, self._settings.research_settings)
+        audit_operator_action(
+            conn,
+            actor=actor,
+            action_type="mission.update",
+            scope="mission",
+            target_id=None,
+            payload=dict(payload or {}),
+            result=mission,
+        )
+        return mission
+
+    def get_settings(self, conn: Any) -> Dict[str, Any]:
+        return load_panel_settings(conn, self._settings, self._settings.research_settings)
+
+    def update_settings(self, conn: Any, payload: Mapping[str, Any], *, actor: str) -> Dict[str, Any]:
+        settings = save_panel_settings(
+            conn,
+            payload,
+            control_settings=self._settings,
+            research_settings=self._settings.research_settings,
+        )
+        audit_operator_action(
+            conn,
+            actor=actor,
+            action_type="settings.update",
+            scope="settings",
+            target_id=None,
+            payload=dict(payload or {}),
+            result=settings,
+        )
+        return settings
+
+    def overview(self, conn: Any) -> Dict[str, Any]:
+        mission = self.get_mission(conn)
+        research_policy = resolve_research_runtime(conn, self._settings, self._settings.research_settings)
+        engineering_policy = resolve_engineering_runtime(conn, self._settings, self._settings.research_settings)
+        research_status = self.research_status(conn)
+        current_incident = self.current_incident(conn)
+        latest_action = self._latest_engineering_action(conn)
+        latest_smokes = self._runtime.store.list_recent_smoketests(conn, limit=5)
+        queue_counts = self._job_counts(conn)
+        latest_candidate = self._latest_candidate_summary(conn)
+        return {
+            "mission": mission,
+            "brokerday": (research_status.get("latestRun") or {}).get("brokerday"),
+            "research": {
+                "state": research_status["state"],
+                "policy": research_policy,
+                "queueCounts": queue_counts,
+                "latestRun": research_status.get("latestRun"),
+                "latestErrors": research_status.get("latestErrors", []),
+                "latestCandidate": latest_candidate,
+                "nextProposals": research_status.get("nextProposals", []),
+            },
+            "engineering": {
+                "state": self._derive_engineering_state(current_incident=current_incident),
+                "policy": engineering_policy,
+                "activeIncident": current_incident,
+                "latestAction": latest_action,
+                "latestSmokeTests": [serialize_mapping(item) for item in latest_smokes],
+            },
+            "latestIncidentSummary": current_incident.get("summary"),
+            "latestEngineeringAction": latest_action,
+            "latestCandidateSummary": latest_candidate,
+            "latestMetrics": ((research_status.get("latestRun") or {}).get("metrics") or {}),
+        }
+
+    def research_status(self, conn: Any) -> Dict[str, Any]:
+        status = self._runtime.research_manager.status(conn)
+        latest_run = self._runtime.research_manager.latest_run(conn)
+        latest_errors = self._runtime.research_manager.latest_errors(conn, limit=8)
+        queue_counts = self._job_counts(conn)
+        next_proposals = self._latest_mutation_proposals(conn)
+        return {
+            "state": self._derive_research_state(status, queue_counts=queue_counts),
+            "status": serialize_mapping(status),
+            "latestRun": self._serialize_run_payload(latest_run),
+            "latestErrors": [serialize_mapping(item) for item in latest_errors],
+            "queueCounts": queue_counts,
+            "nextProposals": next_proposals,
+        }
+
+    def list_research_runs(self, conn: Any, *, limit: int = 20) -> List[Dict[str, Any]]:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT r.*, rs.verdict_hint, rs.headline, rs.metrics_json
+                FROM research.run r
+                LEFT JOIN research.runsummary rs ON rs.run_id = r.id
+                ORDER BY r.id DESC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            rows = [dict(row) for row in cur.fetchall()]
+        return [self._serialize_run_payload(row) for row in rows]
+
+    def list_research_jobs(self, conn: Any, *, limit: int = 40, status_filter: Optional[str] = None) -> List[Dict[str, Any]]:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            if status_filter:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM research.job
+                    WHERE status = %s
+                    ORDER BY id DESC
+                    LIMIT %s
+                    """,
+                    (status_filter, limit),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM research.job
+                    ORDER BY id DESC
+                    LIMIT %s
+                    """,
+                    (limit,),
+                )
+            rows = [dict(row) for row in cur.fetchall()]
+        return [serialize_mapping(row) for row in rows]
+
+    def list_incidents(self, conn: Any, *, limit: int = 30, status_filter: Optional[str] = None) -> List[Dict[str, Any]]:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            if status_filter:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM research.engineering_incident
+                    WHERE status = %s
+                    ORDER BY id DESC
+                    LIMIT %s
+                    """,
+                    (status_filter, limit),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM research.engineering_incident
+                    ORDER BY id DESC
+                    LIMIT %s
+                    """,
+                    (limit,),
+                )
+            incidents = [dict(row) for row in cur.fetchall()]
+        return [self._incident_details(conn, item) for item in incidents]
+
+    def current_incident(self, conn: Any) -> Dict[str, Any]:
+        incident = self._runtime.store.get_active_incident(conn)
+        if incident:
+            return self._incident_details(conn, incident)
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM research.engineering_incident
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            )
+            latest = dict(cur.fetchone() or {})
+        return self._incident_details(conn, latest) if latest else {}
+
+    def list_journals(
+        self,
+        conn: Any,
+        *,
+        component: Optional[str] = None,
+        level: Optional[str] = None,
+        event_type: Optional[str] = None,
+        limit: int = 120,
+    ) -> List[Dict[str, Any]]:
+        items: List[Dict[str, Any]] = []
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            research_sql = """
+                SELECT *
+                FROM research.journal
+                ORDER BY created_at DESC, id DESC
+                LIMIT %s
+            """
+            cur.execute(research_sql, (limit,))
+            for row in cur.fetchall():
+                payload = dict(row)
+                payload["source"] = "research"
+                items.append(payload)
+            cur.execute(
+                """
+                SELECT *
+                FROM research.engineering_journal
+                ORDER BY created_at DESC, id DESC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            for row in cur.fetchall():
+                payload = dict(row)
+                payload["source"] = "engineering"
+                items.append(payload)
+            cur.execute(
+                """
+                SELECT *
+                FROM research.control_operator_action
+                ORDER BY created_at DESC, id DESC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            for row in cur.fetchall():
+                action = dict(row)
+                items.append(
+                    {
+                        "id": action["id"],
+                        "component": "panel",
+                        "level": "INFO",
+                        "event_type": action["action_type"],
+                        "message": f"{action['actor']} {action['action_type']}",
+                        "payload": {
+                            "actor": action["actor"],
+                            "scope": action["scope"],
+                            "targetId": action["target_id"],
+                            "payload": action["payload"],
+                            "result": action["result"],
+                        },
+                        "created_at": action["created_at"],
+                        "source": "operator",
+                    }
+                )
+        filtered = []
+        for item in items:
+            if component and str(item.get("component") or "") != component:
+                continue
+            if level and str(item.get("level") or "").upper() != str(level).upper():
+                continue
+            if event_type and str(item.get("event_type") or "") != event_type:
+                continue
+            filtered.append(item)
+        filtered.sort(key=lambda item: (str(item.get("created_at") or ""), int(item.get("id") or 0)), reverse=True)
+        return [serialize_mapping(row) for row in filtered[:limit]]
+
+    def list_candidates(
+        self,
+        conn: Any,
+        *,
+        brokerday: Optional[str] = None,
+        side: Optional[str] = None,
+        family: Optional[str] = None,
+        status_filter: Optional[str] = None,
+        spread_regime: Optional[str] = None,
+        session_bucket: Optional[str] = None,
+        limit: int = 200,
+    ) -> List[Dict[str, Any]]:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                    cr.id,
+                    cr.run_id,
+                    cr.rank,
+                    cr.candidate_name,
+                    cr.family,
+                    cr.side,
+                    cr.is_selected,
+                    cr.rule_json,
+                    cr.train_metrics,
+                    cr.validation_metrics,
+                    cr.setup_fingerprint,
+                    r.brokerday,
+                    r.iteration,
+                    rs.verdict_hint
+                FROM research.candidate_result cr
+                JOIN research.run r ON r.id = cr.run_id
+                LEFT JOIN research.runsummary rs ON rs.run_id = r.id
+                ORDER BY cr.id DESC
+                LIMIT %s
+                """,
+                (max(50, limit * 6),),
+            )
+            rows = [dict(row) for row in cur.fetchall()]
+            cur.execute("SELECT * FROM research.candidate_library")
+            overrides = {
+                str(row["setup_fingerprint"]): dict(row)
+                for row in cur.fetchall()
+            }
+        aggregate: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            rule_json = dict(row.get("rule_json") or {})
+            validation = dict(row.get("validation_metrics") or {})
+            fingerprint = str(row.get("setup_fingerprint") or _setup_fingerprint(rule_json, fallback_name=str(row.get("candidate_name") or "")))
+            item = aggregate.get(fingerprint)
+            if item is None:
+                override = overrides.get(fingerprint) or {}
+                item = {
+                    "setupFingerprint": fingerprint,
+                    "candidateName": row.get("candidate_name"),
+                    "family": row.get("family"),
+                    "side": row.get("side"),
+                    "rule": rule_json,
+                    "status": override.get("status") or ("promoted" if bool(override.get("promoted")) else "active"),
+                    "operatorNotes": override.get("operator_notes") or "",
+                    "latestRunId": row.get("run_id"),
+                    "latestBrokerday": serialize_value(row.get("brokerday")),
+                    "latestVerdictHint": row.get("verdict_hint"),
+                    "trainMetrics": dict(row.get("train_metrics") or {}),
+                    "validationMetrics": validation,
+                    "entriesPerDay": float(validation.get("entriesPerDay") or 0.0),
+                    "daysSeen": set(),
+                    "daysPassed": set(),
+                    "daysFailed": set(),
+                    "runsSeen": 0,
+                    "sessionBucket": _dominant_bucket(validation.get("bySession") or {}),
+                    "spreadRegime": _dominant_bucket(validation.get("bySpread") or {}),
+                }
+                aggregate[fingerprint] = item
+            brokerday_value = serialize_value(row.get("brokerday"))
+            if brokerday_value:
+                item["daysSeen"].add(brokerday_value)
+                if _candidate_passed(validation):
+                    item["daysPassed"].add(brokerday_value)
+                else:
+                    item["daysFailed"].add(brokerday_value)
+            item["runsSeen"] += 1
+            if int(row.get("run_id") or 0) >= int(item.get("latestRunId") or 0):
+                item["latestRunId"] = row.get("run_id")
+                item["latestBrokerday"] = serialize_value(row.get("brokerday"))
+                item["latestVerdictHint"] = row.get("verdict_hint")
+                item["trainMetrics"] = dict(row.get("train_metrics") or {})
+                item["validationMetrics"] = validation
+                item["entriesPerDay"] = float(validation.get("entriesPerDay") or 0.0)
+                item["sessionBucket"] = _dominant_bucket(validation.get("bySession") or {})
+                item["spreadRegime"] = _dominant_bucket(validation.get("bySpread") or {})
+        candidates = []
+        for item in aggregate.values():
+            payload = dict(item)
+            payload["daysSeen"] = len(payload["daysSeen"])
+            payload["daysPassed"] = len(payload["daysPassed"])
+            payload["daysFailed"] = len(payload["daysFailed"])
+            candidates.append(payload)
+        filtered = []
+        for item in candidates:
+            if brokerday and str(item.get("latestBrokerday") or "") != brokerday:
+                continue
+            if side and str(item.get("side") or "") != side:
+                continue
+            if family and str(item.get("family") or "") != family:
+                continue
+            if status_filter and str(item.get("status") or "") != status_filter:
+                continue
+            if spread_regime and str(item.get("spreadRegime") or "") != spread_regime:
+                continue
+            if session_bucket and str(item.get("sessionBucket") or "") != session_bucket:
+                continue
+            filtered.append(item)
+        filtered.sort(
+            key=lambda item: (
+                float((item.get("validationMetrics") or {}).get("cleanPrecision") or 0.0),
+                float(item.get("entriesPerDay") or 0.0),
+                int(item.get("daysPassed") or 0),
+            ),
+            reverse=True,
+        )
+        return filtered[:limit]
+
+    def update_candidate_library(
+        self,
+        conn: Any,
+        *,
+        fingerprint: str,
+        status: str,
+        operator_notes: str,
+        actor: str,
+    ) -> Dict[str, Any]:
+        normalized_status = status if status in {"promoted", "active", "archived"} else "active"
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                INSERT INTO research.candidate_library (
+                    setup_fingerprint, status, promoted, operator_notes, updated_by
+                )
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (setup_fingerprint)
+                DO UPDATE SET
+                    status = EXCLUDED.status,
+                    promoted = EXCLUDED.promoted,
+                    operator_notes = EXCLUDED.operator_notes,
+                    updated_by = EXCLUDED.updated_by,
+                    updated_at = NOW()
+                RETURNING *
+                """,
+                (fingerprint, normalized_status, normalized_status == "promoted", operator_notes[:4000], actor[:128]),
+            )
+            row = dict(cur.fetchone() or {})
+        audit_operator_action(
+            conn,
+            actor=actor,
+            action_type="candidate.update",
+            scope="candidate",
+            target_id=fingerprint,
+            payload={"status": normalized_status, "operatorNotes": operator_notes},
+            result=row,
+        )
+        return serialize_mapping(row)
+
+    def day_review(
+        self,
+        conn: Any,
+        *,
+        brokerday_text: Optional[str],
+        run_id: Optional[int],
+        setup_fingerprint: Optional[str],
+    ) -> Dict[str, Any]:
+        run = self._resolve_day_review_run(conn, brokerday_text=brokerday_text, run_id=run_id)
+        if not run:
+            return {"brokerday": brokerday_text, "run": None, "candidates": [], "entries": [], "chart": {"ticks": [], "markers": []}}
+        review_candidates = self._load_day_review_candidates(conn, run_id=int(run["id"]), setup_fingerprint=setup_fingerprint)
+        features = self._load_feature_snapshots(conn, run_id=int(run["id"]))
+        labels = self._load_entry_labels(conn, run_id=int(run["id"]))
+        entries = []
+        markers = []
+        for candidate in review_candidates:
+            predicate = _compile_predicates(candidate["rule"])
+            side = str(candidate["side"] or "both")
+            for tick_id, feature_row in features.items():
+                if side not in labels.get(tick_id, {}):
+                    continue
+                if not predicate(feature_row["features"]):
+                    continue
+                label = labels[tick_id][side]
+                entry = {
+                    "tickId": tick_id,
+                    "timestamp": feature_row["timestamp"],
+                    "side": side,
+                    "spread": label["spread"],
+                    "targetHit": label["targetHit"],
+                    "hitSeconds": label["hitSeconds"],
+                    "maxAdverse": label["maxAdverse"],
+                    "maxFavorable": label["maxFavorable"],
+                    "candidate": candidate["candidateName"],
+                    "setupFingerprint": candidate["setupFingerprint"],
+                    "sessionBucket": feature_row["sessionBucket"],
+                }
+                entries.append(entry)
+                markers.append(
+                    {
+                        "tickId": tick_id,
+                        "timestamp": feature_row["timestamp"],
+                        "price": label["entryPrice"],
+                        "side": side,
+                        "targetHit": label["targetHit"],
+                        "candidate": candidate["candidateName"],
+                    }
+                )
+        entries.sort(key=lambda item: item["tickId"])
+        ticks = self._load_chart_ticks(conn, brokerday=str(run["brokerday"]))
+        return {
+            "brokerday": serialize_value(run["brokerday"]),
+            "run": self._serialize_run_payload(run),
+            "candidates": review_candidates,
+            "entries": entries[:500],
+            "chart": {
+                "ticks": ticks,
+                "markers": markers[:500],
+            },
+        }
+
+    def record_action(
+        self,
+        conn: Any,
+        *,
+        actor: str,
+        action_type: str,
+        scope: str,
+        target_id: Optional[str],
+        payload: Mapping[str, Any],
+        result: Mapping[str, Any],
+    ) -> None:
+        audit_operator_action(
+            conn,
+            actor=actor,
+            action_type=action_type,
+            scope=scope,
+            target_id=target_id,
+            payload=payload,
+            result=result,
+        )
+
+    def _serialize_run_payload(self, row: Mapping[str, Any]) -> Dict[str, Any]:
+        payload = serialize_mapping(dict(row or {}))
+        metrics = dict((row or {}).get("metrics_json") or (row or {}).get("metrics") or {})
+        payload["metrics"] = metrics
+        payload["config"] = dict((row or {}).get("config") or {})
+        if not payload.get("brokerday"):
+            brokerday_value = self._lookup_run_brokerday(row)
+            if brokerday_value:
+                payload["brokerday"] = brokerday_value
+        return payload
+
+    def _lookup_run_brokerday(self, row: Mapping[str, Any]) -> Optional[str]:
+        brokerday_value = row.get("brokerday")
+        if brokerday_value:
+            return serialize_value(brokerday_value)
+        return None
+
+    def _derive_research_state(self, status: Mapping[str, Any], *, queue_counts: Mapping[str, int]) -> str:
+        value = dict(status.get("value") or {})
+        if value.get("final_verdict"):
+            return "stopped"
+        if value.get("paused"):
+            return "paused"
+        if queue_counts.get("failed", 0) > 0:
+            return "degraded"
+        latest_run = dict(status.get("latest_run") or {})
+        if str(latest_run.get("status") or "") == "running":
+            return "running"
+        return "idle"
+
+    def _derive_engineering_state(self, *, current_incident: Mapping[str, Any]) -> str:
+        if not current_incident:
+            return "idle"
+        status = str(current_incident.get("status") or "")
+        mapping = {
+            "open": "investigating",
+            "analyzing": "investigating",
+            "executing": "repairing",
+            "validating": "repairing",
+            "escalated": "escalated",
+            "resolved": "idle",
+        }
+        return mapping.get(status, status or "idle")
+
+    def _job_counts(self, conn: Any) -> Dict[str, int]:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT status, COUNT(*)
+                FROM research.job
+                GROUP BY status
+                """
+            )
+            rows = {str(row[0]): int(row[1]) for row in cur.fetchall()}
+        return {
+            "pending": int(rows.get("pending") or 0),
+            "running": int(rows.get("running") or 0),
+            "failed": int(rows.get("failed") or 0),
+            "completed": int(rows.get("completed") or 0),
+        }
+
+    def _latest_mutation_proposals(self, conn: Any) -> List[Dict[str, Any]]:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT rs.briefing_json
+                FROM research.runsummary rs
+                JOIN research.run r ON r.id = rs.run_id
+                ORDER BY r.id DESC
+                LIMIT 1
+                """
+            )
+            row = dict(cur.fetchone() or {})
+        briefing = dict(row.get("briefing_json") or {})
+        return list(briefing.get("mutationProposals") or [])
+
+    def _latest_candidate_summary(self, conn: Any) -> Dict[str, Any]:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT cr.*, r.brokerday, rs.verdict_hint
+                FROM research.candidate_result cr
+                JOIN research.run r ON r.id = cr.run_id
+                LEFT JOIN research.runsummary rs ON rs.run_id = r.id
+                WHERE cr.is_selected = TRUE
+                ORDER BY cr.id DESC
+                LIMIT 1
+                """
+            )
+            row = dict(cur.fetchone() or {})
+        if not row:
+            return {}
+        rule_json = dict(row.get("rule_json") or {})
+        return {
+            "setupFingerprint": str(row.get("setup_fingerprint") or _setup_fingerprint(rule_json, fallback_name=str(row.get("candidate_name") or ""))),
+            "candidateName": row.get("candidate_name"),
+            "family": row.get("family"),
+            "side": row.get("side"),
+            "brokerday": serialize_value(row.get("brokerday")),
+            "verdictHint": row.get("verdict_hint"),
+            "rule": rule_json,
+            "metrics": dict(row.get("validation_metrics") or {}),
+        }
+
+    def _latest_engineering_action(self, conn: Any) -> Dict[str, Any]:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM research.engineering_action
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            )
+            row = dict(cur.fetchone() or {})
+        return serialize_mapping(row)
+
+    def _incident_details(self, conn: Any, incident: Mapping[str, Any]) -> Dict[str, Any]:
+        if not incident:
+            return {}
+        incident_id = int(incident["id"])
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM research.engineering_action
+                WHERE incident_id = %s
+                ORDER BY id DESC
+                LIMIT 10
+                """,
+                (incident_id,),
+            )
+            actions = [serialize_mapping(dict(row)) for row in cur.fetchall()]
+            cur.execute(
+                """
+                SELECT *
+                FROM research.engineering_patch
+                WHERE incident_id = %s
+                ORDER BY id DESC
+                LIMIT 10
+                """,
+                (incident_id,),
+            )
+            patches = [serialize_mapping(dict(row)) for row in cur.fetchall()]
+        smoketests = [serialize_mapping(row) for row in self._runtime.store.list_recent_smoketests(conn, incident_id=incident_id, limit=10)]
+        payload = serialize_mapping(dict(incident))
+        payload["actions"] = actions
+        payload["patches"] = patches
+        payload["smokeTests"] = smoketests
+        payload["filesTouched"] = [
+            target
+            for patch in patches
+            for target in list(patch.get("target_files") or [])
+        ]
+        return payload
+
+    def _resolve_day_review_run(self, conn: Any, *, brokerday_text: Optional[str], run_id: Optional[int]) -> Dict[str, Any]:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            if run_id is not None:
+                cur.execute(
+                    """
+                    SELECT r.*, rs.verdict_hint, rs.headline, rs.metrics_json
+                    FROM research.run r
+                    LEFT JOIN research.runsummary rs ON rs.run_id = r.id
+                    WHERE r.id = %s
+                    LIMIT 1
+                    """,
+                    (run_id,),
+                )
+            elif brokerday_text:
+                cur.execute(
+                    """
+                    SELECT r.*, rs.verdict_hint, rs.headline, rs.metrics_json
+                    FROM research.run r
+                    LEFT JOIN research.runsummary rs ON rs.run_id = r.id
+                    WHERE r.brokerday = %s
+                    ORDER BY r.id DESC
+                    LIMIT 1
+                    """,
+                    (brokerday_text,),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT r.*, rs.verdict_hint, rs.headline, rs.metrics_json
+                    FROM research.run r
+                    LEFT JOIN research.runsummary rs ON rs.run_id = r.id
+                    WHERE r.status = 'completed'
+                    ORDER BY r.id DESC
+                    LIMIT 1
+                    """
+                )
+            return dict(cur.fetchone() or {})
+
+    def _load_day_review_candidates(self, conn: Any, *, run_id: int, setup_fingerprint: Optional[str]) -> List[Dict[str, Any]]:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM research.candidate_result
+                WHERE run_id = %s
+                ORDER BY rank ASC, id ASC
+                LIMIT 8
+                """,
+                (run_id,),
+            )
+            rows = [dict(row) for row in cur.fetchall()]
+        candidates = []
+        for row in rows:
+            rule_json = dict(row.get("rule_json") or {})
+            fingerprint = str(row.get("setup_fingerprint") or _setup_fingerprint(rule_json, fallback_name=str(row.get("candidate_name") or "")))
+            if setup_fingerprint and fingerprint != setup_fingerprint:
+                continue
+            candidates.append(
+                {
+                    "setupFingerprint": fingerprint,
+                    "candidateName": row.get("candidate_name"),
+                    "side": row.get("side"),
+                    "family": row.get("family"),
+                    "rule": rule_json,
+                    "validationMetrics": dict(row.get("validation_metrics") or {}),
+                }
+            )
+        if setup_fingerprint:
+            return candidates[:1]
+        return candidates[:3]
+
+    def _load_feature_snapshots(self, conn: Any, *, run_id: int) -> Dict[int, Dict[str, Any]]:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT tick_id, tick_timestamp, session_bucket, feature_json
+                FROM research.feature_snapshot
+                WHERE run_id = %s
+                ORDER BY tick_id ASC
+                """,
+                (run_id,),
+            )
+            rows = [dict(row) for row in cur.fetchall()]
+        payload = {}
+        for row in rows:
+            payload[int(row["tick_id"])] = {
+                "timestamp": serialize_value(row["tick_timestamp"]),
+                "sessionBucket": row["session_bucket"],
+                "features": dict(row.get("feature_json") or {}),
+            }
+        return payload
+
+    def _load_entry_labels(self, conn: Any, *, run_id: int) -> Dict[int, Dict[str, Dict[str, Any]]]:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT tick_id, side, entry_price, spread_at_entry, hit_2x, hit_seconds, max_adverse, max_favorable
+                FROM research.entry_label
+                WHERE run_id = %s
+                ORDER BY tick_id ASC
+                """,
+                (run_id,),
+            )
+            rows = [dict(row) for row in cur.fetchall()]
+        payload: Dict[int, Dict[str, Dict[str, Any]]] = {}
+        for row in rows:
+            tick_id = int(row["tick_id"])
+            payload.setdefault(tick_id, {})[str(row["side"])] = {
+                "entryPrice": float(row["entry_price"]),
+                "spread": float(row["spread_at_entry"]),
+                "targetHit": bool(row["hit_2x"]),
+                "hitSeconds": float(row["hit_seconds"]) if row.get("hit_seconds") is not None else None,
+                "maxAdverse": float(row["max_adverse"]),
+                "maxFavorable": float(row["max_favorable"]),
+            }
+        return payload
+
+    def _load_chart_ticks(self, conn: Any, *, brokerday: str) -> List[Dict[str, Any]]:
+        day_value = date.fromisoformat(brokerday)
+        start_ts, end_ts = brokerday_bounds(day_value)
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, timestamp, bid, ask, mid, spread
+                FROM public.ticks
+                WHERE symbol = %s
+                  AND timestamp >= %s
+                  AND timestamp < %s
+                ORDER BY id ASC
+                """,
+                (self._settings.research_settings.symbol, start_ts, end_ts),
+            )
+            rows = [dict(row) for row in cur.fetchall()]
+        serialized = [
+            {
+                "id": int(row["id"]),
+                "timestamp": serialize_value(row["timestamp"]),
+                "mid": float(row["mid"] if row.get("mid") is not None else (float(row["bid"]) + float(row["ask"])) / 2.0),
+                "spread": float(row["spread"] if row.get("spread") is not None else max(0.0, float(row["ask"]) - float(row["bid"]))),
+            }
+            for row in rows
+        ]
+        return _downsample_rows(serialized, max_points=1400)

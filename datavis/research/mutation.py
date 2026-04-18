@@ -4,6 +4,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 from datavis.research.config import ResearchSettings
 from datavis.research.guardrails import (
+    APPROVED_CANDIDATE_FAMILIES,
     SearchGuardrails,
     build_config_fingerprint,
     merge_parameters,
@@ -94,9 +95,12 @@ def evaluate_stop_guardrails(
     latest_metrics: Mapping[str, Any],
     history_summary: Mapping[str, Any],
     settings: ResearchSettings,
+    policy: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
     completed_runs = int(history_summary.get("completedRuns") or 0)
     distinct_failed = int(history_summary.get("distinctFailedDirections") or 0)
+    min_runs_before_stop = int((policy or {}).get("minRunsBeforeStop") or settings.min_runs_before_stop)
+    failed_direction_stop_count = int((policy or {}).get("failedDirectionStopCount") or settings.failed_direction_stop_count)
     if control.get("stop_requested"):
         return {
             "allowStop": True,
@@ -104,7 +108,7 @@ def evaluate_stop_guardrails(
             "policyNote": "explicit stop requested in control state",
         }
     if run_is_strong(latest_metrics):
-        if completed_runs >= settings.min_runs_before_stop:
+        if completed_runs >= min_runs_before_stop:
             return {
                 "allowStop": True,
                 "acceptedReason": decision_stop_reason or "strong_narrow_regime_found",
@@ -113,9 +117,9 @@ def evaluate_stop_guardrails(
         return {
             "allowStop": False,
             "acceptedReason": None,
-            "policyNote": f"minimum completed runs not reached ({completed_runs} < {settings.min_runs_before_stop})",
+            "policyNote": f"minimum completed runs not reached ({completed_runs} < {min_runs_before_stop})",
         }
-    if distinct_failed >= settings.failed_direction_stop_count and completed_runs >= settings.min_runs_before_stop:
+    if distinct_failed >= failed_direction_stop_count and completed_runs >= min_runs_before_stop:
         return {
             "allowStop": True,
             "acceptedReason": decision_stop_reason or "no_robust_edge_found",
@@ -136,12 +140,17 @@ def generate_mutation_proposals(
     source_run_id: int | None,
     seen_fingerprints: Iterable[str] = (),
     pending_fingerprints: Iterable[str] = (),
+    policy: Mapping[str, Any] | None = None,
 ) -> List[Dict[str, Any]]:
+    max_next_jobs = int((policy or {}).get("maxNextJobs") or settings.max_next_jobs)
+    approved_slice_ladder = tuple((policy or {}).get("approvedSliceLadder") or settings.slice_ladder)
+    preferred_side_lock = str((policy or {}).get("preferredSideLock") or base_params.side_lock or "both")
+    allowed_candidate_families = set((policy or {}).get("allowedCandidateFamilies") or APPROVED_CANDIDATE_FAMILIES)
     limits = SearchGuardrails(
         max_slice_rows=settings.max_slice_rows,
         max_warmup_rows=settings.max_warmup_rows,
         max_slice_offset_rows=settings.max_slice_offset_rows,
-        max_next_actions=settings.max_next_jobs,
+        max_next_actions=max_next_jobs,
     )
     best_candidate = dict(summary_payload.get("bestCandidate") or {})
     best_rule = dict(best_candidate.get("rule") or {})
@@ -153,10 +162,15 @@ def generate_mutation_proposals(
     local_fingerprints = set()
 
     def add_proposal(action: str, reason: str, patch_payload: Mapping[str, Any]) -> None:
-        if len(proposals) >= settings.max_next_jobs:
+        if len(proposals) >= max_next_jobs:
+            return
+        family = str((patch_payload or {}).get("candidate_family") or base_params.candidate_family or "")
+        if family and family not in allowed_candidate_families:
             return
         patch = EntryResearchParameterPatch.model_validate(dict(patch_payload))
         next_params = merge_parameters(base_params, patch, limits=limits)
+        if preferred_side_lock in {"long", "short"} and next_params.side_lock == "both":
+            next_params = next_params.model_copy(update={"side_lock": preferred_side_lock})
         update_payload = {
             "iteration": base_params.iteration + 1,
             "source_run_id": source_run_id,
@@ -297,7 +311,7 @@ def generate_mutation_proposals(
             },
         )
 
-    next_slice = next_slice_size(base_params.slice_rows, settings.slice_ladder)
+    next_slice = next_slice_size(base_params.slice_rows, approved_slice_ladder)
     low_signal = int(validation_metrics.get("signalCount") or 0) < 12
     moderate_precision = float(validation_metrics.get("cleanPrecision") or 0.0) >= 0.40
     if next_slice is not None and (low_signal or moderate_precision):
@@ -340,7 +354,7 @@ def generate_mutation_proposals(
             },
         )
 
-    return proposals[: settings.max_next_jobs]
+    return proposals[: max_next_jobs]
 
 
 def best_session_bucket(contrast_summary: Mapping[str, Any]) -> str | None:
