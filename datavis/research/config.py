@@ -12,8 +12,19 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 load_dotenv(BASE_DIR / ".env")
 
 
+def _clean_env_text(value: str) -> str:
+    text = str(value or "").strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+        return text[1:-1].strip()
+    return text
+
+
+def _env_text(name: str, default: str = "") -> str:
+    return _clean_env_text(os.getenv(name, default))
+
+
 def _env_int(name: str, default: int, *, minimum: int | None = None, maximum: int | None = None) -> int:
-    value = int(os.getenv(name, str(default)).strip() or default)
+    value = int(_env_text(name, str(default)) or default)
     if minimum is not None:
         value = max(minimum, value)
     if maximum is not None:
@@ -22,7 +33,7 @@ def _env_int(name: str, default: int, *, minimum: int | None = None, maximum: in
 
 
 def _env_float(name: str, default: float, *, minimum: float | None = None, maximum: float | None = None) -> float:
-    value = float(os.getenv(name, str(default)).strip() or default)
+    value = float(_env_text(name, str(default)) or default)
     if minimum is not None:
         value = max(minimum, value)
     if maximum is not None:
@@ -31,12 +42,12 @@ def _env_float(name: str, default: float, *, minimum: float | None = None, maxim
 
 
 def _env_path(name: str, default: Path) -> Path:
-    raw = os.getenv(name, "").strip()
+    raw = _env_text(name, "")
     return Path(raw) if raw else default
 
 
 def _env_int_tuple(name: str, default: Tuple[int, ...], *, minimum: int, maximum: int) -> Tuple[int, ...]:
-    raw = os.getenv(name, "").strip()
+    raw = _env_text(name, "")
     if not raw:
         values = list(default)
     else:
@@ -100,8 +111,8 @@ def load_settings() -> ResearchSettings:
     bounded_slice_ladder = tuple(value for value in slice_ladder if value <= max_slice_rows) or (max_slice_rows,)
     seed_slice_default = bounded_slice_ladder[0]
     return ResearchSettings(
-        database_url=os.getenv("DATABASE_URL", "").strip(),
-        symbol=(os.getenv("DATAVIS_RESEARCH_SYMBOL", os.getenv("DATAVIS_SYMBOL", "XAUUSD")).strip() or "XAUUSD").upper(),
+        database_url=_env_text("DATABASE_URL", ""),
+        symbol=(_env_text("DATAVIS_RESEARCH_SYMBOL", _env_text("DATAVIS_SYMBOL", "XAUUSD")) or "XAUUSD").upper(),
         runtime_dir=runtime_dir,
         artifact_dir=_env_path("DATAVIS_RESEARCH_ARTIFACT_DIR", runtime_dir / "artifacts"),
         journal_dir=_env_path("DATAVIS_RESEARCH_JOURNAL_DIR", runtime_dir / "journals"),
@@ -128,17 +139,17 @@ def load_settings() -> ResearchSettings:
         iteration_budget=_env_int("DATAVIS_RESEARCH_ITERATION_BUDGET", 8, minimum=1, maximum=128),
         max_candidates=_env_int("DATAVIS_RESEARCH_MAX_CANDIDATES", 12, minimum=1, maximum=50),
         max_examples=_env_int("DATAVIS_RESEARCH_MAX_EXAMPLES", 5, minimum=1, maximum=20),
-        supervisor_endpoint=os.getenv("DATAVIS_RESEARCH_OPENAI_ENDPOINT", "https://api.openai.com/v1/responses").strip(),
-        supervisor_api_style=(os.getenv("DATAVIS_RESEARCH_OPENAI_API_STYLE", "responses").strip().lower() or "responses"),
-        supervisor_api_key=os.getenv("OPENAI_API_KEY", "").strip() or os.getenv("DATAVIS_RESEARCH_OPENAI_API_KEY", "").strip(),
-        supervisor_model=os.getenv("DATAVIS_RESEARCH_OPENAI_MODEL", "").strip(),
+        supervisor_endpoint=_env_text("DATAVIS_RESEARCH_OPENAI_ENDPOINT", "https://api.openai.com/v1/responses"),
+        supervisor_api_style=(_env_text("DATAVIS_RESEARCH_OPENAI_API_STYLE", "responses").lower() or "responses"),
+        supervisor_api_key=_env_text("OPENAI_API_KEY", "") or _env_text("DATAVIS_RESEARCH_OPENAI_API_KEY", ""),
+        supervisor_model=_env_text("DATAVIS_RESEARCH_OPENAI_MODEL", ""),
         supervisor_timeout_seconds=_env_float("DATAVIS_RESEARCH_OPENAI_TIMEOUT_SECONDS", 45.0, minimum=5.0, maximum=300.0),
         supervisor_max_output_tokens=_env_int("DATAVIS_RESEARCH_OPENAI_MAX_OUTPUT_TOKENS", 900, minimum=100, maximum=4000),
         supervisor_max_briefing_chars=_env_int("DATAVIS_RESEARCH_SUPERVISOR_MAX_BRIEFING_CHARS", 24000, minimum=2000, maximum=100000),
         supervisor_temperature=_env_float("DATAVIS_RESEARCH_OPENAI_TEMPERATURE", 0.1, minimum=0.0, maximum=1.0),
-        worker_name=os.getenv("DATAVIS_RESEARCH_WORKER_NAME", "research-worker").strip() or "research-worker",
-        orchestrator_name=os.getenv("DATAVIS_RESEARCH_ORCHESTRATOR_NAME", "research-orchestrator").strip() or "research-orchestrator",
-        supervisor_name=os.getenv("DATAVIS_RESEARCH_SUPERVISOR_NAME", "research-supervisor").strip() or "research-supervisor",
+        worker_name=_env_text("DATAVIS_RESEARCH_WORKER_NAME", "research-worker") or "research-worker",
+        orchestrator_name=_env_text("DATAVIS_RESEARCH_ORCHESTRATOR_NAME", "research-orchestrator") or "research-orchestrator",
+        supervisor_name=_env_text("DATAVIS_RESEARCH_SUPERVISOR_NAME", "research-supervisor") or "research-supervisor",
     )
 
 

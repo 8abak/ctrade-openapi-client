@@ -150,7 +150,7 @@ def _validate_feature_list(values: Iterable[str], *, max_count: int) -> List[str
     if not normalized:
         normalized = list(DEFAULT_FEATURES)
     if len(normalized) > max_count:
-        raise ValueError(f"too many feature toggles: {len(normalized)} > {max_count}")
+        normalized = normalized[:max_count]
     return normalized
 
 
@@ -180,7 +180,10 @@ def _validate_contrast_hints(hints: Sequence[ContrastHint], *, max_count: int) -
 
 
 def sanitize_parameters(payload: Mapping[str, Any], *, limits: SearchGuardrails) -> EntryResearchParameters:
-    params = EntryResearchParameters.model_validate(dict(payload))
+    bounded_payload = dict(payload)
+    if isinstance(bounded_payload.get("feature_toggles"), list):
+        bounded_payload["feature_toggles"] = list(dict.fromkeys(str(item).strip() for item in bounded_payload["feature_toggles"] if str(item or "").strip()))[: limits.max_feature_count]
+    params = EntryResearchParameters.model_validate(bounded_payload)
     if params.slice_rows > limits.max_slice_rows:
         raise ValueError(f"slice_rows exceeds limit: {params.slice_rows} > {limits.max_slice_rows}")
     if params.slice_offset_rows > limits.max_slice_offset_rows:

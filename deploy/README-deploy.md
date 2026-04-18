@@ -21,6 +21,7 @@ Runtime paths used by the deploy flow:
 - virtualenv: `/home/ec2-user/venvs/datavis`
 - env file: `/etc/datavis.env`
 - optional research env file: `/etc/datavis-research.env`
+- optional control env file: `/etc/datavis-control.env`
 
 Systemd units installed by deploy:
 - `datavis.service` runs `datavis.app:app` from `/home/ec2-user/venvs/datavis/bin/uvicorn`
@@ -29,8 +30,11 @@ Systemd units installed by deploy:
 - `research-worker.service` runs `python -m datavis.research.worker_runtime`
 - `research-orchestrator.service` runs `python -m datavis.research.orchestrator_runtime`
 - `research-supervisor.service` runs `python -m datavis.research.supervisor_runtime`
+- `research-control.service` runs `python -m datavis.control.control_runtime` and binds the control API to loopback by default
+- `engineering-orchestrator.service` runs `python -m datavis.control.engineering_orchestrator_runtime`
 - `tickcollector.service` also reads `/etc/datavis.env` when present so `DATAVIS_CTRADER_CREDS_FILE` and related runtime overrides apply to the collector too
 - research services read both `/etc/datavis.env` and `/etc/datavis-research.env` when present
+- control services read `/etc/datavis.env`, `/etc/datavis-research.env`, and `/etc/datavis-control.env` when present
 
 Trading runtime env vars for `/etc/datavis.env`:
 - `DATAVIS_TRADE_USERNAME` (default `babak`)
@@ -52,14 +56,16 @@ The deploy workflow resets and cleans the EC2 checkout, so do not store runtime-
 The deploy script:
 - activates `/home/ec2-user/venvs/datavis/bin/activate`
 - runs `pip install -r requirements.txt`
-- installs the `datavis`, `tickcollector`, `separation`, and research systemd units
+- installs the `datavis`, `tickcollector`, `separation`, research, and control-plane systemd units
 - disables and removes old processor services, including `fastzig` and `zonebuilder`
+- applies `deploy/sql/20260418_engineering_control_plane.sql`
 - applies `deploy/sql/20260418_entry_research_loop.sql`
 - applies `deploy/sql/20260418_remove_legacy_structure_layer.sql`
 - applies `deploy/sql/20260416_separation.sql`
 - enables `datavis` and `tickcollector`
 - enables `separation`
 - only enables and restarts research services when `DATAVIS_RESEARCH_ENABLE_ON_DEPLOY=1`
+- only enables and restarts control-plane services when `DATAVIS_CONTROL_ENABLE_ON_DEPLOY=1`
 - restarts and verifies `datavis` and `separation`
 - never restarts `tickcollector`
 - performs a local health check at `http://127.0.0.1:8000/api/health` when `curl` is available

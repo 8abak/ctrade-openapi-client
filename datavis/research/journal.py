@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -53,9 +54,16 @@ class ResearchJournal:
 
     def _append_file_record(self, record: Dict[str, Any]) -> None:
         line = json.dumps(record, separators=(",", ":"), sort_keys=True)
-        with self.component_path.open("a", encoding="utf-8") as handle:
-            handle.write(line)
-            handle.write("\n")
+        fallback = Path(tempfile.gettempdir()) / "datavis-research" / "journals" / f"{self._component}.jsonl"
+        for path in (self.component_path, fallback):
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("a", encoding="utf-8") as handle:
+                    handle.write(line)
+                    handle.write("\n")
+                return
+            except OSError:
+                continue
 
     def _insert_db_record(self, record: Dict[str, Any], *, conn: Any | None) -> None:
         try:
