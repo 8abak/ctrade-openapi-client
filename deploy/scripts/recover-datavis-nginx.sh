@@ -23,6 +23,35 @@ audit_nginx_state() {
     /etc/nginx/nginx.conf /etc/nginx/conf.d/*.conf 2>/dev/null || true
 }
 
+ensure_conf_d_include_in_main_conf() {
+  if sudo grep -qF 'include /etc/nginx/conf.d/*.conf;' "$MAIN_NGINX_CONF"; then
+    log "${MAIN_NGINX_CONF} already includes /etc/nginx/conf.d/*.conf"
+    return
+  fi
+
+  log "Adding /etc/nginx/conf.d/*.conf include to ${MAIN_NGINX_CONF}"
+  backup_file "$MAIN_NGINX_CONF"
+
+  local temp_path
+  temp_path="$(mktemp)"
+  sudo awk '
+    {
+      print
+      if (!inserted && $0 ~ /^[[:space:]]*http[[:space:]]*\{[[:space:]]*$/) {
+        print "    include /etc/nginx/conf.d/*.conf;"
+        inserted = 1
+      }
+    }
+    END {
+      if (!inserted) {
+        exit 1
+      }
+    }
+  ' "$MAIN_NGINX_CONF" > "$temp_path"
+  sudo install -m 0644 "$temp_path" "$MAIN_NGINX_CONF"
+  rm -f "$temp_path"
+}
+
 strip_datavis_server_blocks_from_main_conf() {
   if ! sudo grep -qE 'server_name .*datavis\.au' "$MAIN_NGINX_CONF"; then
     log "No datavis.au server block found in ${MAIN_NGINX_CONF}"
@@ -99,6 +128,7 @@ validate_and_reload_nginx() {
 main() {
   audit_nginx_state
   strip_datavis_server_blocks_from_main_conf
+  ensure_conf_d_include_in_main_conf
   install_managed_site_conf
   audit_nginx_state
   validate_and_reload_nginx
