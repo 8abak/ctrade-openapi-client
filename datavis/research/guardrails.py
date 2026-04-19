@@ -48,6 +48,7 @@ APPROVED_LABEL_VARIANTS: Dict[str, Dict[str, float | int]] = {
 
 APPROVED_CANDIDATE_FAMILIES = (
     "threshold_grid",
+    "divergence_sweep",
     "pair_combo",
     "triad_combo",
     "contrast_gate",

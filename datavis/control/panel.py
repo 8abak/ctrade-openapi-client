@@ -102,6 +102,10 @@ def _candidate_passed(metrics: Mapping[str, Any]) -> bool:
     )
 
 
+def _divergence_meta(rule_json: Mapping[str, Any]) -> Dict[str, Any]:
+    return dict((rule_json or {}).get("divergence") or {})
+
+
 def _compile_predicates(rule_json: Mapping[str, Any]) -> Any:
     predicates = list((rule_json or {}).get("predicates") or [])
 
@@ -466,6 +470,8 @@ class ControlPanelService:
                 WHERE r.status = 'completed'
                 ORDER BY
                     COALESCE((cr.validation_metrics->>'cleanPrecision')::double precision, 0.0) DESC,
+                    COALESCE((cr.validation_metrics->>'medianHitSeconds')::double precision, 999999.0) ASC,
+                    COALESCE((cr.validation_metrics->>'walkForwardRange')::double precision, 999999.0) ASC,
                     COALESCE((cr.validation_metrics->>'entriesPerDay')::double precision, 0.0) DESC,
                     r.id DESC,
                     cr.rank ASC
@@ -476,6 +482,7 @@ class ControlPanelService:
         if not row:
             return {}
         rule_json = dict(row.get("rule_json") or {})
+        divergence = _divergence_meta(rule_json)
         return {
             "runId": row.get("run_id"),
             "setupFingerprint": str(row.get("setup_fingerprint") or _setup_fingerprint(rule_json, fallback_name=str(row.get("candidate_name") or ""))),
@@ -485,6 +492,9 @@ class ControlPanelService:
             "brokerday": serialize_value(row.get("brokerday")),
             "verdictHint": row.get("verdict_hint"),
             "rule": rule_json,
+            "eventSubtype": divergence.get("eventSubtype"),
+            "indicator": divergence.get("indicator"),
+            "signalStyle": divergence.get("style"),
             "metrics": dict(row.get("validation_metrics") or {}),
         }
 
@@ -520,6 +530,7 @@ class ControlPanelService:
             )
             selected_row = dict(cur.fetchone() or {})
         selected_rule = dict(selected_row.get("rule_json") or {})
+        selected_divergence = _divergence_meta(selected_rule)
         selected_fingerprint = str(
             selected_row.get("setup_fingerprint") or _setup_fingerprint(selected_rule, fallback_name=str(selected_row.get("candidate_name") or ""))
         ) if selected_row else None
@@ -537,6 +548,9 @@ class ControlPanelService:
                 "family": selected_row.get("family"),
                 "side": selected_row.get("side"),
                 "setupFingerprint": selected_fingerprint,
+                "eventSubtype": selected_divergence.get("eventSubtype"),
+                "indicator": selected_divergence.get("indicator"),
+                "signalStyle": selected_divergence.get("style"),
             } if selected_row else {},
             "bestImproved": bool(selected_fingerprint and selected_fingerprint == best_candidate.get("setupFingerprint")),
             "finishedAt": serialize_value(run.get("finished_at")),
@@ -776,6 +790,7 @@ class ControlPanelService:
         aggregate: Dict[str, Dict[str, Any]] = {}
         for row in rows:
             rule_json = dict(row.get("rule_json") or {})
+            divergence = _divergence_meta(rule_json)
             validation = dict(row.get("validation_metrics") or {})
             fingerprint = str(row.get("setup_fingerprint") or _setup_fingerprint(rule_json, fallback_name=str(row.get("candidate_name") or "")))
             item = aggregate.get(fingerprint)
@@ -787,6 +802,9 @@ class ControlPanelService:
                     "family": row.get("family"),
                     "side": row.get("side"),
                     "rule": rule_json,
+                    "eventSubtype": divergence.get("eventSubtype"),
+                    "indicator": divergence.get("indicator"),
+                    "signalStyle": divergence.get("style"),
                     "status": override.get("status") or ("promoted" if bool(override.get("promoted")) else "active"),
                     "operatorNotes": override.get("operator_notes") or "",
                     "latestRunId": row.get("run_id"),
@@ -820,12 +838,18 @@ class ControlPanelService:
                 item["entriesPerDay"] = float(validation.get("entriesPerDay") or 0.0)
                 item["sessionBucket"] = _dominant_bucket(validation.get("bySession") or {})
                 item["spreadRegime"] = _dominant_bucket(validation.get("bySpread") or {})
+                item["eventSubtype"] = divergence.get("eventSubtype")
+                item["indicator"] = divergence.get("indicator")
+                item["signalStyle"] = divergence.get("style")
         candidates = []
         for item in aggregate.values():
             payload = dict(item)
             payload["daysSeen"] = len(payload["daysSeen"])
             payload["daysPassed"] = len(payload["daysPassed"])
             payload["daysFailed"] = len(payload["daysFailed"])
+            payload["medianHitSeconds"] = (payload.get("validationMetrics") or {}).get("medianHitSeconds")
+            payload["avgMaxAdverse"] = (payload.get("validationMetrics") or {}).get("avgMaxAdverse")
+            payload["avgMaxFavorable"] = (payload.get("validationMetrics") or {}).get("avgMaxFavorable")
             candidates.append(payload)
         filtered = []
         for item in candidates:
@@ -845,8 +869,10 @@ class ControlPanelService:
         filtered.sort(
             key=lambda item: (
                 float((item.get("validationMetrics") or {}).get("cleanPrecision") or 0.0),
-                float(item.get("entriesPerDay") or 0.0),
+                -float((item.get("validationMetrics") or {}).get("medianHitSeconds") or 9_999.0),
+                -float((item.get("validationMetrics") or {}).get("walkForwardRange") or 0.0),
                 int(item.get("daysPassed") or 0),
+                float(item.get("entriesPerDay") or 0.0),
             ),
             reverse=True,
         )
@@ -914,43 +940,58 @@ class ControlPanelService:
                 "chart": {"ticks": [], "markers": []},
             }
         review_candidates = self._load_day_review_candidates(conn, run_id=int(run["id"]), setup_fingerprint=setup_fingerprint)
-        features = self._load_feature_snapshots(conn, run_id=int(run["id"]))
-        labels = self._load_entry_labels(conn, run_id=int(run["id"]))
+        family = str(((run.get("config") or {}).get("candidate_family")) or "")
         entries = []
         markers = []
-        for candidate in review_candidates:
-            predicate = _compile_predicates(candidate["rule"])
-            side = str(candidate["side"] or "both")
-            for tick_id, feature_row in features.items():
-                if side not in labels.get(tick_id, {}):
-                    continue
-                if not predicate(feature_row["features"]):
-                    continue
-                label = labels[tick_id][side]
-                entry = {
-                    "tickId": tick_id,
-                    "timestamp": feature_row["timestamp"],
-                    "side": side,
-                    "spread": label["spread"],
-                    "targetHit": label["targetHit"],
-                    "hitSeconds": label["hitSeconds"],
-                    "maxAdverse": label["maxAdverse"],
-                    "maxFavorable": label["maxFavorable"],
-                    "candidate": candidate["candidateName"],
-                    "setupFingerprint": candidate["setupFingerprint"],
-                    "sessionBucket": feature_row["sessionBucket"],
+        if family == "divergence_sweep":
+            entries = self._load_divergence_review_entries(conn, run_id=int(run["id"]), setup_fingerprint=setup_fingerprint)
+            markers = [
+                {
+                    "tickId": int(item["tickId"]),
+                    "timestamp": item["timestamp"],
+                    "price": item["entryPrice"],
+                    "side": item["side"],
+                    "targetHit": item["targetHit"],
+                    "candidate": item["candidate"],
                 }
-                entries.append(entry)
-                markers.append(
-                    {
+                for item in entries
+            ]
+        else:
+            features = self._load_feature_snapshots(conn, run_id=int(run["id"]))
+            labels = self._load_entry_labels(conn, run_id=int(run["id"]))
+            for candidate in review_candidates:
+                predicate = _compile_predicates(candidate["rule"])
+                side = str(candidate["side"] or "both")
+                for tick_id, feature_row in features.items():
+                    if side not in labels.get(tick_id, {}):
+                        continue
+                    if not predicate(feature_row["features"]):
+                        continue
+                    label = labels[tick_id][side]
+                    entry = {
                         "tickId": tick_id,
                         "timestamp": feature_row["timestamp"],
-                        "price": label["entryPrice"],
                         "side": side,
+                        "spread": label["spread"],
                         "targetHit": label["targetHit"],
+                        "hitSeconds": label["hitSeconds"],
+                        "maxAdverse": label["maxAdverse"],
+                        "maxFavorable": label["maxFavorable"],
                         "candidate": candidate["candidateName"],
+                        "setupFingerprint": candidate["setupFingerprint"],
+                        "sessionBucket": feature_row["sessionBucket"],
                     }
-                )
+                    entries.append(entry)
+                    markers.append(
+                        {
+                            "tickId": tick_id,
+                            "timestamp": feature_row["timestamp"],
+                            "price": label["entryPrice"],
+                            "side": side,
+                            "targetHit": label["targetHit"],
+                            "candidate": candidate["candidateName"],
+                        }
+                    )
         entries.sort(key=lambda item: item["tickId"], reverse=True)
         markers.sort(key=lambda item: item["tickId"], reverse=True)
         visible_entries = entries[:entry_limit]
@@ -1547,6 +1588,7 @@ class ControlPanelService:
         candidates = []
         for row in rows:
             rule_json = dict(row.get("rule_json") or {})
+            divergence = _divergence_meta(rule_json)
             fingerprint = str(row.get("setup_fingerprint") or _setup_fingerprint(rule_json, fallback_name=str(row.get("candidate_name") or "")))
             if setup_fingerprint and fingerprint != setup_fingerprint:
                 continue
@@ -1556,6 +1598,9 @@ class ControlPanelService:
                     "candidateName": row.get("candidate_name"),
                     "side": row.get("side"),
                     "family": row.get("family"),
+                    "eventSubtype": divergence.get("eventSubtype"),
+                    "indicator": divergence.get("indicator"),
+                    "signalStyle": divergence.get("style"),
                     "rule": rule_json,
                     "validationMetrics": dict(row.get("validation_metrics") or {}),
                 }
@@ -1609,6 +1654,61 @@ class ControlPanelService:
                 "maxFavorable": float(row["max_favorable"]),
             }
         return payload
+
+    def _load_divergence_review_entries(
+        self,
+        conn: Any,
+        *,
+        run_id: int,
+        setup_fingerprint: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        filters = ["run_id = %s"]
+        params: List[Any] = [run_id]
+        if setup_fingerprint:
+            filters.append("setup_fingerprint = %s")
+            params.append(setup_fingerprint)
+        where_clause = " AND ".join(filters)
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                f"""
+                SELECT *
+                FROM research.divergence_event
+                WHERE {where_clause}
+                ORDER BY event_timestamp DESC, id DESC
+                """,
+                params,
+            )
+            rows = [dict(row) for row in cur.fetchall()]
+        entries = []
+        for row in rows:
+            event_json = dict(row.get("event_json") or {})
+            rule_json = dict(event_json.get("rule") or {})
+            divergence = _divergence_meta(rule_json)
+            entries.append(
+                {
+                    "tickId": int(row["tick_id"]),
+                    "timestamp": serialize_value(row["event_timestamp"]),
+                    "side": row.get("side"),
+                    "spread": float(row["spread_at_event"]),
+                    "targetAmount": float(row["target_amount"]),
+                    "targetHit": bool(row["target_hit"]),
+                    "firstSideHit": row.get("first_side_hit"),
+                    "hitSeconds": float(row["hit_seconds"]) if row.get("hit_seconds") is not None else None,
+                    "hitTicks": int(row["hit_ticks"]) if row.get("hit_ticks") is not None else None,
+                    "maxAdverse": float(row["max_adverse"]),
+                    "maxFavorable": float(row["max_favorable"]),
+                    "candidate": (rule_json.get("name") or row.get("setup_fingerprint")),
+                    "setupFingerprint": row.get("setup_fingerprint"),
+                    "sessionBucket": row.get("session_bucket"),
+                    "eventFamily": row.get("event_family"),
+                    "eventSubtype": row.get("event_subtype") or divergence.get("eventSubtype"),
+                    "indicator": row.get("indicator_name") or divergence.get("indicator"),
+                    "signalStyle": row.get("signal_style") or divergence.get("style"),
+                    "entryPrice": float(row["entry_price"]),
+                    "scalpQualified": bool(row.get("scalp_qualified")),
+                }
+            )
+        return entries
 
     def _load_chart_ticks(self, conn: Any, *, brokerday: str) -> List[Dict[str, Any]]:
         day_value = date.fromisoformat(brokerday)

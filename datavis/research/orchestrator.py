@@ -417,10 +417,11 @@ class ResearchOrchestrator:
     @staticmethod
     def _rebuild_summary_fragment(briefing: Dict[str, Any], top_candidates: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         best = dict(briefing.get("bestCandidate") or {})
+        best_rule = dict(best.get("rule") or {})
         return {
             "bestCandidate": {
                 "candidateName": best.get("name"),
-                "rule": {
+                "rule": best_rule or {
                     "name": best.get("name"),
                     "family": best.get("family"),
                     "side": best.get("side"),

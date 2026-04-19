@@ -63,9 +63,52 @@ class ResearchWorker:
         )
         try:
             params = sanitize_parameters(job.config, limits=self._limits)
+            if params.candidate_family == "divergence_sweep":
+                self._journal.write(
+                    level="INFO",
+                    event_type="worker.job.divergence.start",
+                    message=f"Running divergence_sweep on broker day {params.study_brokerday or 'latest available'}",
+                    job_id=job.id,
+                    run_id=run_id,
+                    payload={
+                        "family": params.candidate_family,
+                        "studyBrokerday": params.study_brokerday,
+                        "indicators": ["rsi14", "macd_line", "macd_hist", "roc8", "kal_gap"],
+                    },
+                    conn=conn,
+                )
             result = execute_entry_research(conn, params=params, settings=self._settings)
             self._persist_result(conn, job=job, run_id=run_id, params=params.model_dump(), result=result)
             self._mark_job_completed(conn, job_id=job.id, run_id=run_id, summary=result["summaryPayload"])
+            if params.candidate_family == "divergence_sweep":
+                best_candidate = dict((result.get("summaryPayload") or {}).get("bestCandidate") or {})
+                best_rule = dict(best_candidate.get("rule") or {})
+                divergence_meta = dict(best_rule.get("divergence") or {})
+                verdict_hint = str((result["summaryPayload"] or {}).get("verdictHint") or "no_robust_edge_found")
+                if verdict_hint == "no_robust_edge_found":
+                    completion_message = "Completed divergence_sweep: no robust divergence edge found"
+                else:
+                    completion_message = (
+                        "Completed divergence_sweep: "
+                        f"{divergence_meta.get('eventSubtype') or best_candidate.get('candidateName') or 'best candidate'} "
+                        f"improved precision with {divergence_meta.get('indicator') or 'bounded indicators'}"
+                    )
+                self._journal.write(
+                    level="INFO",
+                    event_type="worker.job.divergence.completed",
+                    message=completion_message,
+                    job_id=job.id,
+                    run_id=run_id,
+                    payload={
+                        "bestCandidate": best_candidate.get("candidateName"),
+                        "eventSubtype": divergence_meta.get("eventSubtype"),
+                        "indicator": divergence_meta.get("indicator"),
+                        "signalStyle": divergence_meta.get("style"),
+                        "verdictHint": verdict_hint,
+                        "cleanPrecision": (best_candidate.get("validationMetrics") or {}).get("cleanPrecision"),
+                    },
+                    conn=conn,
+                )
             self._journal.write(
                 level="INFO",
                 event_type="worker.job.completed",
@@ -156,9 +199,16 @@ class ResearchWorker:
         label_rows = self._materialize_rows(result["labelRows"], run_id=run_id)
         feature_rows = self._materialize_rows(result["featureRows"], run_id=run_id)
         candidate_rows = self._materialize_rows(result["candidateRows"], run_id=run_id)
+        divergence_event_rows = self._materialize_divergence_rows(
+            result.get("divergenceEventRows") or [],
+            run_id=run_id,
+            job_id=job.id,
+            symbol=str(params.get("symbol") or self._settings.symbol),
+        )
         self._insert_feature_rows(conn, feature_rows)
         self._insert_label_rows(conn, label_rows)
         self._insert_candidate_rows(conn, candidate_rows)
+        self._insert_divergence_rows(conn, divergence_event_rows)
         self._update_run_metadata(conn, run_id=run_id, slice_bounds=result["sliceBounds"], result=result)
         self._insert_run_summary(conn, run_id=run_id, summary_payload=summary_payload)
         artifact_paths = write_run_artifacts(self._settings, run_id=run_id, summary_payload=summary_payload)
@@ -169,6 +219,23 @@ class ResearchWorker:
         for row in rows:
             payload = dict(row)
             payload["runId"] = run_id
+            materialized.append(payload)
+        return materialized
+
+    def _materialize_divergence_rows(
+        self,
+        rows: Iterable[Dict[str, Any]],
+        *,
+        run_id: int,
+        job_id: int,
+        symbol: str,
+    ) -> List[Dict[str, Any]]:
+        materialized = []
+        for row in rows:
+            payload = dict(row)
+            payload["runId"] = run_id
+            payload["jobId"] = job_id
+            payload["symbol"] = symbol
             materialized.append(payload)
         return materialized
 
@@ -261,6 +328,8 @@ class ResearchWorker:
             time.sleep(self._settings.chunk_sleep_seconds)
 
     def _insert_candidate_rows(self, conn: Any, rows: List[Dict[str, Any]]) -> None:
+        if not rows:
+            return
         with conn.cursor() as cur:
             psycopg2.extras.execute_values(
                 cur,
@@ -281,17 +350,81 @@ class ResearchWorker:
                         Json(row["rule"]),
                         Json(row["trainMetrics"]),
                         Json(row["validationMetrics"]),
-                        _setup_fingerprint(row["rule"], fallback_name=str(row["candidateName"] or "")),
+                        str(row.get("setupFingerprint") or _setup_fingerprint(row["rule"], fallback_name=str(row["candidateName"] or ""))),
                     )
                     for row in rows
                 ],
                 page_size=min(len(rows), self._settings.write_batch_rows),
             )
 
+    def _insert_divergence_rows(self, conn: Any, rows: List[Dict[str, Any]]) -> None:
+        if not rows:
+            return
+        for batch in batched(rows, self._settings.write_batch_rows):
+            payload = [
+                (
+                    row["runId"],
+                    row["jobId"],
+                    row["setupFingerprint"],
+                    row["fingerprint"],
+                    row["brokerday"],
+                    row["symbol"],
+                    row["tickId"],
+                    row["timestamp"],
+                    row["eventFamily"],
+                    row["eventSubtype"],
+                    row["indicatorName"],
+                    row["side"],
+                    row["signalStyle"],
+                    row["pivotMethod"],
+                    row["structurePack"],
+                    row.get("pivotLeftTickId"),
+                    row.get("pivotRightTickId"),
+                    row["entryPrice"],
+                    row.get("priceValue1"),
+                    row.get("priceValue2"),
+                    row.get("indicatorValue1"),
+                    row.get("indicatorValue2"),
+                    Json(row.get("indicatorPayload") or {}),
+                    row["spreadAtEvent"],
+                    row["targetAmount"],
+                    row["targetHit"],
+                    row["firstSideHit"],
+                    row.get("hitSeconds"),
+                    row.get("hitTicks"),
+                    row["maxAdverse"],
+                    row["maxFavorable"],
+                    row["sessionBucket"],
+                    row["scalpQualified"],
+                    Json(row.get("eventJson") or {}),
+                )
+                for row in batch
+            ]
+            with conn.cursor() as cur:
+                psycopg2.extras.execute_values(
+                    cur,
+                    """
+                    INSERT INTO research.divergence_event (
+                        run_id, job_id, setup_fingerprint, fingerprint, brokerday, symbol, tick_id, event_timestamp,
+                        event_family, event_subtype, indicator_name, side, signal_style, pivot_method, structure_pack,
+                        pivot_left_tick_id, pivot_right_tick_id, entry_price, price_value_1, price_value_2,
+                        indicator_value_1, indicator_value_2, indicator_payload, spread_at_event, target_amount,
+                        target_hit, first_side_hit, hit_seconds, hit_ticks, max_adverse, max_favorable,
+                        session_bucket, scalp_qualified, event_json
+                    )
+                    VALUES %s
+                    ON CONFLICT (run_id, fingerprint)
+                    DO NOTHING
+                    """,
+                    payload,
+                    page_size=min(len(payload), self._settings.write_batch_rows),
+                )
+            time.sleep(self._settings.chunk_sleep_seconds)
+
     def _update_run_metadata(self, conn: Any, *, run_id: int, slice_bounds: Dict[str, Any], result: Dict[str, Any]) -> None:
-        brokerday = None
+        brokerday = slice_bounds.get("study_brokerday")
         cases = list(result.get("cases") or [])
-        if cases:
+        if cases and not brokerday:
             brokerday = brokerday_for_timestamp(cases[-1]["timestamp"])
         with conn.cursor() as cur:
             cur.execute(

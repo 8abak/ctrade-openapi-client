@@ -199,6 +199,15 @@
   function renderCurrentBest(candidate) {
     const latestCandidate = candidate || {};
     const latestMetrics = latestCandidate.metrics || {};
+    const divergenceDetail = latestCandidate.family === "divergence_sweep"
+      ? "<div class=\"control-callout\"><div><span class=\"sql-label\">Divergence Detail</span><p class=\"control-copy\">" +
+        escapeHtml([
+          latestCandidate.eventSubtype || "n/a",
+          latestCandidate.indicator || "n/a",
+          latestCandidate.signalStyle || "n/a"
+        ].join(" | ")) +
+        "</p></div></div>"
+      : "";
     return [
       kvGrid([
         { label: "Setup", value: latestCandidate.candidateName || "n/a" },
@@ -206,6 +215,7 @@
         { label: "Side", value: latestCandidate.side || "n/a" },
         { label: "Broker Day", value: latestCandidate.brokerday || "n/a" }
       ]),
+      divergenceDetail,
       "<div class=\"control-metric-row\">",
       metricPill("Clean Precision", humanNumber(latestMetrics.cleanPrecision, 3)),
       metricPill("Entries/Day", humanNumber(latestMetrics.entriesPerDay, 2)),
@@ -219,6 +229,17 @@
     if (!result || !result.runId) {
       return "<div class=\"sql-empty\">No completed run result is available yet.</div>";
     }
+    const selectedCandidate = result.selectedCandidate || {};
+    const divergenceDetail = selectedCandidate.eventSubtype || selectedCandidate.indicator || selectedCandidate.signalStyle
+      ? "<div class=\"control-callout\"><div><span class=\"sql-label\">Selected Divergence</span><p class=\"control-copy\">" +
+        escapeHtml([
+          selectedCandidate.candidateName || "n/a",
+          selectedCandidate.eventSubtype || "n/a",
+          selectedCandidate.indicator || "n/a",
+          selectedCandidate.signalStyle || "n/a"
+        ].join(" | ")) +
+        "</p></div></div>"
+      : "";
     return [
       kvGrid([
         { label: "Run", value: result.runId || "n/a" },
@@ -233,6 +254,7 @@
       "<div class=\"control-callout\">",
       "<div><span class=\"sql-label\">Headline</span><p class=\"control-copy\">", escapeHtml(result.headline || "No summary headline recorded."), "</p></div>",
       "</div>",
+      divergenceDetail,
       "<div class=\"control-metric-row\">",
       metricPill("Clean Precision", humanNumber((result.metrics || {}).cleanPrecision, 3)),
       metricPill("Entries/Day", humanNumber((result.metrics || {}).entriesPerDay, 2)),
@@ -370,7 +392,10 @@
         { label: "Latest Available", value: studyDay.latestAvailableBrokerday || "n/a" },
         { label: "Recent Days", value: String(available.length) }
       ]),
-      "<div class=\"control-action-row\"><button class=\"ghost-button compact-button\" type=\"submit\">Save Study Day</button></div>",
+      "<div class=\"control-action-row\">",
+      "<button class=\"ghost-button compact-button\" type=\"submit\">Save Study Day</button>",
+      "<button class=\"primary-button compact-button\" type=\"button\" data-action=\"seedDivergenceSweep\">Run Divergence Sweep</button>",
+      "</div>",
       "</form>"
     ].join("");
   }
@@ -490,6 +515,7 @@
         actionButtons([
           { action: "pauseResearch", label: "Pause", kind: "ghost-button" },
           { action: "resumeResearch", label: "Resume", kind: "ghost-button" },
+          { action: "seedDivergenceSweep", label: "Run Divergence Sweep", kind: "primary-button" },
           { action: "seedResearch", label: "Seed Next Job", kind: "ghost-button" },
           { action: "resetResearch", label: "Reset State", kind: "ghost-button" }
         ])
@@ -527,6 +553,7 @@
         { label: "Run", render: function (row) { return escapeHtml(row.id); } },
         { label: "Broker Day", render: function (row) { return escapeHtml(row.brokerday || "n/a"); } },
         { label: "Study Day", render: function (row) { return escapeHtml(((row.config || {}).study_brokerday) || "n/a"); } },
+        { label: "Family", render: function (row) { return escapeHtml(((row.config || {}).candidate_family) || "n/a"); } },
         { label: "Status", render: function (row) { return escapeHtml(row.status); } },
         { label: "Verdict", render: function (row) { return escapeHtml(row.verdict_hint || "n/a"); } },
         { label: "Precision", render: function (row) { return escapeHtml(humanNumber((row.metrics || {}).cleanPrecision, 3)); } },
@@ -644,13 +671,27 @@
         badge(row.status || "active", row.status === "promoted" ? "good" : (row.status === "archived" ? "danger" : "")),
         badge(row.side || "n/a"),
         badge(row.family || "n/a"),
+        row.eventSubtype ? badge(row.eventSubtype) : "",
+        row.indicator ? badge(row.indicator) : "",
+        row.signalStyle ? badge(row.signalStyle) : "",
         "</div></div>",
         "<div class=\"control-metric-row\">",
         metricPill("Clean Precision", humanNumber((row.validationMetrics || {}).cleanPrecision, 3)),
         metricPill("Entries/Day", humanNumber(row.entriesPerDay, 2)),
+        metricPill("Hit Speed", humanNumber(row.medianHitSeconds, 1)),
         metricPill("Walk Range", humanNumber((row.validationMetrics || {}).walkForwardRange, 3)),
+        metricPill("Avg Adv", humanNumber(row.avgMaxAdverse, 4)),
         metricPill("Days", String(row.daysPassed || 0) + "/" + String(row.daysSeen || 0)),
         "</div>",
+        row.family === "divergence_sweep"
+          ? "<div class=\"control-callout\"><div><span class=\"sql-label\">Divergence Pack</span><p class=\"control-copy\">" + escapeHtml([
+              row.eventSubtype || "n/a",
+              row.indicator || "n/a",
+              row.signalStyle || "n/a",
+              row.spreadRegime || "n/a",
+              row.sessionBucket || "n/a"
+            ].join(" | ")) + "</p></div></div>"
+          : "",
         "<div class=\"control-wrap\"><code>", escapeHtml(JSON.stringify((row.rule || {}).predicates || [])), "</code></div>",
         "<form class=\"control-candidate-form\" data-fingerprint=\"", escapeHtml(row.setupFingerprint), "\">",
         "<div class=\"control-form-grid\">",
@@ -702,12 +743,19 @@
       card("Chart", renderDayChart((data.chart || {}).ticks || [], (data.chart || {}).markers || [])),
       card("Matched Entries", simpleTable([
         { label: "Time", render: function (row) { return escapeHtml(humanWhen(row.timestamp)); } },
+        { label: "Subtype", render: function (row) { return escapeHtml(row.eventSubtype || "n/a"); } },
+        { label: "Indicator", render: function (row) { return escapeHtml(row.indicator || "n/a"); } },
+        { label: "Style", render: function (row) { return escapeHtml(row.signalStyle || "n/a"); } },
         { label: "Side", render: function (row) { return escapeHtml(row.side); } },
         { label: "Spread", render: function (row) { return escapeHtml(humanNumber(row.spread, 4)); } },
+        { label: "2x Spread", render: function (row) { return escapeHtml(humanNumber(row.targetAmount, 4)); } },
         { label: "Target Hit", render: function (row) { return escapeHtml(row.targetHit ? "yes" : "no"); } },
+        { label: "First Hit", render: function (row) { return escapeHtml(row.firstSideHit || "n/a"); } },
         { label: "Hit Sec", render: function (row) { return escapeHtml(humanNumber(row.hitSeconds, 1)); } },
+        { label: "Hit Ticks", render: function (row) { return escapeHtml(humanNumber(row.hitTicks, 0)); } },
         { label: "Max Adv", render: function (row) { return escapeHtml(humanNumber(row.maxAdverse, 4)); } },
         { label: "Max Fav", render: function (row) { return escapeHtml(humanNumber(row.maxFavorable, 4)); } },
+        { label: "Scalp", render: function (row) { return escapeHtml(row.scalpQualified ? "yes" : "no"); } },
         { label: "Candidate", render: function (row) { return escapeHtml(row.candidate); } }
       ], data.entries || []))
     ].join("");
@@ -994,6 +1042,9 @@
     }
     if (action === "seedResearch") {
       return postAction("/api/control/research/seed-next", actionReason("seeded next job from control panel"), "Seeded next research job.");
+    }
+    if (action === "seedDivergenceSweep") {
+      return postAction("/api/control/research/seed-divergence", actionReason("seeded divergence_sweep from control panel"), "Seeded divergence_sweep research job.");
     }
     if (action === "resetResearch") {
       return postAction("/api/control/research/reset", { mode: "soft", reason: "soft reset from control panel" }, "Research state reset.");

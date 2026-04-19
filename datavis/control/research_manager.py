@@ -165,6 +165,7 @@ class ResearchManager:
                 cur.execute(
                     """
                     TRUNCATE TABLE
+                        research.divergence_event,
                         research.candidate_result,
                         research.feature_snapshot,
                         research.entry_label,
@@ -353,6 +354,74 @@ class ResearchManager:
             control["last_seed_service_actions"] = service_actions
         set_state(conn, CONTROL_STATE_KEY, control)
         inserted["serviceActions"] = service_actions
+        return inserted
+
+    def seed_divergence_job(self, conn: Any, *, reason: str) -> Dict[str, Any]:
+        runtime_policy = resolve_research_runtime(conn, self._settings, self._settings.research_settings)
+        if "divergence_sweep" not in set(runtime_policy.get("allowedCandidateFamilies") or []):
+            raise ValueError("divergence_sweep is disabled in control panel settings")
+        selected_day = self.selected_study_day(conn) or self.study_day_state(conn).get("effectiveStudyDay")
+        if not selected_day:
+            raise ValueError("No broker day is available to run divergence_sweep")
+        existing_pending = self._latest_job(conn, statuses=("pending", "running"))
+        if existing_pending:
+            existing_config = dict(existing_pending.get("config") or {})
+            existing_family = str(existing_config.get("candidate_family") or "unknown")
+            existing_day = self._job_study_day(existing_pending) or "latest available"
+            if existing_family == "divergence_sweep" and existing_day == selected_day:
+                control = ensure_control_state(conn, self._settings.research_settings)
+                self._wake_research_loop(control, reason=reason)
+                control["seeded"] = True
+                service_actions = self._ensure_research_services_ready()
+                if service_actions:
+                    control["last_seed_service_actions"] = service_actions
+                set_state(conn, CONTROL_STATE_KEY, control)
+                return {
+                    "jobId": int(existing_pending["id"]),
+                    "config": existing_config,
+                    "reusedExisting": True,
+                    "proposalDerived": self._job_is_proposal_derived(existing_pending),
+                    "serviceActions": service_actions,
+                    "message": f"Existing divergence_sweep for broker day {selected_day} is already queued.",
+                }
+            raise ValueError(
+                f"queued work targets {existing_family} on broker day {existing_day}; clear or finish that work before seeding divergence_sweep for {selected_day}"
+            )
+        slice_ladder = list(runtime_policy.get("approvedSliceLadder") or self._settings.research_settings.slice_ladder)
+        params = default_parameters(
+            symbol=self._settings.research_settings.symbol,
+            slice_rows=int(slice_ladder[0] if slice_ladder else self._settings.research_settings.seed_slice_rows),
+            warmup_rows=max(self._settings.research_settings.seed_warmup_rows, 80),
+            iteration=1,
+        ).model_copy(
+            update={
+                "study_brokerday": selected_day,
+                "candidate_family": "divergence_sweep",
+                "train_validation_plan": "chronological_60_40",
+                "side_lock": "both",
+                "mutation_note": reason[:512],
+            }
+        )
+        params = sanitize_parameters(params.model_dump(), limits=self._build_limits())
+        inserted = self._insert_seed_job(
+            conn,
+            params=params,
+            action="divergence_sweep",
+            reason=reason,
+            proposal_source="control-panel-divergence",
+            mutated_fields=["candidate_family", "study_brokerday", "train_validation_plan"],
+        )
+        control = ensure_control_state(conn, self._settings.research_settings)
+        self._wake_research_loop(control, reason=reason)
+        control["seeded"] = True
+        control["last_seeded_job_id"] = inserted.get("jobId")
+        control["selected_study_day"] = selected_day
+        service_actions = self._ensure_research_services_ready()
+        if service_actions:
+            control["last_seed_service_actions"] = service_actions
+        set_state(conn, CONTROL_STATE_KEY, control)
+        inserted["serviceActions"] = service_actions
+        inserted["message"] = f"Seeded divergence_sweep on broker day {selected_day}."
         return inserted
 
     def _build_limits(self):  # type: ignore[no-untyped-def]
@@ -651,13 +720,14 @@ class ResearchManager:
         payload = dict(row)
         briefing = dict(payload.get("briefing_json") or {})
         best = dict(briefing.get("bestCandidate") or {})
+        best_rule = dict(best.get("rule") or {})
         return {
             "runId": int(payload["run_id"]),
             "config": dict(payload.get("config") or {}),
             "summaryPayload": {
                 "bestCandidate": {
                     "candidateName": best.get("name"),
-                    "rule": {
+                    "rule": best_rule or {
                         "name": best.get("name"),
                         "family": best.get("family"),
                         "side": best.get("side"),

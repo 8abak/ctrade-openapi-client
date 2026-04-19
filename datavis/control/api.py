@@ -128,6 +128,14 @@ def research_requeue(payload: RequeueRequest) -> Dict[str, Any]:
         return result
 
 
+@app.post("/control/research/seed-divergence", dependencies=[Depends(require_control_auth)])
+def research_seed_divergence(payload: PauseRequest) -> Dict[str, Any]:
+    with connection(SETTINGS, readonly=False, autocommit=False, application_name="datavis.control.api.seed_divergence") as conn:
+        result = RESEARCH_MANAGER.seed_divergence_job(conn, reason=payload.reason)
+        conn.commit()
+        return result
+
+
 @app.post("/control/research/pause", dependencies=[Depends(require_control_auth)])
 def research_pause(payload: PauseRequest) -> Dict[str, Any]:
     with connection(SETTINGS, readonly=False, autocommit=False, application_name="datavis.control.api.pause") as conn:

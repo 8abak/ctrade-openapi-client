@@ -210,6 +210,50 @@ def generate_mutation_proposals(
     if best_rule.get("name") and best_rule.get("side") in {"long", "short"}:
         seed_rule = CandidateSeed.model_validate(best_rule)
 
+    if str(base_params.candidate_family or "") == "divergence_sweep":
+        divergence = dict(best_rule.get("divergence") or {})
+        if best_rule.get("side") in {"long", "short"} and base_params.side_lock == "both":
+            add_proposal(
+                "refine",
+                f"Re-run divergence_sweep with {best_rule['side']}-only focus because the best selected-day edge is side-specific.",
+                {
+                    "candidate_family": "divergence_sweep",
+                    "side_lock": best_rule["side"],
+                },
+            )
+        session_bucket = best_session_bucket(contrast_summary)
+        if session_bucket and session_bucket not in set(base_params.session_filter):
+            add_proposal(
+                "split_by_pattern",
+                f"Re-run divergence_sweep inside the strongest session bucket {session_bucket}.",
+                {
+                    "candidate_family": "divergence_sweep",
+                    "session_filter": [session_bucket],
+                    "side_lock": best_rule.get("side") or base_params.side_lock,
+                },
+            )
+        spread_filter = better_spread_filter(contrast_summary, base_params.spread_filter)
+        if spread_filter and spread_filter != base_params.spread_filter:
+            add_proposal(
+                "split_by_pattern",
+                f"Re-run divergence_sweep with tighter spread focus ({spread_filter}) because the selected-day edge clusters in tighter spreads.",
+                {
+                    "candidate_family": "divergence_sweep",
+                    "spread_filter": spread_filter,
+                    "side_lock": best_rule.get("side") or base_params.side_lock,
+                },
+            )
+        if divergence.get("style") == "reversal" and best_rule.get("side") in {"long", "short"} and not proposals:
+            add_proposal(
+                "continue",
+                "Repeat divergence_sweep without mutation to confirm whether the selected-day reversal edge is stable.",
+                {
+                    "candidate_family": "divergence_sweep",
+                    "side_lock": best_rule.get("side") or base_params.side_lock,
+                },
+            )
+        return proposals[: max_next_jobs]
+
     if seed_rule is not None and hints:
         add_proposal(
             "refine",
