@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import statistics
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from itertools import combinations
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 from zoneinfo import ZoneInfo
@@ -18,6 +18,7 @@ from datavis.research.guardrails import (
 )
 from datavis.research.models import CandidateSeed, ContrastHint, EntryResearchParameters, PredicateSpec
 from datavis.research.mutation import generate_mutation_proposals
+from datavis.separation import brokerday_bounds
 
 
 BROKER_TZ = ZoneInfo("Australia/Sydney")
@@ -51,6 +52,7 @@ def execute_entry_research(
     slice_bounds = resolve_slice_bounds(
         conn,
         symbol=params.symbol,
+        study_brokerday=params.study_brokerday,
         slice_rows=params.slice_rows,
         slice_offset_rows=params.slice_offset_rows,
         lookahead_ticks=int(variant["horizon_ticks"]),
@@ -109,31 +111,55 @@ def resolve_slice_bounds(
     conn: Any,
     *,
     symbol: str,
+    study_brokerday: str | None,
     slice_rows: int,
     slice_offset_rows: int,
     lookahead_ticks: int,
 ) -> Dict[str, Any]:
     with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT MAX(id) AS max_id
-            FROM public.ticks
-            WHERE symbol = %s
-            """,
-            (symbol,),
-        )
+        if study_brokerday:
+            day_value = date.fromisoformat(study_brokerday)
+            start_ts, end_ts = brokerday_bounds(day_value)
+            cur.execute(
+                """
+                SELECT MIN(id) AS min_id, MAX(id) AS max_id
+                FROM public.ticks
+                WHERE symbol = %s
+                  AND timestamp >= %s
+                  AND timestamp < %s
+                """,
+                (symbol, start_ts, end_ts),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT NULL::BIGINT AS min_id, MAX(id) AS max_id
+                FROM public.ticks
+                WHERE symbol = %s
+                """,
+                (symbol,),
+            )
         row = cur.fetchone()
-    latest_id = int((row or [0])[0] or 0)
+    row_values = row or (None, 0)
+    min_day_id = int(row_values[0]) if row_values[0] is not None else None
+    latest_id = int(row_values[1] or 0)
     if latest_id <= 0:
+        if study_brokerday:
+            raise RuntimeError(f"No ticks found for symbol {symbol} on broker day {study_brokerday}.")
         raise RuntimeError(f"No ticks found for symbol {symbol}.")
     end_tick_id = max(1, latest_id - max(lookahead_ticks, 4) - max(0, int(slice_offset_rows)))
+    if min_day_id is not None and end_tick_id < min_day_id:
+        end_tick_id = latest_id
     start_tick_id = max(1, end_tick_id - max(1, slice_rows) + 1)
+    if min_day_id is not None:
+        start_tick_id = max(min_day_id, start_tick_id)
     return {
         "latest_tick_id": latest_id,
         "start_tick_id": start_tick_id,
         "end_tick_id": end_tick_id,
         "slice_rows": max(0, end_tick_id - start_tick_id + 1),
         "slice_offset_rows": max(0, int(slice_offset_rows)),
+        "study_brokerday": study_brokerday,
     }
 
 

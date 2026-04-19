@@ -11,7 +11,7 @@ from datavis.control.service_manager import ServiceManager
 from datavis.research.guardrails import default_parameters
 from datavis.research.guardrails import sanitize_parameters
 from datavis.research.mutation import generate_mutation_proposals, summarize_history
-from datavis.research.state import CONTROL_STATE_KEY, default_control_state, ensure_control_state, set_state
+from datavis.research.state import CONTROL_STATE_KEY, default_control_state, ensure_control_state, normalize_brokerday_text, set_state
 
 
 class ResearchManager:
@@ -94,6 +94,31 @@ class ResearchManager:
                 )
             return [dict(row) for row in cur.fetchall()]
 
+    def selected_study_day(self, conn: Any) -> Optional[str]:
+        control = ensure_control_state(conn, self._settings.research_settings)
+        return normalize_brokerday_text(control.get("selected_study_day"))
+
+    def set_selected_study_day(self, conn: Any, *, brokerday_text: Optional[str]) -> Dict[str, Any]:
+        selected_day = normalize_brokerday_text(brokerday_text)
+        if selected_day and not self._brokerday_exists(conn, selected_day):
+            raise ValueError(f"broker day {selected_day} is not available for {self._settings.research_settings.symbol}")
+        control = ensure_control_state(conn, self._settings.research_settings)
+        control["selected_study_day"] = selected_day
+        set_state(conn, CONTROL_STATE_KEY, control)
+        return self.study_day_state(conn, control=control)
+
+    def study_day_state(self, conn: Any, *, control: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+        resolved_control = dict(control or ensure_control_state(conn, self._settings.research_settings))
+        selected_day = normalize_brokerday_text(resolved_control.get("selected_study_day"))
+        available_days = self.list_available_brokerdays(conn, limit=30)
+        latest_available = available_days[0] if available_days else None
+        return {
+            "selectedStudyDay": selected_day,
+            "effectiveStudyDay": selected_day or latest_available,
+            "availableBrokerdays": available_days,
+            "latestAvailableBrokerday": latest_available,
+        }
+
     def pause(self, conn: Any, *, reason: str) -> Dict[str, Any]:
         control = ensure_control_state(conn, self._settings.research_settings)
         control["paused"] = True
@@ -107,8 +132,16 @@ class ResearchManager:
         cleared_final_verdict = str(control.get("final_verdict") or "")
         self._wake_research_loop(control, reason=reason, cleared_final_verdict=cleared_final_verdict or None)
         pending_or_running = self._latest_job(conn, statuses=("pending", "running"))
+        selected_day = normalize_brokerday_text(control.get("selected_study_day"))
         if pending_or_running:
             control["seeded"] = True
+            job_day = self._job_study_day(pending_or_running)
+            if selected_day and job_day and job_day != selected_day:
+                control["last_resume_day_mismatch"] = {
+                    "selectedStudyDay": selected_day,
+                    "queuedJobId": int(pending_or_running["id"]),
+                    "queuedJobStudyDay": job_day,
+                }
         if cleared_final_verdict:
             control["last_resume_cleared_final_verdict"] = cleared_final_verdict
         service_actions = self._ensure_research_services_ready()
@@ -241,8 +274,14 @@ class ResearchManager:
 
     def seed_next_job(self, conn: Any, *, reason: str) -> Dict[str, Any]:
         runtime_policy = resolve_research_runtime(conn, self._settings, self._settings.research_settings)
+        selected_day = self.selected_study_day(conn)
         existing_pending = self._latest_job(conn, statuses=("pending", "running"))
         if existing_pending:
+            job_day = self._job_study_day(existing_pending)
+            if selected_day and job_day != selected_day:
+                raise ValueError(
+                    f"queued work targets broker day {job_day or 'latest available'}; clear or finish that work before seeding {selected_day}"
+                )
             control = ensure_control_state(conn, self._settings.research_settings)
             self._wake_research_loop(control, reason=reason)
             control["seeded"] = True
@@ -259,7 +298,7 @@ class ResearchManager:
                 "message": "Existing queued work was kept and the worker wake-up path was triggered.",
             }
 
-        selected = self._select_seed_job(conn, runtime_policy=runtime_policy, reason=reason)
+        selected = self._select_seed_job(conn, runtime_policy=runtime_policy, reason=reason, study_day=selected_day)
         if selected is None:
             if self._has_any_run(conn):
                 return {
@@ -280,6 +319,7 @@ class ResearchManager:
                 "params": sanitize_parameters(
                     params.model_copy(
                         update={
+                            "study_brokerday": selected_day,
                             "side_lock": runtime_policy.get("preferredSideLock") or params.side_lock,
                             "mutation_note": reason[:512],
                         }
@@ -306,6 +346,8 @@ class ResearchManager:
         self._wake_research_loop(control, reason=reason)
         control["seeded"] = True
         control["last_seeded_job_id"] = inserted.get("jobId")
+        if selected_day:
+            control["selected_study_day"] = selected_day
         service_actions = self._ensure_research_services_ready()
         if service_actions:
             control["last_seed_service_actions"] = service_actions
@@ -471,13 +513,21 @@ class ResearchManager:
             "message": "seeded bounded research job",
         }
 
-    def _select_seed_job(self, conn: Any, *, runtime_policy: Mapping[str, Any], reason: str) -> Optional[Dict[str, Any]]:
+    def _select_seed_job(
+        self,
+        conn: Any,
+        *,
+        runtime_policy: Mapping[str, Any],
+        reason: str,
+        study_day: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
         for proposal in self._latest_decision_proposals(conn):
             selected = self._proposal_to_seed_job(
                 conn,
                 proposal=proposal,
                 proposal_source="decision-briefing",
                 default_reason=reason,
+                study_day=study_day,
             )
             if selected:
                 return selected
@@ -487,6 +537,7 @@ class ResearchManager:
                 proposal=proposal,
                 proposal_source="runsummary-mutation",
                 default_reason=reason,
+                study_day=study_day,
             )
             if selected:
                 return selected
@@ -510,6 +561,7 @@ class ResearchManager:
                 proposal=proposal,
                 proposal_source="generated-fallback",
                 default_reason=reason,
+                study_day=study_day,
             )
             if selected:
                 return selected
@@ -522,10 +574,13 @@ class ResearchManager:
         proposal: Mapping[str, Any],
         proposal_source: str,
         default_reason: str,
+        study_day: Optional[str],
     ) -> Optional[Dict[str, Any]]:
         params_payload = dict(proposal.get("parameters") or {})
         if not params_payload:
             return None
+        if study_day:
+            params_payload["study_brokerday"] = study_day
         if not params_payload.get("mutation_note"):
             params_payload["mutation_note"] = str(proposal.get("reason") or default_reason)[:512]
         params = sanitize_parameters(params_payload, limits=self._build_limits())
@@ -650,6 +705,39 @@ class ResearchManager:
                 """
             )
             return [str(row[0]) for row in cur.fetchall() if row and row[0]]
+
+    def list_available_brokerdays(self, conn: Any, *, limit: int = 30) -> List[str]:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT (((timestamp AT TIME ZONE 'Australia/Sydney') - INTERVAL '8 hours')::date) AS brokerday
+                FROM public.ticks
+                WHERE symbol = %s
+                ORDER BY brokerday DESC
+                LIMIT %s
+                """,
+                (self._settings.research_settings.symbol, limit),
+            )
+            return [normalize_brokerday_text(row[0]) for row in cur.fetchall() if row and row[0]]
+
+    def _brokerday_exists(self, conn: Any, brokerday_text: str) -> bool:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1
+                FROM public.ticks
+                WHERE symbol = %s
+                  AND (((timestamp AT TIME ZONE 'Australia/Sydney') - INTERVAL '8 hours')::date) = %s::date
+                LIMIT 1
+                """,
+                (self._settings.research_settings.symbol, brokerday_text),
+            )
+            return cur.fetchone() is not None
+
+    @staticmethod
+    def _job_study_day(job: Mapping[str, Any]) -> Optional[str]:
+        config = dict(job.get("config") or {})
+        return normalize_brokerday_text(config.get("study_brokerday"))
 
     @staticmethod
     def _job_is_proposal_derived(job: Mapping[str, Any]) -> bool:

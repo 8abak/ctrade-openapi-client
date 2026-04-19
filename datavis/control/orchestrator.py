@@ -35,6 +35,22 @@ class EngineeringOrchestrator:
         self._research_manager = research_manager
         self._journal = EngineeringJournal(settings, "orchestrator")
 
+    def _engineering_runtime_policy(self, conn: Any) -> Dict[str, Any]:
+        try:
+            return resolve_engineering_runtime(conn, self._settings, self._settings.research_settings)
+        except Exception:
+            return {
+                "enabled": bool(self._settings.enable_loop),
+                "maxRetriesPerIncident": int(self._settings.incident_max_retries),
+                "restartRateLimitPerHour": int(self._settings.max_restarts_per_hour),
+                "maxPatchFiles": int(self._settings.max_patch_files),
+                "maxPatchLineChanges": int(self._settings.max_patch_line_changes),
+                "maxPatchBytes": int(self._settings.max_patch_bytes),
+                "engineeringModelOverride": "",
+                "mission": {},
+                "settings": {},
+            }
+
     def run_forever(self, conn_factory: Any) -> None:
         self._journal.write(level="INFO", event_type="engineering.start", message="engineering orchestrator loop started")
         while True:
@@ -45,8 +61,8 @@ class EngineeringOrchestrator:
                 time.sleep(self._settings.poll_seconds)
 
     def run_once(self, conn: Any) -> bool:
-        runtime_policy = resolve_engineering_runtime(conn, self._settings, self._settings.research_settings)
-        if not runtime_policy.get("enabled", True):
+        policy = self._engineering_runtime_policy(conn)
+        if not policy.get("enabled", True):
             return False
         state = self._store.ensure_state(conn)
         if not state.get("enabled", True) or state.get("paused", False) or state.get("manual_takeover", False):
@@ -66,7 +82,7 @@ class EngineeringOrchestrator:
                 payload=candidate.model_dump(),
                 conn=conn,
             )
-        return self._process_incident(conn, incident, runtime_policy=runtime_policy)
+        return self._process_incident(conn, incident, runtime_policy=policy)
 
     def _process_incident(self, conn: Any, incident: Dict[str, Any], *, runtime_policy: Dict[str, Any]) -> bool:
         incident_id = int(incident["id"])

@@ -1,0 +1,10 @@
+{
+  "detail": "Repair executor completed a bounded simulated patch path.",
+  "durationMs": 23.89,
+  "payload": {
+    "ok": true,
+    "patchedText": "\ndef _validate_feature_list(values: Iterable[str], *, max_count: int) -> List[str]:\n    normalized: List[str] = []\n    seen = set()\n    for raw in values:\n        value = str(raw or \"\").strip()\n        if not value:\n            continue\n        if value not in APPROVED_FEATURES:\n            raise ValueError(f\"unsupported feature toggle: {value}\")\n        if value in seen:\n            continue\n        normalized.append(value)\n        seen.add(value)\n    if not normalized:\n        normalized = list(DEFAULT_FEATURES)\n    if len(normalized) > max_count:\n        normalized = normalized[:max_count]\n    return normalized\n\n",
+    "path": "C:\\Users\\MRF585~1.BAB\\AppData\\Local\\Temp\\datavis-control-patch-p93awomy\\guardrails.py"
+  },
+  "status": "passed"
+}

@@ -13,7 +13,7 @@ from datavis.research.guardrails import SearchGuardrails, default_parameters, sa
 from datavis.research.journal import ResearchJournal, write_decision_artifacts
 from datavis.research.models import EntryResearchParameterPatch, EntryResearchParameters, SupervisorDecision
 from datavis.research.mutation import evaluate_stop_guardrails, generate_mutation_proposals, summarize_history
-from datavis.research.state import CONTROL_STATE_KEY, ensure_control_state, get_state, set_state
+from datavis.research.state import CONTROL_STATE_KEY, ensure_control_state, set_state
 
 
 CONTROL_SETTINGS = load_control_settings()
@@ -84,7 +84,7 @@ class ResearchOrchestrator:
             slice_rows=seed_slice,
             warmup_rows=self._settings.seed_warmup_rows,
             iteration=1,
-        )
+        ).model_copy(update={"study_brokerday": control.get("selected_study_day")})
         if runtime_policy.get("preferredSideLock") in {"long", "short"}:
             params = params.model_copy(update={"side_lock": runtime_policy["preferredSideLock"]})
         self._insert_job(conn, params, requested_by="orchestrator.seed", parent_decision_id=None, parent_job_id=None, action="continue", reason="initial seed job")

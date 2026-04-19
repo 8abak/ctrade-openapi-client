@@ -24,7 +24,9 @@
     loading: false,
     candidateFilters: { day: "", side: "", family: "", promotedStatus: "", spreadRegime: "", sessionBucket: "" },
     journalFilters: { component: "", level: "", eventType: "" },
-    dayReviewFilters: { day: "", runId: "", setupFingerprint: "" }
+    dayReviewFilters: { day: "", runId: "", setupFingerprint: "" },
+    journalLimit: 20,
+    dayReviewLimit: 20
   };
 
   const elements = {
@@ -249,7 +251,8 @@
         "<h3 class=\"control-headline\">", escapeHtml((data.mission || {}).missionTitle || "Mission"), "</h3>",
         "<p class=\"control-copy\">", escapeHtml((data.mission || {}).mainObjective || "No mission configured."), "</p>",
         kvGrid([
-          { label: "Broker Day", value: data.brokerday || "unknown" },
+          { label: "Selected Study Day", value: data.selectedStudyDay || "latest available" },
+          { label: "Latest Run Day", value: data.brokerday || "unknown" },
           { label: "Research", value: research.state || "unknown" },
           { label: "Engineering", value: engineering.state || "unknown" },
           { label: "Queue Depth", value: String(((research.activity || {}).queueDepth) == null ? 0 : ((research.activity || {}).queueDepth)) }
@@ -261,6 +264,7 @@
           { action: "resumeEngineering", label: "Resume Engineering", kind: "ghost-button" }
         ])
       ].join("")),
+      card("Study Day", renderStudyDayControl(research)),
       card("Operating Story", renderStoryCard(data.story || {})),
       card("Live Research", renderResearchActivity(research.activity || {})),
       card("Last Completed Result", renderLastCompletedResult(research.lastCompletedResult || {})),
@@ -325,6 +329,7 @@
     return [
       kvGrid([
         { label: "Last Completed", value: summary.lastCompletedRun || "n/a" },
+        { label: "Selected Study Day", value: summary.selectedStudyDay || "latest available" },
         { label: "Last Family", value: summary.lastFamilyTried || "n/a" },
         { label: "Last Verdict", value: summary.lastVerdict || "n/a" },
         { label: "Queue Depth", value: String(summary.queueDepth == null ? 0 : summary.queueDepth) },
@@ -335,6 +340,38 @@
       "<div><span class=\"sql-label\">Recommended Action</span><p class=\"control-copy\">", escapeHtml(summary.recommendedAction || "No action required."), "</p></div>",
       "<div><span class=\"sql-label\">What The Verdict Means</span><p class=\"control-copy\">", escapeHtml(summary.latestVerdictMeaning || "n/a"), "</p></div>",
       "</div>"
+    ].join("");
+  }
+
+  function renderStudyDayControl(research) {
+    const studyDay = (research || {}).studyDay || {};
+    const selected = studyDay.selectedStudyDay || "";
+    const available = Array.isArray(studyDay.availableBrokerdays) ? studyDay.availableBrokerdays.slice() : [];
+    if (selected && available.indexOf(selected) === -1) {
+      available.unshift(selected);
+    }
+    return [
+      "<form class=\"control-form\" data-role=\"studyDayForm\">",
+      "<div class=\"control-form-grid\">",
+      "<label class=\"control-field\">",
+      "<span>Study Broker Day</span>",
+      "<select name=\"brokerday\">",
+      "<option value=\"\">Latest available</option>",
+      available.map(function (day) {
+        const isSelected = String(day) === String(selected) ? " selected" : "";
+        return "<option value=\"" + escapeHtml(day) + "\"" + isSelected + ">" + escapeHtml(day) + "</option>";
+      }).join(""),
+      "</select>",
+      "</label>",
+      "</div>",
+      kvGrid([
+        { label: "Selected", value: studyDay.selectedStudyDay || "latest available" },
+        { label: "Effective", value: studyDay.effectiveStudyDay || "n/a" },
+        { label: "Latest Available", value: studyDay.latestAvailableBrokerday || "n/a" },
+        { label: "Recent Days", value: String(available.length) }
+      ]),
+      "<div class=\"control-action-row\"><button class=\"ghost-button compact-button\" type=\"submit\">Save Study Day</button></div>",
+      "</form>"
     ].join("");
   }
 
@@ -427,7 +464,9 @@
         kvGrid([
           { label: "Run", value: currentRun.id || "none" },
           { label: "Job", value: currentJob.id || "none" },
+          { label: "Selected Study Day", value: (data.selectedStudyDay) || "latest available" },
           { label: "Broker Day", value: ((data.activity || {}).currentBrokerday) || "unknown" },
+          { label: "Target Study Day", value: ((data.activity || {}).currentStudyDayTarget) || ((data.activity || {}).nextStudyDayTarget) || "n/a" },
           { label: "Family", value: ((data.activity || {}).currentFamily) || "unknown" },
           { label: "Fingerprint", value: ((data.activity || {}).currentFingerprint) || "unknown" },
           { label: "Proposal", value: ((data.activity || {}).currentProposalKind) || "unknown" },
@@ -442,6 +481,7 @@
         kvGrid([
           { label: "Loop State", value: data.state || "unknown" },
           { label: "Last Completed Run", value: (data.summary || {}).lastCompletedRun || "n/a" },
+          { label: "Selected Study Day", value: data.selectedStudyDay || "latest available" },
           { label: "Current Run", value: currentRun.id || "none" },
           { label: "Queue Depth", value: String((((data.activity || {}).queueDepth) == null ? 0 : ((data.activity || {}).queueDepth))) },
           { label: "Fingerprint", value: (((focusRun.config || {}).config_fingerprint) || "n/a") },
@@ -454,8 +494,10 @@
           { action: "resetResearch", label: "Reset State", kind: "ghost-button" }
         ])
       ].join("")),
+      card("Study Day Control", renderStudyDayControl(data)),
       card("Last Completed Result", renderLastCompletedResult(data.lastCompletedResult || {})),
       card("Current Config", kvGrid([
+        { label: "Study Day", value: ((focusRun.config || {}).study_brokerday) || "n/a" },
         { label: "Slice Rows", value: ((focusRun.config || {}).slice_rows) || "n/a" },
         { label: "Family", value: ((focusRun.config || {}).candidate_family) || "n/a" },
         { label: "Side Lock", value: ((focusRun.config || {}).side_lock) || "n/a" },
@@ -465,6 +507,7 @@
         { label: "ID", render: function (row) { return escapeHtml(row.id); } },
         { label: "Status", render: function (row) { return escapeHtml(row.status); } },
         { label: "Requested By", render: function (row) { return escapeHtml(row.requested_by || "n/a"); } },
+        { label: "Study Day", render: function (row) { return escapeHtml(((row.config || {}).study_brokerday) || "n/a"); } },
         { label: "Proposal", render: function (row) { return escapeHtml(proposalKindLabel(row.proposal || {})); } },
         { label: "Proposal Source", render: function (row) { return escapeHtml(((row.proposal || {}).proposalSource) || "n/a"); } },
         { label: "Family", render: function (row) { return escapeHtml(((row.proposal || {}).family) || ((row.config || {}).candidate_family) || "n/a"); } },
@@ -483,6 +526,7 @@
       card("Recent Runs", simpleTable([
         { label: "Run", render: function (row) { return escapeHtml(row.id); } },
         { label: "Broker Day", render: function (row) { return escapeHtml(row.brokerday || "n/a"); } },
+        { label: "Study Day", render: function (row) { return escapeHtml(((row.config || {}).study_brokerday) || "n/a"); } },
         { label: "Status", render: function (row) { return escapeHtml(row.status); } },
         { label: "Verdict", render: function (row) { return escapeHtml(row.verdict_hint || "n/a"); } },
         { label: "Precision", render: function (row) { return escapeHtml(humanNumber((row.metrics || {}).cleanPrecision, 3)); } },
@@ -621,12 +665,13 @@
   }
 
   function renderDayReview(data) {
+    const page = (data || {}).entriesPage || {};
     return [
       renderSectionStory(state.overview),
       card("Review Scope", [
         "<form class=\"control-form\" id=\"dayReviewForm\">",
         "<div class=\"control-form-grid\">",
-        field("Broker Day", "day", state.dayReviewFilters.day || data.brokerday || ""),
+        field("Broker Day", "day", state.dayReviewFilters.day || data.selectedStudyDay || data.brokerday || ""),
         field("Run ID", "runId", state.dayReviewFilters.runId || ((data.run || {}).id || "")),
         field("Setup Fingerprint", "setupFingerprint", state.dayReviewFilters.setupFingerprint || ""),
         "</div>",
@@ -644,6 +689,16 @@
         headline: (data.run || {}).headline,
         candidateCount: (data.candidates || []).length
       })),
+      card("Review Detail", [
+        kvGrid([
+          { label: "Selected Study Day", value: data.selectedStudyDay || "latest available" },
+          { label: "Visible Entries", value: String((data.entries || []).length) },
+          { label: "Total Entries", value: String(page.totalCount == null ? 0 : page.totalCount) },
+          { label: "Has More", value: page.hasMore ? "yes" : "no" }
+        ]),
+        "<div class=\"control-callout\"><div><span class=\"sql-label\">Raw Detail</span><p class=\"control-copy\">Use SQL view for full raw detail when you need the complete entry set beyond the default page.</p></div></div>",
+        page.hasMore ? "<div class=\"control-action-row\"><button class=\"ghost-button compact-button\" type=\"button\" data-action=\"loadMoreDayReview\">Load More</button></div>" : ""
+      ].join("")),
       card("Chart", renderDayChart((data.chart || {}).ticks || [], (data.chart || {}).markers || [])),
       card("Matched Entries", simpleTable([
         { label: "Time", render: function (row) { return escapeHtml(humanWhen(row.timestamp)); } },
@@ -695,7 +750,8 @@
     ].join("");
   }
 
-  function renderJournals(rows) {
+  function renderJournals(data) {
+    const rows = (data || {}).rows || [];
     return [
       renderSectionStory(state.overview),
       card("Filters", [
@@ -707,6 +763,16 @@
         "</div>",
         "<div class=\"control-action-row\"><button class=\"ghost-button compact-button\" type=\"submit\">Apply Filters</button></div>",
         "</form>"
+      ].join("")),
+      card("Journal Detail", [
+        kvGrid([
+          { label: "Visible Events", value: String(rows.length) },
+          { label: "Total Events", value: String((data || {}).totalCount == null ? 0 : (data || {}).totalCount) },
+          { label: "Current Limit", value: String((data || {}).limit == null ? 0 : (data || {}).limit) },
+          { label: "Has More", value: (data || {}).hasMore ? "yes" : "no" }
+        ]),
+        "<div class=\"control-callout\"><div><span class=\"sql-label\">Raw Detail</span><p class=\"control-copy\">Use SQL view for full raw detail when you need the full journal stream beyond the default page.</p></div></div>",
+        (data || {}).hasMore ? "<div class=\"control-action-row\"><button class=\"ghost-button compact-button\" type=\"button\" data-action=\"loadMoreJournals\">Load More</button></div>" : ""
       ].join("")),
       card("Journal Stream", simpleTable([
         { label: "Time", render: function (row) { return escapeHtml(humanWhen(row.created_at)); } },
@@ -838,11 +904,12 @@
         elements.content.innerHTML = renderCandidates(state.candidates);
       } else if (state.currentSection === "day-review") {
         const query = new URLSearchParams(cleanObject(state.dayReviewFilters));
+        query.set("entryLimit", String(state.dayReviewLimit));
         state.dayReview = await fetchJson("/api/control/day-review?" + query.toString());
         elements.content.innerHTML = renderDayReview(state.dayReview);
       } else if (state.currentSection === "journals") {
         const query = new URLSearchParams(cleanObject(state.journalFilters));
-        query.set("limit", "120");
+        query.set("limit", String(state.journalLimit));
         state.journals = await fetchJson("/api/control/journals?" + query.toString());
         elements.content.innerHTML = renderJournals(state.journals);
       } else if (state.currentSection === "settings") {
@@ -916,6 +983,14 @@
     }
     if (action === "runSmoke") {
       return postAction("/api/control/repair/run-smoke-tests", { tests: [] }, "Smoke tests started.");
+    }
+    if (action === "loadMoreJournals") {
+      state.journalLimit += 20;
+      return loadSection();
+    }
+    if (action === "loadMoreDayReview") {
+      state.dayReviewLimit += 20;
+      return loadSection();
     }
     if (action === "seedResearch") {
       return postAction("/api/control/research/seed-next", actionReason("seeded next job from control panel"), "Seeded next research job.");
@@ -1006,13 +1081,30 @@
       loadSection();
       return;
     }
+    if (form.dataset.role === "studyDayForm") {
+      const payload = formToObject(form);
+      fetchJson("/api/control/research/study-day", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      }).then(function () {
+        loadSection().then(function () {
+          setStatus("Study day saved.", "success");
+        });
+      }).catch(function (error) {
+        setStatus((error && error.detail) || "Study day save failed.", "error");
+      });
+      return;
+    }
     if (form.id === "journalFilterForm") {
       state.journalFilters = formToObject(form);
+      state.journalLimit = 20;
       loadSection();
       return;
     }
     if (form.id === "dayReviewForm") {
       state.dayReviewFilters = formToObject(form);
+      state.dayReviewLimit = 20;
       loadSection();
       return;
     }

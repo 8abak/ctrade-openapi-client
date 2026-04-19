@@ -12,15 +12,14 @@ from datavis.control.panel_state import (
     audit_operator_action,
     load_mission,
     load_panel_settings,
-    mission_briefing_payload,
     resolve_engineering_runtime,
     resolve_research_runtime,
     save_mission,
     save_panel_settings,
 )
 from datavis.control.runtime import ControlRuntime
-from datavis.research.guardrails import APPROVED_CANDIDATE_FAMILIES
-from datavis.separation import brokerday_bounds, brokerday_for_timestamp
+from datavis.research.state import ensure_control_state, normalize_brokerday_text
+from datavis.separation import brokerday_bounds
 
 
 def serialize_value(value: Any) -> Any:
@@ -207,6 +206,7 @@ class ControlPanelService:
                 or (research_status.get("lastCompletedRun") or {}).get("brokerday")
                 or (research_status.get("bestCandidate") or {}).get("brokerday")
             ),
+            "selectedStudyDay": research_status.get("selectedStudyDay"),
             "research": {**research_status, "policy": research_policy},
             "engineering": {
                 "state": self._derive_engineering_state(current_incident=current_incident),
@@ -228,6 +228,7 @@ class ControlPanelService:
     def research_status(self, conn: Any) -> Dict[str, Any]:
         status = self._runtime.research_manager.status(conn)
         control = dict(status.get("value") or {})
+        study_day = self._runtime.research_manager.study_day_state(conn, control=control)
         latest_run = self._runtime.research_manager.latest_run(conn)
         latest_errors = self._runtime.research_manager.latest_errors(conn, limit=8)
         queue_counts = self._job_counts(conn)
@@ -263,6 +264,8 @@ class ControlPanelService:
             "state": self._derive_research_state(status, queue_counts=queue_counts, current_run=current_run),
             "status": serialize_mapping(status),
             "control": serialize_mapping(control),
+            "selectedStudyDay": study_day.get("selectedStudyDay"),
+            "studyDay": study_day,
             "latestRun": self._serialize_run_payload(latest_run),
             "lastCompletedRun": self._serialize_run_payload(last_completed_run),
             "currentRun": self._serialize_run_payload(current_run),
@@ -649,74 +652,82 @@ class ControlPanelService:
         component: Optional[str] = None,
         level: Optional[str] = None,
         event_type: Optional[str] = None,
-        limit: int = 120,
-    ) -> List[Dict[str, Any]]:
-        items: List[Dict[str, Any]] = []
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            research_sql = """
-                SELECT *
+        limit: int = 20,
+    ) -> Dict[str, Any]:
+        filters_sql = []
+        params: List[Any] = []
+        if component:
+            filters_sql.append("component = %s")
+            params.append(component)
+        if level:
+            filters_sql.append("UPPER(level) = UPPER(%s)")
+            params.append(level)
+        if event_type:
+            filters_sql.append("event_type = %s")
+            params.append(event_type)
+        where_clause = f"WHERE {' AND '.join(filters_sql)}" if filters_sql else ""
+        base_sql = f"""
+            FROM (
+                SELECT
+                    id,
+                    component,
+                    level,
+                    event_type,
+                    message,
+                    payload,
+                    created_at,
+                    'research'::text AS source
                 FROM research.journal
-                ORDER BY created_at DESC, id DESC
-                LIMIT %s
-            """
-            cur.execute(research_sql, (limit,))
-            for row in cur.fetchall():
-                payload = dict(row)
-                payload["source"] = "research"
-                items.append(payload)
-            cur.execute(
-                """
-                SELECT *
+                UNION ALL
+                SELECT
+                    id,
+                    component,
+                    level,
+                    event_type,
+                    message,
+                    payload,
+                    created_at,
+                    'engineering'::text AS source
                 FROM research.engineering_journal
-                ORDER BY created_at DESC, id DESC
-                LIMIT %s
-                """,
-                (limit,),
-            )
-            for row in cur.fetchall():
-                payload = dict(row)
-                payload["source"] = "engineering"
-                items.append(payload)
-            cur.execute(
-                """
-                SELECT *
+                UNION ALL
+                SELECT
+                    id,
+                    'panel'::text AS component,
+                    'INFO'::text AS level,
+                    action_type AS event_type,
+                    (actor || ' ' || action_type) AS message,
+                    jsonb_build_object(
+                        'actor', actor,
+                        'scope', scope,
+                        'targetId', target_id,
+                        'payload', payload,
+                        'result', result
+                    ) AS payload,
+                    created_at,
+                    'operator'::text AS source
                 FROM research.control_operator_action
+            ) journal_feed
+            {where_clause}
+        """
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(f"SELECT COUNT(*) AS total_count {base_sql}", params)
+            total_count = int((cur.fetchone() or {}).get("total_count") or 0)
+            cur.execute(
+                f"""
+                SELECT *
+                {base_sql}
                 ORDER BY created_at DESC, id DESC
                 LIMIT %s
                 """,
-                (limit,),
+                [*params, limit],
             )
-            for row in cur.fetchall():
-                action = dict(row)
-                items.append(
-                    {
-                        "id": action["id"],
-                        "component": "panel",
-                        "level": "INFO",
-                        "event_type": action["action_type"],
-                        "message": f"{action['actor']} {action['action_type']}",
-                        "payload": {
-                            "actor": action["actor"],
-                            "scope": action["scope"],
-                            "targetId": action["target_id"],
-                            "payload": action["payload"],
-                            "result": action["result"],
-                        },
-                        "created_at": action["created_at"],
-                        "source": "operator",
-                    }
-                )
-        filtered = []
-        for item in items:
-            if component and str(item.get("component") or "") != component:
-                continue
-            if level and str(item.get("level") or "").upper() != str(level).upper():
-                continue
-            if event_type and str(item.get("event_type") or "") != event_type:
-                continue
-            filtered.append(item)
-        filtered.sort(key=lambda item: (str(item.get("created_at") or ""), int(item.get("id") or 0)), reverse=True)
-        return [serialize_mapping(row) for row in filtered[:limit]]
+            rows = [serialize_mapping(dict(row)) for row in cur.fetchall()]
+        return {
+            "rows": rows,
+            "limit": limit,
+            "totalCount": total_count,
+            "hasMore": total_count > len(rows),
+        }
 
     def list_candidates(
         self,
@@ -888,10 +899,20 @@ class ControlPanelService:
         brokerday_text: Optional[str],
         run_id: Optional[int],
         setup_fingerprint: Optional[str],
+        entry_limit: int = 20,
     ) -> Dict[str, Any]:
-        run = self._resolve_day_review_run(conn, brokerday_text=brokerday_text, run_id=run_id)
+        review_day = brokerday_text or self._selected_study_day(conn)
+        run = self._resolve_day_review_run(conn, brokerday_text=review_day, run_id=run_id)
         if not run:
-            return {"brokerday": brokerday_text, "run": None, "candidates": [], "entries": [], "chart": {"ticks": [], "markers": []}}
+            return {
+                "brokerday": review_day,
+                "selectedStudyDay": self._selected_study_day(conn),
+                "run": None,
+                "candidates": [],
+                "entries": [],
+                "entriesPage": {"limit": entry_limit, "totalCount": 0, "hasMore": False},
+                "chart": {"ticks": [], "markers": []},
+            }
         review_candidates = self._load_day_review_candidates(conn, run_id=int(run["id"]), setup_fingerprint=setup_fingerprint)
         features = self._load_feature_snapshots(conn, run_id=int(run["id"]))
         labels = self._load_entry_labels(conn, run_id=int(run["id"]))
@@ -930,16 +951,25 @@ class ControlPanelService:
                         "candidate": candidate["candidateName"],
                     }
                 )
-        entries.sort(key=lambda item: item["tickId"])
+        entries.sort(key=lambda item: item["tickId"], reverse=True)
+        markers.sort(key=lambda item: item["tickId"], reverse=True)
+        visible_entries = entries[:entry_limit]
+        visible_tick_ids = {int(item["tickId"]) for item in visible_entries}
         ticks = self._load_chart_ticks(conn, brokerday=str(run["brokerday"]))
         return {
             "brokerday": serialize_value(run["brokerday"]),
             "run": self._serialize_run_payload(run),
             "candidates": review_candidates,
-            "entries": entries[:500],
+            "selectedStudyDay": self._selected_study_day(conn),
+            "entries": visible_entries,
+            "entriesPage": {
+                "limit": entry_limit,
+                "totalCount": len(entries),
+                "hasMore": len(entries) > len(visible_entries),
+            },
             "chart": {
                 "ticks": ticks,
-                "markers": markers[:500],
+                "markers": [item for item in markers if int(item["tickId"]) in visible_tick_ids],
             },
         }
 
@@ -1177,8 +1207,13 @@ class ControlPanelService:
         engineering_state = self._derive_engineering_state(current_incident=current_incident)
         latest_decision = dict(status.get("latest_decision") or {})
         current_config = dict(current_job.get("config") or current_run.get("config") or {})
+        next_config = dict(next_job.get("config") or {})
         current_proposal = self._job_proposal_payload(config=current_config, guardrails=dict(current_job.get("guardrails") or {}))
         incident_root_cause = self._incident_root_cause(current_incident)
+        selected_study_day = normalize_brokerday_text(control.get("selected_study_day"))
+        current_target_day = normalize_brokerday_text(current_config.get("study_brokerday"))
+        next_target_day = normalize_brokerday_text(next_config.get("study_brokerday"))
+        queued_target_day = current_target_day or next_target_day
 
         if current_job:
             current_phase = "worker"
@@ -1206,6 +1241,10 @@ class ControlPanelService:
             blocker = f"Engineering incident #{current_incident.get('id')} is escalated: {incident_root_cause}"
             action = "Investigate escalated incident"
             action_key = "investigate_incident"
+        elif selected_study_day and next_job and queued_target_day != selected_study_day:
+            blocker = f"Selected study day {selected_study_day} differs from queued work day {queued_target_day or 'latest available'}."
+            action = "Clear or finish the queued work before seeding the selected day."
+            action_key = "align_selected_day"
         elif current_job:
             blocker = "none"
             action = "No action required while the active run is executing."
@@ -1246,9 +1285,13 @@ class ControlPanelService:
             "lastFamilyTried": ((last_completed_run.get("config") or {}).get("candidate_family") if last_completed_run else None),
             "lastVerdict": last_completed_run.get("verdict_hint"),
             "lastCompletedAt": serialize_value(last_completed_run.get("finished_at")),
+            "selectedStudyDay": selected_study_day,
+            "effectiveStudyDay": selected_study_day or serialize_value(last_completed_run.get("brokerday")),
             "currentRunId": current_run.get("id") or (latest_run.get("id") if str(latest_run.get("status") or "") == "running" else None),
             "currentJobId": current_job.get("id"),
             "currentBrokerday": serialize_value(current_run.get("brokerday")),
+            "currentStudyDayTarget": current_target_day,
+            "nextStudyDayTarget": next_target_day,
             "currentFamily": current_config.get("candidate_family"),
             "currentFingerprint": current_config.get("config_fingerprint"),
             "currentProposalKind": current_proposal.get("proposalKind"),
@@ -1309,6 +1352,7 @@ class ControlPanelService:
             best_label = f"{best_candidate.get('candidateName') or best_candidate.get('setupFingerprint')} ({best_candidate.get('family') or 'unknown family'})"
         return {
             "lastCompletedRun": run_label,
+            "selectedStudyDay": activity.get("selectedStudyDay") or "latest available",
             "lastFamilyTried": activity.get("lastFamilyTried") or "n/a",
             "lastVerdict": activity.get("lastVerdict") or "n/a",
             "pendingJobs": activity.get("pendingJobs") or 0,
@@ -1344,6 +1388,10 @@ class ControlPanelService:
         active = str(service.get("active_state") or "unknown")
         sub = str(service.get("sub_state") or "unknown")
         return f"{active}/{sub}"
+
+    def _selected_study_day(self, conn: Any) -> Optional[str]:
+        control = ensure_control_state(conn, self._settings.research_settings)
+        return normalize_brokerday_text(control.get("selected_study_day"))
 
     def _serialize_proposals(self, proposals: Iterable[Mapping[str, Any]], *, source: str) -> List[Dict[str, Any]]:
         items: List[Dict[str, Any]] = []

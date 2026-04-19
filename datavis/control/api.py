@@ -99,7 +99,7 @@ def research_latest_errors(limit: int = Query(20, ge=1, le=100)) -> List[Dict[st
 
 
 @app.get("/control/research/journals", dependencies=[Depends(require_control_auth)])
-def research_journals(component: Optional[str] = Query(None), limit: int = Query(50, ge=1, le=200)) -> List[Dict[str, Any]]:
+def research_journals(component: Optional[str] = Query(None), limit: int = Query(20, ge=1, le=200)) -> List[Dict[str, Any]]:
     with connection(SETTINGS, readonly=True, autocommit=True, application_name="datavis.control.api.journals") as conn:
         return RESEARCH_MANAGER.recent_journals(conn, component=component, limit=limit)
 

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import difflib
-import json
 import os
 import re
 import tempfile
@@ -31,6 +30,22 @@ class RepairExecutor:
         self._research_manager = research_manager
         self._service_manager = service_manager
         self._journal = EngineeringJournal(settings, "repair-executor")
+
+    def _engineering_runtime_policy(self, conn: Any) -> Dict[str, Any]:
+        try:
+            return resolve_engineering_runtime(conn, self._settings, self._settings.research_settings)
+        except Exception:
+            return {
+                "enabled": bool(self._settings.enable_loop),
+                "maxRetriesPerIncident": int(self._settings.incident_max_retries),
+                "maxPatchFiles": int(self._settings.max_patch_files),
+                "maxPatchLineChanges": int(self._settings.max_patch_line_changes),
+                "maxPatchBytes": int(self._settings.max_patch_bytes),
+                "restartRateLimitPerHour": int(self._settings.max_restarts_per_hour),
+                "engineeringModelOverride": "",
+                "mission": {},
+                "settings": {},
+            }
 
     def execute(
         self,
@@ -158,8 +173,8 @@ class RepairExecutor:
         return {"paths": repaired_paths}
 
     def _restart_services(self, conn: Any, service_names: List[str]) -> List[Dict[str, Any]]:
-        runtime_policy = resolve_engineering_runtime(conn, self._settings, self._settings.research_settings)
-        if self._store.restart_actions_last_hour(conn) >= int(runtime_policy["restartRateLimitPerHour"]):
+        policy = self._engineering_runtime_policy(conn)
+        if self._store.restart_actions_last_hour(conn) >= int(policy["restartRateLimitPerHour"]):
             raise RuntimeError("restart budget exceeded for the last hour")
         snapshots = []
         for service_name in service_names:
@@ -342,7 +357,7 @@ def coerce_supervisor_decision_payload(decision_payload: Mapping[str, Any]) -> D
         patch_type: str,
         mutations: List[Tuple[Path, str]],
     ) -> Dict[str, Any]:
-        runtime_policy = resolve_engineering_runtime(conn, self._settings, self._settings.research_settings)
+        policy = self._engineering_runtime_policy(conn)
         changed = []
         total_lines = 0
         total_bytes = 0
@@ -370,11 +385,11 @@ def coerce_supervisor_decision_payload(decision_payload: Mapping[str, Any]) -> D
             total_lines += line_changes
             total_bytes += byte_changes
             changed.append((path, old_text, new_text, diff, line_changes, byte_changes))
-        if len(changed) > int(runtime_policy["maxPatchFiles"]):
+        if len(changed) > int(policy["maxPatchFiles"]):
             raise RuntimeError("patch exceeds allowed file count")
-        if total_lines > int(runtime_policy["maxPatchLineChanges"]):
+        if total_lines > int(policy["maxPatchLineChanges"]):
             raise RuntimeError("patch exceeds allowed line-change budget")
-        if total_bytes > int(runtime_policy["maxPatchBytes"]):
+        if total_bytes > int(policy["maxPatchBytes"]):
             raise RuntimeError("patch exceeds allowed byte-change budget")
         if not changed:
             return {"applied": False, "reason": "already in known-good state"}

@@ -11,7 +11,7 @@ import hashlib
 import threading
 import time
 from contextlib import contextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
@@ -250,6 +250,10 @@ class RectModeRequest(BaseModel):
 
 class ControlReasonRequest(BaseModel):
     reason: str = Field("manual control action", min_length=1, max_length=512)
+
+
+class ControlStudyDayRequest(BaseModel):
+    brokerday: Optional[str] = Field(None, max_length=10)
 
 
 class ControlRestartRequest(BaseModel):
@@ -3263,6 +3267,26 @@ def control_research_status(username: Optional[str] = Depends(require_sql_admin)
         return CONTROL_PANEL.research_status(conn)
 
 
+@app.put("/api/control/research/study-day")
+def control_research_study_day_update(payload: ControlStudyDayRequest, username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
+    with db_connection(readonly=False) as conn:
+        try:
+            result = CONTROL_RUNTIME.research_manager.set_selected_study_day(conn, brokerday_text=payload.brokerday)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        CONTROL_PANEL.record_action(
+            conn,
+            actor=control_actor_name(username),
+            action_type="research.study_day.set",
+            scope="research",
+            target_id=result.get("selectedStudyDay"),
+            payload=payload.model_dump(),
+            result=result,
+        )
+        conn.commit()
+        return result
+
+
 @app.get("/api/control/research/runs")
 def control_research_runs(
     limit: int = Query(20, ge=1, le=100),
@@ -3638,11 +3662,18 @@ def control_day_review(
     day: Optional[str] = Query(None),
     runId: Optional[int] = Query(None, ge=1),
     setupFingerprint: Optional[str] = Query(None),
+    entryLimit: int = Query(20, ge=1, le=200),
     username: Optional[str] = Depends(require_sql_admin),
 ) -> Dict[str, Any]:
     _ = username
     with db_connection(readonly=True) as conn:
-        return CONTROL_PANEL.day_review(conn, brokerday_text=day, run_id=runId, setup_fingerprint=setupFingerprint)
+        return CONTROL_PANEL.day_review(
+            conn,
+            brokerday_text=day,
+            run_id=runId,
+            setup_fingerprint=setupFingerprint,
+            entry_limit=entryLimit,
+        )
 
 
 @app.get("/api/control/journals")
@@ -3650,9 +3681,9 @@ def control_journals(
     component: Optional[str] = Query(None),
     level: Optional[str] = Query(None),
     eventType: Optional[str] = Query(None),
-    limit: int = Query(120, ge=1, le=400),
+    limit: int = Query(20, ge=1, le=200),
     username: Optional[str] = Depends(require_sql_admin),
-) -> List[Dict[str, Any]]:
+) -> Dict[str, Any]:
     _ = username
     with db_connection(readonly=True) as conn:
         return CONTROL_PANEL.list_journals(conn, component=component, level=level, event_type=eventType, limit=limit)

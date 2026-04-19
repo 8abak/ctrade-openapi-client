@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
@@ -37,6 +37,7 @@ class ContrastHint(BaseModel):
 class EntryResearchParameters(BaseModel):
     symbol: str = Field(..., min_length=1, max_length=32)
     iteration: int = Field(1, ge=1, le=512)
+    study_brokerday: Optional[str] = Field(None, max_length=10)
     slice_rows: int = Field(..., ge=500, le=50000)
     slice_offset_rows: int = Field(0, ge=0, le=250000)
     warmup_rows: int = Field(..., ge=20, le=5000)
@@ -63,6 +64,14 @@ class EntryResearchParameters(BaseModel):
             raise ValueError("symbol is required")
         return normalized
 
+    @field_validator("study_brokerday")
+    @classmethod
+    def normalize_study_brokerday(cls, value: Optional[str]) -> Optional[str]:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        return date.fromisoformat(text).isoformat()
+
     @field_validator("feature_toggles", "session_filter")
     @classmethod
     def dedupe_values(cls, values: List[str]) -> List[str]:
@@ -80,6 +89,7 @@ class EntryResearchParameters(BaseModel):
 class EntryResearchParameterPatch(BaseModel):
     symbol: Optional[str] = Field(None, min_length=1, max_length=32)
     iteration: Optional[int] = Field(None, ge=1, le=512)
+    study_brokerday: Optional[str] = Field(None, max_length=10)
     slice_rows: Optional[int] = Field(None, ge=500, le=50000)
     slice_offset_rows: Optional[int] = Field(None, ge=0, le=250000)
     warmup_rows: Optional[int] = Field(None, ge=20, le=5000)
@@ -97,6 +107,14 @@ class EntryResearchParameterPatch(BaseModel):
     source_run_id: Optional[int] = Field(None, ge=1)
     mutation_note: Optional[str] = Field(None, max_length=512)
     config_fingerprint: Optional[str] = Field(None, max_length=64)
+
+    @field_validator("study_brokerday")
+    @classmethod
+    def normalize_patch_study_brokerday(cls, value: Optional[str]) -> Optional[str]:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        return date.fromisoformat(text).isoformat()
 
 
 class SupervisorNextAction(BaseModel):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+from datetime import date
+from typing import Any, Dict, Optional
 
 from psycopg2.extras import Json
 
@@ -23,6 +24,7 @@ def default_control_state(settings: ResearchSettings) -> Dict[str, Any]:
         "last_decision_id": None,
         "last_stop_override_reason": None,
         "last_selected_fingerprint": None,
+        "selected_study_day": None,
         "seeded": False,
     }
 
@@ -57,3 +59,10 @@ def set_state(conn: Any, key: str, value: Dict[str, Any]) -> None:
             """,
             (key, Json(value)),
         )
+
+
+def normalize_brokerday_text(value: Any) -> Optional[str]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return date.fromisoformat(text).isoformat()

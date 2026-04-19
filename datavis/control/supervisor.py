@@ -86,6 +86,14 @@ class EngineeringSupervisor:
         self._settings = settings
         self._journal = EngineeringJournal(settings, "engineering-supervisor")
 
+    def _engineering_runtime_policy(self, conn: Any | None) -> Dict[str, Any]:
+        if conn is None:
+            return {"engineeringModelOverride": ""}
+        try:
+            return resolve_engineering_runtime(conn, self._settings, self._settings.research_settings)
+        except Exception:
+            return {"engineeringModelOverride": ""}
+
     def is_enabled(self, *, model_override: str = "") -> bool:
         return bool(self._settings.openai_api_key and (model_override or self._settings.openai_model))
 
@@ -98,8 +106,8 @@ class EngineeringSupervisor:
     ) -> Tuple[EngineeringSupervisorDecision, str]:
         model_name = self._settings.openai_model
         if conn is not None:
-            runtime_policy = resolve_engineering_runtime(conn, self._settings, self._settings.research_settings)
-            model_name = str(runtime_policy.get("engineeringModelOverride") or self._settings.openai_model)
+            policy = self._engineering_runtime_policy(conn)
+            model_name = str(policy.get("engineeringModelOverride") or self._settings.openai_model)
         if force_fallback or not self.is_enabled(model_override=model_name):
             decision = self._heuristic_decision(briefing)
             self._journal.write(

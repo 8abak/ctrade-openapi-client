@@ -119,6 +119,7 @@ def default_parameters(*, symbol: str, slice_rows: int, warmup_rows: int, iterat
     return EntryResearchParameters(
         symbol=symbol,
         iteration=iteration,
+        study_brokerday=None,
         slice_rows=slice_rows,
         slice_offset_rows=0,
         warmup_rows=warmup_rows,
@@ -275,6 +276,7 @@ def build_config_fingerprint(payload: EntryResearchParameters | Mapping[str, Any
         data = dict(payload)
     normalized = {
         "symbol": str(data.get("symbol") or "").upper(),
+        "study_brokerday": str(data.get("study_brokerday") or "") or None,
         "slice_rows": int(data.get("slice_rows") or 0),
         "slice_offset_rows": int(data.get("slice_offset_rows") or 0),
         "warmup_rows": int(data.get("warmup_rows") or 0),
