@@ -33,6 +33,12 @@ show_service_status() {
   sudo systemctl status "$service_name" --no-pager -l || true
 }
 
+install_operational_bins() {
+  log "Installing operational CLI wrappers"
+  sudo install -d /usr/local/bin
+  sudo install -m 0755 "deploy/bin/getCsv" "/usr/local/bin/getCsv"
+}
+
 install_systemd_units() {
   log "Installing systemd units"
   for service_name in "${UNIT_FILES[@]}"; do
@@ -101,6 +107,7 @@ source "$VENV_ACTIVATE"
 log "Installing Python dependencies"
 pip install -r requirements.txt
 
+install_operational_bins
 install_systemd_units
 disable_legacy_services
 recover_nginx_site

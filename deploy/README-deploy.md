@@ -31,7 +31,8 @@ Nginx recovery managed by deploy:
 - canonical site file: `/etc/nginx/conf.d/datavis.au.conf`
 - source of truth in repo: `deploy/nginx/datavis.au.conf`
 - `deploy/scripts/recover-datavis-nginx.sh` removes any stale `server_name datavis.au` block from `/etc/nginx/nginx.conf`, installs the managed site file, runs `nginx -t`, and reloads nginx
-- the managed site file redirects `/` to `/live`, proxies the live app to `127.0.0.1:8000`, and contains no `8501` upstream or static `frontend` root
+- the managed site file keeps the app proxy on `/` and exposes read-only nginx directory browsing on `/src/` via `alias /home/ec2-user/cTrade/`
+- `/src/` blocks dotfiles, `__pycache__`, and obvious secret filenames such as `*.pem`, `*.key`, `*.crt`, and `*creds*`
 
 Trading runtime env vars for `/etc/datavis.env`:
 - `DATAVIS_TRADE_USERNAME` (default `babak`)
@@ -53,6 +54,7 @@ The deploy workflow resets and cleans the EC2 checkout, so do not store runtime-
 The deploy script:
 - activates `/home/ec2-user/venvs/datavis/bin/activate`
 - runs `pip install -r requirements.txt`
+- installs `/usr/local/bin/getCsv` from `deploy/bin/getCsv`
 - installs the `datavis`, `tickcollector`, and `separation` systemd units
 - disables and removes retired legacy processor services
 - applies `deploy/sql/20260418_remove_legacy_structure_layer.sql`
@@ -67,3 +69,11 @@ The deploy script:
 Legacy cleanup:
 - `deploy/scripts/cleanup-layer0.sh` creates a public-schema backup before applying the same cleanup SQL
 - the cleanup SQL drops old derived-layer tables, preserves the raw `ticks` table, and keeps the hot-path tick indexes
+
+Operational checks:
+- deploy the change on EC2: `cd /home/ec2-user/cTrade && bash deploy/scripts/deploy-datavis.sh`
+- validate nginx: `sudo nginx -t`
+- reload nginx: `sudo systemctl reload nginx`
+- verify source browsing: `curl -I https://www.datavis.au/src/` and then open `https://www.datavis.au/src/` in a browser
+- export one broker day: `getCsv --day 14/04`
+- export with explicit year: `getCsv --day 17/04/2026`

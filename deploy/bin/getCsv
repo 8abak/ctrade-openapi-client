@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+APP_DIR="/home/ec2-user/cTrade"
+ENV_FILE="/etc/datavis.env"
+VENV_PYTHON="/home/ec2-user/venvs/datavis/bin/python"
+
+cd "$APP_DIR"
+
+if [[ -f "$ENV_FILE" ]]; then
+  set -a
+  if [[ -r "$ENV_FILE" ]]; then
+    source "$ENV_FILE"
+  else
+    eval "$(sudo cat "$ENV_FILE")"
+  fi
+  set +a
+fi
+
+exec "$VENV_PYTHON" -m datavis.get_csv "$@"
