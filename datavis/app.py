@@ -3304,7 +3304,10 @@ def control_research_pause(payload: ControlReasonRequest, username: Optional[str
 @app.post("/api/control/research/resume")
 def control_research_resume(payload: ControlReasonRequest, username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
     with db_connection(readonly=False) as conn:
-        result = CONTROL_RUNTIME.research_manager.resume(conn, reason=payload.reason)
+        try:
+            result = CONTROL_RUNTIME.research_manager.resume(conn, reason=payload.reason)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
         CONTROL_PANEL.record_action(
             conn,
             actor=control_actor_name(username),
@@ -3315,7 +3318,12 @@ def control_research_resume(payload: ControlReasonRequest, username: Optional[st
             result=result,
         )
         conn.commit()
-        return {"state": result}
+        return {
+            "state": result,
+            "message": str(result.get("message") or "Research loop resumed."),
+            "serviceActions": result.get("serviceActions") or [],
+            "seedResult": result.get("seedResult"),
+        }
 
 
 @app.post("/api/control/research/reset")
@@ -3342,6 +3350,8 @@ def control_research_requeue(payload: ControlRequeueRequest, username: Optional[
             result = CONTROL_RUNTIME.research_manager.requeue(conn, job_id=payload.jobId, reason=payload.reason)
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
         CONTROL_PANEL.record_action(
             conn,
             actor=control_actor_name(username),
@@ -3352,14 +3362,22 @@ def control_research_requeue(payload: ControlRequeueRequest, username: Optional[
             result=result,
         )
         conn.commit()
-        return result
+        return {
+            **result,
+            "message": str(result.get("message") or "Research job requeued."),
+        }
 
 
 @app.post("/api/control/research/restart")
 def control_research_restart(payload: ControlRestartRequest, username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
     with db_connection(readonly=False) as conn:
         services = payload.services or list(CONTROL_RUNTIME.settings.research_services)
-        result = CONTROL_RUNTIME.research_manager.restart_services(services)
+        try:
+            result = CONTROL_RUNTIME.research_manager.restart_services(services)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
         CONTROL_PANEL.record_action(
             conn,
             actor=control_actor_name(username),
@@ -3370,13 +3388,21 @@ def control_research_restart(payload: ControlRestartRequest, username: Optional[
             result={"services": result},
         )
         conn.commit()
-        return {"services": result}
+        return {
+            "services": result,
+            "message": "Research services restart sequence completed.",
+        }
 
 
 @app.post("/api/control/research/seed-next")
 def control_research_seed_next(payload: ControlReasonRequest, username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
     with db_connection(readonly=False) as conn:
-        result = CONTROL_RUNTIME.research_manager.seed_next_job(conn, reason=payload.reason)
+        try:
+            result = CONTROL_RUNTIME.research_manager.seed_next_job(conn, reason=payload.reason)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
         CONTROL_PANEL.record_action(
             conn,
             actor=control_actor_name(username),
@@ -3387,7 +3413,10 @@ def control_research_seed_next(payload: ControlReasonRequest, username: Optional
             result=result,
         )
         conn.commit()
-        return result
+        return {
+            **result,
+            "message": str(result.get("message") or "Seeded next research job."),
+        }
 
 
 @app.get("/api/control/incidents")
@@ -3538,9 +3567,13 @@ def control_services_restart(payload: ControlRestartRequest, username: Optional[
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported control service restart target.")
     with db_connection(readonly=False) as conn:
         snapshots = []
-        for service in services:
-            CONTROL_RUNTIME.service_manager.reset_failed(service)
-            snapshots.append(CONTROL_RUNTIME.service_manager.restart(service).model_dump())
+        try:
+            for service in services:
+                snapshots.append(CONTROL_RUNTIME.service_manager.restart_with_reset_tolerance(service))
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
         CONTROL_PANEL.record_action(
             conn,
             actor=control_actor_name(username),
@@ -3551,7 +3584,10 @@ def control_services_restart(payload: ControlRestartRequest, username: Optional[
             result={"services": snapshots},
         )
         conn.commit()
-        return {"services": snapshots}
+        return {
+            "services": snapshots,
+            "message": "Control service restart sequence completed.",
+        }
 
 
 @app.get("/api/control/candidates")

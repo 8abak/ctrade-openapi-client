@@ -66,9 +66,9 @@ class EngineeringOrchestrator:
                 payload=candidate.model_dump(),
                 conn=conn,
             )
-        return self._process_incident(conn, incident)
+        return self._process_incident(conn, incident, runtime_policy=runtime_policy)
 
-    def _process_incident(self, conn: Any, incident: Dict[str, Any]) -> bool:
+    def _process_incident(self, conn: Any, incident: Dict[str, Any], *, runtime_policy: Dict[str, Any]) -> bool:
         incident_id = int(incident["id"])
         action_id = None
         try:
@@ -129,7 +129,7 @@ class EngineeringOrchestrator:
                         conn,
                         incident_id=incident_id,
                         status="escalated",
-                        summary="Incident escalated after exhausting bounded repair retries.",
+                        summary="Incident escalated after exhausting bounded repair retries and smoke validation still failed.",
                         resolution_payload={"execution": execution, "smokeResults": [item.model_dump() for item in smoke_results], "rollback": rollback},
                         action_id=action_id,
                     )
@@ -187,7 +187,7 @@ class EngineeringOrchestrator:
                     conn,
                     incident_id=incident_id,
                     status="escalated",
-                    summary="Incident escalated after executor failure exhaustion.",
+                    summary=f"Incident escalated after executor failure exhaustion: {str(exc)[:200]}",
                     resolution_payload={"error": str(exc)},
                     action_id=action_id,
                 )

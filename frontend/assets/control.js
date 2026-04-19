@@ -160,21 +160,99 @@
     ].join("");
   }
 
+  function humanDuration(value) {
+    const seconds = Number(value);
+    if (!Number.isFinite(seconds) || seconds < 0) {
+      return "n/a";
+    }
+    if (seconds < 60) {
+      return seconds + "s";
+    }
+    if (seconds < 3600) {
+      return Math.floor(seconds / 60) + "m " + (seconds % 60) + "s";
+    }
+    return Math.floor(seconds / 3600) + "h " + Math.floor((seconds % 3600) / 60) + "m";
+  }
+
+  function renderStoryCard(story) {
+    if (!story) {
+      return "<div class=\"sql-empty\">No control story available yet.</div>";
+    }
+    return [
+      "<div class=\"control-list\">",
+      "<div class=\"control-list-item\"><strong>What Just Happened</strong><div class=\"sql-muted\">", escapeHtml(story.whatJustHappened || "n/a"), "</div></div>",
+      "<div class=\"control-list-item\"><strong>What Is Running Now</strong><div class=\"sql-muted\">", escapeHtml(story.runningNow || "n/a"), "</div></div>",
+      "<div class=\"control-list-item\"><strong>What Is Blocked Now</strong><div class=\"sql-muted\">", escapeHtml(story.blockedNow || "none"), "</div></div>",
+      "<div class=\"control-list-item\"><strong>What The Machine Wants Next</strong><div class=\"sql-muted\">", escapeHtml(story.machineNext || "n/a"), "</div></div>",
+      "<div class=\"control-list-item\"><strong>What The Latest Verdict Means</strong><div class=\"sql-muted\">", escapeHtml(story.latestVerdictMeans || "n/a"), "</div></div>",
+      "<div class=\"control-list-item\"><strong>Recommended Action</strong><div class=\"sql-muted\">", escapeHtml(story.recommendedAction || "No action required."), "</div></div>",
+      "</div>"
+    ].join("");
+  }
+
+  function renderSectionStory(overview) {
+    return card("Control Story", renderStoryCard((overview || {}).story || {}));
+  }
+
+  function renderCurrentBest(candidate) {
+    const latestCandidate = candidate || {};
+    const latestMetrics = latestCandidate.metrics || {};
+    return [
+      kvGrid([
+        { label: "Setup", value: latestCandidate.candidateName || "n/a" },
+        { label: "Family", value: latestCandidate.family || "n/a" },
+        { label: "Side", value: latestCandidate.side || "n/a" },
+        { label: "Broker Day", value: latestCandidate.brokerday || "n/a" }
+      ]),
+      "<div class=\"control-metric-row\">",
+      metricPill("Clean Precision", humanNumber(latestMetrics.cleanPrecision, 3)),
+      metricPill("Entries/Day", humanNumber(latestMetrics.entriesPerDay, 2)),
+      metricPill("Median Hit Sec", humanNumber(latestMetrics.medianHitSeconds, 1)),
+      metricPill("Walk Range", humanNumber(latestMetrics.walkForwardRange, 3)),
+      "</div>"
+    ].join("");
+  }
+
+  function renderLastCompletedResult(result) {
+    if (!result || !result.runId) {
+      return "<div class=\"sql-empty\">No completed run result is available yet.</div>";
+    }
+    return [
+      kvGrid([
+        { label: "Run", value: result.runId || "n/a" },
+        { label: "Broker Day", value: result.brokerday || "n/a" },
+        { label: "Family", value: result.family || "n/a" },
+        { label: "Fingerprint", value: result.fingerprint || "n/a" },
+        { label: "Verdict", value: result.verdict || "n/a" },
+        { label: "Candidates", value: String(result.candidateCount == null ? 0 : result.candidateCount) },
+        { label: "Best Improved", value: truthLabel(result.bestImproved) },
+        { label: "Finished", value: humanWhen(result.finishedAt) }
+      ]),
+      "<div class=\"control-callout\">",
+      "<div><span class=\"sql-label\">Headline</span><p class=\"control-copy\">", escapeHtml(result.headline || "No summary headline recorded."), "</p></div>",
+      "</div>",
+      "<div class=\"control-metric-row\">",
+      metricPill("Clean Precision", humanNumber((result.metrics || {}).cleanPrecision, 3)),
+      metricPill("Entries/Day", humanNumber((result.metrics || {}).entriesPerDay, 2)),
+      metricPill("Walk Range", humanNumber((result.metrics || {}).walkForwardRange, 3)),
+      metricPill("Signals", humanNumber((result.metrics || {}).signalCount, 0)),
+      "</div>"
+    ].join("");
+  }
+
   function renderOverview(data) {
     const research = data.research || {};
     const engineering = data.engineering || {};
-    const latestCandidate = data.latestCandidateSummary || {};
-    const latestMetrics = data.latestMetrics || {};
     return [
       "<div class=\"control-grid control-grid-overview\">",
       card("Mission", [
         "<h3 class=\"control-headline\">", escapeHtml((data.mission || {}).missionTitle || "Mission"), "</h3>",
         "<p class=\"control-copy\">", escapeHtml((data.mission || {}).mainObjective || "No mission configured."), "</p>",
         kvGrid([
-          { label: "Broker Day", value: data.brokerday || "n/a" },
+          { label: "Broker Day", value: data.brokerday || "unknown" },
           { label: "Research", value: research.state || "unknown" },
           { label: "Engineering", value: engineering.state || "unknown" },
-          { label: "Iteration", value: (((research.latestRun || {}).iteration) || "n/a") }
+          { label: "Queue Depth", value: String(((research.activity || {}).queueDepth) == null ? 0 : ((research.activity || {}).queueDepth)) }
         ]),
         actionButtons([
           { action: "pauseResearch", label: "Pause Research", kind: "ghost-button" },
@@ -183,22 +261,10 @@
           { action: "resumeEngineering", label: "Resume Engineering", kind: "ghost-button" }
         ])
       ].join("")),
-      card("What Just Happened", renderResearchNarrative(research.summary || {})),
-      card("Research Activity", renderResearchActivity(research.activity || {})),
-      card("Current Best", [
-        kvGrid([
-          { label: "Setup", value: latestCandidate.candidateName || "n/a" },
-          { label: "Family", value: latestCandidate.family || "n/a" },
-          { label: "Side", value: latestCandidate.side || "n/a" },
-          { label: "Verdict", value: latestCandidate.verdictHint || "n/a" }
-        ]),
-        "<div class=\"control-metric-row\">",
-        metricPill("Clean Precision", humanNumber(latestMetrics.cleanPrecision, 3)),
-        metricPill("Entries/Day", humanNumber(latestMetrics.entriesPerDay, 2)),
-        metricPill("Median Hit Sec", humanNumber(latestMetrics.medianHitSeconds, 1)),
-        metricPill("Walk Range", humanNumber(latestMetrics.walkForwardRange, 3)),
-        "</div>"
-      ].join("")),
+      card("Operating Story", renderStoryCard(data.story || {})),
+      card("Live Research", renderResearchActivity(research.activity || {})),
+      card("Last Completed Result", renderLastCompletedResult(research.lastCompletedResult || {})),
+      card("Current Best", renderCurrentBest(research.bestCandidate || {})),
       card("Latest Incident", renderIncidentSummary(engineering.activeIncident)),
       card("Latest Engineering Action", renderActionSummary(engineering.latestAction)),
       card("Safe Controls", actionButtons([
@@ -230,7 +296,10 @@
         { label: "Class", value: incident.incident_type || "n/a" },
         { label: "Fingerprint", value: incident.fingerprint || "n/a" },
         { label: "Retries", value: String(incident.retry_count || 0) + "/" + String(incident.max_retries || 0) }
-      ])
+      ]),
+      "<div class=\"control-callout\">",
+      "<div><span class=\"sql-label\">Root Cause</span><p class=\"control-copy\">", escapeHtml(incident.rootCause || incident.summary || "n/a"), "</p></div>",
+      "</div>"
     ].join("");
   }
 
@@ -238,12 +307,15 @@
     if (!action || !action.id) {
       return "<div class=\"sql-empty\">No recent engineering action.</div>";
     }
-    return kvGrid([
-      { label: "Action", value: action.action_type || "n/a" },
-      { label: "Status", value: action.status || "n/a" },
-      { label: "Requested By", value: action.requested_by || "n/a" },
-      { label: "Finished", value: humanWhen(action.finished_at || action.finishedAt) }
-    ]);
+    return [
+      kvGrid([
+        { label: "Action", value: action.action_type || "n/a" },
+        { label: "Status", value: action.status || "n/a" },
+        { label: "Requested By", value: action.requested_by || "n/a" },
+        { label: "Finished", value: humanWhen(action.finished_at || action.finishedAt) }
+      ]),
+      action.error_text ? "<div class=\"control-callout\"><div><span class=\"sql-label\">Failure</span><p class=\"control-copy\">" + escapeHtml(action.error_text) + "</p></div></div>" : ""
+    ].join("");
   }
 
   function renderResearchNarrative(summary) {
@@ -255,12 +327,13 @@
         { label: "Last Completed", value: summary.lastCompletedRun || "n/a" },
         { label: "Last Family", value: summary.lastFamilyTried || "n/a" },
         { label: "Last Verdict", value: summary.lastVerdict || "n/a" },
-        { label: "Pending Jobs", value: String(summary.pendingJobs == null ? 0 : summary.pendingJobs) },
-        { label: "Worker Last Claimed", value: humanWhen(summary.workerLastClaimedAt) }
+        { label: "Queue Depth", value: String(summary.queueDepth == null ? 0 : summary.queueDepth) },
+        { label: "Best Current", value: summary.bestCandidate || "n/a" }
       ]),
       "<div class=\"control-callout\">",
       "<div><span class=\"sql-label\">Current Blocker</span><p class=\"control-copy\">", escapeHtml(summary.currentBlocker || "none"), "</p></div>",
       "<div><span class=\"sql-label\">Recommended Action</span><p class=\"control-copy\">", escapeHtml(summary.recommendedAction || "No action required."), "</p></div>",
+      "<div><span class=\"sql-label\">What The Verdict Means</span><p class=\"control-copy\">", escapeHtml(summary.latestVerdictMeaning || "n/a"), "</p></div>",
       "</div>"
     ].join("");
   }
@@ -272,10 +345,19 @@
     return [
       kvGrid([
         { label: "Loop State", value: activity.loopState || "unknown" },
-        { label: "Current Run ID", value: activity.currentRunId || "none" },
+        { label: "Current Run", value: activity.currentRunId || "none" },
+        { label: "Current Job", value: activity.currentJobId || "none" },
+        { label: "Phase", value: activity.currentPhase || "unknown" },
+        { label: "Step", value: activity.currentStep || "unknown" },
         { label: "Queue Depth", value: String(activity.queueDepth == null ? 0 : activity.queueDepth) },
+        { label: "Family", value: activity.currentFamily || "unknown" },
+        { label: "Fingerprint", value: activity.currentFingerprint || "unknown" },
+        { label: "Proposal Source", value: activity.currentProposalSource || "unknown" },
         { label: "Worker Consuming", value: truthLabel(activity.workerActivelyConsuming) },
         { label: "Worker Service", value: activity.workerServiceState || "unknown" },
+        { label: "Worker Heartbeat", value: humanWhen(activity.workerHeartbeatAt) },
+        { label: "Run Elapsed", value: humanDuration(activity.activeRunElapsedSeconds) },
+        { label: "Supervisor Service", value: activity.supervisorServiceState || "unknown" },
         { label: "Orchestrator Active", value: truthLabel(activity.orchestratorActive) },
         { label: "Orchestrator Service", value: activity.orchestratorServiceState || "unknown" },
         { label: "Engineering", value: activity.engineeringState || "idle" },
@@ -285,8 +367,14 @@
       "<div class=\"control-list-item\"><strong>Worker last claimed job</strong><div class=\"sql-muted\">",
       escapeHtml(activity.workerLastClaimedJobId ? ("Job " + activity.workerLastClaimedJobId + " at " + humanWhen(activity.workerLastClaimedAt)) : "No claim event recorded."),
       "</div></div>",
+      "<div class=\"control-list-item\"><strong>Latest worker event</strong><div class=\"sql-muted\">",
+      escapeHtml(activity.workerLastEventType ? (activity.workerLastEventType + " at " + humanWhen(activity.workerLastEventAt) + " | " + (activity.workerLastEventMessage || "")) : "No worker event recorded."),
+      "</div></div>",
       "<div class=\"control-list-item\"><strong>Orchestrator last event</strong><div class=\"sql-muted\">",
       escapeHtml(activity.orchestratorLastEventAt ? humanWhen(activity.orchestratorLastEventAt) : "No recent orchestrator event recorded."),
+      "</div></div>",
+      "<div class=\"control-list-item\"><strong>Latest event anywhere</strong><div class=\"sql-muted\">",
+      escapeHtml(activity.latestEventType ? ((activity.latestEventSource || "system") + " | " + activity.latestEventType + " at " + humanWhen(activity.latestEventAt)) : "No journal event recorded."),
       "</div></div>",
       "</div>"
     ].join("");
@@ -328,18 +416,36 @@
     const latestRun = data.latestRun || {};
     const lastCompletedRun = data.lastCompletedRun || {};
     const currentRun = data.currentRun || {};
+    const currentJob = data.currentJob || {};
     const focusRun = currentRun.id ? currentRun : (lastCompletedRun.id ? lastCompletedRun : latestRun);
     return [
       "<div class=\"control-grid control-grid-overview\">",
+      renderSectionStory(state.overview),
       card("What Just Happened", renderResearchNarrative(data.summary || {})),
       card("Active State", renderResearchActivity(data.activity || {})),
+      card("Current Run / Job", [
+        kvGrid([
+          { label: "Run", value: currentRun.id || "none" },
+          { label: "Job", value: currentJob.id || "none" },
+          { label: "Broker Day", value: ((data.activity || {}).currentBrokerday) || "unknown" },
+          { label: "Family", value: ((data.activity || {}).currentFamily) || "unknown" },
+          { label: "Fingerprint", value: ((data.activity || {}).currentFingerprint) || "unknown" },
+          { label: "Proposal", value: ((data.activity || {}).currentProposalKind) || "unknown" },
+          { label: "Proposal Source", value: ((data.activity || {}).currentProposalSource) || "unknown" },
+          { label: "Elapsed", value: humanDuration((data.activity || {}).activeRunElapsedSeconds) }
+        ]),
+        "<div class=\"control-callout\">",
+        "<div><span class=\"sql-label\">Mutation Note</span><p class=\"control-copy\">", escapeHtml(((data.activity || {}).currentMutationNote) || "No mutation note recorded for the active job."), "</p></div>",
+        "</div>"
+      ].join("")),
       card("Research State", [
         kvGrid([
           { label: "Loop State", value: data.state || "unknown" },
           { label: "Last Completed Run", value: (data.summary || {}).lastCompletedRun || "n/a" },
           { label: "Current Run", value: currentRun.id || "none" },
           { label: "Queue Depth", value: String((((data.activity || {}).queueDepth) == null ? 0 : ((data.activity || {}).queueDepth))) },
-          { label: "Fingerprint", value: (((focusRun.config || {}).config_fingerprint) || "n/a") }
+          { label: "Fingerprint", value: (((focusRun.config || {}).config_fingerprint) || "n/a") },
+          { label: "Recommended Action", value: data.recommendedAction || "No action required." }
         ]),
         actionButtons([
           { action: "pauseResearch", label: "Pause", kind: "ghost-button" },
@@ -348,6 +454,7 @@
           { action: "resetResearch", label: "Reset State", kind: "ghost-button" }
         ])
       ].join("")),
+      card("Last Completed Result", renderLastCompletedResult(data.lastCompletedResult || {})),
       card("Current Config", kvGrid([
         { label: "Slice Rows", value: ((focusRun.config || {}).slice_rows) || "n/a" },
         { label: "Family", value: ((focusRun.config || {}).candidate_family) || "n/a" },
@@ -357,9 +464,19 @@
       card("Queued Jobs", simpleTable([
         { label: "ID", render: function (row) { return escapeHtml(row.id); } },
         { label: "Status", render: function (row) { return escapeHtml(row.status); } },
+        { label: "Requested By", render: function (row) { return escapeHtml(row.requested_by || "n/a"); } },
         { label: "Proposal", render: function (row) { return escapeHtml(proposalKindLabel(row.proposal || {})); } },
+        { label: "Proposal Source", render: function (row) { return escapeHtml(((row.proposal || {}).proposalSource) || "n/a"); } },
         { label: "Family", render: function (row) { return escapeHtml(((row.proposal || {}).family) || ((row.config || {}).candidate_family) || "n/a"); } },
         { label: "Fingerprint", render: function (row) { return "<div class=\"control-wrap\">" + escapeHtml(((row.proposal || {}).fingerprint) || ((row.config || {}).config_fingerprint) || "n/a") + "</div>"; } },
+        { label: "Lineage", render: function (row) {
+          const proposal = row.proposal || {};
+          const parts = [];
+          if (proposal.derivedFromRunId) { parts.push("run " + proposal.derivedFromRunId); }
+          if (row.sourceDecisionId) { parts.push("decision " + row.sourceDecisionId); }
+          if (row.sourceJobId) { parts.push("job " + row.sourceJobId); }
+          return "<div class=\"control-wrap\">" + escapeHtml(parts.join(" | ") || "n/a") + "</div>";
+        } },
         { label: "Seed Rule", render: function (row) { return "<div class=\"control-wrap\">" + escapeHtml(((row.proposal || {}).seedRuleRef) || "n/a") + "</div>"; } },
         { label: "Mutation Note", render: function (row) { return "<div class=\"control-wrap\">" + escapeHtml(((row.proposal || {}).mutationNote) || "n/a") + "</div>"; } }
       ], (data.jobs || []).filter(function (row) { return row.status === "pending"; }).slice(0, 8))),
@@ -368,7 +485,8 @@
         { label: "Broker Day", render: function (row) { return escapeHtml(row.brokerday || "n/a"); } },
         { label: "Status", render: function (row) { return escapeHtml(row.status); } },
         { label: "Verdict", render: function (row) { return escapeHtml(row.verdict_hint || "n/a"); } },
-        { label: "Precision", render: function (row) { return escapeHtml(humanNumber((row.metrics || {}).cleanPrecision, 3)); } }
+        { label: "Precision", render: function (row) { return escapeHtml(humanNumber((row.metrics || {}).cleanPrecision, 3)); } },
+        { label: "Candidates", render: function (row) { return escapeHtml(String(row.candidateCount == null ? 0 : row.candidateCount)); } }
       ], data.runs || [])),
       card("Next Proposals", renderProposalList(data.nextProposals || [])),
       card("Failed Jobs", simpleTable([
@@ -391,6 +509,7 @@
         "<div class=\"sql-muted\">", escapeHtml(item.reason || ""), "</div>",
         "<small>", escapeHtml((item.mutatedFields || []).join(", ") || "bounded mutation"), "</small>",
         "<div class=\"control-wrap\">", escapeHtml(item.configFingerprint || "n/a"), "</div>",
+        "<div class=\"sql-muted\">", escapeHtml(((item.proposalSource || item.source) || "unknown source") + (item.sourceRunId ? (" | from run " + item.sourceRunId) : "") + (item.seedRuleRef ? (" | " + item.seedRuleRef) : "")), "</div>",
         "</div>"
       ].join("");
     }).join("") + "</div>";
@@ -399,6 +518,7 @@
   function renderIncidents(data) {
     return [
       "<div class=\"control-grid control-grid-overview\">",
+      renderSectionStory(state.overview),
       card("Active Incident", [
         renderIncidentSummary(data.current || {}),
         actionButtons([
@@ -414,7 +534,8 @@
         { label: "ID", render: function (row) { return escapeHtml(row.id); } },
         { label: "Status", render: function (row) { return escapeHtml(row.status); } },
         { label: "Type", render: function (row) { return escapeHtml(row.incident_type); } },
-        { label: "Summary", render: function (row) { return "<div class=\"control-wrap\">" + escapeHtml(row.summary || "") + "</div>"; } }
+        { label: "Summary", render: function (row) { return "<div class=\"control-wrap\">" + escapeHtml(row.summary || "") + "</div>"; } },
+        { label: "Root Cause", render: function (row) { return "<div class=\"control-wrap\">" + escapeHtml(row.rootCause || "n/a") + "</div>"; } }
       ], data.rows || [])),
       "</div>"
       ].join("");
@@ -448,6 +569,7 @@
 
   function renderCandidates(data) {
     return [
+      renderSectionStory(state.overview),
       card("Filters", [
         "<form class=\"control-form\" id=\"candidateFilterForm\">",
         "<div class=\"control-form-grid\">",
@@ -500,6 +622,7 @@
 
   function renderDayReview(data) {
     return [
+      renderSectionStory(state.overview),
       card("Review Scope", [
         "<form class=\"control-form\" id=\"dayReviewForm\">",
         "<div class=\"control-form-grid\">",
@@ -510,6 +633,17 @@
         "<div class=\"control-action-row\"><button class=\"ghost-button compact-button\" type=\"submit\">Load Review</button></div>",
         "</form>"
       ].join("")),
+      card("Review Run", renderLastCompletedResult({
+        runId: (data.run || {}).id,
+        brokerday: data.brokerday,
+        family: (((data.run || {}).config || {}).candidate_family),
+        fingerprint: (((data.run || {}).config || {}).config_fingerprint),
+        verdict: (data.run || {}).verdict_hint,
+        metrics: (data.run || {}).metrics,
+        finishedAt: (data.run || {}).finished_at,
+        headline: (data.run || {}).headline,
+        candidateCount: (data.candidates || []).length
+      })),
       card("Chart", renderDayChart((data.chart || {}).ticks || [], (data.chart || {}).markers || [])),
       card("Matched Entries", simpleTable([
         { label: "Time", render: function (row) { return escapeHtml(humanWhen(row.timestamp)); } },
@@ -563,6 +697,7 @@
 
   function renderJournals(rows) {
     return [
+      renderSectionStory(state.overview),
       card("Filters", [
         "<form class=\"control-form\" id=\"journalFilterForm\">",
         "<div class=\"control-form-grid\">",
@@ -672,9 +807,7 @@
     }
     state.loading = true;
     try {
-      if (!state.overview || state.currentSection === "overview") {
-        await loadOverview();
-      }
+      await loadOverview();
       const section = sections.find(function (item) { return item.key === state.currentSection; }) || sections[0];
       elements.pageEyebrow.textContent = section.label;
       elements.pageTitle.textContent = section.subtitle;
@@ -689,7 +822,7 @@
           fetchJson("/api/control/research/runs?limit=12"),
           fetchJson("/api/control/research/jobs?limit=40")
         ]);
-        state.research = data[0];
+        state.research = Object.assign({}, state.overview.research || {}, data[0]);
         state.research.runs = data[1];
         state.research.jobs = data[2];
         elements.content.innerHTML = renderResearch(state.research);
@@ -742,9 +875,8 @@
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body || {})
     });
-    setStatus((payload && payload.message) || successMessage || "Action completed.", "success");
-    await loadOverview();
     await loadSection();
+    setStatus((payload && payload.message) || successMessage || "Action completed.", "success");
     return payload;
   }
 
@@ -811,7 +943,7 @@
   });
 
   elements.refresh.addEventListener("click", function () {
-    loadOverview().then(loadSection);
+    loadSection();
   });
 
   elements.content.addEventListener("click", function (event) {
@@ -841,8 +973,9 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)
       }).then(function () {
-        setStatus("Mission policy saved.", "success");
-        loadOverview().then(loadSection);
+        loadSection().then(function () {
+          setStatus("Mission policy saved.", "success");
+        });
       }).catch(function (error) {
         setStatus((error && error.detail) || "Mission save failed.", "error");
       });
@@ -860,8 +993,9 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)
       }).then(function () {
-        setStatus("Settings saved.", "success");
-        loadOverview().then(loadSection);
+        loadSection().then(function () {
+          setStatus("Settings saved.", "success");
+        });
       }).catch(function (error) {
         setStatus((error && error.detail) || "Settings save failed.", "error");
       });
@@ -889,8 +1023,9 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)
       }).then(function () {
-        setStatus("Candidate library state saved.", "success");
-        loadSection();
+        loadSection().then(function () {
+          setStatus("Candidate library state saved.", "success");
+        });
       }).catch(function (error) {
         setStatus((error && error.detail) || "Candidate save failed.", "error");
       });
@@ -935,11 +1070,13 @@
   function startPolling() {
     stopPolling();
     state.pollTimer = window.setInterval(function () {
-      loadOverview().then(function () {
-        if (state.currentSection !== "mission" && state.currentSection !== "settings") {
-          loadSection();
-        }
-      }).catch(function () {
+      if (state.currentSection === "mission" || state.currentSection === "settings") {
+        loadOverview().catch(function () {
+          setStatus("Background refresh failed.", "error");
+        });
+        return;
+      }
+      loadSection().catch(function () {
         setStatus("Background refresh failed.", "error");
       });
     }, 15000);
@@ -953,7 +1090,7 @@
   }
 
   renderNav();
-  loadOverview().then(loadSection).catch(function (error) {
+  loadSection().catch(function (error) {
     setStatus((error && error.detail) || "Failed to initialize control panel.", "error");
   });
   startPolling();

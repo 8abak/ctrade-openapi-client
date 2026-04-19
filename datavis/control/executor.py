@@ -163,8 +163,7 @@ class RepairExecutor:
             raise RuntimeError("restart budget exceeded for the last hour")
         snapshots = []
         for service_name in service_names:
-            self._service_manager.reset_failed(service_name)
-            snapshots.append(self._service_manager.restart(service_name).model_dump())
+            snapshots.append(self._service_manager.restart_with_reset_tolerance(service_name))
         return snapshots
 
     def _apply_config_changes(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
@@ -37,6 +37,39 @@ def serialize_value(value: Any) -> Any:
 
 def serialize_mapping(payload: Mapping[str, Any]) -> Dict[str, Any]:
     return {key: serialize_value(value) for key, value in payload.items()}
+
+
+def _as_utc_datetime(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    if isinstance(value, str):
+        try:
+            text = value.replace("Z", "+00:00")
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    return None
+
+
+def _elapsed_seconds(started_at: Any) -> Optional[int]:
+    started = _as_utc_datetime(started_at)
+    if started is None:
+        return None
+    delta = datetime.now(timezone.utc) - started
+    return max(0, int(delta.total_seconds()))
+
+
+def _event_sort_key(*timestamps: Any) -> tuple[int, str]:
+    for timestamp in timestamps:
+        resolved = _as_utc_datetime(timestamp)
+        if resolved is not None:
+            return (1, resolved.isoformat())
+    return (0, "")
 
 
 def _setup_fingerprint(rule_json: Mapping[str, Any], *, fallback_name: str = "") -> str:
@@ -154,7 +187,7 @@ class ControlPanelService:
         )
         return settings
 
-    def overview(self, conn: Any) -> Dict[str, Any]:
+    def control_snapshot(self, conn: Any) -> Dict[str, Any]:
         mission = self.get_mission(conn)
         research_policy = resolve_research_runtime(conn, self._settings, self._settings.research_settings)
         engineering_policy = resolve_engineering_runtime(conn, self._settings, self._settings.research_settings)
@@ -162,20 +195,19 @@ class ControlPanelService:
         current_incident = self.current_incident(conn)
         latest_action = self._latest_engineering_action(conn)
         latest_smokes = self._runtime.store.list_recent_smoketests(conn, limit=5)
-        queue_counts = self._job_counts(conn)
-        latest_candidate = self._latest_candidate_summary(conn)
+        story = self._build_story(
+            research_status=research_status,
+            current_incident=current_incident,
+            latest_action=latest_action,
+        )
         return {
             "mission": mission,
-            "brokerday": (research_status.get("latestRun") or {}).get("brokerday"),
-            "research": {
-                "state": research_status["state"],
-                "policy": research_policy,
-                "queueCounts": queue_counts,
-                "latestRun": research_status.get("latestRun"),
-                "latestErrors": research_status.get("latestErrors", []),
-                "latestCandidate": latest_candidate,
-                "nextProposals": research_status.get("nextProposals", []),
-            },
+            "brokerday": (
+                (research_status.get("currentRun") or {}).get("brokerday")
+                or (research_status.get("lastCompletedRun") or {}).get("brokerday")
+                or (research_status.get("bestCandidate") or {}).get("brokerday")
+            ),
+            "research": {**research_status, "policy": research_policy},
             "engineering": {
                 "state": self._derive_engineering_state(current_incident=current_incident),
                 "policy": engineering_policy,
@@ -183,50 +215,82 @@ class ControlPanelService:
                 "latestAction": latest_action,
                 "latestSmokeTests": [serialize_mapping(item) for item in latest_smokes],
             },
+            "story": story,
             "latestIncidentSummary": current_incident.get("summary"),
             "latestEngineeringAction": latest_action,
-            "latestCandidateSummary": latest_candidate,
-            "latestMetrics": ((research_status.get("latestRun") or {}).get("metrics") or {}),
+            "latestCandidateSummary": research_status.get("bestCandidate") or {},
+            "latestMetrics": ((research_status.get("bestCandidate") or {}).get("metrics") or {}),
         }
+
+    def overview(self, conn: Any) -> Dict[str, Any]:
+        return self.control_snapshot(conn)
 
     def research_status(self, conn: Any) -> Dict[str, Any]:
         status = self._runtime.research_manager.status(conn)
+        control = dict(status.get("value") or {})
         latest_run = self._runtime.research_manager.latest_run(conn)
         latest_errors = self._runtime.research_manager.latest_errors(conn, limit=8)
         queue_counts = self._job_counts(conn)
         last_completed_run = self._latest_run_by_status(conn, status_filter="completed")
         current_run = self._latest_run_by_status(conn, status_filter="running")
+        current_job = self._latest_job_by_status(conn, statuses=("running",))
+        next_job = self._latest_job_by_status(conn, statuses=("pending",))
         next_proposals = self._latest_mutation_proposals(conn)
         current_incident = self.current_incident(conn)
+        best_candidate = self._best_candidate_summary(conn)
+        last_completed_result = self._completed_run_result(conn, run=last_completed_run, best_candidate=best_candidate)
+        latest_claim = self._latest_journal_event(conn, event_types=("worker.job.claimed",))
+        latest_worker_event = self._latest_component_journal(conn, component="worker")
+        latest_research_event = self._latest_journal_entry(conn)
         activity = self._research_activity(
             conn,
             status=status,
+            control=control,
             queue_counts=queue_counts,
             latest_run=latest_run,
             last_completed_run=last_completed_run,
             current_run=current_run,
+            current_job=current_job,
+            next_job=next_job,
             current_incident=current_incident,
+            latest_claim=latest_claim,
+            latest_worker_event=latest_worker_event,
+            latest_research_event=latest_research_event,
+            next_proposals=next_proposals,
         )
+        summary = self._research_summary(activity, best_candidate=best_candidate, last_completed_result=last_completed_result)
         return {
             "state": self._derive_research_state(status, queue_counts=queue_counts, current_run=current_run),
             "status": serialize_mapping(status),
+            "control": serialize_mapping(control),
             "latestRun": self._serialize_run_payload(latest_run),
             "lastCompletedRun": self._serialize_run_payload(last_completed_run),
             "currentRun": self._serialize_run_payload(current_run),
+            "currentJob": self._serialize_job_payload(current_job),
+            "nextJob": self._serialize_job_payload(next_job),
             "latestErrors": [serialize_mapping(item) for item in latest_errors],
             "queueCounts": queue_counts,
             "nextProposals": next_proposals,
+            "bestCandidate": best_candidate,
+            "lastCompletedResult": last_completed_result,
             "activity": activity,
-            "summary": self._research_summary(activity),
+            "summary": summary,
+            "recommendedAction": activity.get("recommendedAction") or "No action required.",
+            "recommendedActionKey": activity.get("recommendedActionKey") or "noop",
         }
 
     def list_research_runs(self, conn: Any, *, limit: int = 20) -> List[Dict[str, Any]]:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT r.*, rs.verdict_hint, rs.headline, rs.metrics_json
+                SELECT r.*, rs.verdict_hint, rs.headline, rs.metrics_json, COALESCE(cc.candidate_count, 0) AS candidate_count
                 FROM research.run r
                 LEFT JOIN research.runsummary rs ON rs.run_id = r.id
+                LEFT JOIN (
+                    SELECT run_id, COUNT(*) AS candidate_count
+                    FROM research.candidate_result
+                    GROUP BY run_id
+                ) cc ON cc.run_id = r.id
                 ORDER BY r.id DESC
                 LIMIT %s
                 """,
@@ -302,6 +366,281 @@ class ControlPanelService:
             )
             latest = dict(cur.fetchone() or {})
         return self._incident_details(conn, latest) if latest else {}
+
+    def _latest_job_by_status(self, conn: Any, *, statuses: Iterable[str]) -> Dict[str, Any]:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM research.job
+                WHERE status = ANY(%s)
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (list(statuses),),
+            )
+            row = cur.fetchone()
+        return dict(row) if row else {}
+
+    def _latest_component_journal(self, conn: Any, *, component: str) -> Dict[str, Any]:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, component, event_type, message, created_at, job_id, run_id, decision_id, payload
+                FROM research.journal
+                WHERE component = %s
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (component,),
+            )
+            row = cur.fetchone()
+        return serialize_mapping(dict(row or {}))
+
+    def _latest_journal_entry(self, conn: Any) -> Dict[str, Any]:
+        items: List[Dict[str, Any]] = []
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, component, event_type, message, created_at
+                FROM research.journal
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """
+            )
+            row = cur.fetchone()
+            if row:
+                payload = dict(row)
+                payload["source"] = "research"
+                items.append(payload)
+            cur.execute(
+                """
+                SELECT id, component, event_type, message, created_at
+                FROM research.engineering_journal
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """
+            )
+            row = cur.fetchone()
+            if row:
+                payload = dict(row)
+                payload["source"] = "engineering"
+                items.append(payload)
+            cur.execute(
+                """
+                SELECT id, action_type, actor, created_at
+                FROM research.control_operator_action
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """
+            )
+            row = cur.fetchone()
+            if row:
+                payload = dict(row)
+                items.append(
+                    {
+                        "id": payload["id"],
+                        "component": "panel",
+                        "event_type": payload["action_type"],
+                        "message": f"{payload['actor']} {payload['action_type']}",
+                        "created_at": payload["created_at"],
+                        "source": "operator",
+                    }
+                )
+        if not items:
+            return {}
+        items.sort(key=lambda item: _event_sort_key(item.get("created_at")), reverse=True)
+        return serialize_mapping(items[0])
+
+    def _best_candidate_summary(self, conn: Any) -> Dict[str, Any]:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT cr.*, r.id AS run_id, r.brokerday, rs.verdict_hint
+                FROM research.candidate_result cr
+                JOIN research.run r ON r.id = cr.run_id
+                LEFT JOIN research.runsummary rs ON rs.run_id = r.id
+                WHERE r.status = 'completed'
+                ORDER BY
+                    COALESCE((cr.validation_metrics->>'cleanPrecision')::double precision, 0.0) DESC,
+                    COALESCE((cr.validation_metrics->>'entriesPerDay')::double precision, 0.0) DESC,
+                    r.id DESC,
+                    cr.rank ASC
+                LIMIT 1
+                """
+            )
+            row = dict(cur.fetchone() or {})
+        if not row:
+            return {}
+        rule_json = dict(row.get("rule_json") or {})
+        return {
+            "runId": row.get("run_id"),
+            "setupFingerprint": str(row.get("setup_fingerprint") or _setup_fingerprint(rule_json, fallback_name=str(row.get("candidate_name") or ""))),
+            "candidateName": row.get("candidate_name"),
+            "family": row.get("family"),
+            "side": row.get("side"),
+            "brokerday": serialize_value(row.get("brokerday")),
+            "verdictHint": row.get("verdict_hint"),
+            "rule": rule_json,
+            "metrics": dict(row.get("validation_metrics") or {}),
+        }
+
+    def _completed_run_result(
+        self,
+        conn: Any,
+        *,
+        run: Mapping[str, Any],
+        best_candidate: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        if not run:
+            return {}
+        run_id = int(run["id"])
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*) AS candidate_count
+                FROM research.candidate_result
+                WHERE run_id = %s
+                """,
+                (run_id,),
+            )
+            candidate_count = int((cur.fetchone() or {}).get("candidate_count") or 0)
+            cur.execute(
+                """
+                SELECT *
+                FROM research.candidate_result
+                WHERE run_id = %s
+                ORDER BY is_selected DESC, rank ASC, id ASC
+                LIMIT 1
+                """,
+                (run_id,),
+            )
+            selected_row = dict(cur.fetchone() or {})
+        selected_rule = dict(selected_row.get("rule_json") or {})
+        selected_fingerprint = str(
+            selected_row.get("setup_fingerprint") or _setup_fingerprint(selected_rule, fallback_name=str(selected_row.get("candidate_name") or ""))
+        ) if selected_row else None
+        return {
+            "runId": run_id,
+            "brokerday": serialize_value(run.get("brokerday")),
+            "family": ((run.get("config") or {}).get("candidate_family") if run else None),
+            "fingerprint": ((run.get("config") or {}).get("config_fingerprint") if run else None),
+            "verdict": run.get("verdict_hint"),
+            "headline": run.get("headline"),
+            "metrics": dict(run.get("metrics_json") or run.get("metrics") or {}),
+            "candidateCount": candidate_count,
+            "selectedCandidate": {
+                "candidateName": selected_row.get("candidate_name"),
+                "family": selected_row.get("family"),
+                "side": selected_row.get("side"),
+                "setupFingerprint": selected_fingerprint,
+            } if selected_row else {},
+            "bestImproved": bool(selected_fingerprint and selected_fingerprint == best_candidate.get("setupFingerprint")),
+            "finishedAt": serialize_value(run.get("finished_at")),
+        }
+
+    @staticmethod
+    def _incident_root_cause(incident: Mapping[str, Any]) -> str:
+        if not incident:
+            return "none"
+        resolution = dict(incident.get("resolution") or {})
+        latest_error = str(resolution.get("error") or "")
+        if latest_error:
+            return latest_error[:240]
+        actions = list(incident.get("actions") or [])
+        if actions and actions[0].get("error_text"):
+            return str(actions[0]["error_text"])[:240]
+        smoke_tests = list(incident.get("smokeTests") or [])
+        failed_smoke = next((item for item in smoke_tests if str(item.get("status") or "") == "failed"), None)
+        if failed_smoke:
+            return str((failed_smoke.get("result_json") or {}).get("detail") or failed_smoke.get("test_name") or incident.get("summary") or "")[:240]
+        return str(incident.get("summary") or "incident details unavailable")[:240]
+
+    @staticmethod
+    def _verdict_meaning(verdict: str) -> str:
+        mapping = {
+            "strong_narrow_regime_found": "The latest completed run found a stable bounded regime worth reviewing carefully.",
+            "good_precision_but_too_low_frequency": "Precision looked acceptable, but the setup did not fire often enough to count as robust.",
+            "moderate_edge_not_near_target": "There may be signal, but it has not reached the required quality bar yet.",
+            "unstable_out_of_sample": "The setup changed too much across the holdout slice to trust it yet.",
+            "no_robust_edge_found": "Several bounded directions have been tried without finding a stable same-day edge.",
+            "stopped_by_budget_guardrail": "The loop used its bounded iteration budget and stopped safely.",
+            "hard_technical_failure": "The loop could not enqueue a safe bounded next step and stopped for safety.",
+            "supervisor_instruction_rejected": "A supervisor response was rejected by guardrails, so the loop stopped safely.",
+        }
+        return mapping.get(verdict, "The latest verdict is recorded, but no plain-English explanation is defined for it yet.")
+
+    def _build_story(
+        self,
+        *,
+        research_status: Mapping[str, Any],
+        current_incident: Mapping[str, Any],
+        latest_action: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        activity = dict(research_status.get("activity") or {})
+        summary = dict(research_status.get("summary") or {})
+        best_candidate = dict(research_status.get("bestCandidate") or {})
+        last_completed = dict(research_status.get("lastCompletedResult") or {})
+        queue_depth = int(activity.get("queueDepth") or 0)
+        current_run_id = activity.get("currentRunId")
+        current_job_id = activity.get("currentJobId")
+        current_family = activity.get("currentFamily") or "unknown family"
+        current_fingerprint = activity.get("currentFingerprint") or "unknown fingerprint"
+        if current_run_id and current_job_id:
+            running_now = f"Run {current_run_id} is active on job {current_job_id}, testing {current_family} ({current_fingerprint})."
+        elif current_incident and self._derive_engineering_state(current_incident=current_incident) == "repairing":
+            running_now = f"Engineering is actively repairing incident #{current_incident.get('id')}."
+        elif queue_depth > 0:
+            running_now = f"No run is active right now; {queue_depth} job(s) are queued."
+        else:
+            running_now = "No run is active right now."
+
+        if last_completed:
+            what_just_happened = (
+                f"Last completed run: Run {last_completed.get('runId')} on {last_completed.get('brokerday') or 'unknown broker day'} "
+                f"tested {last_completed.get('family') or 'unknown family'} and returned {last_completed.get('verdict') or 'unknown'}."
+            )
+        elif current_incident:
+            what_just_happened = f"Latest material event: incident #{current_incident.get('id')} was recorded."
+        else:
+            what_just_happened = "No completed research run has been recorded yet."
+
+        if current_incident and self._derive_engineering_state(current_incident=current_incident) == "escalated":
+            blocked_now = f"Blocked by escalated incident #{current_incident.get('id')}: {self._incident_root_cause(current_incident)}"
+        else:
+            blocked_now = summary.get("currentBlocker") or "none"
+
+        if current_run_id and current_job_id:
+            machine_next = "When the active run finishes, the supervisor should review the result and produce bounded next jobs."
+        elif queue_depth > 0:
+            machine_next = "The worker should claim the next queued job."
+        elif research_status.get("nextProposals"):
+            next_item = dict((research_status.get("nextProposals") or [])[0] or {})
+            machine_next = f"Next bounded proposal is ready: {next_item.get('action') or 'proposal'} -> {next_item.get('family') or 'unknown family'}."
+        elif best_candidate:
+            machine_next = "No bounded next job is queued; review the best current candidate or seed a new bounded run."
+        else:
+            machine_next = "The loop is waiting for its next bounded instruction."
+
+        latest_verdict_means = summary.get("latestVerdictMeaning") or self._verdict_meaning(str(summary.get("lastVerdict") or ""))
+        recommended_action = summary.get("recommendedAction") or "No action required."
+        return {
+            "whatJustHappened": what_just_happened,
+            "runningNow": running_now,
+            "blockedNow": blocked_now,
+            "machineNext": machine_next,
+            "latestVerdictMeans": latest_verdict_means,
+            "recommendedAction": recommended_action,
+            "recommendedActionKey": summary.get("recommendedActionKey") or "noop",
+            "bestCandidate": (
+                f"{best_candidate.get('candidateName') or best_candidate.get('setupFingerprint')} "
+                f"({best_candidate.get('family') or 'unknown family'})"
+                if best_candidate else "No completed candidate yet"
+            ),
+            "queueDepth": queue_depth,
+            "incidentRootCause": self._incident_root_cause(current_incident),
+            "latestEngineeringAction": str(latest_action.get("action_type") or "n/a"),
+        }
 
     def list_journals(
         self,
@@ -630,6 +969,8 @@ class ControlPanelService:
         metrics = dict((row or {}).get("metrics_json") or (row or {}).get("metrics") or {})
         payload["metrics"] = metrics
         payload["config"] = dict((row or {}).get("config") or {})
+        payload["candidateCount"] = int((row or {}).get("candidate_count") or payload.get("candidate_count") or 0)
+        payload["elapsedSeconds"] = _elapsed_seconds((row or {}).get("started_at"))
         if not payload.get("brokerday"):
             brokerday_value = self._lookup_run_brokerday(row)
             if brokerday_value:
@@ -643,6 +984,10 @@ class ControlPanelService:
         payload["config"] = config
         payload["guardrails"] = guardrails
         payload["proposal"] = self._job_proposal_payload(config=config, guardrails=guardrails)
+        payload["elapsedSeconds"] = _elapsed_seconds((row or {}).get("started_at"))
+        payload["sourceRunId"] = config.get("source_run_id")
+        payload["sourceDecisionId"] = (row or {}).get("parent_decision_id")
+        payload["sourceJobId"] = (row or {}).get("parent_job_id")
         return payload
 
     def _lookup_run_brokerday(self, row: Mapping[str, Any]) -> Optional[str]:
@@ -806,85 +1151,179 @@ class ControlPanelService:
         conn: Any,
         *,
         status: Mapping[str, Any],
+        control: Mapping[str, Any],
         queue_counts: Mapping[str, int],
         latest_run: Mapping[str, Any],
         last_completed_run: Mapping[str, Any],
         current_run: Mapping[str, Any],
+        current_job: Mapping[str, Any],
+        next_job: Mapping[str, Any],
         current_incident: Mapping[str, Any],
+        latest_claim: Mapping[str, Any],
+        latest_worker_event: Mapping[str, Any],
+        latest_research_event: Mapping[str, Any],
+        next_proposals: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        control = dict(status.get("value") or {})
         services = list(status.get("services") or [])
         worker_service = self._service_snapshot(services, self._settings.research_settings.worker_name)
         orchestrator_service = self._service_snapshot(services, self._settings.research_settings.orchestrator_name)
-        latest_claim = self._latest_journal_event(conn, event_types=("worker.job.claimed",))
+        supervisor_service = self._service_snapshot(services, self._settings.research_settings.supervisor_name)
         latest_orchestrator_event = self._latest_journal_event(
             conn,
             event_types=("orchestrator.seeded", "orchestrator.decision.queued", "orchestrator.decision.applied"),
         )
-        worker_consuming = bool(queue_counts.get("running", 0) > 0 or latest_claim.get("run_id") == (current_run or {}).get("id"))
+        latest_supervisor_event = self._latest_component_journal(conn, component="supervisor")
+        worker_consuming = bool(current_job)
         engineering_state = self._derive_engineering_state(current_incident=current_incident)
+        latest_decision = dict(status.get("latest_decision") or {})
+        current_config = dict(current_job.get("config") or current_run.get("config") or {})
+        current_proposal = self._job_proposal_payload(config=current_config, guardrails=dict(current_job.get("guardrails") or {}))
+        incident_root_cause = self._incident_root_cause(current_incident)
+
+        if current_job:
+            current_phase = "worker"
+            current_step = "executing entry research"
+        elif str(latest_decision.get("status") or "") == "running":
+            current_phase = "supervisor"
+            current_step = "reviewing the latest completed run"
+        elif str(latest_decision.get("status") or "") == "pending":
+            current_phase = "supervisor"
+            current_step = "awaiting supervisor pickup"
+        elif next_job:
+            current_phase = "queue"
+            current_step = "awaiting worker claim"
+        elif control.get("final_verdict"):
+            current_phase = "stopped"
+            current_step = f"stopped after {control.get('final_verdict')}"
+        else:
+            current_phase = "idle"
+            current_step = "waiting for the next bounded job"
+
         blocker = "none"
         action = "No action required."
-        if control.get("paused"):
-            blocker = "research is paused"
-            action = "Resume Research to allow the worker and orchestrator to process pending jobs."
+        action_key = "noop"
+        if engineering_state == "escalated":
+            blocker = f"Engineering incident #{current_incident.get('id')} is escalated: {incident_root_cause}"
+            action = "Investigate escalated incident"
+            action_key = "investigate_incident"
+        elif current_job:
+            blocker = "none"
+            action = "No action required while the active run is executing."
+            action_key = "noop"
+        elif control.get("paused"):
+            blocker = "Research is paused."
+            action = "Resume Research"
+            action_key = "resume_research"
         elif control.get("final_verdict") and queue_counts.get("pending", 0) > 0:
-            blocker = f"pending jobs exist, but the loop is stopped by final verdict {control['final_verdict']}"
-            action = "Resume Research to clear the stop verdict and wake the research services."
+            blocker = f"Queued jobs exist, but research is stopped by final verdict {control.get('final_verdict')}."
+            action = "Resume Research"
+            action_key = "resume_research"
         elif control.get("final_verdict"):
-            blocker = f"research stopped after final verdict {control['final_verdict']}"
-            action = "Resume Research only if you want to continue search beyond the last accepted verdict."
+            blocker = f"Research is stopped after final verdict {control.get('final_verdict')}."
+            action = "Resume Research if you want the loop to continue past that verdict."
+            action_key = "resume_research"
+        elif queue_counts.get("pending", 0) > 0 and not self._service_is_running(worker_service):
+            blocker = "Queued jobs exist, but the worker service is not running."
+            action = "Restart worker claim path"
+            action_key = "restart_worker"
         elif queue_counts.get("pending", 0) > 0 and not worker_consuming:
-            blocker = "pending jobs are not being consumed"
-            if not self._service_is_running(worker_service):
-                action = "Resume Research or Restart Research Services to bring the worker back to running."
-            else:
-                action = "Inspect worker health and recent claim events; the queue should be moving."
-        elif engineering_state == "escalated":
-            blocker = "engineering is escalated"
-            action = "Acknowledge or resolve the engineering incident if it is affecting research services."
+            blocker = "Queued jobs are not being claimed."
+            action = "Inspect worker claim path"
+            action_key = "inspect_worker"
+        elif not current_job and not next_job and next_proposals:
+            blocker = "No runnable job is queued yet."
+            action = "Seed Next Job"
+            action_key = "seed_next_job"
+        elif not current_job and not next_job and control.get("seeded") and not next_proposals:
+            blocker = "The loop is idle with no queued bounded work."
+            action = "Review the latest verdict or seed a new bounded job."
+            action_key = "review_or_seed"
+
         return {
             "loopState": self._derive_research_state(status, queue_counts=queue_counts, current_run=current_run),
             "lastCompletedRunId": last_completed_run.get("id"),
             "lastCompletedBrokerday": serialize_value(last_completed_run.get("brokerday")),
             "lastFamilyTried": ((last_completed_run.get("config") or {}).get("candidate_family") if last_completed_run else None),
             "lastVerdict": last_completed_run.get("verdict_hint"),
+            "lastCompletedAt": serialize_value(last_completed_run.get("finished_at")),
             "currentRunId": current_run.get("id") or (latest_run.get("id") if str(latest_run.get("status") or "") == "running" else None),
+            "currentJobId": current_job.get("id"),
+            "currentBrokerday": serialize_value(current_run.get("brokerday")),
+            "currentFamily": current_config.get("candidate_family"),
+            "currentFingerprint": current_config.get("config_fingerprint"),
+            "currentProposalKind": current_proposal.get("proposalKind"),
+            "currentProposalSource": current_proposal.get("proposalSource"),
+            "currentMutationNote": current_proposal.get("mutationNote"),
+            "currentSourceRunId": current_config.get("source_run_id"),
+            "currentSourceDecisionId": current_job.get("parent_decision_id"),
+            "currentSourceJobId": current_job.get("parent_job_id"),
+            "currentPhase": current_phase,
+            "currentStep": current_step,
             "queueDepth": int(queue_counts.get("pending", 0) or 0) + int(queue_counts.get("running", 0) or 0),
             "pendingJobs": int(queue_counts.get("pending", 0) or 0),
             "runningJobs": int(queue_counts.get("running", 0) or 0),
             "failedJobs": int(queue_counts.get("failed", 0) or 0),
+            "completedJobs": int(queue_counts.get("completed", 0) or 0),
             "workerLastClaimedAt": latest_claim.get("created_at"),
             "workerLastClaimedJobId": latest_claim.get("job_id"),
             "workerActivelyConsuming": worker_consuming,
             "workerServiceState": self._service_state_text(worker_service),
+            "workerHeartbeatAt": serialize_value(current_job.get("last_heartbeat_at") or latest_worker_event.get("created_at")),
+            "workerLastEventAt": latest_worker_event.get("created_at"),
+            "workerLastEventType": latest_worker_event.get("event_type"),
+            "workerLastEventMessage": latest_worker_event.get("message"),
             "orchestratorActive": self._service_is_running(orchestrator_service),
             "orchestratorServiceState": self._service_state_text(orchestrator_service),
             "orchestratorLastEventAt": latest_orchestrator_event.get("created_at"),
+            "supervisorServiceState": self._service_state_text(supervisor_service),
+            "supervisorLastEventAt": latest_supervisor_event.get("created_at"),
             "researchFinalVerdict": control.get("final_verdict"),
             "researchPaused": bool(control.get("paused")),
             "stopRequested": bool(control.get("stop_requested")),
             "engineeringState": engineering_state,
             "engineeringBlocking": engineering_state == "escalated",
+            "activeRunElapsedSeconds": _elapsed_seconds(current_run.get("started_at")),
+            "latestEventAt": latest_research_event.get("created_at"),
+            "latestEventSource": latest_research_event.get("component"),
+            "latestEventType": latest_research_event.get("event_type"),
+            "latestEventMessage": latest_research_event.get("message"),
             "currentBlocker": blocker,
             "recommendedAction": action,
+            "recommendedActionKey": action_key,
         }
 
-    @staticmethod
-    def _research_summary(activity: Mapping[str, Any]) -> Dict[str, Any]:
+    def _research_summary(
+        self,
+        activity: Mapping[str, Any],
+        *,
+        best_candidate: Mapping[str, Any],
+        last_completed_result: Mapping[str, Any],
+    ) -> Dict[str, Any]:
         run_id = activity.get("lastCompletedRunId")
         brokerday = activity.get("lastCompletedBrokerday")
         run_label = f"Run {run_id}" if run_id else "No completed run yet"
         if run_id and brokerday:
             run_label = f"Run {run_id} on {brokerday}"
+        best_label = "No completed candidate yet"
+        if best_candidate:
+            best_label = f"{best_candidate.get('candidateName') or best_candidate.get('setupFingerprint')} ({best_candidate.get('family') or 'unknown family'})"
         return {
             "lastCompletedRun": run_label,
             "lastFamilyTried": activity.get("lastFamilyTried") or "n/a",
             "lastVerdict": activity.get("lastVerdict") or "n/a",
             "pendingJobs": activity.get("pendingJobs") or 0,
+            "queueDepth": activity.get("queueDepth") or 0,
             "workerLastClaimedAt": activity.get("workerLastClaimedAt") or None,
+            "lastCompletedAt": activity.get("lastCompletedAt") or None,
+            "bestCandidate": best_label,
+            "latestVerdictMeaning": self._verdict_meaning(str(activity.get("lastVerdict") or "")),
             "currentBlocker": activity.get("currentBlocker") or "none",
             "recommendedAction": activity.get("recommendedAction") or "No action required.",
+            "recommendedActionKey": activity.get("recommendedActionKey") or "noop",
+            "currentRunId": activity.get("currentRunId"),
+            "currentJobId": activity.get("currentJobId"),
+            "currentPhase": activity.get("currentPhase") or "idle",
+            "lastCompletedResult": dict(last_completed_result or {}),
         }
 
     @staticmethod
@@ -911,12 +1350,26 @@ class ControlPanelService:
         for proposal in proposals:
             payload = dict(proposal or {})
             params = dict(payload.get("parameters") or {})
+            seed_rule = dict(params.get("seed_rule") or {})
+            seed_rule_ref = None
+            if seed_rule:
+                seed_rule_ref = " / ".join(
+                    [
+                        str(seed_rule.get("name") or "seed"),
+                        str(seed_rule.get("family") or "family"),
+                        str(seed_rule.get("side") or "side"),
+                    ]
+                )
             items.append(
                 {
                     "action": payload.get("action") or "proposal",
                     "reason": payload.get("reason") or "",
                     "configFingerprint": payload.get("configFingerprint") or params.get("config_fingerprint"),
                     "family": params.get("candidate_family"),
+                    "proposalSource": source,
+                    "sourceRunId": params.get("source_run_id"),
+                    "mutationNote": params.get("mutation_note"),
+                    "seedRuleRef": seed_rule_ref,
                     "mutatedFields": list(payload.get("mutatedFields") or []),
                     "source": source,
                     "parameters": params,
@@ -947,6 +1400,9 @@ class ControlPanelService:
             "mutationNote": config.get("mutation_note") or guardrails.get("reason"),
             "mutatedFields": list(guardrails.get("mutatedFields") or []),
             "proposalDerived": derived,
+            "derivedFromRunId": config.get("source_run_id"),
+            "derivedFromDecisionId": guardrails.get("sourceDecisionId"),
+            "seedRule": seed_rule,
         }
 
     def _incident_details(self, conn: Any, incident: Mapping[str, Any]) -> Dict[str, Any]:
@@ -986,6 +1442,7 @@ class ControlPanelService:
             for patch in patches
             for target in list(patch.get("target_files") or [])
         ]
+        payload["rootCause"] = self._incident_root_cause(payload)
         return payload
 
     def _resolve_day_review_run(self, conn: Any, *, brokerday_text: Optional[str], run_id: Optional[int]) -> Dict[str, Any]:

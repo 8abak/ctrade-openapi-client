@@ -105,19 +105,26 @@ class ResearchManager:
     def resume(self, conn: Any, *, reason: str) -> Dict[str, Any]:
         control = ensure_control_state(conn, self._settings.research_settings)
         cleared_final_verdict = str(control.get("final_verdict") or "")
-        control["paused"] = False
-        control["paused_by"] = None
-        control["pause_reason"] = reason[:512]
-        control["stop_requested"] = False
-        control["final_verdict"] = None
-        control["final_reason"] = None
+        self._wake_research_loop(control, reason=reason, cleared_final_verdict=cleared_final_verdict or None)
+        pending_or_running = self._latest_job(conn, statuses=("pending", "running"))
+        if pending_or_running:
+            control["seeded"] = True
         if cleared_final_verdict:
             control["last_resume_cleared_final_verdict"] = cleared_final_verdict
         service_actions = self._ensure_research_services_ready()
         if service_actions:
             control["last_resume_service_actions"] = service_actions
         set_state(conn, CONTROL_STATE_KEY, control)
-        return control
+        seed_result = None
+        if pending_or_running is None:
+            seed_result = self.seed_next_job(conn, reason=f"resume wake: {reason[:480]}")
+            control = ensure_control_state(conn, self._settings.research_settings)
+        result = dict(control)
+        result["serviceActions"] = service_actions
+        if seed_result is not None:
+            result["seedResult"] = seed_result
+        result["message"] = "Research loop resumed and consumption wake-up was attempted."
+        return result
 
     def reset(self, conn: Any, *, mode: str, reason: str) -> Dict[str, Any]:
         if mode == "hard":
@@ -212,30 +219,44 @@ class ResearchManager:
             )
             new_job_id = int(cur.fetchone()["id"])
         control = ensure_control_state(conn, self._settings.research_settings)
-        if str(control.get("paused_by") or "") == "engineering_control":
-            control["paused"] = False
-            control["paused_by"] = None
-            set_state(conn, CONTROL_STATE_KEY, control)
-        return {"requeuedFromJobId": int(payload["id"]), "jobId": new_job_id}
+        self._wake_research_loop(control, reason=reason)
+        control["seeded"] = True
+        service_actions = self._ensure_research_services_ready()
+        if service_actions:
+            control["last_requeue_service_actions"] = service_actions
+        set_state(conn, CONTROL_STATE_KEY, control)
+        return {
+            "requeuedFromJobId": int(payload["id"]),
+            "jobId": new_job_id,
+            "serviceActions": service_actions,
+            "message": "Failed research job requeued and wake-up was attempted.",
+        }
 
     def restart_services(self, service_names: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         targets = service_names or list(self._settings.research_services)
         snapshots = []
         for service_name in targets:
-            self._service_manager.reset_failed(service_name)
-            snapshots.append(self._service_manager.restart(service_name).model_dump())
+            snapshots.append(self._service_manager.restart_with_reset_tolerance(service_name))
         return snapshots
 
     def seed_next_job(self, conn: Any, *, reason: str) -> Dict[str, Any]:
         runtime_policy = resolve_research_runtime(conn, self._settings, self._settings.research_settings)
-        existing_pending = self._latest_job(conn, statuses=("pending",))
+        existing_pending = self._latest_job(conn, statuses=("pending", "running"))
         if existing_pending:
+            control = ensure_control_state(conn, self._settings.research_settings)
+            self._wake_research_loop(control, reason=reason)
+            control["seeded"] = True
+            service_actions = self._ensure_research_services_ready()
+            if service_actions:
+                control["last_seed_service_actions"] = service_actions
+            set_state(conn, CONTROL_STATE_KEY, control)
             return {
                 "jobId": int(existing_pending["id"]),
                 "config": dict(existing_pending.get("config") or {}),
                 "reusedExisting": True,
                 "proposalDerived": self._job_is_proposal_derived(existing_pending),
-                "message": "pending job already queued; skipped duplicate seed",
+                "serviceActions": service_actions,
+                "message": "Existing queued work was kept and the worker wake-up path was triggered.",
             }
 
         selected = self._select_seed_job(conn, runtime_policy=runtime_policy, reason=reason)
@@ -281,7 +302,15 @@ class ResearchManager:
         )
         if inserted.get("reusedExisting"):
             return inserted
-        self._ensure_research_services_ready()
+        control = ensure_control_state(conn, self._settings.research_settings)
+        self._wake_research_loop(control, reason=reason)
+        control["seeded"] = True
+        control["last_seeded_job_id"] = inserted.get("jobId")
+        service_actions = self._ensure_research_services_ready()
+        if service_actions:
+            control["last_seed_service_actions"] = service_actions
+        set_state(conn, CONTROL_STATE_KEY, control)
+        inserted["serviceActions"] = service_actions
         return inserted
 
     def _build_limits(self):  # type: ignore[no-untyped-def]
@@ -296,22 +325,37 @@ class ResearchManager:
         )
 
     def _ensure_research_services_ready(self) -> List[Dict[str, str]]:
-        snapshots = self._service_manager.status_many(self._settings.research_services)
         actions: List[Dict[str, str]] = []
-        for snapshot in snapshots:
-            if not snapshot.probe_supported:
+        for service_name in self._settings.research_services:
+            snapshot = self._service_manager.ensure_running(service_name)
+            requested_action = str(snapshot.get("requestedAction") or "noop")
+            warnings = list(snapshot.get("warnings") or [])
+            if requested_action == "noop" and not warnings:
                 continue
-            is_running = snapshot.active_state == "active" and snapshot.sub_state == "running"
-            if is_running:
-                continue
-            self._service_manager.reset_failed(snapshot.name)
-            action = "restart" if snapshot.active_state == "active" else "start"
-            if action == "restart":
-                self._service_manager.restart(snapshot.name)
-            else:
-                self._service_manager.start(snapshot.name)
-            actions.append({"service": snapshot.name, "action": action})
+            action_payload: Dict[str, str] = {
+                "service": service_name,
+                "action": requested_action,
+            }
+            if warnings:
+                action_payload["warning"] = warnings[0]
+            actions.append(action_payload)
         return actions
+
+    @staticmethod
+    def _wake_research_loop(
+        control: Dict[str, Any],
+        *,
+        reason: str,
+        cleared_final_verdict: str | None = None,
+    ) -> None:
+        control["paused"] = False
+        control["paused_by"] = None
+        control["pause_reason"] = reason[:512]
+        control["stop_requested"] = False
+        control["final_verdict"] = None
+        control["final_reason"] = None
+        if cleared_final_verdict:
+            control["last_resume_cleared_final_verdict"] = cleared_final_verdict
 
     def _latest_job(self, conn: Any, *, statuses: Sequence[str]) -> Optional[Dict[str, Any]]:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
