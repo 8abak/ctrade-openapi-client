@@ -27,6 +27,12 @@ Systemd units installed by deploy:
 - `separation.service` runs `python -m datavis.separation_runtime` from `/home/ec2-user/venvs/datavis/bin/python`
 - `tickcollector.service` also reads `/etc/datavis.env` when present so `DATAVIS_CTRADER_CREDS_FILE` and related runtime overrides apply to the collector too
 
+Nginx recovery managed by deploy:
+- canonical site file: `/etc/nginx/conf.d/datavis.au.conf`
+- source of truth in repo: `deploy/nginx/datavis.au.conf`
+- `deploy/scripts/recover-datavis-nginx.sh` removes any stale `server_name datavis.au` block from `/etc/nginx/nginx.conf`, installs the managed site file, runs `nginx -t`, and reloads nginx
+- the managed site file redirects `/` to `/live`, proxies the live app to `127.0.0.1:8000`, and contains no `8501` upstream or static `frontend` root
+
 Trading runtime env vars for `/etc/datavis.env`:
 - `DATAVIS_TRADE_USERNAME` (default `babak`)
 - `DATAVIS_TRADE_PASSWORD` (required to enable trade login)

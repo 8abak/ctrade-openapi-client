@@ -2577,6 +2577,12 @@ def bigpicture_page() -> FileResponse:
     return FileResponse(FRONTEND_DIR / "bigpicture.html")
 
 
+@app.get("/bigpic", include_in_schema=False)
+@app.get("/bigpicture", include_in_schema=False)
+def bigpicture_alias_page() -> RedirectResponse:
+    return RedirectResponse(url="/bigPic", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+
+
 @app.get("/sql", include_in_schema=False)
 def sql_page(_: Optional[str] = Depends(require_sql_admin)) -> FileResponse:
     return FileResponse(FRONTEND_DIR / "sql.html")

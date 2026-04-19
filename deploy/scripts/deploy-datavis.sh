@@ -41,6 +41,16 @@ install_systemd_units() {
   sudo systemctl daemon-reload
 }
 
+recover_nginx_site() {
+  if ! command -v nginx >/dev/null 2>&1; then
+    log "nginx not installed; skipping site recovery"
+    return
+  fi
+
+  log "Recovering nginx datavis.au site config"
+  bash deploy/scripts/recover-datavis-nginx.sh
+}
+
 disable_legacy_services() {
   for service_name in "${LEGACY_SERVICES[@]}"; do
     log "Disabling legacy service ${service_name}"
@@ -93,6 +103,7 @@ pip install -r requirements.txt
 
 install_systemd_units
 disable_legacy_services
+recover_nginx_site
 apply_sql_migrations
 
 for service_name in "${UNIT_FILES[@]}"; do
