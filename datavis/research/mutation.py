@@ -248,6 +248,18 @@ def generate_mutation_proposals(
                 "feature_toggles": sorted(set(base_params.feature_toggles + [hint.feature for hint in hints[:3]])),
             },
         )
+    if seed_rule is not None:
+        add_proposal(
+            "explore_new_family",
+            "Test bounded crossover confirmations on the current winner and keep only variants that cut noise or improve precision.",
+            {
+                "candidate_family": "crossover_confirmation",
+                "side_lock": seed_rule.side,
+                "seed_rule": seed_rule,
+                "spread_filter": base_params.spread_filter,
+                "threshold_profile": "strict",
+            },
+        )
 
     current_family = str(base_params.candidate_family or "")
     if current_family in {"threshold_grid", "slice_expand"}:

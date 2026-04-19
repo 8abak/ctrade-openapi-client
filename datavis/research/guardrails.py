@@ -51,6 +51,7 @@ APPROVED_CANDIDATE_FAMILIES = (
     "pair_combo",
     "triad_combo",
     "contrast_gate",
+    "crossover_confirmation",
     "regime_split",
     "tighten_winner",
     "slice_expand",

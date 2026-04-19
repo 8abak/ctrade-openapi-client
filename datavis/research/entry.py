@@ -217,6 +217,7 @@ def compute_features(rows: Sequence[TickRow], index: int) -> Dict[str, float | s
     prev_3 = rows[index - 3]
     prev_4 = rows[index - 4]
     prev_5 = rows[index - 5]
+    prev_8 = rows[index - 8]
     prev_10 = rows[index - 10]
     prev_12_window = rows[index - 12:index]
     mids_10 = [row.mid for row in prev_12_window]
@@ -243,6 +244,20 @@ def compute_features(rows: Sequence[TickRow], index: int) -> Dict[str, float | s
         breakout = -(recent_low - tick.mid)
     pullback_depth = (recent_high - tick.mid) if momentum_3 >= 0 else (tick.mid - recent_low)
     imbalance = sum(direction_flags) / max(1, len(direction_flags))
+    fast_short_momentum = tick.mid - prev_3.mid
+    slow_short_momentum = tick.mid - prev_8.mid
+    prev_fast_short_momentum = rows[index - 1].mid - rows[index - 4].mid
+    prev_slow_short_momentum = rows[index - 1].mid - rows[index - 9].mid
+    smoother_mid = rolling_mean([row.mid for row in rows[index - 7:index + 1]])
+    prev_smoother_mid = rolling_mean([row.mid for row in rows[index - 8:index]])
+    kal = weighted_mean([row.mid for row in rows[index - 4:index + 1]])
+    k2 = weighted_mean([row.mid for row in rows[index - 8:index + 1]])
+    prev_kal = weighted_mean([row.mid for row in rows[index - 5:index]])
+    prev_k2 = weighted_mean([row.mid for row in rows[index - 9:index]])
+    fast_imbalance = mean_sign(rows, start=index - 3, end=index)
+    slow_imbalance = mean_sign(rows, start=index - 7, end=index)
+    prev_fast_imbalance = mean_sign(rows, start=index - 4, end=index - 1)
+    prev_slow_imbalance = mean_sign(rows, start=index - 8, end=index - 1)
     return {
         "spread": round(tick.spread, 6),
         "short_momentum": round(tick.mid - prev_5.mid, 6),
@@ -257,6 +272,21 @@ def compute_features(rows: Sequence[TickRow], index: int) -> Dict[str, float | s
         "flip_frequency": round(direction_changes / max(1, len(direction_flags) - 1), 6),
         "session_bucket": session_bucket_for_timestamp(tick.timestamp),
         "momentum_anchor": round(tick.mid - prev_10.mid, 6),
+        "fast_short_momentum": round(fast_short_momentum, 6),
+        "slow_short_momentum": round(slow_short_momentum, 6),
+        "price_smoother_gap": round(tick.mid - smoother_mid, 6),
+        "kal": round(kal, 6),
+        "k2": round(k2, 6),
+        "fast_tick_imbalance": round(fast_imbalance, 6),
+        "slow_tick_imbalance": round(slow_imbalance, 6),
+        "short_momentum_cross_down": float(crossed_below(prev_fast_short_momentum, prev_slow_short_momentum, fast_short_momentum, slow_short_momentum)),
+        "short_momentum_cross_up": float(crossed_above(prev_fast_short_momentum, prev_slow_short_momentum, fast_short_momentum, slow_short_momentum)),
+        "price_cross_below_smoother": float(crossed_below(rows[index - 1].mid, prev_smoother_mid, tick.mid, smoother_mid)),
+        "price_cross_above_smoother": float(crossed_above(rows[index - 1].mid, prev_smoother_mid, tick.mid, smoother_mid)),
+        "kal_cross_below_k2": float(crossed_below(prev_kal, prev_k2, kal, k2)),
+        "kal_cross_above_k2": float(crossed_above(prev_kal, prev_k2, kal, k2)),
+        "imbalance_cross_down": float(crossed_below(prev_fast_imbalance, prev_slow_imbalance, fast_imbalance, slow_imbalance)),
+        "imbalance_cross_up": float(crossed_above(prev_fast_imbalance, prev_slow_imbalance, fast_imbalance, slow_imbalance)),
     }
 
 
@@ -357,7 +387,7 @@ def search_candidates(
     allowed_sides = resolve_sides(params.side_lock)
     single_rules = build_threshold_rules(filtered_train, params.feature_toggles, threshold_values, allowed_sides=allowed_sides)
     single_results = evaluate_rules(single_rules, filtered_train, filtered_validation, dedup_gap=dedup_gap, example_limit=settings.max_examples)
-    if not single_results:
+    if not single_results and params.seed_rule is None:
         return []
     candidate_results: List[Dict[str, Any]] = []
     strategy = params.candidate_family
@@ -380,6 +410,24 @@ def search_candidates(
         contrast_rules = build_contrast_rules(params, single_results)
         contrast_results = evaluate_rules(contrast_rules, filtered_train, filtered_validation, dedup_gap=dedup_gap, example_limit=settings.max_examples)
         candidate_results.extend(contrast_results[:candidate_limit])
+    elif strategy == "crossover_confirmation":
+        crossover_seed, crossover_rules = build_crossover_rules(params, filtered_train, single_results)
+        if crossover_seed is not None and crossover_rules:
+            baseline_result = evaluate_candidate(
+                crossover_seed,
+                filtered_train,
+                filtered_validation,
+                dedup_gap=dedup_gap,
+                example_limit=settings.max_examples,
+            )
+            crossover_results = evaluate_rules(
+                crossover_rules,
+                filtered_train,
+                filtered_validation,
+                dedup_gap=dedup_gap,
+                example_limit=settings.max_examples,
+            )
+            candidate_results.extend(select_crossover_candidates(crossover_results, baseline_result)[:candidate_limit])
     elif strategy == "tighten_winner":
         tighten_rules = build_tighten_rules(params, single_results)
         tighten_results = evaluate_rules(tighten_rules, filtered_train, filtered_validation, dedup_gap=dedup_gap, example_limit=settings.max_examples)
@@ -537,6 +585,122 @@ def build_tighten_rules(params: EntryResearchParameters, single_results: Sequenc
             )
         )
     return rules[:6]
+
+
+def build_crossover_rules(
+    params: EntryResearchParameters,
+    train_cases: Sequence[Dict[str, Any]],
+    single_results: Sequence[Dict[str, Any]],
+) -> tuple[CandidateRule | None, List[CandidateRule]]:
+    seed = params.seed_rule or derive_seed_from_results(single_results)
+    if seed is None:
+        return None, []
+    base_predicates = [predicate.model_dump() if isinstance(predicate, PredicateSpec) else dict(predicate) for predicate in seed.predicates]
+    baseline_rule = CandidateRule(
+        name=f"{seed.side}:crossover_seed:{seed.name}",
+        family="crossover_confirmation",
+        side=seed.side,
+        predicates=base_predicates,
+    )
+    direction = "down" if seed.side == "short" else "up"
+    spread_values = [float(case["spread"]) for case in train_cases]
+    if not spread_values:
+        return baseline_rule, []
+    low_spread = quantile_value(spread_values, 0.50)
+    low_mid_spread = quantile_value(spread_values, 0.65)
+    gate_specs = [
+        ("short_momentum", f"short_momentum_cross_{direction}"),
+        ("price_smoother", f"price_cross_{'below' if direction == 'down' else 'above'}_smoother"),
+        ("kal_k2", f"kal_cross_{'below' if direction == 'down' else 'above'}_k2"),
+        ("imbalance", f"imbalance_cross_{direction}"),
+    ]
+    rules: List[CandidateRule] = []
+    for label, crossover_feature in gate_specs:
+        rules.append(
+            CandidateRule(
+                name=f"{seed.side}:crossover:{label}:seed",
+                family="crossover_confirmation",
+                side=seed.side,
+                predicates=base_predicates + [{"feature": crossover_feature, "operator": ">=", "threshold": 0.5}],
+            )
+        )
+        rules.append(
+            CandidateRule(
+                name=f"{seed.side}:crossover:{label}:lowmid_spread",
+                family="crossover_confirmation",
+                side=seed.side,
+                predicates=base_predicates + [
+                    {"feature": crossover_feature, "operator": ">=", "threshold": 0.5},
+                    {"feature": "spread", "operator": "<=", "threshold": low_mid_spread},
+                ],
+            )
+        )
+        rules.append(
+            CandidateRule(
+                name=f"{seed.side}:crossover:{label}:low_spread",
+                family="crossover_confirmation",
+                side=seed.side,
+                predicates=base_predicates + [
+                    {"feature": crossover_feature, "operator": ">=", "threshold": 0.5},
+                    {"feature": "spread", "operator": "<=", "threshold": low_spread},
+                ],
+            )
+        )
+    return baseline_rule, rules[:12]
+
+
+def select_crossover_candidates(candidates: Sequence[Dict[str, Any]], baseline_result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    baseline_metrics = dict(baseline_result.get("validationMetrics") or {})
+    baseline_clean_precision = float(baseline_metrics.get("cleanPrecision") or 0.0)
+    baseline_entries_per_day = float(baseline_metrics.get("entriesPerDay") or 0.0)
+    baseline_median_hit_seconds = metric_or_inf(baseline_metrics.get("medianHitSeconds"))
+    accepted: List[Dict[str, Any]] = []
+    for candidate in candidates:
+        validation = dict(candidate.get("validationMetrics") or {})
+        clean_precision = float(validation.get("cleanPrecision") or 0.0)
+        entries_per_day = float(validation.get("entriesPerDay") or 0.0)
+        median_hit_seconds = metric_or_inf(validation.get("medianHitSeconds"))
+        precision_gain = clean_precision - baseline_clean_precision
+        noise_reduction = baseline_entries_per_day - entries_per_day
+        spread_stats = crossover_spread_preference(validation)
+        materially_improves_precision = precision_gain >= 0.04
+        materially_reduces_noise = noise_reduction >= max(0.10, baseline_entries_per_day * 0.15)
+        follow_through_ok = baseline_median_hit_seconds == math.inf or median_hit_seconds <= (baseline_median_hit_seconds * 1.10)
+        if clean_precision < 0.333:
+            continue
+        if not (materially_improves_precision or materially_reduces_noise):
+            continue
+        if not follow_through_ok and not materially_improves_precision:
+            continue
+        if spread_stats["lowMidShare"] < 0.50 and precision_gain < 0.05:
+            continue
+        validation["baselineComparison"] = {
+            "baselineCandidate": baseline_result.get("candidateName"),
+            "baselineCleanPrecision": round(baseline_clean_precision, 6),
+            "baselineEntriesPerDay": round(baseline_entries_per_day, 4),
+            "baselineMedianHitSeconds": None if baseline_median_hit_seconds == math.inf else round(baseline_median_hit_seconds, 6),
+            "cleanPrecisionGain": round(precision_gain, 6),
+            "entryReductionPerDay": round(noise_reduction, 4),
+            "medianHitSecondsDelta": None if median_hit_seconds == math.inf or baseline_median_hit_seconds == math.inf else round(baseline_median_hit_seconds - median_hit_seconds, 6),
+            "materiallyImprovesPrecision": materially_improves_precision,
+            "materiallyReducesNoise": materially_reduces_noise,
+        }
+        validation["spreadPreference"] = {
+            "lowMidShare": round(spread_stats["lowMidShare"], 6),
+            "lowPrecision": round(spread_stats["lowPrecision"], 6),
+            "midPrecision": round(spread_stats["midPrecision"], 6),
+            "highPrecision": round(spread_stats["highPrecision"], 6),
+        }
+        candidate["validationMetrics"] = validation
+        candidate["rankingBonus"] = {
+            "spreadPreference": round(spread_stats["lowMidShare"], 6),
+            "followThroughScore": 0.0 if median_hit_seconds == math.inf else round(1.0 / (1.0 + median_hit_seconds), 9),
+            "noiseReduction": round(max(0.0, noise_reduction), 6),
+            "precisionGain": round(max(0.0, precision_gain), 6),
+        }
+        accepted.append(candidate)
+    accepted.sort(key=candidate_sort_key, reverse=True)
+    return accepted
 
 
 def derive_seed_from_results(single_results: Sequence[Dict[str, Any]]) -> CandidateSeed | None:
@@ -1078,15 +1242,77 @@ def quantile_value(values: Sequence[float], quantile: float) -> float:
     return ordered[lower] + ((ordered[upper] - ordered[lower]) * fraction)
 
 
-def candidate_sort_key(item: Dict[str, Any]) -> tuple[float, float, float, int]:
+def candidate_sort_key(item: Dict[str, Any]) -> tuple[float, float, float, float, float, float, float, int]:
     validation = item["validationMetrics"]
     train = item["trainMetrics"]
+    ranking_bonus = item.get("rankingBonus") or {}
     return (
         float(validation["cleanPrecision"]),
+        float(ranking_bonus.get("spreadPreference") or 0.0),
+        float(ranking_bonus.get("followThroughScore") or 0.0),
+        float(ranking_bonus.get("noiseReduction") or 0.0),
+        float(ranking_bonus.get("precisionGain") or 0.0),
         float(validation["precision"]),
         -float(validation.get("walkForwardRange") or 0.0),
         int(train["signalCount"]),
     )
+
+
+def rolling_mean(values: Sequence[float]) -> float:
+    if not values:
+        return 0.0
+    return sum(float(value) for value in values) / len(values)
+
+
+def weighted_mean(values: Sequence[float]) -> float:
+    if not values:
+        return 0.0
+    weights = list(range(1, len(values) + 1))
+    denominator = sum(weights)
+    if denominator <= 0:
+        return 0.0
+    return sum(float(value) * weight for value, weight in zip(values, weights)) / denominator
+
+
+def mean_sign(rows: Sequence[TickRow], *, start: int, end: int) -> float:
+    flags = [sign(rows[pos].mid - rows[pos - 1].mid) for pos in range(start, end + 1)]
+    if not flags:
+        return 0.0
+    return sum(flags) / len(flags)
+
+
+def crossed_below(previous_fast: float, previous_slow: float, current_fast: float, current_slow: float) -> bool:
+    return previous_fast >= previous_slow and current_fast < current_slow
+
+
+def crossed_above(previous_fast: float, previous_slow: float, current_fast: float, current_slow: float) -> bool:
+    return previous_fast <= previous_slow and current_fast > current_slow
+
+
+def metric_or_inf(value: Any) -> float:
+    if value is None:
+        return math.inf
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return math.inf
+
+
+def crossover_spread_preference(validation: Dict[str, Any]) -> Dict[str, float]:
+    spread_buckets = validation.get("bySpread") or {}
+    low_bucket = spread_buckets.get("low") or {}
+    mid_bucket = spread_buckets.get("mid") or {}
+    high_bucket = spread_buckets.get("high") or {}
+    low_signals = float(low_bucket.get("signalCount") or 0.0)
+    mid_signals = float(mid_bucket.get("signalCount") or 0.0)
+    high_signals = float(high_bucket.get("signalCount") or 0.0)
+    total_signals = max(1.0, low_signals + mid_signals + high_signals)
+    return {
+        "lowMidShare": (low_signals + mid_signals) / total_signals,
+        "lowPrecision": float(low_bucket.get("cleanPrecision") or 0.0),
+        "midPrecision": float(mid_bucket.get("cleanPrecision") or 0.0),
+        "highPrecision": float(high_bucket.get("cleanPrecision") or 0.0),
+    }
 
 
 def longest_same_sign_streak(values: Sequence[int]) -> int:
