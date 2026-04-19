@@ -2558,8 +2558,8 @@ def app_shutdown() -> None:
 
 
 @app.get("/", include_in_schema=False)
-def home_page() -> RedirectResponse:
-    return RedirectResponse(url="/live", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+def home_page() -> FileResponse:
+    return FileResponse(FRONTEND_DIR / "index.html")
 
 
 @app.get("/live", include_in_schema=False)
