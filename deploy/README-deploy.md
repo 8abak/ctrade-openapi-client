@@ -25,6 +25,7 @@ Systemd units installed by deploy:
 - `datavis.service` runs `datavis.app:app` from `/home/ec2-user/venvs/datavis/bin/uvicorn`
 - `tickcollector.service` runs `/home/ec2-user/cTrade/tickCollectorRawToDB.py` from `/home/ec2-user/venvs/datavis/bin/python`
 - `separation.service` runs `python -m datavis.separation_runtime` from `/home/ec2-user/venvs/datavis/bin/python`
+- `backbone.service` runs `python -m datavis.backbone_runtime` from `/home/ec2-user/venvs/datavis/bin/python`
 - `tickcollector.service` also reads `/etc/datavis.env` when present so `DATAVIS_CTRADER_CREDS_FILE` and related runtime overrides apply to the collector too
 
 Nginx recovery managed by deploy:
@@ -56,13 +57,15 @@ The deploy script:
 - runs `pip install -r requirements.txt`
 - installs `/usr/local/bin/getCsv` from `deploy/bin/getCsv`
 - installs the `datavis`, `tickcollector`, and `separation` systemd units
+- installs the `backbone` systemd unit
 - disables and removes retired legacy processor services
 - applies `deploy/sql/20260418_remove_legacy_structure_layer.sql`
 - applies `deploy/sql/20260411_layer_zero_rects.sql`
 - applies `deploy/sql/20260416_separation.sql`
+- applies `deploy/sql/20260420_backbone.sql`
 - applies `deploy/sql/20260419_speed_cleanup.sql`
-- enables `datavis`, `tickcollector`, and `separation`
-- restarts and verifies `datavis` and `separation`
+- enables `datavis`, `tickcollector`, `separation`, and `backbone`
+- restarts and verifies `datavis`, `separation`, and `backbone`
 - never restarts `tickcollector`
 - performs a local health check at `http://127.0.0.1:8000/api/health` when `curl` is available
 

@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>datavis.au | Backbone</title>
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="icon" type="image/svg+xml" href="/assets/datavis_favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body class="page-live page-structure">
+  <div class="live-workspace is-sidebar-collapsed" id="backboneWorkspace">
+    <button
+      class="ghost-button live-sidebar-toggle"
+      id="sidebarToggle"
+      type="button"
+      aria-controls="backboneSidebar"
+      aria-expanded="false"
+      aria-label="Open backbone controls"
+    >
+      <span class="live-sidebar-toggle-bars" aria-hidden="true">
+        <span></span>
+        <span></span>
+        <span></span>
+      </span>
+      <span class="sr-only">Toggle backbone controls</span>
+    </button>
+
+    <button
+      class="live-sidebar-backdrop"
+      id="sidebarBackdrop"
+      type="button"
+      aria-hidden="true"
+      tabindex="-1"
+    ></button>
+
+    <aside class="panel live-sidebar" id="backboneSidebar">
+      <div class="live-sidebar-scroll">
+        <header class="live-sidebar-header">
+          <nav class="app-nav" aria-label="Primary">
+            <a class="app-nav-link" href="/live">Live</a>
+            <a class="app-nav-link app-nav-link-active" href="/backbone">Backbone</a>
+            <a class="app-nav-link" href="/separation">Separation</a>
+            <a class="app-nav-link" href="/bigPic">Big Pic</a>
+            <a class="app-nav-link" href="/sql">SQL</a>
+          </nav>
+          <h1>Backbone</h1>
+          <p class="live-sidebar-copy">Confirmed adaptive hysteresis pivots and moves from the current Sydney broker day. Raw ticks stay optional and off by default.</p>
+          <div class="meta-strip" id="backboneMeta">Waiting for backbone...</div>
+          <div class="meta-strip" id="backbonePerf">Stream down.</div>
+          <div class="status-line live-status" id="statusLine">Ready.</div>
+        </header>
+
+        <section class="live-sidebar-section">
+          <div class="live-form-grid">
+            <div class="live-control-field live-control-field-wide">
+              <span>mode</span>
+              <div class="segmented" id="modeToggle">
+                <button type="button" data-value="live">Live</button>
+                <button type="button" data-value="review">Review</button>
+              </div>
+            </div>
+
+            <div class="live-control-field live-control-field-wide">
+              <span>run state</span>
+              <div class="segmented" id="runToggle">
+                <button type="button" data-value="run">Run</button>
+                <button type="button" data-value="stop">Stop</button>
+              </div>
+            </div>
+
+            <div class="live-control-field live-control-field-wide">
+              <span>display</span>
+              <div class="live-check-grid">
+                <label class="compact-check">
+                  <input id="showTicks" type="checkbox">
+                  <span>Raw ticks</span>
+                </label>
+              </div>
+            </div>
+
+            <label>
+              <span>review start id</span>
+              <input id="tickId" type="number" min="1" inputmode="numeric" placeholder="start id">
+            </label>
+
+            <label>
+              <span>review window</span>
+              <input id="windowSize" type="number" min="1" max="6000" inputmode="numeric" value="1200">
+            </label>
+
+            <label class="live-control-field-wide review-start-field">
+              <span>review start (Sydney)</span>
+              <input id="reviewStart" type="datetime-local" step="1">
+            </label>
+
+            <div class="live-control-field live-control-field-wide review-speed-control">
+              <span>review speed</span>
+              <div class="segmented single-select" id="reviewSpeedToggle" aria-label="Review speed">
+                <button type="button" data-value="0.5">0.5x</button>
+                <button type="button" data-value="1">1x</button>
+                <button type="button" data-value="2">2x</button>
+                <button type="button" data-value="3">3x</button>
+                <button type="button" data-value="5">5x</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="live-inline-actions">
+            <button class="primary-button compact-button" id="applyButton" type="button">Load</button>
+          </div>
+        </section>
+
+        <section class="live-sidebar-section">
+          <header class="trade-panel-header">
+            <h2>Status</h2>
+          </header>
+          <div class="trade-session-copy" id="daySummary">Broker day unavailable.</div>
+          <div class="trade-session-copy" id="stateSummary">No backbone state yet.</div>
+          <div class="trade-session-copy" id="countsSummary">0 pivots | 0 moves</div>
+          <div class="trade-session-copy" id="thresholdSummary">Threshold -</div>
+        </section>
+      </div>
+    </aside>
+
+    <section class="live-chart-stage">
+      <div class="panel chart-panel live-chart-panel" id="chartPanel">
+        <div id="backboneChart" class="chart-host"></div>
+      </div>
+    </section>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+  <script src="/assets/backbone.js"></script>
+</body>
+</html>
