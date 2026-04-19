@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import psycopg2.extras
 from psycopg2.extras import Json
@@ -10,6 +10,7 @@ from datavis.control.panel_state import resolve_research_runtime
 from datavis.control.service_manager import ServiceManager
 from datavis.research.guardrails import default_parameters
 from datavis.research.guardrails import sanitize_parameters
+from datavis.research.mutation import generate_mutation_proposals, summarize_history
 from datavis.research.state import CONTROL_STATE_KEY, default_control_state, ensure_control_state, set_state
 
 
@@ -103,11 +104,19 @@ class ResearchManager:
 
     def resume(self, conn: Any, *, reason: str) -> Dict[str, Any]:
         control = ensure_control_state(conn, self._settings.research_settings)
-        if str(control.get("paused_by") or "") == "engineering_control":
-            control["paused"] = False
-            control["paused_by"] = None
-            control["pause_reason"] = reason[:512]
-            set_state(conn, CONTROL_STATE_KEY, control)
+        cleared_final_verdict = str(control.get("final_verdict") or "")
+        control["paused"] = False
+        control["paused_by"] = None
+        control["pause_reason"] = reason[:512]
+        control["stop_requested"] = False
+        control["final_verdict"] = None
+        control["final_reason"] = None
+        if cleared_final_verdict:
+            control["last_resume_cleared_final_verdict"] = cleared_final_verdict
+        service_actions = self._ensure_research_services_ready()
+        if service_actions:
+            control["last_resume_service_actions"] = service_actions
+        set_state(conn, CONTROL_STATE_KEY, control)
         return control
 
     def reset(self, conn: Any, *, mode: str, reason: str) -> Dict[str, Any]:
@@ -219,41 +228,182 @@ class ResearchManager:
 
     def seed_next_job(self, conn: Any, *, reason: str) -> Dict[str, Any]:
         runtime_policy = resolve_research_runtime(conn, self._settings, self._settings.research_settings)
-        slice_ladder = list(runtime_policy.get("approvedSliceLadder") or self._settings.research_settings.slice_ladder)
+        existing_pending = self._latest_job(conn, statuses=("pending",))
+        if existing_pending:
+            return {
+                "jobId": int(existing_pending["id"]),
+                "config": dict(existing_pending.get("config") or {}),
+                "reusedExisting": True,
+                "proposalDerived": self._job_is_proposal_derived(existing_pending),
+                "message": "pending job already queued; skipped duplicate seed",
+            }
+
+        selected = self._select_seed_job(conn, runtime_policy=runtime_policy, reason=reason)
+        if selected is None:
+            if self._has_any_run(conn):
+                return {
+                    "jobId": None,
+                    "config": {},
+                    "reusedExisting": False,
+                    "proposalDerived": False,
+                    "message": "no novel bounded job was available to seed",
+                }
+            slice_ladder = list(runtime_policy.get("approvedSliceLadder") or self._settings.research_settings.slice_ladder)
+            params = default_parameters(
+                symbol=self._settings.research_settings.symbol,
+                slice_rows=int(slice_ladder[0] if slice_ladder else self._settings.research_settings.seed_slice_rows),
+                warmup_rows=self._settings.research_settings.seed_warmup_rows,
+                iteration=1,
+            )
+            selected = {
+                "params": sanitize_parameters(
+                    params.model_copy(
+                        update={
+                            "side_lock": runtime_policy.get("preferredSideLock") or params.side_lock,
+                            "mutation_note": reason[:512],
+                        }
+                    ).model_dump(),
+                    limits=self._build_limits(),
+                ),
+                "action": "seed_next_job",
+                "reason": reason[:512],
+                "proposalSource": "control-panel-default",
+                "mutatedFields": [],
+            }
+
+        inserted = self._insert_seed_job(
+            conn,
+            params=selected["params"],
+            action=str(selected.get("action") or "seed_next_job"),
+            reason=str(selected.get("reason") or reason),
+            proposal_source=str(selected.get("proposalSource") or "control-panel"),
+            mutated_fields=list(selected.get("mutatedFields") or []),
+        )
+        if inserted.get("reusedExisting"):
+            return inserted
+        self._ensure_research_services_ready()
+        return inserted
+
+    def _build_limits(self):  # type: ignore[no-untyped-def]
+        from datavis.research.guardrails import SearchGuardrails
+
+        settings = self._settings.research_settings
+        return SearchGuardrails(
+            max_slice_rows=settings.max_slice_rows,
+            max_warmup_rows=settings.max_warmup_rows,
+            max_slice_offset_rows=settings.max_slice_offset_rows,
+            max_next_actions=settings.max_next_jobs,
+        )
+
+    def _ensure_research_services_ready(self) -> List[Dict[str, str]]:
+        snapshots = self._service_manager.status_many(self._settings.research_services)
+        actions: List[Dict[str, str]] = []
+        for snapshot in snapshots:
+            if not snapshot.probe_supported:
+                continue
+            is_running = snapshot.active_state == "active" and snapshot.sub_state == "running"
+            if is_running:
+                continue
+            self._service_manager.reset_failed(snapshot.name)
+            action = "restart" if snapshot.active_state == "active" else "start"
+            if action == "restart":
+                self._service_manager.restart(snapshot.name)
+            else:
+                self._service_manager.start(snapshot.name)
+            actions.append({"service": snapshot.name, "action": action})
+        return actions
+
+    def _latest_job(self, conn: Any, *, statuses: Sequence[str]) -> Optional[Dict[str, Any]]:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT config, iteration
-                FROM research.run
+                SELECT *
+                FROM research.job
+                WHERE status = ANY(%s)
                 ORDER BY id DESC
                 LIMIT 1
-                """
+                """,
+                (list(statuses),),
             )
-            latest = dict(cur.fetchone() or {})
-            if latest:
-                latest_config = sanitize_parameters(latest.get("config") or {}, limits=self._build_limits())
-                next_payload = latest_config.model_copy(
-                    update={
-                        "iteration": int(latest.get("iteration") or latest_config.iteration) + 1,
-                        "slice_rows": int(slice_ladder[0] if slice_ladder else latest_config.slice_rows),
-                        "side_lock": runtime_policy.get("preferredSideLock") or latest_config.side_lock,
-                        "mutation_note": reason[:512],
-                    }
-                ).model_dump()
-            else:
-                params = default_parameters(
-                    symbol=self._settings.research_settings.symbol,
-                    slice_rows=int(slice_ladder[0] if slice_ladder else self._settings.research_settings.seed_slice_rows),
-                    warmup_rows=self._settings.research_settings.seed_warmup_rows,
-                    iteration=1,
-                )
-                next_payload = params.model_copy(
-                    update={
-                        "side_lock": runtime_policy.get("preferredSideLock") or params.side_lock,
-                        "mutation_note": reason[:512],
-                    }
-                ).model_dump()
-            params = sanitize_parameters(next_payload, limits=self._build_limits())
+            row = cur.fetchone()
+        return dict(row) if row else None
+
+    def _has_any_run(self, conn: Any) -> bool:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM research.run LIMIT 1")
+            return cur.fetchone() is not None
+
+    def _job_exists_for_fingerprint(self, conn: Any, fingerprint: str) -> bool:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1
+                FROM research.job
+                WHERE config->>'config_fingerprint' = %s
+                LIMIT 1
+                """,
+                (fingerprint,),
+            )
+            return cur.fetchone() is not None
+
+    def _find_pending_or_running_job(self, conn: Any, fingerprint: str) -> Optional[Dict[str, Any]]:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM research.job
+                WHERE config->>'config_fingerprint' = %s
+                  AND status IN ('pending', 'running')
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (fingerprint,),
+            )
+            row = cur.fetchone()
+        return dict(row) if row else None
+
+    def _insert_seed_job(
+        self,
+        conn: Any,
+        *,
+        params: Any,
+        action: str,
+        reason: str,
+        proposal_source: str,
+        mutated_fields: Sequence[str],
+    ) -> Dict[str, Any]:
+        fingerprint = str(params.config_fingerprint or "")
+        existing = self._find_pending_or_running_job(conn, fingerprint)
+        if existing:
+            return {
+                "jobId": int(existing["id"]),
+                "config": dict(existing.get("config") or {}),
+                "reusedExisting": True,
+                "proposalDerived": self._job_is_proposal_derived(existing),
+                "message": "matching pending/running job already exists",
+            }
+        if self._job_exists_for_fingerprint(conn, fingerprint):
+            return {
+                "jobId": None,
+                "config": params.model_dump(),
+                "reusedExisting": False,
+                "proposalDerived": action != "seed_next_job" or bool(params.source_run_id or params.seed_rule or params.mutation_note),
+                "message": "matching job fingerprint already exists in history; skipped duplicate seed",
+            }
+        seed_rule = dict(params.seed_rule.model_dump() if getattr(params, "seed_rule", None) else {})
+        guardrails = {
+            "bounded": True,
+            "action": action,
+            "reason": reason[:512],
+            "proposalSource": proposal_source,
+            "mutatedFields": [str(item) for item in mutated_fields if item][:16],
+            "seedRuleRef": {
+                "name": seed_rule.get("name"),
+                "family": seed_rule.get("family"),
+                "side": seed_rule.get("side"),
+            } if seed_rule else None,
+        }
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
                 INSERT INTO research.job (
@@ -265,19 +415,206 @@ class ResearchManager:
                 (
                     "control-panel",
                     Json(params.model_dump()),
-                    Json({"bounded": True, "action": "seed_next_job", "reason": reason[:512]}),
+                    Json(guardrails),
                 ),
             )
             job_id = int(cur.fetchone()["id"])
-        return {"jobId": job_id, "config": params.model_dump()}
+        return {
+            "jobId": job_id,
+            "config": params.model_dump(),
+            "reusedExisting": False,
+            "proposalDerived": action != "seed_next_job" or bool(params.source_run_id or params.seed_rule or params.mutation_note),
+            "message": "seeded bounded research job",
+        }
 
-    def _build_limits(self):  # type: ignore[no-untyped-def]
-        from datavis.research.guardrails import SearchGuardrails
+    def _select_seed_job(self, conn: Any, *, runtime_policy: Mapping[str, Any], reason: str) -> Optional[Dict[str, Any]]:
+        for proposal in self._latest_decision_proposals(conn):
+            selected = self._proposal_to_seed_job(
+                conn,
+                proposal=proposal,
+                proposal_source="decision-briefing",
+                default_reason=reason,
+            )
+            if selected:
+                return selected
+        for proposal in self._latest_runsummary_proposals(conn):
+            selected = self._proposal_to_seed_job(
+                conn,
+                proposal=proposal,
+                proposal_source="runsummary-mutation",
+                default_reason=reason,
+            )
+            if selected:
+                return selected
 
-        settings = self._settings.research_settings
-        return SearchGuardrails(
-            max_slice_rows=settings.max_slice_rows,
-            max_warmup_rows=settings.max_warmup_rows,
-            max_slice_offset_rows=settings.max_slice_offset_rows,
-            max_next_actions=settings.max_next_jobs,
+        latest_completed = self._latest_completed_run_summary(conn)
+        if not latest_completed:
+            return None
+        base_params = sanitize_parameters(latest_completed["config"], limits=self._build_limits())
+        proposals = generate_mutation_proposals(
+            base_params=base_params,
+            summary_payload=latest_completed["summaryPayload"],
+            settings=self._settings.research_settings,
+            source_run_id=int(latest_completed["runId"]),
+            seen_fingerprints=summarize_history(self._recent_runs(conn)).get("seenFingerprints") or [],
+            pending_fingerprints=self._pending_or_running_fingerprints(conn),
+            policy=runtime_policy,
+        )
+        for proposal in proposals:
+            selected = self._proposal_to_seed_job(
+                conn,
+                proposal=proposal,
+                proposal_source="generated-fallback",
+                default_reason=reason,
+            )
+            if selected:
+                return selected
+        return None
+
+    def _proposal_to_seed_job(
+        self,
+        conn: Any,
+        *,
+        proposal: Mapping[str, Any],
+        proposal_source: str,
+        default_reason: str,
+    ) -> Optional[Dict[str, Any]]:
+        params_payload = dict(proposal.get("parameters") or {})
+        if not params_payload:
+            return None
+        if not params_payload.get("mutation_note"):
+            params_payload["mutation_note"] = str(proposal.get("reason") or default_reason)[:512]
+        params = sanitize_parameters(params_payload, limits=self._build_limits())
+        if self._job_exists_for_fingerprint(conn, str(params.config_fingerprint or "")):
+            return None
+        return {
+            "params": params,
+            "action": str(proposal.get("action") or "seed_next_job"),
+            "reason": str(proposal.get("reason") or default_reason)[:512],
+            "proposalSource": proposal_source,
+            "mutatedFields": list(proposal.get("mutatedFields") or []),
+        }
+
+    def _latest_decision_proposals(self, conn: Any) -> List[Dict[str, Any]]:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT briefing
+                FROM research.decision
+                WHERE briefing IS NOT NULL
+                ORDER BY id DESC
+                LIMIT 5
+                """
+            )
+            rows = [dict(row) for row in cur.fetchall()]
+        proposals: List[Dict[str, Any]] = []
+        for row in rows:
+            briefing = dict(row.get("briefing") or {})
+            proposals.extend(list(briefing.get("proposedNextJobs") or []))
+        return proposals
+
+    def _latest_runsummary_proposals(self, conn: Any) -> List[Dict[str, Any]]:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT rs.briefing_json
+                FROM research.runsummary rs
+                JOIN research.run r ON r.id = rs.run_id
+                ORDER BY r.id DESC
+                LIMIT 5
+                """
+            )
+            rows = [dict(row) for row in cur.fetchall()]
+        proposals: List[Dict[str, Any]] = []
+        for row in rows:
+            briefing = dict(row.get("briefing_json") or {})
+            proposals.extend(list(briefing.get("mutationProposals") or []))
+        return proposals
+
+    def _latest_completed_run_summary(self, conn: Any) -> Optional[Dict[str, Any]]:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT r.id AS run_id,
+                       r.config,
+                       rs.briefing_json,
+                       rs.top_candidates_json
+                FROM research.run r
+                JOIN research.runsummary rs ON rs.run_id = r.id
+                WHERE r.status = 'completed'
+                ORDER BY r.id DESC
+                LIMIT 1
+                """
+            )
+            row = cur.fetchone()
+        if not row:
+            return None
+        payload = dict(row)
+        briefing = dict(payload.get("briefing_json") or {})
+        best = dict(briefing.get("bestCandidate") or {})
+        return {
+            "runId": int(payload["run_id"]),
+            "config": dict(payload.get("config") or {}),
+            "summaryPayload": {
+                "bestCandidate": {
+                    "candidateName": best.get("name"),
+                    "rule": {
+                        "name": best.get("name"),
+                        "family": best.get("family"),
+                        "side": best.get("side"),
+                        "predicates": list(best.get("predicates") or []),
+                    },
+                    "trainMetrics": dict(best.get("trainMetrics") or {}),
+                    "validationMetrics": dict(best.get("validationMetrics") or {}),
+                    "contrastSummary": dict(best.get("contrastSummary") or briefing.get("contrastSummary") or {}),
+                },
+                "candidateResults": list(payload.get("top_candidates_json") or []),
+            },
+        }
+
+    def _recent_runs(self, conn: Any) -> List[Dict[str, Any]]:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT r.id,
+                       r.status,
+                       r.config,
+                       rs.verdict_hint,
+                       rs.metrics_json
+                FROM research.run r
+                LEFT JOIN research.runsummary rs ON rs.run_id = r.id
+                ORDER BY r.id DESC
+                LIMIT %s
+                """,
+                (self._settings.research_settings.max_history_runs,),
+            )
+            rows = []
+            for row in cur.fetchall():
+                payload = dict(row)
+                payload["metrics"] = dict(payload.pop("metrics_json") or {})
+                rows.append(payload)
+        return rows
+
+    def _pending_or_running_fingerprints(self, conn: Any) -> List[str]:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT config->>'config_fingerprint'
+                FROM research.job
+                WHERE status IN ('pending', 'running')
+                  AND (config->>'config_fingerprint') IS NOT NULL
+                """
+            )
+            return [str(row[0]) for row in cur.fetchall() if row and row[0]]
+
+    @staticmethod
+    def _job_is_proposal_derived(job: Mapping[str, Any]) -> bool:
+        config = dict(job.get("config") or {})
+        guardrails = dict(job.get("guardrails") or {})
+        action = str(guardrails.get("action") or "")
+        return bool(
+            config.get("source_run_id")
+            or config.get("seed_rule")
+            or config.get("mutation_note")
+            or action not in {"", "seed_next_job"}
         )

@@ -183,6 +183,8 @@
           { action: "resumeEngineering", label: "Resume Engineering", kind: "ghost-button" }
         ])
       ].join("")),
+      card("What Just Happened", renderResearchNarrative(research.summary || {})),
+      card("Research Activity", renderResearchActivity(research.activity || {})),
       card("Current Best", [
         kvGrid([
           { label: "Setup", value: latestCandidate.candidateName || "n/a" },
@@ -213,6 +215,10 @@
     return "<div class=\"control-metric-pill\"><span>" + escapeHtml(label) + "</span><strong>" + escapeHtml(value) + "</strong></div>";
   }
 
+  function truthLabel(value) {
+    return value ? "yes" : "no";
+  }
+
   function renderIncidentSummary(incident) {
     if (!incident || !incident.id) {
       return "<div class=\"sql-empty\">No active incident.</div>";
@@ -240,6 +246,62 @@
     ]);
   }
 
+  function renderResearchNarrative(summary) {
+    if (!summary) {
+      return "<div class=\"sql-empty\">No research summary available.</div>";
+    }
+    return [
+      kvGrid([
+        { label: "Last Completed", value: summary.lastCompletedRun || "n/a" },
+        { label: "Last Family", value: summary.lastFamilyTried || "n/a" },
+        { label: "Last Verdict", value: summary.lastVerdict || "n/a" },
+        { label: "Pending Jobs", value: String(summary.pendingJobs == null ? 0 : summary.pendingJobs) },
+        { label: "Worker Last Claimed", value: humanWhen(summary.workerLastClaimedAt) }
+      ]),
+      "<div class=\"control-callout\">",
+      "<div><span class=\"sql-label\">Current Blocker</span><p class=\"control-copy\">", escapeHtml(summary.currentBlocker || "none"), "</p></div>",
+      "<div><span class=\"sql-label\">Recommended Action</span><p class=\"control-copy\">", escapeHtml(summary.recommendedAction || "No action required."), "</p></div>",
+      "</div>"
+    ].join("");
+  }
+
+  function renderResearchActivity(activity) {
+    if (!activity) {
+      return "<div class=\"sql-empty\">No runtime activity available.</div>";
+    }
+    return [
+      kvGrid([
+        { label: "Loop State", value: activity.loopState || "unknown" },
+        { label: "Current Run ID", value: activity.currentRunId || "none" },
+        { label: "Queue Depth", value: String(activity.queueDepth == null ? 0 : activity.queueDepth) },
+        { label: "Worker Consuming", value: truthLabel(activity.workerActivelyConsuming) },
+        { label: "Worker Service", value: activity.workerServiceState || "unknown" },
+        { label: "Orchestrator Active", value: truthLabel(activity.orchestratorActive) },
+        { label: "Orchestrator Service", value: activity.orchestratorServiceState || "unknown" },
+        { label: "Engineering", value: activity.engineeringState || "idle" },
+        { label: "Engineering Blocking", value: truthLabel(activity.engineeringBlocking) }
+      ]),
+      "<div class=\"control-mini-list\">",
+      "<div class=\"control-list-item\"><strong>Worker last claimed job</strong><div class=\"sql-muted\">",
+      escapeHtml(activity.workerLastClaimedJobId ? ("Job " + activity.workerLastClaimedJobId + " at " + humanWhen(activity.workerLastClaimedAt)) : "No claim event recorded."),
+      "</div></div>",
+      "<div class=\"control-list-item\"><strong>Orchestrator last event</strong><div class=\"sql-muted\">",
+      escapeHtml(activity.orchestratorLastEventAt ? humanWhen(activity.orchestratorLastEventAt) : "No recent orchestrator event recorded."),
+      "</div></div>",
+      "</div>"
+    ].join("");
+  }
+
+  function proposalKindLabel(proposal) {
+    if (!proposal) {
+      return "n/a";
+    }
+    if (!proposal.proposalDerived && proposal.proposalKind === "seed_next_job") {
+      return "manual seed";
+    }
+    return proposal.proposalKind || "proposal";
+  }
+
   function renderMissionForm(data) {
     return [
       "<form class=\"control-form\" id=\"missionForm\">",
@@ -264,14 +326,20 @@
 
   function renderResearch(data) {
     const latestRun = data.latestRun || {};
+    const lastCompletedRun = data.lastCompletedRun || {};
+    const currentRun = data.currentRun || {};
+    const focusRun = currentRun.id ? currentRun : (lastCompletedRun.id ? lastCompletedRun : latestRun);
     return [
       "<div class=\"control-grid control-grid-overview\">",
+      card("What Just Happened", renderResearchNarrative(data.summary || {})),
+      card("Active State", renderResearchActivity(data.activity || {})),
       card("Research State", [
         kvGrid([
           { label: "Loop State", value: data.state || "unknown" },
-          { label: "Broker Day", value: latestRun.brokerday || "n/a" },
-          { label: "Run", value: latestRun.id || "n/a" },
-          { label: "Fingerprint", value: (((latestRun.config || {}).config_fingerprint) || "n/a") }
+          { label: "Last Completed Run", value: (data.summary || {}).lastCompletedRun || "n/a" },
+          { label: "Current Run", value: currentRun.id || "none" },
+          { label: "Queue Depth", value: String((((data.activity || {}).queueDepth) == null ? 0 : ((data.activity || {}).queueDepth))) },
+          { label: "Fingerprint", value: (((focusRun.config || {}).config_fingerprint) || "n/a") }
         ]),
         actionButtons([
           { action: "pauseResearch", label: "Pause", kind: "ghost-button" },
@@ -281,16 +349,19 @@
         ])
       ].join("")),
       card("Current Config", kvGrid([
-        { label: "Slice Rows", value: ((latestRun.config || {}).slice_rows) || "n/a" },
-        { label: "Family", value: ((latestRun.config || {}).candidate_family) || "n/a" },
-        { label: "Side Lock", value: ((latestRun.config || {}).side_lock) || "n/a" },
-        { label: "Label Variant", value: ((latestRun.config || {}).label_variant) || "n/a" }
+        { label: "Slice Rows", value: ((focusRun.config || {}).slice_rows) || "n/a" },
+        { label: "Family", value: ((focusRun.config || {}).candidate_family) || "n/a" },
+        { label: "Side Lock", value: ((focusRun.config || {}).side_lock) || "n/a" },
+        { label: "Label Variant", value: ((focusRun.config || {}).label_variant) || "n/a" }
       ])),
       card("Queued Jobs", simpleTable([
         { label: "ID", render: function (row) { return escapeHtml(row.id); } },
         { label: "Status", render: function (row) { return escapeHtml(row.status); } },
-        { label: "Family", render: function (row) { return escapeHtml(((row.config || {}).candidate_family) || "n/a"); } },
-        { label: "Fingerprint", render: function (row) { return escapeHtml(((row.config || {}).config_fingerprint) || "n/a"); } }
+        { label: "Proposal", render: function (row) { return escapeHtml(proposalKindLabel(row.proposal || {})); } },
+        { label: "Family", render: function (row) { return escapeHtml(((row.proposal || {}).family) || ((row.config || {}).candidate_family) || "n/a"); } },
+        { label: "Fingerprint", render: function (row) { return "<div class=\"control-wrap\">" + escapeHtml(((row.proposal || {}).fingerprint) || ((row.config || {}).config_fingerprint) || "n/a") + "</div>"; } },
+        { label: "Seed Rule", render: function (row) { return "<div class=\"control-wrap\">" + escapeHtml(((row.proposal || {}).seedRuleRef) || "n/a") + "</div>"; } },
+        { label: "Mutation Note", render: function (row) { return "<div class=\"control-wrap\">" + escapeHtml(((row.proposal || {}).mutationNote) || "n/a") + "</div>"; } }
       ], (data.jobs || []).filter(function (row) { return row.status === "pending"; }).slice(0, 8))),
       card("Recent Runs", simpleTable([
         { label: "Run", render: function (row) { return escapeHtml(row.id); } },
@@ -316,9 +387,10 @@
     return "<div class=\"control-list\">" + items.map(function (item) {
       return [
         "<div class=\"control-list-item\">",
-        "<strong>", escapeHtml(item.action || "proposal"), "</strong>",
+        "<strong>", escapeHtml((item.action || "proposal") + " -> " + (item.family || "n/a")), "</strong>",
         "<div class=\"sql-muted\">", escapeHtml(item.reason || ""), "</div>",
         "<small>", escapeHtml((item.mutatedFields || []).join(", ") || "bounded mutation"), "</small>",
+        "<div class=\"control-wrap\">", escapeHtml(item.configFingerprint || "n/a"), "</div>",
         "</div>"
       ].join("");
     }).join("") + "</div>";
@@ -670,7 +742,7 @@
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body || {})
     });
-    setStatus(successMessage || "Action completed.", "success");
+    setStatus((payload && payload.message) || successMessage || "Action completed.", "success");
     await loadOverview();
     await loadSection();
     return payload;

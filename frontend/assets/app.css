@@ -1544,6 +1544,19 @@ select {
   gap: 0.75rem;
 }
 
+.control-callout,
+.control-mini-list {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.control-callout {
+  padding: 0.72rem 0.78rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(8, 14, 23, 0.9);
+}
+
 .control-headline {
   font-size: 1.06rem;
 }

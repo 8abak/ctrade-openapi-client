@@ -194,14 +194,30 @@ class ControlPanelService:
         latest_run = self._runtime.research_manager.latest_run(conn)
         latest_errors = self._runtime.research_manager.latest_errors(conn, limit=8)
         queue_counts = self._job_counts(conn)
+        last_completed_run = self._latest_run_by_status(conn, status_filter="completed")
+        current_run = self._latest_run_by_status(conn, status_filter="running")
         next_proposals = self._latest_mutation_proposals(conn)
+        current_incident = self.current_incident(conn)
+        activity = self._research_activity(
+            conn,
+            status=status,
+            queue_counts=queue_counts,
+            latest_run=latest_run,
+            last_completed_run=last_completed_run,
+            current_run=current_run,
+            current_incident=current_incident,
+        )
         return {
-            "state": self._derive_research_state(status, queue_counts=queue_counts),
+            "state": self._derive_research_state(status, queue_counts=queue_counts, current_run=current_run),
             "status": serialize_mapping(status),
             "latestRun": self._serialize_run_payload(latest_run),
+            "lastCompletedRun": self._serialize_run_payload(last_completed_run),
+            "currentRun": self._serialize_run_payload(current_run),
             "latestErrors": [serialize_mapping(item) for item in latest_errors],
             "queueCounts": queue_counts,
             "nextProposals": next_proposals,
+            "activity": activity,
+            "summary": self._research_summary(activity),
         }
 
     def list_research_runs(self, conn: Any, *, limit: int = 20) -> List[Dict[str, Any]]:
@@ -243,7 +259,7 @@ class ControlPanelService:
                     (limit,),
                 )
             rows = [dict(row) for row in cur.fetchall()]
-        return [serialize_mapping(row) for row in rows]
+        return [self._serialize_job_payload(row) for row in rows]
 
     def list_incidents(self, conn: Any, *, limit: int = 30, status_filter: Optional[str] = None) -> List[Dict[str, Any]]:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -620,21 +636,36 @@ class ControlPanelService:
                 payload["brokerday"] = brokerday_value
         return payload
 
+    def _serialize_job_payload(self, row: Mapping[str, Any]) -> Dict[str, Any]:
+        payload = serialize_mapping(dict(row or {}))
+        config = dict((row or {}).get("config") or {})
+        guardrails = dict((row or {}).get("guardrails") or {})
+        payload["config"] = config
+        payload["guardrails"] = guardrails
+        payload["proposal"] = self._job_proposal_payload(config=config, guardrails=guardrails)
+        return payload
+
     def _lookup_run_brokerday(self, row: Mapping[str, Any]) -> Optional[str]:
         brokerday_value = row.get("brokerday")
         if brokerday_value:
             return serialize_value(brokerday_value)
         return None
 
-    def _derive_research_state(self, status: Mapping[str, Any], *, queue_counts: Mapping[str, int]) -> str:
+    def _derive_research_state(
+        self,
+        status: Mapping[str, Any],
+        *,
+        queue_counts: Mapping[str, int],
+        current_run: Mapping[str, Any] | None = None,
+    ) -> str:
         value = dict(status.get("value") or {})
-        if value.get("final_verdict"):
-            return "stopped"
         if value.get("paused"):
             return "paused"
+        if value.get("final_verdict"):
+            return "stopped"
         if queue_counts.get("failed", 0) > 0:
             return "degraded"
-        latest_run = dict(status.get("latest_run") or {})
+        latest_run = dict(current_run or status.get("latest_run") or {})
         if str(latest_run.get("status") or "") == "running":
             return "running"
         return "idle"
@@ -674,6 +705,19 @@ class ControlPanelService:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
+                SELECT briefing
+                FROM research.decision
+                WHERE briefing IS NOT NULL
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            )
+            decision_row = dict(cur.fetchone() or {})
+            decision_briefing = dict(decision_row.get("briefing") or {})
+            if decision_briefing.get("proposedNextJobs"):
+                return self._serialize_proposals(decision_briefing.get("proposedNextJobs") or [], source="decision-briefing")
+            cur.execute(
+                """
                 SELECT rs.briefing_json
                 FROM research.runsummary rs
                 JOIN research.run r ON r.id = rs.run_id
@@ -683,7 +727,7 @@ class ControlPanelService:
             )
             row = dict(cur.fetchone() or {})
         briefing = dict(row.get("briefing_json") or {})
-        return list(briefing.get("mutationProposals") or [])
+        return self._serialize_proposals(briefing.get("mutationProposals") or [], source="runsummary-mutation")
 
     def _latest_candidate_summary(self, conn: Any) -> Dict[str, Any]:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -725,6 +769,185 @@ class ControlPanelService:
             )
             row = dict(cur.fetchone() or {})
         return serialize_mapping(row)
+
+    def _latest_run_by_status(self, conn: Any, *, status_filter: str) -> Dict[str, Any]:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT r.*, rs.verdict_hint, rs.headline, rs.metrics_json
+                FROM research.run r
+                LEFT JOIN research.runsummary rs ON rs.run_id = r.id
+                WHERE r.status = %s
+                ORDER BY r.id DESC
+                LIMIT 1
+                """,
+                (status_filter,),
+            )
+            row = cur.fetchone()
+        return dict(row) if row else {}
+
+    def _latest_journal_event(self, conn: Any, *, event_types: Iterable[str]) -> Dict[str, Any]:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, component, event_type, message, created_at, job_id, run_id, payload
+                FROM research.journal
+                WHERE event_type = ANY(%s)
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (list(event_types),),
+            )
+            row = cur.fetchone()
+        return serialize_mapping(dict(row or {}))
+
+    def _research_activity(
+        self,
+        conn: Any,
+        *,
+        status: Mapping[str, Any],
+        queue_counts: Mapping[str, int],
+        latest_run: Mapping[str, Any],
+        last_completed_run: Mapping[str, Any],
+        current_run: Mapping[str, Any],
+        current_incident: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        control = dict(status.get("value") or {})
+        services = list(status.get("services") or [])
+        worker_service = self._service_snapshot(services, self._settings.research_settings.worker_name)
+        orchestrator_service = self._service_snapshot(services, self._settings.research_settings.orchestrator_name)
+        latest_claim = self._latest_journal_event(conn, event_types=("worker.job.claimed",))
+        latest_orchestrator_event = self._latest_journal_event(
+            conn,
+            event_types=("orchestrator.seeded", "orchestrator.decision.queued", "orchestrator.decision.applied"),
+        )
+        worker_consuming = bool(queue_counts.get("running", 0) > 0 or latest_claim.get("run_id") == (current_run or {}).get("id"))
+        engineering_state = self._derive_engineering_state(current_incident=current_incident)
+        blocker = "none"
+        action = "No action required."
+        if control.get("paused"):
+            blocker = "research is paused"
+            action = "Resume Research to allow the worker and orchestrator to process pending jobs."
+        elif control.get("final_verdict") and queue_counts.get("pending", 0) > 0:
+            blocker = f"pending jobs exist, but the loop is stopped by final verdict {control['final_verdict']}"
+            action = "Resume Research to clear the stop verdict and wake the research services."
+        elif control.get("final_verdict"):
+            blocker = f"research stopped after final verdict {control['final_verdict']}"
+            action = "Resume Research only if you want to continue search beyond the last accepted verdict."
+        elif queue_counts.get("pending", 0) > 0 and not worker_consuming:
+            blocker = "pending jobs are not being consumed"
+            if not self._service_is_running(worker_service):
+                action = "Resume Research or Restart Research Services to bring the worker back to running."
+            else:
+                action = "Inspect worker health and recent claim events; the queue should be moving."
+        elif engineering_state == "escalated":
+            blocker = "engineering is escalated"
+            action = "Acknowledge or resolve the engineering incident if it is affecting research services."
+        return {
+            "loopState": self._derive_research_state(status, queue_counts=queue_counts, current_run=current_run),
+            "lastCompletedRunId": last_completed_run.get("id"),
+            "lastCompletedBrokerday": serialize_value(last_completed_run.get("brokerday")),
+            "lastFamilyTried": ((last_completed_run.get("config") or {}).get("candidate_family") if last_completed_run else None),
+            "lastVerdict": last_completed_run.get("verdict_hint"),
+            "currentRunId": current_run.get("id") or (latest_run.get("id") if str(latest_run.get("status") or "") == "running" else None),
+            "queueDepth": int(queue_counts.get("pending", 0) or 0) + int(queue_counts.get("running", 0) or 0),
+            "pendingJobs": int(queue_counts.get("pending", 0) or 0),
+            "runningJobs": int(queue_counts.get("running", 0) or 0),
+            "failedJobs": int(queue_counts.get("failed", 0) or 0),
+            "workerLastClaimedAt": latest_claim.get("created_at"),
+            "workerLastClaimedJobId": latest_claim.get("job_id"),
+            "workerActivelyConsuming": worker_consuming,
+            "workerServiceState": self._service_state_text(worker_service),
+            "orchestratorActive": self._service_is_running(orchestrator_service),
+            "orchestratorServiceState": self._service_state_text(orchestrator_service),
+            "orchestratorLastEventAt": latest_orchestrator_event.get("created_at"),
+            "researchFinalVerdict": control.get("final_verdict"),
+            "researchPaused": bool(control.get("paused")),
+            "stopRequested": bool(control.get("stop_requested")),
+            "engineeringState": engineering_state,
+            "engineeringBlocking": engineering_state == "escalated",
+            "currentBlocker": blocker,
+            "recommendedAction": action,
+        }
+
+    @staticmethod
+    def _research_summary(activity: Mapping[str, Any]) -> Dict[str, Any]:
+        run_id = activity.get("lastCompletedRunId")
+        brokerday = activity.get("lastCompletedBrokerday")
+        run_label = f"Run {run_id}" if run_id else "No completed run yet"
+        if run_id and brokerday:
+            run_label = f"Run {run_id} on {brokerday}"
+        return {
+            "lastCompletedRun": run_label,
+            "lastFamilyTried": activity.get("lastFamilyTried") or "n/a",
+            "lastVerdict": activity.get("lastVerdict") or "n/a",
+            "pendingJobs": activity.get("pendingJobs") or 0,
+            "workerLastClaimedAt": activity.get("workerLastClaimedAt") or None,
+            "currentBlocker": activity.get("currentBlocker") or "none",
+            "recommendedAction": activity.get("recommendedAction") or "No action required.",
+        }
+
+    @staticmethod
+    def _service_snapshot(services: Iterable[Mapping[str, Any]], name: str) -> Dict[str, Any]:
+        for service in services:
+            if str(service.get("name") or "") == name:
+                return dict(service)
+        return {}
+
+    @staticmethod
+    def _service_is_running(service: Mapping[str, Any]) -> bool:
+        return str(service.get("active_state") or "") == "active" and str(service.get("sub_state") or "") == "running"
+
+    @staticmethod
+    def _service_state_text(service: Mapping[str, Any]) -> str:
+        if not service:
+            return "unknown"
+        active = str(service.get("active_state") or "unknown")
+        sub = str(service.get("sub_state") or "unknown")
+        return f"{active}/{sub}"
+
+    def _serialize_proposals(self, proposals: Iterable[Mapping[str, Any]], *, source: str) -> List[Dict[str, Any]]:
+        items: List[Dict[str, Any]] = []
+        for proposal in proposals:
+            payload = dict(proposal or {})
+            params = dict(payload.get("parameters") or {})
+            items.append(
+                {
+                    "action": payload.get("action") or "proposal",
+                    "reason": payload.get("reason") or "",
+                    "configFingerprint": payload.get("configFingerprint") or params.get("config_fingerprint"),
+                    "family": params.get("candidate_family"),
+                    "mutatedFields": list(payload.get("mutatedFields") or []),
+                    "source": source,
+                    "parameters": params,
+                }
+            )
+        return items
+
+    @staticmethod
+    def _job_proposal_payload(*, config: Mapping[str, Any], guardrails: Mapping[str, Any]) -> Dict[str, Any]:
+        seed_rule = dict(config.get("seed_rule") or {})
+        seed_rule_ref = None
+        if seed_rule:
+            seed_rule_ref = " / ".join(
+                [
+                    str(seed_rule.get("name") or "seed"),
+                    str(seed_rule.get("family") or "family"),
+                    str(seed_rule.get("side") or "side"),
+                ]
+            )
+        action = str(guardrails.get("action") or "")
+        derived = bool(config.get("source_run_id") or config.get("mutation_note") or seed_rule or action not in {"", "seed_next_job"})
+        return {
+            "proposalKind": action or "seed_next_job",
+            "proposalSource": guardrails.get("proposalSource"),
+            "family": config.get("candidate_family"),
+            "fingerprint": config.get("config_fingerprint"),
+            "seedRuleRef": seed_rule_ref,
+            "mutationNote": config.get("mutation_note") or guardrails.get("reason"),
+            "mutatedFields": list(guardrails.get("mutatedFields") or []),
+            "proposalDerived": derived,
+        }
 
     def _incident_details(self, conn: Any, incident: Mapping[str, Any]) -> Dict[str, Any]:
         if not incident:
