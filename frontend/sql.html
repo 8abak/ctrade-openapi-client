@@ -15,7 +15,12 @@
   <main class="sql-workbench">
     <aside class="panel sql-sidebar">
       <div class="sql-sidebar-header">
-        <a class="back-link" href="/">datavis.au</a>
+        <nav class="app-nav" aria-label="Primary">
+          <a class="app-nav-link" href="/live">Live</a>
+          <a class="app-nav-link" href="/separation">Separation</a>
+          <a class="app-nav-link" href="/bigPic">Big Pic</a>
+          <a class="app-nav-link app-nav-link-active" href="/sql">SQL</a>
+        </nav>
         <h1>SQL</h1>
         <div class="sql-muted" id="connectionMeta">Loading tables...</div>
       </div>
@@ -29,13 +34,6 @@
         <section class="sql-table-section">
           <div class="sql-table-section-list" id="publicTableList">
             <div class="sql-empty">Loading public tables...</div>
-          </div>
-        </section>
-
-        <section class="sql-table-section">
-          <div class="sql-label">Research tables</div>
-          <div class="sql-table-section-list" id="researchTableList">
-            <div class="sql-empty">Loading research tables...</div>
           </div>
         </section>
       </div>

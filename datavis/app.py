@@ -22,14 +22,11 @@ import psycopg2.extras
 import sqlparse
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
-from datavis.auction import AuctionService, AuctionStateStore, current_session_window
-from datavis.control.panel import ControlPanelService
-from datavis.control.runtime import get_control_runtime
 from datavis.db import db_connect as shared_db_connect
 from datavis.rects import RectPaperService, RectServiceError
 from datavis.separation import LEVELS as SEPARATION_LEVELS
@@ -51,14 +48,11 @@ if DATABASE_URL.startswith("postgresql+psycopg2://"):
 TICK_SYMBOL = os.getenv("DATAVIS_SYMBOL", "XAUUSD")
 DEFAULT_WINDOW = int(os.getenv("DATAVIS_WINDOW", "2000"))
 MAX_TICK_WINDOW = int(os.getenv("DATAVIS_MAX_WINDOW", "10000"))
-DEFAULT_AUCTION_WINDOW = int(os.getenv("DATAVIS_AUCTION_WINDOW", "2000"))
-MAX_AUCTION_WINDOW = int(os.getenv("DATAVIS_AUCTION_MAX_WINDOW", "10000"))
 DEFAULT_SEPARATION_WINDOW = int(os.getenv("DATAVIS_SEPARATION_WINDOW", "160"))
 MAX_SEPARATION_WINDOW = int(os.getenv("DATAVIS_SEPARATION_MAX_WINDOW", "4000"))
 DEFAULT_HISTORY_LIMIT = 2000
 DEFAULT_BIGPICTURE_POINTS = 2000
 MAX_BIGPICTURE_POINTS = int(os.getenv("DATAVIS_BIGPICTURE_MAX_POINTS", "2400"))
-MAX_AUCTION_HISTORY_SESSIONS = int(os.getenv("DATAVIS_AUCTION_HISTORY_MAX_SESSIONS", "96"))
 MAX_STREAM_BATCH = 1000
 MAX_QUERY_ROWS = int(os.getenv("DATAVIS_SQL_MAX_ROWS", "1000"))
 STATEMENT_TIMEOUT_MS = int(os.getenv("DATAVIS_SQL_TIMEOUT_MS", "15000"))
@@ -74,10 +68,6 @@ STREAM_HEARTBEAT_SECONDS = max(
     STREAM_IDLE_POLL_SECONDS,
     float(os.getenv("DATAVIS_STREAM_HEARTBEAT_SECONDS", "5.0")),
 )
-AUCTION_SNAPSHOT_STREAM_SECONDS = max(
-    STREAM_IDLE_POLL_SECONDS,
-    float(os.getenv("DATAVIS_AUCTION_SNAPSHOT_STREAM_SECONDS", "0.75")),
-)
 REVIEW_STREAM_BATCH = int(os.getenv("DATAVIS_REVIEW_STREAM_BATCH", "256"))
 REVIEW_MAX_DELAY_MS = max(50, int(os.getenv("DATAVIS_REVIEW_MAX_DELAY_MS", "1500")))
 REVIEW_MIN_DELAY_MS = max(0, int(os.getenv("DATAVIS_REVIEW_MIN_DELAY_MS", "5")))
@@ -92,7 +82,13 @@ TRADE_HISTORY_DEFAULT_LIMIT = 40
 TRADE_HISTORY_MAX_LIMIT = 120
 TRADE_DEFAULT_LOT_SIZE = Decimal("0.01")
 
-app = FastAPI(title="datavis.au", version="3.0.0")
+app = FastAPI(
+    title="datavis.au",
+    version="3.0.0",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
 app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets")
 security = HTTPBasic(auto_error=False)
 RUNTIME_TRADE_SESSION_SECRET = TRADE_SESSION_SECRET or secrets.token_bytes(32)
@@ -107,8 +103,6 @@ STREAM_ACTIVITY_LOCK = threading.Lock()
 STREAM_ACTIVITY_COUNTS: Dict[str, int] = {}
 SQL_SCHEMA_CACHE_LOCK = threading.Lock()
 SQL_SCHEMA_CACHE: Dict[str, Any] = {"expiresAtMs": 0, "payload": None}
-CONTROL_RUNTIME = get_control_runtime()
-CONTROL_PANEL = ControlPanelService(CONTROL_RUNTIME)
 
 
 class QueryRequest(BaseModel):
@@ -247,37 +241,6 @@ class RectModeRequest(BaseModel):
             raise ValueError("mode must be live or review")
         return normalized
 
-
-class ControlReasonRequest(BaseModel):
-    reason: str = Field("manual control action", min_length=1, max_length=512)
-
-
-class ControlStudyDayRequest(BaseModel):
-    brokerday: Optional[str] = Field(None, max_length=10)
-
-
-class ControlRestartRequest(BaseModel):
-    services: List[str] = Field(default_factory=list, max_length=8)
-
-
-class ControlRequeueRequest(BaseModel):
-    jobId: Optional[int] = Field(None, ge=1)
-    reason: str = Field("manual control requeue", min_length=1, max_length=512)
-
-
-class ControlResetRequest(BaseModel):
-    mode: str = Field("soft", pattern="^(soft|hard)$")
-    reason: str = Field("manual control reset", min_length=1, max_length=512)
-
-
-class ControlSmokeRequest(BaseModel):
-    tests: List[str] = Field(default_factory=list, max_length=8)
-
-
-class ControlCandidateUpdateRequest(BaseModel):
-    status: str = Field("active", min_length=1, max_length=32)
-    operatorNotes: str = Field("", max_length=4000)
-
 def ensure_database_url() -> str:
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL is not configured")
@@ -393,23 +356,6 @@ def serialize_tick_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [serialize_tick_row(row) for row in rows]
 
 
-def serialize_auction_chart_row(row: Dict[str, Any]) -> Dict[str, Any]:
-    timestamp = row["timestamp"]
-    mid = float(row["mid"]) if row.get("mid") is not None else None
-    spread = float(row["spread"]) if row.get("spread") is not None else None
-    return {
-        "id": int(row["id"]),
-        "timestamp": timestamp.isoformat(),
-        "timestampMs": dt_to_ms(timestamp),
-        "mid": mid,
-        "spread": spread,
-    }
-
-
-def serialize_auction_chart_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    return [serialize_auction_chart_row(row) for row in rows]
-
-
 def serialize_metrics_payload(
     *,
     fetch_ms: float,
@@ -453,10 +399,6 @@ def require_sql_admin(credentials: Optional[HTTPBasicCredentials] = Depends(secu
         )
 
     return credentials.username
-
-
-def control_actor_name(username: Optional[str]) -> str:
-    return str(username or "private-admin")
 
 
 def _trade_session_sign(raw_payload: str) -> str:
@@ -729,7 +671,7 @@ def list_sql_tables() -> Dict[str, Any]:
                   ON n.oid = c.relnamespace
                 LEFT JOIN pg_stat_user_tables s
                   ON s.relid = c.oid
-                WHERE n.nspname IN ('public', 'research')
+                WHERE n.nspname = 'public'
                   AND c.relkind IN ('r', 'p')
                 ORDER BY n.nspname ASC, c.relname ASC
                 """
@@ -745,12 +687,10 @@ def list_sql_tables() -> Dict[str, Any]:
                 for row in cur.fetchall()
             ]
     public_tables = [table for table in tables if table["schema"] == "public"]
-    research_tables = [table for table in tables if table["schema"] == "research"]
     payload = {
         "context": context,
-        "tables": public_tables,
+        "tables": tables,
         "public": public_tables,
-        "research": research_tables,
     }
     with SQL_SCHEMA_CACHE_LOCK:
         SQL_SCHEMA_CACHE["payload"] = payload
@@ -759,7 +699,6 @@ def list_sql_tables() -> Dict[str, Any]:
         "sql_schema",
         elapsed=elapsed_ms(started),
         public_count=len(public_tables),
-        research_count=len(research_tables),
         table_count=len(tables),
     )
     return json.loads(json.dumps(payload))
@@ -848,10 +787,6 @@ def tick_columns() -> str:
     return "id, symbol, timestamp, bid, ask, mid, spread"
 
 
-def auction_chart_tick_columns() -> str:
-    return "id, timestamp, mid, spread"
-
-
 def query_tick_bounds(cur: Any) -> Dict[str, Any]:
     cur.execute(
         """
@@ -890,48 +825,23 @@ def query_bootstrap_rows(
     start_id: Optional[int],
     window: int,
     end_id: Optional[int],
-    focus_kind: str = "",
 ) -> List[Dict[str, Any]]:
     select_sql = tick_columns()
     if mode == "live":
-        normalized_focus = str(focus_kind or "").strip().lower()
-        if normalized_focus == "brokerday":
-            latest_row = query_latest_tick(cur)
-            latest_timestamp = latest_row.get("timestamp") if latest_row else None
-            if latest_timestamp is None:
-                return []
-            _, session_start_dt, session_end_dt = current_session_window("brokerday", latest_timestamp)
-            cur.execute(
-                """
+        cur.execute(
+            """
+            SELECT {select_sql}
+            FROM (
                 SELECT {select_sql}
-                FROM (
-                    SELECT {select_sql}
-                    FROM public.ticks
-                    WHERE symbol = %s
-                      AND timestamp >= %s
-                      AND timestamp <= %s
-                    ORDER BY id DESC
-                    LIMIT %s
-                ) recent
-                ORDER BY id ASC
-                """.format(select_sql=select_sql),
-                (TICK_SYMBOL, session_start_dt, session_end_dt, window),
-            )
-        else:
-            cur.execute(
-                """
-                SELECT {select_sql}
-                FROM (
-                    SELECT {select_sql}
-                    FROM public.ticks
-                    WHERE symbol = %s
-                    ORDER BY id DESC
-                    LIMIT %s
-                ) recent
-                ORDER BY id ASC
-                """.format(select_sql=select_sql),
-                (TICK_SYMBOL, window),
-            )
+                FROM public.ticks
+                WHERE symbol = %s
+                ORDER BY id DESC
+                LIMIT %s
+            ) recent
+            ORDER BY id ASC
+            """.format(select_sql=select_sql),
+            (TICK_SYMBOL, window),
+        )
         return [dict(row) for row in cur.fetchall()]
 
     if start_id is None:
@@ -991,25 +901,6 @@ def query_rows_after(
             """.format(select_sql=select_sql),
             (TICK_SYMBOL, after_id, end_id, limit),
         )
-    return [dict(row) for row in cur.fetchall()]
-
-
-def query_auction_chart_rows_after(
-    cur: Any,
-    after_id: int,
-    limit: int,
-) -> List[Dict[str, Any]]:
-    select_sql = auction_chart_tick_columns()
-    cur.execute(
-        """
-        SELECT {select_sql}
-        FROM public.ticks
-        WHERE symbol = %s AND id > %s
-        ORDER BY id ASC
-        LIMIT %s
-        """.format(select_sql=select_sql),
-        (TICK_SYMBOL, after_id, limit),
-    )
     return [dict(row) for row in cur.fetchall()]
 
 
@@ -1292,165 +1183,6 @@ def query_bigpicture_rows(
     return [dict(row) for row in cur.fetchall()], range_bounds
 
 
-def serialize_auction_history_ref(row: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "id": int(row["id"]),
-        "sessionId": int(row["auctionhistorysessionid"]),
-        "refKind": row.get("refkind"),
-        "price": float(row["price"]) if row.get("price") is not None else None,
-        "strength": float(row["strength"]) if row.get("strength") is not None else None,
-        "validFromTs": serialize_value(row.get("validfromts")),
-        "validToTs": serialize_value(row.get("validtots")),
-        "validFromTsMs": dt_to_ms(row.get("validfromts")),
-        "validToTsMs": dt_to_ms(row.get("validtots")),
-        "notesJson": row.get("notesjson") or {},
-    }
-
-
-def serialize_auction_history_event(row: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "id": int(row["id"]),
-        "sessionId": int(row["auctionhistorysessionid"]),
-        "eventTs": serialize_value(row.get("eventts")),
-        "eventTsMs": dt_to_ms(row.get("eventts")),
-        "eventKind": row.get("eventkind"),
-        "price1": float(row["price1"]) if row.get("price1") is not None else None,
-        "price2": float(row["price2"]) if row.get("price2") is not None else None,
-        "direction": row.get("direction"),
-        "strength": float(row["strength"]) if row.get("strength") is not None else None,
-        "confirmed": bool(row.get("confirmed")),
-        "payload": row.get("payloadjson") or {},
-    }
-
-
-def load_auction_history_payload(
-    *,
-    start_ts_ms: int,
-    end_ts_ms: int,
-    include_refs: bool,
-    include_events: bool,
-    limit_sessions: int,
-) -> Dict[str, Any]:
-    started = time.perf_counter()
-    start_ts = ms_to_dt(start_ts_ms)
-    end_ts = ms_to_dt(end_ts_ms)
-    if start_ts is None or end_ts is None:
-        raise HTTPException(status_code=400, detail="Invalid auction history range.")
-    if end_ts < start_ts:
-        start_ts, end_ts = end_ts, start_ts
-    effective_limit = clamp_int(limit_sessions, 1, MAX_AUCTION_HISTORY_SESSIONS)
-
-    with db_connection(readonly=True) as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT
-                    id, symbol, sessionkind, startts, endts, asofts, windowseconds,
-                    openprice, highprice, lowprice, closeprice,
-                    pocprice, vahprice, valprice, ibhigh, iblow,
-                    statekind, opentype, inventorytype,
-                    valuedrift, balancescore, trendscore, transitionscore,
-                    summaryjson
-                FROM public.auctionhistorysession
-                WHERE symbol = %s
-                  AND endts >= %s
-                  AND startts <= %s
-                ORDER BY startts ASC
-                LIMIT %s
-                """,
-                (TICK_SYMBOL, start_ts, end_ts, effective_limit),
-            )
-            session_rows = [dict(row) for row in cur.fetchall()]
-            session_ids = [int(row["id"]) for row in session_rows]
-            refs_by_session: Dict[int, List[Dict[str, Any]]] = {session_id: [] for session_id in session_ids}
-            events_by_session: Dict[int, List[Dict[str, Any]]] = {session_id: [] for session_id in session_ids}
-
-            if session_ids and include_refs:
-                cur.execute(
-                    """
-                    SELECT
-                        id, auctionhistorysessionid, refkind, price, strength,
-                        validfromts, validtots, notesjson
-                    FROM public.auctionhistoryref
-                    WHERE auctionhistorysessionid = ANY(%s)
-                    ORDER BY auctionhistorysessionid ASC, validfromts ASC NULLS LAST, id ASC
-                    """,
-                    (session_ids,),
-                )
-                for row in cur.fetchall():
-                    payload = serialize_auction_history_ref(dict(row))
-                    refs_by_session[payload["sessionId"]].append(payload)
-
-            if session_ids and include_events:
-                cur.execute(
-                    """
-                    SELECT
-                        id, auctionhistorysessionid, eventts, eventkind, price1, price2,
-                        direction, strength, confirmed, payloadjson
-                    FROM public.auctionhistoryevent
-                    WHERE auctionhistorysessionid = ANY(%s)
-                    ORDER BY auctionhistorysessionid ASC, eventts ASC, id ASC
-                    """,
-                    (session_ids,),
-                )
-                for row in cur.fetchall():
-                    payload = serialize_auction_history_event(dict(row))
-                    events_by_session[payload["sessionId"]].append(payload)
-
-    sessions = []
-    for row in session_rows:
-        session_id = int(row["id"])
-        sessions.append(
-            {
-                "id": session_id,
-                "symbol": row.get("symbol"),
-                "sessionKind": row.get("sessionkind"),
-                "startTs": serialize_value(row.get("startts")),
-                "endTs": serialize_value(row.get("endts")),
-                "asOfTs": serialize_value(row.get("asofts")),
-                "startTsMs": dt_to_ms(row.get("startts")),
-                "endTsMs": dt_to_ms(row.get("endts")),
-                "asOfTsMs": dt_to_ms(row.get("asofts")),
-                "windowSeconds": int(row.get("windowseconds") or 0),
-                "openPrice": float(row["openprice"]) if row.get("openprice") is not None else None,
-                "highPrice": float(row["highprice"]) if row.get("highprice") is not None else None,
-                "lowPrice": float(row["lowprice"]) if row.get("lowprice") is not None else None,
-                "closePrice": float(row["closeprice"]) if row.get("closeprice") is not None else None,
-                "pocPrice": float(row["pocprice"]) if row.get("pocprice") is not None else None,
-                "vahPrice": float(row["vahprice"]) if row.get("vahprice") is not None else None,
-                "valPrice": float(row["valprice"]) if row.get("valprice") is not None else None,
-                "ibHigh": float(row["ibhigh"]) if row.get("ibhigh") is not None else None,
-                "ibLow": float(row["iblow"]) if row.get("iblow") is not None else None,
-                "stateKind": row.get("statekind"),
-                "openType": row.get("opentype"),
-                "inventoryType": row.get("inventorytype"),
-                "valueDrift": float(row["valuedrift"]) if row.get("valuedrift") is not None else None,
-                "balanceScore": float(row["balancescore"]) if row.get("balancescore") is not None else None,
-                "trendScore": float(row["trendscore"]) if row.get("trendscore") is not None else None,
-                "transitionScore": float(row["transitionscore"]) if row.get("transitionscore") is not None else None,
-                "summary": row.get("summaryjson") or {},
-                "refs": refs_by_session.get(session_id, []),
-                "events": events_by_session.get(session_id, []),
-            }
-        )
-
-    payload = {
-        "symbol": TICK_SYMBOL,
-        "requestedStartTsMs": start_ts_ms,
-        "requestedEndTsMs": end_ts_ms,
-        "sessions": sessions,
-        "sessionCount": len(sessions),
-    }
-    hot_path_log(
-        "auction_history",
-        elapsed=elapsed_ms(started),
-        session_count=len(sessions),
-        include_refs=include_refs,
-        include_events=include_events,
-    )
-    return payload
-
-
 def build_bigpicture_payload(
     *,
     rows: List[Dict[str, Any]],
@@ -1479,12 +1211,6 @@ def build_bigpicture_payload(
         "lastId": last_row.get("id") if last_row else None,
         "hasMoreLeft": bool(global_bounds.get("firstId") and first_row and int(first_row["id"]) > int(global_bounds["firstId"])),
         "hasMoreRight": bool(global_bounds.get("lastId") and last_row and int(last_row["id"]) < int(global_bounds["lastId"])),
-        "overlays": {
-            "auctionRefs": [],
-            "events": [],
-            "rectangles": [],
-            "structureLines": [],
-        },
     }
     payload["metrics"] = serialize_metrics_payload(
         fetch_ms=fetch_ms,
@@ -2408,112 +2134,6 @@ def stream_separation_review_events(
     except GeneratorExit:
         return
 
-def normalize_auction_focus_kind(value: str) -> str:
-    normalized = (value or "brokerday").strip().lower()
-    valid = {"rolling15m", "rolling60m", "rolling240m", "rolling24h", "brokerday", "london", "newyork"}
-    return normalized if normalized in valid else "brokerday"
-
-
-def build_auction_view_payload(
-    *,
-    mode: str,
-    window: int,
-    rows: List[Dict[str, Any]],
-    review_end_id: Optional[int],
-    review_end_timestamp: Optional[datetime],
-    bounds: Dict[str, Any],
-    fetch_ms: float,
-    snapshot: Dict[str, Any],
-) -> Dict[str, Any]:
-    serialize_started = time.perf_counter()
-    first_row = rows[0] if rows else None
-    last_row = rows[-1] if rows else None
-    payload = {
-        "rows": serialize_auction_chart_rows(rows),
-        "rowCount": len(rows),
-        "firstId": first_row.get("id") if first_row else None,
-        "lastId": last_row.get("id") if last_row else None,
-        "firstTimestamp": serialize_value(first_row.get("timestamp") if first_row else None),
-        "lastTimestamp": serialize_value(last_row.get("timestamp") if last_row else None),
-        "firstTimestampMs": dt_to_ms(first_row.get("timestamp") if first_row else None),
-        "lastTimestampMs": dt_to_ms(last_row.get("timestamp") if last_row else None),
-        "mode": mode,
-        "window": window,
-        "symbol": TICK_SYMBOL,
-        "reviewEndId": review_end_id,
-        "reviewEndTimestamp": serialize_value(review_end_timestamp),
-        "hasMoreLeft": bool(bounds.get("firstId") and first_row and first_row.get("id") and int(first_row["id"]) > int(bounds["firstId"])),
-        "endReached": bool(mode == "review" and review_end_id is not None and last_row and int(last_row["id"]) >= int(review_end_id)),
-        "auction": snapshot,
-    }
-    payload["metrics"] = serialize_metrics_payload(
-        fetch_ms=fetch_ms,
-        serialize_ms=elapsed_ms(serialize_started),
-        latest_row=last_row,
-    )
-    return payload
-
-
-def load_auction_bootstrap_payload(
-    *,
-    mode: str,
-    start_id: Optional[int],
-    window: int,
-    focus_kind: str,
-) -> Dict[str, Any]:
-    effective_window = clamp_int(window, 1, MAX_AUCTION_WINDOW)
-    normalized_focus = normalize_auction_focus_kind(focus_kind)
-    fetch_started = time.perf_counter()
-    with db_connection(readonly=True) as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            bounds_row = query_tick_bounds(cur)
-            bounds = {
-                "firstId": bounds_row.get("first_id"),
-                "lastId": bounds_row.get("last_id"),
-                "firstTimestamp": bounds_row.get("first_timestamp"),
-                "lastTimestamp": bounds_row.get("last_timestamp"),
-            }
-            review_end_id = bounds["lastId"] if mode == "review" else None
-            review_end_timestamp = bounds["lastTimestamp"] if mode == "review" else None
-            rows = query_bootstrap_rows(
-                cur,
-                mode=mode,
-                start_id=start_id,
-                window=effective_window,
-                end_id=review_end_id,
-                focus_kind=normalized_focus,
-            )
-            if mode == "live":
-                snapshot = AUCTION_SERVICE.sync_live(focus_kind=normalized_focus)
-            else:
-                if start_id is None:
-                    raise HTTPException(status_code=400, detail="Review mode requires an id value.")
-                last_chart_row = rows[-1] if rows else query_tick_by_id(cur, start_id)
-                if not last_chart_row:
-                    raise HTTPException(status_code=404, detail="Review start could not be resolved.")
-                end_ts = last_chart_row["timestamp"]
-                context_rows = query_window_ending_at_timestamp(cur, end_ts=end_ts, seconds=48 * 60 * 60)
-                snapshot = AUCTION_SERVICE.build_review_snapshot(rows=context_rows, focus_kind=normalized_focus)
-    payload = build_auction_view_payload(
-        mode=mode,
-        window=effective_window,
-        rows=rows,
-        review_end_id=review_end_id,
-        review_end_timestamp=review_end_timestamp,
-        bounds=bounds,
-        fetch_ms=elapsed_ms(fetch_started),
-        snapshot=snapshot,
-    )
-    hot_path_log(
-        "auction_bootstrap",
-        elapsed=elapsed_ms(fetch_started),
-        mode=mode,
-        row_count=len(rows),
-        focus_kind=normalized_focus,
-        last_processed_id=(snapshot or {}).get("lastProcessedId"),
-    )
-    return payload
-
 
 def stream_events(
     *,
@@ -2735,211 +2355,6 @@ def stream_review_events(
         stream_close(stream_name)
 
 
-def stream_auction_tick_events(
-    *,
-    after_id: int,
-    limit: int,
-    stream_name: str = "auction_tick_stream",
-) -> Generator[str, None, None]:
-    last_id = max(0, after_id)
-    effective_limit = clamp_int(limit, 1, MAX_STREAM_BATCH)
-    last_heartbeat = time.monotonic()
-    idle_sleep = STREAM_POLL_SECONDS
-    stream_open(stream_name)
-    try:
-        try:
-            with db_connection(readonly=True, autocommit=True) as conn:
-                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                    while True:
-                        fetch_started = time.perf_counter()
-                        tick_rows = query_auction_chart_rows_after(cur, last_id, effective_limit)
-                        fetch_ms = elapsed_ms(fetch_started)
-                        if tick_rows:
-                            serialize_started = time.perf_counter()
-                            last_id = int(tick_rows[-1]["id"])
-                            payload = {
-                                "rows": serialize_auction_chart_rows(tick_rows),
-                                "rowCount": len(tick_rows),
-                                "lastId": last_id,
-                                "streamMode": "delta",
-                                **serialize_metrics_payload(
-                                    fetch_ms=fetch_ms,
-                                    serialize_ms=elapsed_ms(serialize_started),
-                                    latest_row=tick_rows[-1],
-                                ),
-                            }
-                            yield format_sse(payload)
-                            last_heartbeat = time.monotonic()
-                            idle_sleep = STREAM_POLL_SECONDS
-                            continue
-
-                        now = time.monotonic()
-                        if now - last_heartbeat >= STREAM_HEARTBEAT_SECONDS:
-                            latest_row = query_latest_tick(cur)
-                            payload = {
-                                "rows": [],
-                                "rowCount": 0,
-                                "lastId": last_id,
-                                "streamMode": "heartbeat",
-                                **serialize_metrics_payload(
-                                    fetch_ms=fetch_ms,
-                                    serialize_ms=0.0,
-                                    latest_row=latest_row,
-                                ),
-                            }
-                            yield format_sse(payload, event_name="heartbeat")
-                            last_heartbeat = now
-                        time.sleep(idle_sleep)
-                        idle_sleep = STREAM_IDLE_POLL_SECONDS
-        except GeneratorExit:
-            return
-    finally:
-        stream_close(stream_name)
-
-
-def stream_auction_events(
-    *,
-    focus_kind: str,
-    stream_name: str = "auction_snapshot_stream",
-) -> Generator[str, None, None]:
-    normalized_focus = normalize_auction_focus_kind(focus_kind)
-    last_heartbeat = time.monotonic()
-    last_snapshot_id: Optional[int] = None
-    last_snapshot_ts_ms: Optional[int] = None
-    stream_open(stream_name)
-    try:
-        try:
-            with db_connection(readonly=True, autocommit=True) as conn:
-                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                    while True:
-                        build_started = time.perf_counter()
-                        snapshot = AUCTION_SERVICE.sync_live(focus_kind=normalized_focus)
-                        snapshot_build_ms = elapsed_ms(build_started)
-                        latest_row = query_latest_tick(cur)
-                        snapshot_id = int(snapshot.get("lastProcessedId") or 0) if snapshot else 0
-                        snapshot_ts_ms = int(snapshot.get("asOfTsMs") or 0) if snapshot else 0
-                        if snapshot_id != last_snapshot_id or snapshot_ts_ms != last_snapshot_ts_ms:
-                            payload = {
-                                "streamMode": "snapshot",
-                                "auction": snapshot,
-                                "snapshotBuildLatencyMs": snapshot_build_ms,
-                                **serialize_metrics_payload(
-                                    fetch_ms=snapshot_build_ms,
-                                    serialize_ms=0.0,
-                                    latest_row=latest_row,
-                                ),
-                            }
-                            yield format_sse(payload)
-                            last_snapshot_id = snapshot_id
-                            last_snapshot_ts_ms = snapshot_ts_ms
-                            last_heartbeat = time.monotonic()
-                        else:
-                            now = time.monotonic()
-                            if now - last_heartbeat >= STREAM_HEARTBEAT_SECONDS:
-                                payload = {
-                                    "streamMode": "heartbeat",
-                                    "auction": None,
-                                    "snapshotBuildLatencyMs": snapshot_build_ms,
-                                    **serialize_metrics_payload(
-                                        fetch_ms=snapshot_build_ms,
-                                        serialize_ms=0.0,
-                                        latest_row=latest_row,
-                                    ),
-                                }
-                                yield format_sse(payload, event_name="heartbeat")
-                                last_heartbeat = now
-                        time.sleep(AUCTION_SNAPSHOT_STREAM_SECONDS)
-        except GeneratorExit:
-            return
-    finally:
-        stream_close(stream_name)
-
-
-def stream_auction_review_events(
-    *,
-    after_id: int,
-    end_id: int,
-    speed: float,
-    focus_kind: str,
-    stream_name: str = "auction_review_stream",
-) -> Generator[str, None, None]:
-    last_id = max(0, after_id)
-    effective_batch = clamp_int(REVIEW_STREAM_BATCH, 1, MAX_STREAM_BATCH)
-    speed_multiplier = max(0.1, float(speed or 1.0))
-    normalized_focus = normalize_auction_focus_kind(focus_kind)
-    review_store = AuctionStateStore(symbol=TICK_SYMBOL)
-    previous_row: Optional[Dict[str, Any]] = None
-
-    stream_open(stream_name)
-    try:
-        try:
-            with db_connection(readonly=True, autocommit=True) as conn:
-                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                    if last_id > 0:
-                        anchor_row = query_tick_by_id(cur, last_id)
-                        if anchor_row:
-                            seed_rows = query_window_ending_at_timestamp(cur, end_ts=anchor_row["timestamp"], seconds=48 * 60 * 60)
-                            review_store.apply_rows(seed_rows)
-                            previous_row = seed_rows[-1] if seed_rows else anchor_row
-
-                    while last_id < end_id:
-                        fetch_started = time.perf_counter()
-                        batch_rows = query_rows_after(cur, last_id, effective_batch, end_id=end_id)
-                        fetch_ms = elapsed_ms(fetch_started)
-                        if not batch_rows:
-                            payload = {
-                                "rows": [],
-                                "rowCount": 0,
-                                "lastId": last_id,
-                                "endId": end_id,
-                                "endReached": True,
-                                "streamMode": "complete",
-                                "auction": review_store.build_snapshot(focus_kind=normalized_focus),
-                                **serialize_metrics_payload(
-                                    fetch_ms=fetch_ms,
-                                    serialize_ms=0.0,
-                                    latest_row=query_latest_tick(cur),
-                                ),
-                            }
-                            yield format_sse(payload)
-                            return
-
-                        for row in batch_rows:
-                            delay_ms = 0
-                            if previous_row and previous_row.get("timestamp") and row.get("timestamp"):
-                                delta_ms = max(0, dt_to_ms(row["timestamp"]) - dt_to_ms(previous_row["timestamp"]))
-                                delay_ms = min(REVIEW_MAX_DELAY_MS, int(round(delta_ms / speed_multiplier)))
-                            if delay_ms > 0:
-                                time.sleep(max(REVIEW_MIN_DELAY_MS, delay_ms) / 1000.0)
-
-                            serialize_started = time.perf_counter()
-                            review_store.apply_rows([row])
-                            last_id = int(row["id"])
-                            payload = {
-                                "rows": serialize_auction_chart_rows([row]),
-                                "rowCount": 1,
-                                "lastId": last_id,
-                                "endId": end_id,
-                                "endReached": bool(last_id >= end_id),
-                                "streamMode": "delta",
-                                "auction": review_store.build_snapshot(focus_kind=normalized_focus),
-                                "playbackDelayMs": delay_ms,
-                                **serialize_metrics_payload(
-                                    fetch_ms=fetch_ms,
-                                    serialize_ms=elapsed_ms(serialize_started),
-                                    latest_row=row,
-                                ),
-                            }
-                            yield format_sse(payload)
-                            previous_row = row
-                            if last_id >= end_id:
-                                return
-        except GeneratorExit:
-            return
-    finally:
-        stream_close(stream_name)
-
-
 def smart_scalp_ticks_after(after_id: int, limit: int) -> List[Dict[str, Any]]:
     effective_after_id = max(0, int(after_id or 0))
     effective_limit = clamp_int(limit, 1, MAX_STREAM_BATCH)
@@ -3051,7 +2466,6 @@ SMART_SCALP_SERVICE = SmartScalpService(
     smart_lot_size=0.01,
 )
 RECT_PAPER_SERVICE = RectPaperService(db_factory=db_connection, symbol=TICK_SYMBOL)
-AUCTION_SERVICE = AuctionService(db_factory=db_connection, symbol=TICK_SYMBOL)
 
 
 def _trade_not_configured() -> bool:
@@ -3135,19 +2549,17 @@ def _handle_rect_error(exc: Exception) -> None:
 def app_startup() -> None:
     SMART_SCALP_SERVICE.start()
     RECT_PAPER_SERVICE.start()
-    AUCTION_SERVICE.start()
 
 
 @app.on_event("shutdown")
 def app_shutdown() -> None:
     SMART_SCALP_SERVICE.stop()
     RECT_PAPER_SERVICE.stop()
-    AUCTION_SERVICE.stop()
 
 
 @app.get("/", include_in_schema=False)
-def home_page() -> FileResponse:
-    return FileResponse(FRONTEND_DIR / "index.html")
+def home_page() -> RedirectResponse:
+    return RedirectResponse(url="/live", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
 
 
 @app.get("/live", include_in_schema=False)
@@ -3160,12 +2572,7 @@ def separation_page() -> FileResponse:
     return FileResponse(FRONTEND_DIR / "separation.html")
 
 
-@app.get("/auction", include_in_schema=False)
-def auction_page() -> FileResponse:
-    return FileResponse(FRONTEND_DIR / "auction.html")
-
-
-@app.get("/bigpicture", include_in_schema=False)
+@app.get("/bigPic", include_in_schema=False)
 def bigpicture_page() -> FileResponse:
     return FileResponse(FRONTEND_DIR / "bigpicture.html")
 
@@ -3173,13 +2580,6 @@ def bigpicture_page() -> FileResponse:
 @app.get("/sql", include_in_schema=False)
 def sql_page(_: Optional[str] = Depends(require_sql_admin)) -> FileResponse:
     return FileResponse(FRONTEND_DIR / "sql.html")
-
-
-@app.get("/control", include_in_schema=False)
-@app.get("/control/{control_path:path}", include_in_schema=False)
-def control_page(control_path: str = "", _: Optional[str] = Depends(require_sql_admin)) -> FileResponse:
-    _ = control_path
-    return FileResponse(FRONTEND_DIR / "control.html")
 
 
 @app.get("/api/health")
@@ -3213,505 +2613,6 @@ def sql_schema(_: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
 @app.post("/api/sql/query")
 def sql_query(payload: QueryRequest, _: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
     return execute_query(payload.sql)
-
-
-@app.get("/api/control/health")
-def control_health(username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
-    _ = username
-    with db_connection(readonly=True) as conn:
-        return CONTROL_PANEL.health(conn)
-
-
-@app.get("/api/control/overview")
-def control_overview(username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
-    _ = username
-    with db_connection(readonly=True) as conn:
-        return CONTROL_PANEL.overview(conn)
-
-
-@app.get("/api/control/mission")
-def control_mission(username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
-    _ = username
-    with db_connection(readonly=True) as conn:
-        return CONTROL_PANEL.get_mission(conn)
-
-
-@app.put("/api/control/mission")
-def control_mission_update(payload: Dict[str, Any], username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
-    with db_connection(readonly=False) as conn:
-        mission = CONTROL_PANEL.update_mission(conn, payload, actor=control_actor_name(username))
-        conn.commit()
-        return mission
-
-
-@app.get("/api/control/settings")
-def control_settings(username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
-    _ = username
-    with db_connection(readonly=True) as conn:
-        return CONTROL_PANEL.get_settings(conn)
-
-
-@app.put("/api/control/settings")
-def control_settings_update(payload: Dict[str, Any], username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
-    with db_connection(readonly=False) as conn:
-        settings = CONTROL_PANEL.update_settings(conn, payload, actor=control_actor_name(username))
-        CONTROL_RUNTIME.store.update_loop_state(conn, enabled=bool(settings.get("engineeringLoopEnabled", True)))
-        conn.commit()
-        return settings
-
-
-@app.get("/api/control/research/status")
-def control_research_status(username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
-    _ = username
-    with db_connection(readonly=True) as conn:
-        return CONTROL_PANEL.research_status(conn)
-
-
-@app.put("/api/control/research/study-day")
-def control_research_study_day_update(payload: ControlStudyDayRequest, username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
-    with db_connection(readonly=False) as conn:
-        try:
-            result = CONTROL_RUNTIME.research_manager.set_selected_study_day(conn, brokerday_text=payload.brokerday)
-        except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-        CONTROL_PANEL.record_action(
-            conn,
-            actor=control_actor_name(username),
-            action_type="research.study_day.set",
-            scope="research",
-            target_id=result.get("selectedStudyDay"),
-            payload=payload.model_dump(),
-            result=result,
-        )
-        conn.commit()
-        return result
-
-
-@app.get("/api/control/research/runs")
-def control_research_runs(
-    limit: int = Query(20, ge=1, le=100),
-    username: Optional[str] = Depends(require_sql_admin),
-) -> List[Dict[str, Any]]:
-    _ = username
-    with db_connection(readonly=True) as conn:
-        return CONTROL_PANEL.list_research_runs(conn, limit=limit)
-
-
-@app.get("/api/control/research/jobs")
-def control_research_jobs(
-    limit: int = Query(40, ge=1, le=200),
-    statusFilter: Optional[str] = Query(None),
-    username: Optional[str] = Depends(require_sql_admin),
-) -> List[Dict[str, Any]]:
-    _ = username
-    with db_connection(readonly=True) as conn:
-        return CONTROL_PANEL.list_research_jobs(conn, limit=limit, status_filter=statusFilter)
-
-
-@app.post("/api/control/research/pause")
-def control_research_pause(payload: ControlReasonRequest, username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
-    with db_connection(readonly=False) as conn:
-        result = CONTROL_RUNTIME.research_manager.pause(conn, reason=payload.reason)
-        CONTROL_PANEL.record_action(
-            conn,
-            actor=control_actor_name(username),
-            action_type="research.pause",
-            scope="research",
-            target_id=None,
-            payload=payload.model_dump(),
-            result=result,
-        )
-        conn.commit()
-        return {"state": result}
-
-
-@app.post("/api/control/research/resume")
-def control_research_resume(payload: ControlReasonRequest, username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
-    with db_connection(readonly=False) as conn:
-        try:
-            result = CONTROL_RUNTIME.research_manager.resume(conn, reason=payload.reason)
-        except RuntimeError as exc:
-            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-        CONTROL_PANEL.record_action(
-            conn,
-            actor=control_actor_name(username),
-            action_type="research.resume",
-            scope="research",
-            target_id=None,
-            payload=payload.model_dump(),
-            result=result,
-        )
-        conn.commit()
-        return {
-            "state": result,
-            "message": str(result.get("message") or "Research loop resumed."),
-            "serviceActions": result.get("serviceActions") or [],
-            "seedResult": result.get("seedResult"),
-        }
-
-
-@app.post("/api/control/research/reset")
-def control_research_reset(payload: ControlResetRequest, username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
-    with db_connection(readonly=False) as conn:
-        result = CONTROL_RUNTIME.research_manager.reset(conn, mode=payload.mode, reason=payload.reason)
-        CONTROL_PANEL.record_action(
-            conn,
-            actor=control_actor_name(username),
-            action_type="research.reset",
-            scope="research",
-            target_id=None,
-            payload=payload.model_dump(),
-            result=result,
-        )
-        conn.commit()
-        return {"state": result}
-
-
-@app.post("/api/control/research/requeue")
-def control_research_requeue(payload: ControlRequeueRequest, username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
-    with db_connection(readonly=False) as conn:
-        try:
-            result = CONTROL_RUNTIME.research_manager.requeue(conn, job_id=payload.jobId, reason=payload.reason)
-        except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-        except RuntimeError as exc:
-            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-        CONTROL_PANEL.record_action(
-            conn,
-            actor=control_actor_name(username),
-            action_type="research.requeue",
-            scope="research",
-            target_id=str(payload.jobId) if payload.jobId else None,
-            payload=payload.model_dump(),
-            result=result,
-        )
-        conn.commit()
-        return {
-            **result,
-            "message": str(result.get("message") or "Research job requeued."),
-        }
-
-
-@app.post("/api/control/research/restart")
-def control_research_restart(payload: ControlRestartRequest, username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
-    with db_connection(readonly=False) as conn:
-        services = payload.services or list(CONTROL_RUNTIME.settings.research_services)
-        try:
-            result = CONTROL_RUNTIME.research_manager.restart_services(services)
-        except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-        except RuntimeError as exc:
-            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-        CONTROL_PANEL.record_action(
-            conn,
-            actor=control_actor_name(username),
-            action_type="research.restart_services",
-            scope="research",
-            target_id=",".join(services),
-            payload={"services": services},
-            result={"services": result},
-        )
-        conn.commit()
-        return {
-            "services": result,
-            "message": "Research services restart sequence completed.",
-        }
-
-
-@app.post("/api/control/research/seed-next")
-def control_research_seed_next(payload: ControlReasonRequest, username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
-    with db_connection(readonly=False) as conn:
-        try:
-            result = CONTROL_RUNTIME.research_manager.seed_next_job(conn, reason=payload.reason)
-        except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-        except RuntimeError as exc:
-            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-        CONTROL_PANEL.record_action(
-            conn,
-            actor=control_actor_name(username),
-            action_type="research.seed_next",
-            scope="research",
-            target_id=str(result.get("jobId") or ""),
-            payload=payload.model_dump(),
-            result=result,
-        )
-        conn.commit()
-        return {
-            **result,
-            "message": str(result.get("message") or "Seeded next research job."),
-        }
-
-
-@app.post("/api/control/research/seed-divergence")
-def control_research_seed_divergence(payload: ControlReasonRequest, username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
-    with db_connection(readonly=False) as conn:
-        try:
-            result = CONTROL_RUNTIME.research_manager.seed_divergence_job(conn, reason=payload.reason)
-        except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-        except RuntimeError as exc:
-            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-        CONTROL_PANEL.record_action(
-            conn,
-            actor=control_actor_name(username),
-            action_type="research.seed_divergence",
-            scope="research",
-            target_id=str(result.get("jobId") or ""),
-            payload=payload.model_dump(),
-            result=result,
-        )
-        conn.commit()
-        return {
-            **result,
-            "message": str(result.get("message") or "Seeded divergence_sweep research job."),
-        }
-
-
-@app.get("/api/control/incidents")
-def control_incidents(
-    limit: int = Query(30, ge=1, le=100),
-    statusFilter: Optional[str] = Query(None),
-    username: Optional[str] = Depends(require_sql_admin),
-) -> List[Dict[str, Any]]:
-    _ = username
-    with db_connection(readonly=True) as conn:
-        return CONTROL_PANEL.list_incidents(conn, limit=limit, status_filter=statusFilter)
-
-
-@app.get("/api/control/incidents/current")
-def control_current_incident(username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
-    _ = username
-    with db_connection(readonly=True) as conn:
-        return CONTROL_PANEL.current_incident(conn)
-
-
-@app.post("/api/control/engineering/pause")
-def control_engineering_pause(payload: ControlReasonRequest, username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
-    with db_connection(readonly=False) as conn:
-        state = CONTROL_RUNTIME.store.update_loop_state(conn, paused=True)
-        CONTROL_PANEL.record_action(
-            conn,
-            actor=control_actor_name(username),
-            action_type="engineering.pause",
-            scope="engineering",
-            target_id=None,
-            payload=payload.model_dump(),
-            result=state,
-        )
-        conn.commit()
-        return {"state": state}
-
-
-@app.post("/api/control/engineering/resume")
-def control_engineering_resume(payload: ControlReasonRequest, username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
-    with db_connection(readonly=False) as conn:
-        state = CONTROL_RUNTIME.store.update_loop_state(conn, paused=False, manual_takeover=False)
-        CONTROL_PANEL.record_action(
-            conn,
-            actor=control_actor_name(username),
-            action_type="engineering.resume",
-            scope="engineering",
-            target_id=None,
-            payload=payload.model_dump(),
-            result=state,
-        )
-        conn.commit()
-        return {"state": state}
-
-
-@app.post("/api/control/engineering/retry")
-def control_engineering_retry(payload: ControlReasonRequest, username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
-    with db_connection(readonly=False) as conn:
-        incident = CONTROL_RUNTIME.store.get_active_incident(conn) or CONTROL_PANEL.current_incident(conn)
-        if not incident:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No incident available to retry.")
-        result = CONTROL_RUNTIME.store.retry_incident(conn, incident_id=int(incident["id"]))
-        CONTROL_RUNTIME.store.update_loop_state(conn, paused=False, manual_takeover=False)
-        CONTROL_PANEL.record_action(
-            conn,
-            actor=control_actor_name(username),
-            action_type="engineering.retry_incident",
-            scope="engineering",
-            target_id=str(incident["id"]),
-            payload=payload.model_dump(),
-            result=result,
-        )
-        conn.commit()
-        return result
-
-
-@app.post("/api/control/engineering/manual-takeover")
-def control_engineering_manual_takeover(payload: ControlReasonRequest, username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
-    with db_connection(readonly=False) as conn:
-        state = CONTROL_RUNTIME.store.update_loop_state(conn, paused=True, manual_takeover=True)
-        incident = CONTROL_RUNTIME.store.get_active_incident(conn)
-        if incident:
-            CONTROL_RUNTIME.store.transition_incident(
-                conn,
-                incident_id=int(incident["id"]),
-                status="escalated",
-                summary=f"Manual takeover requested: {payload.reason[:200]}",
-            )
-        CONTROL_PANEL.record_action(
-            conn,
-            actor=control_actor_name(username),
-            action_type="engineering.manual_takeover",
-            scope="engineering",
-            target_id=str((incident or {}).get("id") or ""),
-            payload=payload.model_dump(),
-            result=state,
-        )
-        conn.commit()
-        return {"state": state, "incidentId": (incident or {}).get("id")}
-
-
-@app.post("/api/control/engineering/acknowledge")
-def control_engineering_acknowledge(payload: ControlReasonRequest, username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
-    with db_connection(readonly=False) as conn:
-        incident = CONTROL_PANEL.current_incident(conn)
-        if not incident:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No incident available to acknowledge.")
-        result = CONTROL_RUNTIME.store.acknowledge_incident(conn, incident_id=int(incident["id"]), actor=control_actor_name(username))
-        CONTROL_PANEL.record_action(
-            conn,
-            actor=control_actor_name(username),
-            action_type="engineering.acknowledge",
-            scope="engineering",
-            target_id=str(incident["id"]),
-            payload=payload.model_dump(),
-            result=result,
-        )
-        conn.commit()
-        return result
-
-
-@app.post("/api/control/repair/run-smoke-tests")
-def control_smoke_tests(payload: ControlSmokeRequest, username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
-    tests = payload.tests or ["import_modules", "engineering_supervisor_schema", "control_api_boot", "patch_roundtrip"]
-    with db_connection(readonly=False) as conn:
-        results = CONTROL_RUNTIME.smoke_runner.run(test_names=tests, incident_id=None, action_id=None, conn=conn)
-        serialized = [item.model_dump() for item in results]
-        CONTROL_PANEL.record_action(
-            conn,
-            actor=control_actor_name(username),
-            action_type="repair.run_smoke_tests",
-            scope="repair",
-            target_id=",".join(tests),
-            payload={"tests": tests},
-            result={"results": serialized},
-        )
-        conn.commit()
-        return {"results": serialized}
-
-
-@app.post("/api/control/services/restart")
-def control_services_restart(payload: ControlRestartRequest, username: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
-    allowed = {
-        CONTROL_RUNTIME.settings.control_service_name,
-        CONTROL_RUNTIME.settings.engineering_orchestrator_service_name,
-    }
-    services = payload.services or list(allowed)
-    if any(service not in allowed for service in services):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported control service restart target.")
-    with db_connection(readonly=False) as conn:
-        snapshots = []
-        try:
-            for service in services:
-                snapshots.append(CONTROL_RUNTIME.service_manager.restart_with_reset_tolerance(service))
-        except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-        except RuntimeError as exc:
-            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-        CONTROL_PANEL.record_action(
-            conn,
-            actor=control_actor_name(username),
-            action_type="services.restart",
-            scope="control",
-            target_id=",".join(services),
-            payload={"services": services},
-            result={"services": snapshots},
-        )
-        conn.commit()
-        return {
-            "services": snapshots,
-            "message": "Control service restart sequence completed.",
-        }
-
-
-@app.get("/api/control/candidates")
-def control_candidates(
-    day: Optional[str] = Query(None),
-    side: Optional[str] = Query(None),
-    family: Optional[str] = Query(None),
-    promotedStatus: Optional[str] = Query(None),
-    spreadRegime: Optional[str] = Query(None),
-    sessionBucket: Optional[str] = Query(None),
-    limit: int = Query(150, ge=1, le=400),
-    username: Optional[str] = Depends(require_sql_admin),
-) -> List[Dict[str, Any]]:
-    _ = username
-    with db_connection(readonly=True) as conn:
-        return CONTROL_PANEL.list_candidates(
-            conn,
-            brokerday=day,
-            side=side,
-            family=family,
-            status_filter=promotedStatus,
-            spread_regime=spreadRegime,
-            session_bucket=sessionBucket,
-            limit=limit,
-        )
-
-
-@app.put("/api/control/candidates/{fingerprint}")
-def control_candidate_update(
-    fingerprint: str,
-    payload: ControlCandidateUpdateRequest,
-    username: Optional[str] = Depends(require_sql_admin),
-) -> Dict[str, Any]:
-    with db_connection(readonly=False) as conn:
-        result = CONTROL_PANEL.update_candidate_library(
-            conn,
-            fingerprint=fingerprint,
-            status=payload.status,
-            operator_notes=payload.operatorNotes,
-            actor=control_actor_name(username),
-        )
-        conn.commit()
-        return result
-
-
-@app.get("/api/control/day-review")
-def control_day_review(
-    day: Optional[str] = Query(None),
-    runId: Optional[int] = Query(None, ge=1),
-    setupFingerprint: Optional[str] = Query(None),
-    entryLimit: int = Query(20, ge=1, le=200),
-    username: Optional[str] = Depends(require_sql_admin),
-) -> Dict[str, Any]:
-    _ = username
-    with db_connection(readonly=True) as conn:
-        return CONTROL_PANEL.day_review(
-            conn,
-            brokerday_text=day,
-            run_id=runId,
-            setup_fingerprint=setupFingerprint,
-            entry_limit=entryLimit,
-        )
-
-
-@app.get("/api/control/journals")
-def control_journals(
-    component: Optional[str] = Query(None),
-    level: Optional[str] = Query(None),
-    eventType: Optional[str] = Query(None),
-    limit: int = Query(20, ge=1, le=200),
-    username: Optional[str] = Depends(require_sql_admin),
-) -> Dict[str, Any]:
-    _ = username
-    with db_connection(readonly=True) as conn:
-        return CONTROL_PANEL.list_journals(conn, component=component, level=level, event_type=eventType, limit=limit)
 
 
 @app.post("/api/trade/login")
@@ -3780,40 +2681,6 @@ def trade_open(username: str = Depends(require_trade_auth)) -> Dict[str, Any]:
         }
     except Exception as exc:
         _handle_trade_gateway_error(exc)
-
-
-@app.get("/api/trade/pending")
-def trade_pending(username: str = Depends(require_trade_auth)) -> Dict[str, Any]:
-    _ = username
-    if _trade_not_configured():
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Broker integration is not configured.")
-    try:
-        snapshot, stale_snapshot = TRADE_GATEWAY.snapshot_or_last_known()
-        volume_info = dict(snapshot.get("volumeInfo") or {})
-        volume_info["defaultLotSize"] = float(TRADE_DEFAULT_LOT_SIZE)
-        return {
-            "symbol": snapshot.get("symbol"),
-            "symbolId": snapshot.get("symbolId"),
-            "volumeInfo": volume_info,
-            "pendingOrders": snapshot.get("pendingOrders", []),
-            "snapshotMeta": snapshot.get("snapshotMeta"),
-            "staleSnapshot": stale_snapshot,
-            "broker": TRADE_GATEWAY.status(),
-            "serverTimeMs": now_ms(),
-        }
-    except Exception as exc:
-        _handle_trade_gateway_error(exc)
-
-
-@app.get("/api/trade/debug/auth")
-def trade_debug_auth(username: str = Depends(require_trade_auth)) -> Dict[str, Any]:
-    _ = username
-    return {
-        "ok": True,
-        "debug": TRADE_GATEWAY.auth_debug_info(),
-        "smart": SMART_SCALP_SERVICE.snapshot_state(),
-        "serverTimeMs": now_ms(),
-    }
 
 
 @app.get("/api/trade/history")
@@ -4064,46 +2931,6 @@ def separation_review_start(
     return live_review_start(timestamp=timestamp, timezoneName=timezoneName)
 
 
-@app.get("/api/auction/review-start")
-def auction_review_start(
-    timestamp: str = Query(..., min_length=1),
-    timezoneName: str = Query(DEFAULT_REVIEW_TIMEZONE, min_length=1),
-) -> Dict[str, Any]:
-    return live_review_start(timestamp=timestamp, timezoneName=timezoneName)
-
-
-@app.get("/api/auction/bootstrap")
-def auction_bootstrap(
-    mode: str = Query("live", pattern="^(live|review)$"),
-    id: Optional[int] = Query(None, ge=1),
-    window: int = Query(DEFAULT_AUCTION_WINDOW, ge=1, le=MAX_AUCTION_WINDOW),
-    focusKind: str = Query("brokerday", min_length=1, max_length=32),
-) -> Dict[str, Any]:
-    return load_auction_bootstrap_payload(
-        mode=mode,
-        start_id=id,
-        window=window,
-        focus_kind=focusKind,
-    )
-
-
-@app.get("/api/auction/history")
-def auction_history(
-    startTsMs: int = Query(..., ge=1),
-    endTsMs: int = Query(..., ge=1),
-    includeRefs: bool = Query(True),
-    includeEvents: bool = Query(True),
-    limitSessions: int = Query(36, ge=1, le=MAX_AUCTION_HISTORY_SESSIONS),
-) -> Dict[str, Any]:
-    return load_auction_history_payload(
-        start_ts_ms=startTsMs,
-        end_ts_ms=endTsMs,
-        include_refs=includeRefs,
-        include_events=includeEvents,
-        limit_sessions=limitSessions,
-    )
-
-
 @app.get("/api/bigpicture/bootstrap")
 def bigpicture_bootstrap(
     points: int = Query(DEFAULT_BIGPICTURE_POINTS, ge=200, le=MAX_BIGPICTURE_POINTS),
@@ -4254,119 +3081,6 @@ def live_review_stream(
     )
 
 
-@app.get("/api/auction/stream")
-def auction_stream(
-    focusKind: str = Query("brokerday", min_length=1, max_length=32),
-) -> StreamingResponse:
-    return StreamingResponse(
-        stream_auction_events(
-            focus_kind=focusKind,
-        ),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
-
-
-@app.get("/api/auction/tick-stream")
-def auction_tick_stream(
-    afterId: int = Query(0, ge=0),
-    limit: int = Query(64, ge=1, le=MAX_STREAM_BATCH),
-) -> StreamingResponse:
-    return StreamingResponse(
-        stream_auction_tick_events(
-            after_id=afterId,
-            limit=limit,
-        ),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
-
-
-@app.get("/api/auction/review-stream")
-def auction_review_stream(
-    afterId: int = Query(0, ge=0),
-    endId: int = Query(..., ge=1),
-    speed: float = Query(1.0, gt=0),
-    focusKind: str = Query("brokerday", min_length=1, max_length=32),
-) -> StreamingResponse:
-    return StreamingResponse(
-        stream_auction_review_events(
-            after_id=afterId,
-            end_id=endId,
-            speed=speed,
-            focus_kind=focusKind,
-        ),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
-
-
-@app.get("/api/separation/status")
-def separation_status(
-    levels: str = Query("micro,median,macro"),
-    showAll: bool = Query(True),
-    includeOpen: bool = Query(True),
-) -> Dict[str, Any]:
-    resolved_levels = normalize_separation_levels(levels, showAll)
-    with db_connection(readonly=True) as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            brokerday = query_current_separation_brokerday(cur)
-            latest_tick = query_latest_tick(cur)
-            bounds = query_separation_bounds(cur, levels=resolved_levels, include_open=includeOpen, brokerday=brokerday)
-            state_rows = []
-            if brokerday is not None:
-                cur.execute(
-                    """
-                    SELECT *
-                    FROM public.separationstate
-                    WHERE symbol = %s
-                      AND brokerday = %s
-                      AND level = ANY(%s)
-                    ORDER BY level
-                    """,
-                    (TICK_SYMBOL, brokerday, resolved_levels),
-                )
-                state_rows = [dict(row) for row in cur.fetchall()]
-            cur.execute(
-                """
-                SELECT *
-                FROM public.separationruns
-                WHERE symbol = %s
-                ORDER BY startedat DESC
-                LIMIT 10
-                """,
-                (TICK_SYMBOL,),
-            )
-            runs = [dict(row) for row in cur.fetchall()]
-    return {
-        "symbol": TICK_SYMBOL,
-        "brokerday": serialize_value(brokerday),
-        "levels": resolved_levels,
-        "includeOpen": includeOpen,
-        "latestTickId": latest_tick.get("id") if latest_tick else None,
-        "latestTickTimestamp": serialize_value(latest_tick.get("timestamp")) if latest_tick else None,
-        "bounds": {
-            "firstId": bounds.get("first_id"),
-            "lastId": bounds.get("last_id"),
-            "firstTimestamp": serialize_value(bounds.get("first_timestamp")),
-            "lastTimestamp": serialize_value(bounds.get("last_timestamp")),
-        },
-        "state": [{key: serialize_value(value) for key, value in row.items()} for row in state_rows],
-        "runs": [{key: serialize_value(value) for key, value in row.items()} for row in runs],
-        "serverTimeMs": now_ms(),
-    }
 
 
 @app.get("/api/separation/bootstrap")

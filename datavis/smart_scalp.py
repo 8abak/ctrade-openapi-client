@@ -238,7 +238,7 @@ class SmartScalpService:
             "mode": "live",
             "run": "stop",
             "enabled": False,
-            "reason": "Smart scalping requires the Live, Auction, or Separation chart in Live + Run.",
+            "reason": "Smart scalping requires the Live or Separation chart in Live + Run.",
             "updatedAtMs": _now_ms(),
         }
 
@@ -247,7 +247,7 @@ class SmartScalpService:
             "armed": {"buy": False, "sell": False, "close": False},
             "backendState": "idle",
             "statusText": "Idle",
-            "availabilityReason": "Smart scalping requires the Live, Auction, or Separation chart in Live + Run.",
+            "availabilityReason": "Smart scalping requires the Live or Separation chart in Live + Run.",
             "cooldownUntilMs": 0,
             "cooldownRemainingMs": 0,
             "lastTickId": 0,
@@ -309,8 +309,8 @@ class SmartScalpService:
             normalized_page = (page or "live").strip().lower() or "live"
             normalized_mode = (mode or "live").strip().lower() or "live"
             normalized_run = (run or "stop").strip().lower() or "stop"
-            enabled = normalized_page in {"live", "auction", "separation"} and normalized_mode == "live" and normalized_run == "run"
-            reason = "" if enabled else "Smart scalping is available only on the Live, Auction, or Separation chart in Live + Run."
+            enabled = normalized_page in {"live", "separation"} and normalized_mode == "live" and normalized_run == "run"
+            reason = "" if enabled else "Smart scalping is available only on the Live or Separation chart in Live + Run."
             self._context = {
                 "page": normalized_page,
                 "mode": normalized_mode,

@@ -37,7 +37,4 @@ CREATE INDEX IF NOT EXISTS ticks_symbol_id_idx
 CREATE INDEX IF NOT EXISTS ticks_symbol_timestamp_id_idx
     ON public.ticks (symbol, timestamp DESC, id DESC);
 
-CREATE INDEX IF NOT EXISTS auctionhistorysession_symbol_endts_startts_idx
-    ON public.auctionhistorysession (symbol, endts DESC, startts DESC);
-
 COMMIT;

@@ -1,7 +1,6 @@
 (function () {
   const state = {
     publicTables: [],
-    researchTables: [],
     activeTable: null,
     running: false,
   };
@@ -11,7 +10,6 @@
     tableFilter: document.getElementById("tableFilter"),
     tableList: document.getElementById("tableList"),
     publicTableList: document.getElementById("publicTableList"),
-    researchTableList: document.getElementById("researchTableList"),
     editor: document.getElementById("sqlEditor"),
     runButton: document.getElementById("runQueryButton"),
     status: document.getElementById("queryStatus"),
@@ -104,7 +102,7 @@
 
   function renderConnection(context) {
     if (!context) {
-      elements.connectionMeta.textContent = "Public + research schemas";
+      elements.connectionMeta.textContent = "Public schema";
       return;
     }
     elements.connectionMeta.textContent = [
@@ -115,7 +113,7 @@
   }
 
   function allTables() {
-    return state.publicTables.concat(state.researchTables);
+    return state.publicTables;
   }
 
   function renderTableButtons(tables) {
@@ -156,10 +154,6 @@
     renderTableSection(elements.publicTableList, state.publicTables, {
       emptyMessage: "No public tables found.",
       noMatchesMessage: "No matching public tables.",
-    });
-    renderTableSection(elements.researchTableList, state.researchTables, {
-      emptyMessage: "No research tables found.",
-      noMatchesMessage: "No matching research tables.",
     });
   }
 
@@ -213,13 +207,9 @@
     clearError();
     const payload = await fetchJson("/api/sql/schema");
     state.publicTables = Array.isArray(payload.public) ? payload.public : (payload.tables || []).filter((table) => table.schema === "public");
-    state.researchTables = Array.isArray(payload.research) ? payload.research : (payload.tables || []).filter((table) => table.schema === "research");
     renderConnection(payload.context);
     renderTables();
-    setStatus(
-      "Loaded " + state.publicTables.length + " public table(s) and " + state.researchTables.length + " research table(s).",
-      "success"
-    );
+    setStatus("Loaded " + state.publicTables.length + " public table(s).", "success");
   }
 
   async function runQuery() {
@@ -292,6 +282,5 @@
   loadTables().catch((error) => {
     showError(error);
     elements.publicTableList.innerHTML = "<div class=\"sql-empty\">Could not load public tables.</div>";
-    elements.researchTableList.innerHTML = "<div class=\"sql-empty\">Could not load research tables.</div>";
   });
 }());
