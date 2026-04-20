@@ -659,6 +659,17 @@ select {
   pointer-events: none;
 }
 
+.chart-trade-entry-left {
+  left: 1.15rem;
+  bottom: 1.15rem;
+  transform: none;
+  justify-items: start;
+}
+
+.chart-trade-entry-left .chart-trade-entry-buttons {
+  justify-content: flex-start;
+}
+
 .chart-trade-entry-buttons {
   display: flex;
   flex-wrap: wrap;

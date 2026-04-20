@@ -236,9 +236,9 @@ class SmartScalpService:
         return {
             "page": "live",
             "mode": "live",
-            "run": "stop",
+            "run": "run",
             "enabled": False,
-            "reason": "Smart scalping requires the Live or Separation chart in Live + Run.",
+            "reason": "Smart entry requires the Live, Separation, or Backbone chart in Live + Run. Smart Close remains server-side.",
             "updatedAtMs": _now_ms(),
         }
 
@@ -247,7 +247,7 @@ class SmartScalpService:
             "armed": {"buy": False, "sell": False, "close": False},
             "backendState": "idle",
             "statusText": "Idle",
-            "availabilityReason": "Smart scalping requires the Live or Separation chart in Live + Run.",
+            "availabilityReason": "Smart Close is server-side and defaults to ON.",
             "cooldownUntilMs": 0,
             "cooldownRemainingMs": 0,
             "lastTickId": 0,
@@ -297,6 +297,7 @@ class SmartScalpService:
             self._stop_event.clear()
             self._thread = threading.Thread(target=self._run_loop, name="datavis-smart-scalp", daemon=True)
             self._thread.start()
+            self._apply_close_preference_locked()
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -309,8 +310,8 @@ class SmartScalpService:
             normalized_page = (page or "live").strip().lower() or "live"
             normalized_mode = (mode or "live").strip().lower() or "live"
             normalized_run = (run or "stop").strip().lower() or "stop"
-            enabled = normalized_page in {"live", "separation"} and normalized_mode == "live" and normalized_run == "run"
-            reason = "" if enabled else "Smart scalping is available only on the Live or Separation chart in Live + Run."
+            enabled = normalized_page in {"live", "separation", "backbone"} and normalized_mode == "live" and normalized_run == "run"
+            reason = "" if enabled else "Smart entry is available only on the Live, Separation, or Backbone chart in Live + Run."
             self._context = {
                 "page": normalized_page,
                 "mode": normalized_mode,
@@ -321,11 +322,12 @@ class SmartScalpService:
             }
             self._state["error"] = None
             if not enabled:
-                self._clear_armed_locked(
-                    reason=reason or "Smart scalping unavailable.",
-                    backend_state="not_available",
-                    auto_reason=reason or "Smart scalping unavailable.",
-                )
+                if self._state["armed"].get("buy") or self._state["armed"].get("sell"):
+                    self._state["armed"]["buy"] = False
+                    self._state["armed"]["sell"] = False
+                    self._state["lastAutoDisarmReason"] = reason or "Smart entry unavailable."
+                self._state["availabilityReason"] = reason or "Smart entry unavailable."
+                self._apply_close_preference_locked()
             else:
                 self._touch_locked("Context synced.")
                 self._apply_close_preference_locked()
@@ -427,7 +429,6 @@ class SmartScalpService:
     def arm_close(self, *, armed: bool) -> Dict[str, Any]:
         with self._lock:
             self._close_preference_armed = bool(armed)
-            self._require_context_enabled_locked()
             snapshot = self._refresh_snapshot_locked(force=True)
             positions = list(snapshot.get("positions") or [])
             if armed:
@@ -436,7 +437,7 @@ class SmartScalpService:
                         self._broker_reason_locked(),
                         code="SMART_CLOSE_BROKER_UNAVAILABLE",
                         status_code=503,
-                )
+                    )
                 self._state["error"] = None
                 self._seed_recent_ticks_locked()
                 position = positions[0] if len(positions) == 1 else None
@@ -474,6 +475,8 @@ class SmartScalpService:
             return {
                 "symbol": self._symbol,
                 "smartLotSize": self._smart_lot_size,
+                "smartCloseServerSide": True,
+                "smartCloseDefaultOn": bool(self._close_preference_armed),
                 "smartBuyArmed": bool(state.get("armed", {}).get("buy")),
                 "smartSellArmed": bool(state.get("armed", {}).get("sell")),
                 "smartCloseArmed": bool(state.get("armed", {}).get("close")),
@@ -542,20 +545,32 @@ class SmartScalpService:
 
     def _work_plan(self) -> Dict[str, Any]:
         with self._lock:
-            if not self._context.get("enabled"):
-                return {"shouldWork": False, "sleep": self._idle_seconds}
-            if not self._auth_active_locked():
-                self._clear_armed_locked(
-                    reason="Trade session heartbeat expired.",
-                    backend_state="idle",
-                    auto_reason="Trade session heartbeat expired.",
-                )
-                return {"shouldWork": False, "sleep": self._idle_seconds}
             armed = self._state.get("armed") or {}
             if not (armed.get("buy") or armed.get("sell") or armed.get("close")):
                 return {"shouldWork": False, "sleep": self._idle_seconds}
+            if armed.get("buy") or armed.get("sell"):
+                if not self._context.get("enabled"):
+                    self._state["armed"]["buy"] = False
+                    self._state["armed"]["sell"] = False
+                    self._state["lastAutoDisarmReason"] = "Smart entry unavailable."
+                    self._apply_close_preference_locked()
+                    armed = self._state.get("armed") or {}
+                elif not self._auth_active_locked():
+                    self._state["armed"]["buy"] = False
+                    self._state["armed"]["sell"] = False
+                    self._state["lastAutoDisarmReason"] = "Trade session heartbeat expired."
+                    self._apply_close_preference_locked()
+                    armed = self._state.get("armed") or {}
+            if not (armed.get("buy") or armed.get("sell") or armed.get("close")):
+                return {"shouldWork": False, "sleep": self._idle_seconds}
             if armed.get("close") and not armed.get("buy") and not armed.get("sell"):
-                snapshot = self._refresh_snapshot_locked()
+                try:
+                    snapshot = self._refresh_snapshot_locked()
+                except Exception as exc:
+                    self._state["backendState"] = "armed_close_waiting"
+                    self._state["statusText"] = "Smart Close armed. Waiting for broker snapshot."
+                    self._state["availabilityReason"] = str(exc) or "Broker snapshot unavailable."
+                    return {"shouldWork": False, "sleep": self._idle_seconds}
                 positions = list(snapshot.get("positions") or [])
                 self._state["openPositionCount"] = len(positions)
                 self._state["currentPosition"] = self._position_summary(positions[0]) if len(positions) == 1 else None
@@ -566,16 +581,13 @@ class SmartScalpService:
 
     def _should_work(self) -> bool:
         with self._lock:
+            armed = self._state.get("armed") or {}
+            if armed.get("close") and not armed.get("buy") and not armed.get("sell"):
+                return True
             if not self._context.get("enabled"):
                 return False
             if not self._auth_active_locked():
-                self._clear_armed_locked(
-                    reason="Trade session heartbeat expired.",
-                    backend_state="idle",
-                    auto_reason="Trade session heartbeat expired.",
-                )
                 return False
-            armed = self._state.get("armed") or {}
             return bool(armed.get("buy") or armed.get("sell") or armed.get("close"))
 
     def _record_poll_state(self, *, rows_fetched: int, sleep_seconds: float, waiting_for_position: bool) -> None:
@@ -1091,7 +1103,7 @@ class SmartScalpService:
                 status_code=401,
             )
         raise SmartScalpError(
-            str(self._context.get("reason") or "Smart scalping unavailable."),
+            str(self._context.get("reason") or "Smart entry unavailable."),
             code="SMART_SCALP_NOT_AVAILABLE",
             status_code=409,
         )
@@ -1100,7 +1112,7 @@ class SmartScalpService:
         return int(self._auth_valid_until_ms or 0) > _now_ms()
 
     def _apply_close_preference_locked(self) -> None:
-        if not self._context.get("enabled") or not self._close_preference_armed:
+        if not self._close_preference_armed:
             return
         armed = self._state.get("armed") or {}
         if armed.get("buy") or armed.get("sell"):

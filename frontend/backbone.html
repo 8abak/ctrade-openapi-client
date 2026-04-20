@@ -48,63 +48,43 @@
             <a class="app-nav-link" href="/sql">SQL</a>
           </nav>
           <h1>Backbone</h1>
-          <p class="live-sidebar-copy">Confirmed adaptive hysteresis pivots and moves from the current Sydney broker day. Raw ticks stay optional and off by default.</p>
+          <p class="live-sidebar-copy">Adaptive structural pivots for the broker day as backbone candles or a detailed tick view with the current provisional leg.</p>
           <div class="meta-strip" id="backboneMeta">Waiting for backbone...</div>
-          <div class="meta-strip" id="backbonePerf">Stream down.</div>
+          <div class="meta-strip" id="backbonePerf">Snapshot idle.</div>
           <div class="status-line live-status" id="statusLine">Ready.</div>
         </header>
 
         <section class="live-sidebar-section">
           <div class="live-form-grid">
             <div class="live-control-field live-control-field-wide">
-              <span>mode</span>
-              <div class="segmented" id="modeToggle">
-                <button type="button" data-value="live">Live</button>
-                <button type="button" data-value="review">Review</button>
+              <span>view</span>
+              <div class="segmented" id="viewToggle">
+                <button type="button" data-value="candles">Candles</button>
+                <button type="button" data-value="detailed">Detailed</button>
               </div>
             </div>
 
-            <div class="live-control-field live-control-field-wide">
-              <span>run state</span>
-              <div class="segmented" id="runToggle">
-                <button type="button" data-value="run">Run</button>
-                <button type="button" data-value="stop">Stop</button>
-              </div>
-            </div>
+            <label>
+              <span id="countLabel">candles</span>
+              <input id="countInput" type="number" min="1" inputmode="numeric" value="35">
+            </label>
+
+            <label>
+              <span>review anchor id</span>
+              <input id="anchorId" type="number" min="1" inputmode="numeric" placeholder="optional">
+            </label>
 
             <div class="live-control-field live-control-field-wide">
               <span>display</span>
               <div class="live-check-grid">
                 <label class="compact-check">
-                  <input id="showTicks" type="checkbox">
+                  <input id="showBands" type="checkbox">
+                  <span>Bollinger Bands</span>
+                </label>
+                <label class="compact-check">
+                  <input id="showTicks" type="checkbox" checked>
                   <span>Raw ticks</span>
                 </label>
-              </div>
-            </div>
-
-            <label>
-              <span>review start id</span>
-              <input id="tickId" type="number" min="1" inputmode="numeric" placeholder="start id">
-            </label>
-
-            <label>
-              <span>review window</span>
-              <input id="windowSize" type="number" min="1" max="6000" inputmode="numeric" value="1200">
-            </label>
-
-            <label class="live-control-field-wide review-start-field">
-              <span>review start (Sydney)</span>
-              <input id="reviewStart" type="datetime-local" step="1">
-            </label>
-
-            <div class="live-control-field live-control-field-wide review-speed-control">
-              <span>review speed</span>
-              <div class="segmented single-select" id="reviewSpeedToggle" aria-label="Review speed">
-                <button type="button" data-value="0.5">0.5x</button>
-                <button type="button" data-value="1">1x</button>
-                <button type="button" data-value="2">2x</button>
-                <button type="button" data-value="3">3x</button>
-                <button type="button" data-value="5">5x</button>
               </div>
             </div>
           </div>
@@ -114,14 +94,16 @@
           </div>
         </section>
 
-        <section class="live-sidebar-section">
+        <section class="live-sidebar-section trade-sidebar-section">
           <header class="trade-panel-header">
             <h2>Status</h2>
+            <div class="trade-auth-pill" id="smartClosePill">Smart Close</div>
           </header>
           <div class="trade-session-copy" id="daySummary">Broker day unavailable.</div>
           <div class="trade-session-copy" id="stateSummary">No backbone state yet.</div>
           <div class="trade-session-copy" id="countsSummary">0 pivots | 0 moves</div>
           <div class="trade-session-copy" id="thresholdSummary">Threshold -</div>
+          <div class="trade-session-copy" id="positionSummary">No open position.</div>
         </section>
       </div>
     </aside>
@@ -129,6 +111,14 @@
     <section class="live-chart-stage">
       <div class="panel chart-panel live-chart-panel" id="chartPanel">
         <div id="backboneChart" class="chart-host"></div>
+        <div class="chart-trade-entry chart-trade-entry-left" id="backboneTradeEntry">
+          <div class="chart-trade-entry-buttons">
+            <button class="chart-trade-button chart-trade-button-buy" id="backboneBuyButton" type="button">Buy</button>
+            <button class="chart-trade-button chart-trade-button-sell" id="backboneSellButton" type="button">Sell</button>
+          </div>
+          <div class="chart-trade-smart-status" id="backboneSmartStatus">Smart Close state unavailable.</div>
+          <div class="chart-trade-hint" id="backboneTradeHint">Trade login required.</div>
+        </div>
       </div>
     </section>
   </div>

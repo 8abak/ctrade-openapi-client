@@ -56,6 +56,9 @@ DEFAULT_SEPARATION_WINDOW = int(os.getenv("DATAVIS_SEPARATION_WINDOW", "160"))
 MAX_SEPARATION_WINDOW = int(os.getenv("DATAVIS_SEPARATION_MAX_WINDOW", "4000"))
 DEFAULT_BACKBONE_REVIEW_WINDOW = int(os.getenv("DATAVIS_BACKBONE_REVIEW_WINDOW", "1200"))
 MAX_BACKBONE_REVIEW_WINDOW = int(os.getenv("DATAVIS_BACKBONE_REVIEW_MAX_WINDOW", "6000"))
+DEFAULT_BACKBONE_CANDLE_COUNT = int(os.getenv("DATAVIS_BACKBONE_CANDLE_COUNT", "35"))
+MAX_BACKBONE_CANDLE_COUNT = int(os.getenv("DATAVIS_BACKBONE_MAX_CANDLES", "400"))
+DEFAULT_BACKBONE_DETAIL_TICKS = int(os.getenv("DATAVIS_BACKBONE_DETAIL_TICKS", "2000"))
 DEFAULT_HISTORY_LIMIT = 2000
 DEFAULT_BIGPICTURE_POINTS = 2000
 MAX_BIGPICTURE_POINTS = int(os.getenv("DATAVIS_BIGPICTURE_MAX_POINTS", "2400"))
@@ -2223,6 +2226,386 @@ def serialize_backbone_move_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, A
     return [serialize_backbone_move_row(row) for row in rows]
 
 
+def serialize_backbone_candle_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    starttime = row.get("starttime")
+    endtime = row.get("endtime")
+    return {
+        "moveId": int(row.get("id") or 0),
+        "dayId": int(row.get("dayid") or 0),
+        "startTickId": int(row.get("starttickid") or 0),
+        "endTickId": int(row.get("endtickid") or 0),
+        "startTime": serialize_value(starttime),
+        "endTime": serialize_value(endtime),
+        "startTimeMs": dt_to_ms(starttime),
+        "endTimeMs": dt_to_ms(endtime),
+        "open": float(row.get("startprice") or 0.0),
+        "high": float(row.get("highprice") or row.get("startprice") or 0.0),
+        "low": float(row.get("lowprice") or row.get("endprice") or 0.0),
+        "close": float(row.get("endprice") or 0.0),
+        "direction": row.get("direction"),
+        "tickCount": int(row.get("tickcount") or 0),
+        "priceDelta": float(row.get("pricedelta") or 0.0),
+        "thresholdAtConfirm": float(row.get("thresholdatconfirm") or 0.0) if row.get("thresholdatconfirm") is not None else None,
+        "source": row.get("source") or BACKBONE_SOURCE,
+        "durationMs": max(0, (dt_to_ms(endtime) or 0) - (dt_to_ms(starttime) or 0)),
+    }
+
+
+def serialize_backbone_candle_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [serialize_backbone_candle_row(row) for row in rows]
+
+
+def query_backbone_item_count(cur: Any, *, table_name: str, day_id: int) -> int:
+    if table_name not in {"backbonepivots", "backbonemoves"}:
+        raise ValueError("Unsupported backbone table.")
+    cur.execute(
+        "SELECT COUNT(*) AS row_count FROM public.{table_name} WHERE dayid = %s".format(table_name=table_name),
+        (day_id,),
+    )
+    row = dict(cur.fetchone() or {})
+    return int(row.get("row_count") or 0)
+
+
+def query_backbone_last_pivot_before(cur: Any, *, day_id: int, before_tick_id: int) -> Optional[Dict[str, Any]]:
+    cur.execute(
+        """
+        SELECT {select_sql}
+        FROM public.backbonepivots
+        WHERE dayid = %s
+          AND tickid < %s
+        ORDER BY tickid DESC, id DESC
+        LIMIT 1
+        """.format(select_sql=backbone_pivot_columns()),
+        (day_id, before_tick_id),
+    )
+    row = cur.fetchone()
+    return dict(row) if row else None
+
+
+def query_backbone_pivots_in_range(cur: Any, *, day_id: int, start_id: int, end_id: int) -> List[Dict[str, Any]]:
+    cur.execute(
+        """
+        SELECT {select_sql}
+        FROM public.backbonepivots
+        WHERE dayid = %s
+          AND tickid >= %s
+          AND tickid <= %s
+        ORDER BY tickid ASC, id ASC
+        """.format(select_sql=backbone_pivot_columns()),
+        (day_id, start_id, end_id),
+    )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def query_recent_ticks_for_day(cur: Any, *, dayref: Any, limit: int) -> List[Dict[str, Any]]:
+    select_sql = tick_columns()
+    cur.execute(
+        """
+        SELECT {select_sql}
+        FROM (
+            SELECT {select_sql}
+            FROM public.ticks
+            WHERE symbol = %s
+              AND timestamp >= %s
+              AND timestamp < %s
+            ORDER BY id DESC
+            LIMIT %s
+        ) recent
+        ORDER BY id ASC
+        """.format(select_sql=select_sql),
+        (TICK_SYMBOL, dayref.starttime, dayref.endtime, limit),
+    )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def query_ticks_for_day_from_id(cur: Any, *, dayref: Any, start_id: int, limit: int) -> List[Dict[str, Any]]:
+    select_sql = tick_columns()
+    cur.execute(
+        """
+        SELECT {select_sql}
+        FROM public.ticks
+        WHERE symbol = %s
+          AND id >= %s
+          AND timestamp >= %s
+          AND timestamp < %s
+        ORDER BY id ASC
+        LIMIT %s
+        """.format(select_sql=select_sql),
+        (TICK_SYMBOL, start_id, dayref.starttime, dayref.endtime, limit),
+    )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def query_backbone_candles(
+    cur: Any,
+    *,
+    day_id: int,
+    limit: int,
+    start_id: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    select_sql = backbone_move_columns()
+    if start_id is None:
+        cur.execute(
+            """
+            SELECT
+                m.*,
+                COALESCE(agg.highprice, GREATEST(m.startprice, m.endprice)) AS highprice,
+                COALESCE(agg.lowprice, LEAST(m.startprice, m.endprice)) AS lowprice
+            FROM (
+                SELECT {select_sql}
+                FROM public.backbonemoves
+                WHERE dayid = %s
+                ORDER BY endtickid DESC, id DESC
+                LIMIT %s
+            ) m
+            LEFT JOIN LATERAL (
+                SELECT
+                    MAX(COALESCE(t.mid, (t.bid + t.ask) / 2.0)) AS highprice,
+                    MIN(COALESCE(t.mid, (t.bid + t.ask) / 2.0)) AS lowprice
+                FROM public.ticks t
+                WHERE t.symbol = %s
+                  AND t.id >= m.starttickid
+                  AND t.id <= m.endtickid
+            ) agg ON TRUE
+            ORDER BY m.endtickid ASC, m.id ASC
+            """.format(select_sql=select_sql),
+            (day_id, limit, TICK_SYMBOL),
+        )
+    else:
+        cur.execute(
+            """
+            SELECT
+                m.*,
+                COALESCE(agg.highprice, GREATEST(m.startprice, m.endprice)) AS highprice,
+                COALESCE(agg.lowprice, LEAST(m.startprice, m.endprice)) AS lowprice
+            FROM (
+                SELECT {select_sql}
+                FROM public.backbonemoves
+                WHERE dayid = %s
+                  AND endtickid >= %s
+                ORDER BY endtickid ASC, id ASC
+                LIMIT %s
+            ) m
+            LEFT JOIN LATERAL (
+                SELECT
+                    MAX(COALESCE(t.mid, (t.bid + t.ask) / 2.0)) AS highprice,
+                    MIN(COALESCE(t.mid, (t.bid + t.ask) / 2.0)) AS lowprice
+                FROM public.ticks t
+                WHERE t.symbol = %s
+                  AND t.id >= m.starttickid
+                  AND t.id <= m.endtickid
+            ) agg ON TRUE
+            ORDER BY m.endtickid ASC, m.id ASC
+            """.format(select_sql=select_sql),
+            (day_id, start_id, limit, TICK_SYMBOL),
+        )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def build_backbone_candles_payload(*, dayref: Any, state_row: Optional[Dict[str, Any]], candles: List[Dict[str, Any]], pivot_total: int, move_total: int, mode: str, requested_count: int, fetch_ms: float) -> Dict[str, Any]:
+    serialize_started = time.perf_counter()
+    serialized_candles = serialize_backbone_candle_rows(candles)
+    first_id = serialized_candles[0]["startTickId"] if serialized_candles else None
+    last_id = serialized_candles[-1]["endTickId"] if serialized_candles else None
+    payload = {
+        "view": "candles",
+        "mode": mode,
+        "symbol": TICK_SYMBOL,
+        "source": BACKBONE_SOURCE,
+        "dayId": int(dayref.dayid) if dayref else None,
+        "brokerday": serialize_value(dayref.brokerday) if dayref else None,
+        "dayStart": serialize_value(dayref.starttime) if dayref else None,
+        "dayEnd": serialize_value(dayref.endtime) if dayref else None,
+        "dayStartMs": dt_to_ms(dayref.starttime) if dayref else None,
+        "dayEndMs": dt_to_ms(dayref.endtime) if dayref else None,
+        "state": serialize_backbone_state_row(state_row, brokerday=(dayref.brokerday if dayref else None), day_id=(dayref.dayid if dayref else None)),
+        "candles": serialized_candles,
+        "candleCount": len(serialized_candles),
+        "requestedCandles": requested_count,
+        "pivotTotal": pivot_total,
+        "moveTotal": move_total,
+        "firstId": first_id,
+        "lastId": last_id,
+    }
+    payload["metrics"] = serialize_metrics_payload(
+        fetch_ms=fetch_ms,
+        serialize_ms=elapsed_ms(serialize_started),
+        latest_row={"id": last_id, "timestamp": candles[-1].get("endtime")} if candles else None,
+    )
+    return payload
+
+
+def load_backbone_candles_payload(*, count: int, start_id: Optional[int]) -> Dict[str, Any]:
+    effective_count = clamp_int(count, 1, MAX_BACKBONE_CANDLE_COUNT)
+    fetch_started = time.perf_counter()
+    with db_connection(readonly=True) as conn:
+        if start_id is None:
+            dayref = resolve_current_backbone_day_ref(conn, symbol=TICK_SYMBOL)
+            if dayref is None:
+                return build_backbone_candles_payload(
+                    dayref=None,
+                    state_row=None,
+                    candles=[],
+                    pivot_total=0,
+                    move_total=0,
+                    mode="live",
+                    requested_count=effective_count,
+                    fetch_ms=elapsed_ms(fetch_started),
+                )
+        else:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                tick_row = query_tick_by_id(cur, start_id)
+            if tick_row is None:
+                raise HTTPException(status_code=404, detail="Backbone start tick was not found.")
+            dayref = resolve_backbone_day_ref_for_timestamp(conn, symbol=TICK_SYMBOL, timestamp=tick_row["timestamp"])
+        state_row = load_backbone_state_row(conn, symbol=TICK_SYMBOL, dayid=dayref.dayid)
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            candles = query_backbone_candles(cur, day_id=dayref.dayid, limit=effective_count, start_id=start_id)
+            pivot_total = query_backbone_item_count(cur, table_name="backbonepivots", day_id=dayref.dayid)
+            move_total = query_backbone_item_count(cur, table_name="backbonemoves", day_id=dayref.dayid)
+    return build_backbone_candles_payload(
+        dayref=dayref,
+        state_row=state_row,
+        candles=candles,
+        pivot_total=pivot_total,
+        move_total=move_total,
+        mode="review" if start_id is not None else "live",
+        requested_count=effective_count,
+        fetch_ms=elapsed_ms(fetch_started),
+    )
+
+
+def build_backbone_detail_payload(
+    *,
+    dayref: Any,
+    state_row: Optional[Dict[str, Any]],
+    tick_rows: List[Dict[str, Any]],
+    pivots: List[Dict[str, Any]],
+    pivot_total: int,
+    move_total: int,
+    mode: str,
+    requested_ticks: int,
+    live_leg: Optional[Dict[str, Any]],
+    fetch_ms: float,
+) -> Dict[str, Any]:
+    serialize_started = time.perf_counter()
+    serialized_rows = serialize_tick_rows(tick_rows)
+    serialized_pivots = serialize_backbone_pivot_rows(pivots)
+    first_id = serialized_rows[0]["id"] if serialized_rows else None
+    last_id = serialized_rows[-1]["id"] if serialized_rows else None
+    payload = {
+        "view": "detailed",
+        "mode": mode,
+        "symbol": TICK_SYMBOL,
+        "source": BACKBONE_SOURCE,
+        "dayId": int(dayref.dayid) if dayref else None,
+        "brokerday": serialize_value(dayref.brokerday) if dayref else None,
+        "dayStart": serialize_value(dayref.starttime) if dayref else None,
+        "dayEnd": serialize_value(dayref.endtime) if dayref else None,
+        "dayStartMs": dt_to_ms(dayref.starttime) if dayref else None,
+        "dayEndMs": dt_to_ms(dayref.endtime) if dayref else None,
+        "state": serialize_backbone_state_row(state_row, brokerday=(dayref.brokerday if dayref else None), day_id=(dayref.dayid if dayref else None)),
+        "rows": serialized_rows,
+        "rowCount": len(serialized_rows),
+        "pivots": serialized_pivots,
+        "pivotCount": len(serialized_pivots),
+        "pivotTotal": pivot_total,
+        "moveTotal": move_total,
+        "requestedTicks": requested_ticks,
+        "firstId": first_id,
+        "lastId": last_id,
+        "liveLeg": live_leg,
+    }
+    payload["metrics"] = serialize_metrics_payload(
+        fetch_ms=fetch_ms,
+        serialize_ms=elapsed_ms(serialize_started),
+        latest_row=tick_rows[-1] if tick_rows else None,
+    )
+    return payload
+
+
+def load_backbone_detail_payload(*, ticks: int, start_id: Optional[int]) -> Dict[str, Any]:
+    effective_ticks = clamp_int(ticks, 1, MAX_TICK_WINDOW)
+    fetch_started = time.perf_counter()
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            if start_id is None:
+                dayref = resolve_current_backbone_day_ref(conn, symbol=TICK_SYMBOL)
+                if dayref is None:
+                    return build_backbone_detail_payload(
+                        dayref=None,
+                        state_row=None,
+                        tick_rows=[],
+                        pivots=[],
+                        pivot_total=0,
+                        move_total=0,
+                        mode="live",
+                        requested_ticks=effective_ticks,
+                        live_leg=None,
+                        fetch_ms=elapsed_ms(fetch_started),
+                    )
+                tick_rows = query_recent_ticks_for_day(cur, dayref=dayref, limit=effective_ticks)
+            else:
+                tick_row = query_tick_by_id(cur, start_id)
+                if tick_row is None:
+                    raise HTTPException(status_code=404, detail="Backbone start tick was not found.")
+                dayref = resolve_backbone_day_ref_for_timestamp(conn, symbol=TICK_SYMBOL, timestamp=tick_row["timestamp"])
+                tick_rows = query_ticks_for_day_from_id(cur, dayref=dayref, start_id=start_id, limit=effective_ticks)
+            state_row = load_backbone_state_row(conn, symbol=TICK_SYMBOL, dayid=dayref.dayid)
+            first_id = int(tick_rows[0]["id"]) if tick_rows else None
+            last_id = int(tick_rows[-1]["id"]) if tick_rows else None
+            visible_pivots: List[Dict[str, Any]] = []
+            if first_id is not None and last_id is not None:
+                anchor_pivot = query_backbone_last_pivot_before(cur, day_id=dayref.dayid, before_tick_id=first_id)
+                if anchor_pivot:
+                    visible_pivots.append(anchor_pivot)
+                visible_pivots.extend(query_backbone_pivots_in_range(cur, day_id=dayref.dayid, start_id=first_id, end_id=last_id))
+            pivot_total = query_backbone_item_count(cur, table_name="backbonepivots", day_id=dayref.dayid)
+            move_total = query_backbone_item_count(cur, table_name="backbonemoves", day_id=dayref.dayid)
+        live_leg = None
+        if start_id is None and tick_rows and state_row:
+            latest_row = tick_rows[-1]
+            confirmed_tick_id = int(state_row.get("confirmedpivottickid") or 0)
+            latest_tick_id = int(latest_row.get("id") or 0)
+            if confirmed_tick_id > 0 and latest_tick_id >= confirmed_tick_id:
+                latest_price = latest_row.get("mid")
+                if latest_price is None and latest_row.get("bid") is not None and latest_row.get("ask") is not None:
+                    latest_price = (float(latest_row["bid"]) + float(latest_row["ask"])) / 2.0
+                if latest_price is not None:
+                    candidate_tick_id = int(state_row.get("candidateextremetickid") or 0) or None
+                    candidate_time = state_row.get("candidateextremetime")
+                    candidate_price = float(state_row.get("candidateextremeprice") or 0.0) if state_row.get("candidateextremeprice") is not None else None
+                    live_leg = {
+                        "startTickId": confirmed_tick_id,
+                        "startTime": serialize_value(state_row.get("confirmedpivottime")),
+                        "startTimeMs": dt_to_ms(state_row.get("confirmedpivottime")),
+                        "startPrice": float(state_row.get("confirmedpivotprice") or 0.0) if state_row.get("confirmedpivotprice") is not None else None,
+                        "candidateTickId": candidate_tick_id,
+                        "candidateTime": serialize_value(candidate_time),
+                        "candidateTimeMs": dt_to_ms(candidate_time),
+                        "candidatePrice": candidate_price,
+                        "endTickId": latest_tick_id,
+                        "endTime": serialize_value(latest_row.get("timestamp")),
+                        "endTimeMs": dt_to_ms(latest_row.get("timestamp")),
+                        "endPrice": float(latest_price),
+                        "direction": state_row.get("direction"),
+                        "threshold": float(state_row.get("currentthreshold") or 0.0) if state_row.get("currentthreshold") is not None else None,
+                        "provisional": True,
+                    }
+    return build_backbone_detail_payload(
+        dayref=dayref,
+        state_row=state_row,
+        tick_rows=tick_rows,
+        pivots=visible_pivots,
+        pivot_total=pivot_total,
+        move_total=move_total,
+        mode="review" if start_id is not None else "live",
+        requested_ticks=effective_ticks,
+        live_leg=live_leg,
+        fetch_ms=elapsed_ms(fetch_started),
+    )
+
+
 def query_backbone_pivots_for_day(cur: Any, *, day_id: int) -> List[Dict[str, Any]]:
     cur.execute(
         """
@@ -3016,7 +3399,7 @@ def _trade_not_configured() -> bool:
 
 def _handle_trade_gateway_error(exc: Exception) -> None:
     detail = str(exc) or "Trade request failed."
-    SMART_SCALP_SERVICE.reset(reason=detail)
+    SMART_SCALP_SERVICE.reset(reason=detail, restore_close_preference=True)
     status_code = getattr(exc, "status_code", None) or status.HTTP_502_BAD_GATEWAY
     if not isinstance(status_code, int):
         status_code = status.HTTP_502_BAD_GATEWAY
@@ -3187,7 +3570,7 @@ def trade_login(payload: TradeLoginRequest, response: Response) -> Any:
 @app.post("/api/trade/logout")
 def trade_logout(response: Response) -> Dict[str, Any]:
     _clear_trade_cookie(response)
-    SMART_SCALP_SERVICE.reset(reason="Trade session logged out.")
+    SMART_SCALP_SERVICE.reset(reason="Trade session logged out. Smart Close remains server-side.", restore_close_preference=True)
     return {"ok": True}
 
 
@@ -3278,7 +3661,7 @@ def trade_order_market(payload: TradeMarketOrderRequest, username: str = Depends
             volume=volume,
             lot_size=payload.lotSize,
         )
-        SMART_SCALP_SERVICE.reset(reason="Manual market order submitted.")
+        SMART_SCALP_SERVICE.reset(reason="Manual market order submitted. Smart Close restored.", restore_close_preference=True)
         return {
             "ok": True,
             "result": result,
@@ -3308,7 +3691,7 @@ def trade_position_close(payload: TradePositionCloseRequest, username: str = Dep
             position_id=payload.positionId,
             volume=payload.volume,
         )
-        SMART_SCALP_SERVICE.reset(reason="Manual close submitted.")
+        SMART_SCALP_SERVICE.reset(reason="Manual close submitted. Smart Close restored.", restore_close_preference=True)
         return {
             "ok": True,
             "result": result,
@@ -3490,6 +3873,22 @@ def backbone_review_start(
     timezoneName: str = Query(DEFAULT_REVIEW_TIMEZONE, min_length=1),
 ) -> Dict[str, Any]:
     return live_review_start(timestamp=timestamp, timezoneName=timezoneName)
+
+
+@app.get("/api/backbone/candles")
+def backbone_candles(
+    candles: int = Query(DEFAULT_BACKBONE_CANDLE_COUNT, ge=1, le=MAX_BACKBONE_CANDLE_COUNT),
+    id: Optional[int] = Query(None, ge=1),
+) -> Dict[str, Any]:
+    return load_backbone_candles_payload(count=candles, start_id=id)
+
+
+@app.get("/api/backbone/detail")
+def backbone_detail(
+    ticks: int = Query(DEFAULT_BACKBONE_DETAIL_TICKS, ge=1, le=MAX_TICK_WINDOW),
+    id: Optional[int] = Query(None, ge=1),
+) -> Dict[str, Any]:
+    return load_backbone_detail_payload(ticks=ticks, start_id=id)
 
 
 @app.get("/api/bigpicture/bootstrap")

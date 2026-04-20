@@ -5,35 +5,44 @@
   window.__datavisBackboneInitialized = true;
 
   const DEFAULTS = {
-    mode: "live",
-    run: "run",
-    showTicks: false,
+    view: "candles",
+    candles: 35,
+    ticks: 2000,
+    showTicks: true,
+    showBands: false,
     id: "",
-    reviewStart: "",
-    reviewSpeed: 1,
-    window: 1200,
   };
-  const REVIEW_SPEEDS = [0.5, 1, 2, 3, 5];
-  const MAX_WINDOW = 6000;
+  const MAX_CANDLES = 400;
+  const MAX_TICKS = 10000;
+  const LIVE_REFRESH_MS = 2500;
+  const TRADE_REFRESH_MS = 5000;
+  const BANDS_PERIOD = 20;
+  const BANDS_STD_MULTIPLIER = 2.0;
 
   const state = {
     chart: null,
-    pivots: [],
-    moves: [],
-    rows: [],
-    source: null,
-    reviewTimer: 0,
-    reviewEndId: null,
-    dayId: null,
-    lastId: 0,
-    stateRow: null,
-    loadToken: 0,
+    payload: null,
     lastMetrics: null,
-    streamConnected: false,
+    loadToken: 0,
     zoom: null,
     applyingZoom: false,
     resizeObserver: null,
+    pollTimer: 0,
+    inputs: {
+      candles: DEFAULTS.candles,
+      ticks: DEFAULTS.ticks,
+    },
     ui: { sidebarCollapsed: true },
+    trade: {
+      authenticated: false,
+      authConfigured: true,
+      positions: [],
+      smart: null,
+      broker: null,
+      busy: false,
+      lastRefreshAtMs: 0,
+      refreshPromise: null,
+    },
   };
 
   const elements = {
@@ -41,13 +50,12 @@
     sidebar: document.getElementById("backboneSidebar"),
     sidebarToggle: document.getElementById("sidebarToggle"),
     sidebarBackdrop: document.getElementById("sidebarBackdrop"),
-    modeToggle: document.getElementById("modeToggle"),
-    runToggle: document.getElementById("runToggle"),
+    viewToggle: document.getElementById("viewToggle"),
+    countLabel: document.getElementById("countLabel"),
+    countInput: document.getElementById("countInput"),
+    anchorId: document.getElementById("anchorId"),
+    showBands: document.getElementById("showBands"),
     showTicks: document.getElementById("showTicks"),
-    tickId: document.getElementById("tickId"),
-    reviewStart: document.getElementById("reviewStart"),
-    reviewSpeedToggle: document.getElementById("reviewSpeedToggle"),
-    windowSize: document.getElementById("windowSize"),
     applyButton: document.getElementById("applyButton"),
     statusLine: document.getElementById("statusLine"),
     backboneMeta: document.getElementById("backboneMeta"),
@@ -56,36 +64,43 @@
     stateSummary: document.getElementById("stateSummary"),
     countsSummary: document.getElementById("countsSummary"),
     thresholdSummary: document.getElementById("thresholdSummary"),
+    positionSummary: document.getElementById("positionSummary"),
+    smartClosePill: document.getElementById("smartClosePill"),
     chartHost: document.getElementById("backboneChart"),
+    buyButton: document.getElementById("backboneBuyButton"),
+    sellButton: document.getElementById("backboneSellButton"),
+    smartStatus: document.getElementById("backboneSmartStatus"),
+    tradeHint: document.getElementById("backboneTradeHint"),
   };
 
-  function sanitizeWindowValue(rawValue) {
-    return Math.max(1, Math.min(MAX_WINDOW, Number.parseInt(rawValue || String(DEFAULTS.window), 10) || DEFAULTS.window));
+  function clampCount(view, rawValue) {
+    const fallback = view === "detailed" ? DEFAULTS.ticks : DEFAULTS.candles;
+    const maximum = view === "detailed" ? MAX_TICKS : MAX_CANDLES;
+    return Math.max(1, Math.min(maximum, Number.parseInt(rawValue || String(fallback), 10) || fallback));
   }
 
   function parseQuery() {
     const params = new URLSearchParams(window.location.search);
-    const speed = Number.parseFloat(params.get("speed") || String(DEFAULTS.reviewSpeed));
+    const view = params.get("view") === "detailed" ? "detailed" : DEFAULTS.view;
     return {
-      mode: params.get("mode") === "review" ? "review" : DEFAULTS.mode,
-      run: params.get("run") === "stop" ? "stop" : DEFAULTS.run,
-      showTicks: params.get("showTicks") === "1",
-      id: params.get("id") || DEFAULTS.id,
-      reviewStart: params.get("reviewStart") || DEFAULTS.reviewStart,
-      reviewSpeed: REVIEW_SPEEDS.includes(speed) ? speed : DEFAULTS.reviewSpeed,
-      window: sanitizeWindowValue(params.get("window")),
+      view: view,
+      candles: clampCount("candles", params.get("candles")),
+      ticks: clampCount("detailed", params.get("ticks")),
+      showTicks: params.has("showTicks") ? params.get("showTicks") !== "0" : DEFAULTS.showTicks,
+      showBands: params.get("showBands") === "1",
+      id: params.get("id") || "",
     };
   }
 
   function currentConfig() {
+    const view = elements.viewToggle.querySelector("button.active")?.dataset.value || DEFAULTS.view;
     return {
-      mode: elements.modeToggle.querySelector("button.active")?.dataset.value || DEFAULTS.mode,
-      run: elements.runToggle.querySelector("button.active")?.dataset.value || DEFAULTS.run,
-      showTicks: elements.showTicks.checked,
-      id: (elements.tickId.value || "").trim(),
-      reviewStart: (elements.reviewStart.value || "").trim(),
-      reviewSpeed: Number.parseFloat(elements.reviewSpeedToggle.querySelector("button.active")?.dataset.value || String(DEFAULTS.reviewSpeed)),
-      window: sanitizeWindowValue(elements.windowSize.value),
+      view: view,
+      candles: clampCount("candles", state.inputs.candles),
+      ticks: clampCount("detailed", state.inputs.ticks),
+      showTicks: Boolean(elements.showTicks.checked),
+      showBands: Boolean(elements.showBands.checked),
+      id: (elements.anchorId.value || "").trim(),
     };
   }
 
@@ -106,17 +121,14 @@
   function writeQuery() {
     const config = currentConfig();
     const params = new URLSearchParams({
-      mode: config.mode,
-      run: config.run,
+      view: config.view,
+      candles: String(config.candles),
+      ticks: String(config.ticks),
       showTicks: config.showTicks ? "1" : "0",
-      window: String(config.window),
-      speed: String(config.reviewSpeed),
+      showBands: config.showBands ? "1" : "0",
     });
     if (config.id) {
       params.set("id", config.id);
-    }
-    if (config.reviewStart) {
-      params.set("reviewStart", config.reviewStart);
     }
     window.history.replaceState({}, "", window.location.pathname + "?" + params.toString());
   }
@@ -126,72 +138,47 @@
     elements.workspace.classList.toggle("is-sidebar-collapsed", state.ui.sidebarCollapsed);
     elements.sidebarToggle.setAttribute("aria-expanded", String(!state.ui.sidebarCollapsed));
     if (state.chart) {
-      requestAnimationFrame(function () { state.chart.resize(); });
+      requestAnimationFrame(function () {
+        state.chart.resize();
+      });
     }
   }
 
-  function updateReviewFields() {
-    const reviewMode = currentConfig().mode === "review";
-    elements.tickId.disabled = !reviewMode;
-    elements.reviewStart.disabled = !reviewMode;
-    elements.windowSize.disabled = !reviewMode;
-    elements.reviewSpeedToggle.querySelectorAll("button").forEach(function (button) {
-      button.disabled = !reviewMode;
-    });
+  function syncControlStates() {
+    const config = currentConfig();
+    elements.countLabel.textContent = config.view === "detailed" ? "ticks" : "candles";
+    elements.countInput.value = String(config.view === "detailed" ? config.ticks : config.candles);
+    elements.showBands.disabled = config.view !== "candles";
+    elements.showTicks.disabled = config.view !== "detailed";
+  }
+
+  function isReviewMode() {
+    return Boolean((currentConfig().id || "").trim());
+  }
+
+  function clearPolling() {
+    if (state.pollTimer) {
+      window.clearTimeout(state.pollTimer);
+      state.pollTimer = 0;
+    }
+  }
+
+  function schedulePolling() {
+    clearPolling();
+    if (isReviewMode()) {
+      return;
+    }
+    state.pollTimer = window.setTimeout(function () {
+      state.pollTimer = 0;
+      loadData(false, { silentStatus: true }).catch(function (error) {
+        status(error.message || "Backbone refresh failed.", true);
+      });
+    }, LIVE_REFRESH_MS);
   }
 
   function status(message, isError) {
     elements.statusLine.textContent = message;
     elements.statusLine.classList.toggle("error", Boolean(isError));
-  }
-
-  function renderMeta() {
-    if (!state.pivots.length && !state.moves.length) {
-      elements.backboneMeta.textContent = "No backbone range loaded.";
-      return;
-    }
-    const firstPivot = state.pivots[0];
-    const lastPivot = state.pivots[state.pivots.length - 1];
-    elements.backboneMeta.textContent = [
-      currentConfig().mode.toUpperCase(),
-      "pivots " + state.pivots.length,
-      "moves " + state.moves.length,
-      "left " + (firstPivot?.tickId ?? "-"),
-      "right " + (state.lastId || lastPivot?.tickId || "-"),
-      state.rows.length ? ("ticks " + state.rows.length) : "ticks off",
-    ].join(" | ");
-  }
-
-  function renderPerf() {
-    const metrics = state.lastMetrics || {};
-    const parts = ["Stream " + (state.streamConnected ? "up" : "down")];
-    if (metrics.dbLatestId != null) {
-      parts.push("DB " + metrics.dbLatestId);
-    }
-    if (metrics.fetchLatencyMs != null) {
-      parts.push("Fetch " + Math.round(metrics.fetchLatencyMs * 100) / 100 + "ms");
-    }
-    if (metrics.serializeLatencyMs != null) {
-      parts.push("Serialize " + Math.round(metrics.serializeLatencyMs * 100) / 100 + "ms");
-    }
-    if (metrics.serverSentAtMs != null) {
-      parts.push("Wire " + Math.max(0, Date.now() - metrics.serverSentAtMs) + "ms");
-    }
-    elements.backbonePerf.textContent = parts.join(" | ");
-  }
-
-  function renderInfo() {
-    const backboneState = state.stateRow || {};
-    elements.daySummary.textContent = state.dayId
-      ? "Broker day " + (backboneState.brokerday || "-") + " | dayId " + state.dayId
-      : "Broker day unavailable.";
-    elements.stateSummary.textContent = backboneState.lastProcessedTickId
-      ? "Last processed tick " + backboneState.lastProcessedTickId + " | direction " + (backboneState.direction || "None")
-      : "No backbone state yet.";
-    elements.countsSummary.textContent = state.pivots.length + " pivots | " + state.moves.length + " moves";
-    elements.thresholdSummary.textContent = backboneState.currentThreshold != null
-      ? "Threshold " + Number(backboneState.currentThreshold).toFixed(4)
-      : "Threshold -";
   }
 
   function escapeHtml(value) {
@@ -212,33 +199,132 @@
     return Number.isFinite(numeric) ? numeric.toFixed(2) : "-";
   }
 
+  function formatSigned(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+      return "-";
+    }
+    return (numeric > 0 ? "+" : "") + numeric.toFixed(2);
+  }
+
+  function renderMeta() {
+    const payload = state.payload || {};
+    if (!payload.dayId) {
+      elements.backboneMeta.textContent = "No backbone day loaded.";
+      return;
+    }
+    const countText = payload.view === "detailed"
+      ? ("ticks " + Number(payload.rowCount || 0))
+      : ("candles " + Number(payload.candleCount || 0));
+    elements.backboneMeta.textContent = [
+      String(payload.view || "backbone").toUpperCase(),
+      payload.mode === "review" ? "review" : "broker day",
+      countText,
+      "left " + (payload.firstId ?? "-"),
+      "right " + (payload.lastId ?? "-"),
+    ].join(" | ");
+  }
+
+  function renderPerf() {
+    const metrics = state.lastMetrics || {};
+    const parts = ["Snapshot"];
+    if (metrics.dbLatestId != null) {
+      parts.push("DB " + metrics.dbLatestId);
+    }
+    if (metrics.fetchLatencyMs != null) {
+      parts.push("Fetch " + Math.round(metrics.fetchLatencyMs * 100) / 100 + "ms");
+    }
+    if (metrics.serializeLatencyMs != null) {
+      parts.push("Serialize " + Math.round(metrics.serializeLatencyMs * 100) / 100 + "ms");
+    }
+    if (metrics.serverSentAtMs != null) {
+      parts.push("Wire " + Math.max(0, Date.now() - metrics.serverSentAtMs) + "ms");
+    }
+    elements.backbonePerf.textContent = parts.join(" | ");
+  }
+
+  function summarizePosition(position) {
+    if (!position) {
+      return "No open position.";
+    }
+    const side = String(position.side || "position").toUpperCase();
+    const entry = position.entryPrice != null ? formatPrice(position.entryPrice) : "-";
+    const pnl = position.netUnrealizedPnl != null ? formatSigned(position.netUnrealizedPnl) : "-";
+    return side + " #" + String(position.positionId || "-") + " | Entry " + entry + " | PnL " + pnl;
+  }
+
+  function renderInfo() {
+    const payload = state.payload || {};
+    const row = payload.state || {};
+    elements.daySummary.textContent = payload.dayId
+      ? ("Broker day " + (payload.brokerday || "-") + " | dayId " + payload.dayId + (payload.mode === "review" ? " | review anchor " + (currentConfig().id || "-") : ""))
+      : "Broker day unavailable.";
+    elements.stateSummary.textContent = row.lastProcessedTickId
+      ? ("Last processed tick " + row.lastProcessedTickId + " | direction " + (row.direction || "None"))
+      : "No backbone state yet.";
+    elements.countsSummary.textContent = Number(payload.pivotTotal || 0) + " pivots | " + Number(payload.moveTotal || 0) + " moves";
+    elements.thresholdSummary.textContent = row.currentThreshold != null
+      ? ("Threshold " + Number(row.currentThreshold).toFixed(4))
+      : "Threshold -";
+    elements.positionSummary.textContent = summarizePosition(state.trade.positions[0] || null);
+  }
+
+  function computeBands(candles) {
+    if (!Array.isArray(candles) || candles.length < BANDS_PERIOD) {
+      return { middle: [], upper: [], lower: [] };
+    }
+    const middle = [];
+    const upper = [];
+    const lower = [];
+    for (let index = BANDS_PERIOD - 1; index < candles.length; index += 1) {
+      const slice = candles.slice(index - BANDS_PERIOD + 1, index + 1);
+      const closes = slice.map(function (item) { return Number(item.close); });
+      const mean = closes.reduce(function (sum, value) { return sum + value; }, 0) / closes.length;
+      const variance = closes.reduce(function (sum, value) {
+        const delta = value - mean;
+        return sum + (delta * delta);
+      }, 0) / closes.length;
+      const deviation = Math.sqrt(variance) * BANDS_STD_MULTIPLIER;
+      const x = Number(candles[index].endTimeMs);
+      middle.push({ value: [x, mean] });
+      upper.push({ value: [x, mean + deviation] });
+      lower.push({ value: [x, mean - deviation] });
+    }
+    return { middle: middle, upper: upper, lower: lower };
+  }
+
   function tooltipFormatter(param) {
-    const point = param?.data?.pivot;
-    if (point) {
+    const candle = param?.data?.candle;
+    if (candle) {
       return [
         "<div class=\"chart-tip\">",
         "<div class=\"chart-tip-section\">",
-        "<div class=\"chart-tip-title\">", escapeHtml(point.pivotType || "Pivot"), "</div>",
-        "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">Tick</span><span class=\"chart-tip-value\">", escapeHtml(String(point.tickId || "-")), "</span></div>",
-        "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">Time</span><span class=\"chart-tip-value\">", escapeHtml(formatTimestamp(point.tickTimeMs)), "</span></div>",
-        "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">Price</span><span class=\"chart-tip-value\">", escapeHtml(formatPrice(point.price)), "</span></div>",
-        "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">Threshold</span><span class=\"chart-tip-value\">", escapeHtml(point.threshold != null ? Number(point.threshold).toFixed(4) : "-"), "</span></div>",
+        "<div class=\"chart-tip-title\">Backbone Candle</div>",
+        "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">Move</span><span class=\"chart-tip-value\">", escapeHtml(String(candle.moveId)), "</span></div>",
+        "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">Start</span><span class=\"chart-tip-value\">", escapeHtml(formatTimestamp(candle.startTimeMs)), "</span></div>",
+        "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">End</span><span class=\"chart-tip-value\">", escapeHtml(formatTimestamp(candle.endTimeMs)), "</span></div>",
+        "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">Open</span><span class=\"chart-tip-value\">", escapeHtml(formatPrice(candle.open)), "</span></div>",
+        "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">High</span><span class=\"chart-tip-value\">", escapeHtml(formatPrice(candle.high)), "</span></div>",
+        "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">Low</span><span class=\"chart-tip-value\">", escapeHtml(formatPrice(candle.low)), "</span></div>",
+        "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">Close</span><span class=\"chart-tip-value\">", escapeHtml(formatPrice(candle.close)), "</span></div>",
+        "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">Ticks</span><span class=\"chart-tip-value\">", escapeHtml(String(candle.tickCount || 0)), "</span></div>",
+        "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">Direction</span><span class=\"chart-tip-value\">", escapeHtml(String(candle.direction || "-")), "</span></div>",
+        "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">Delta</span><span class=\"chart-tip-value\">", escapeHtml(formatSigned(candle.priceDelta)), "</span></div>",
+        "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">Threshold</span><span class=\"chart-tip-value\">", escapeHtml(candle.thresholdAtConfirm != null ? Number(candle.thresholdAtConfirm).toFixed(4) : "-"), "</span></div>",
         "</div></div>",
       ].join("");
     }
 
-    const move = param?.data?.move;
-    if (move) {
+    const pivot = param?.data?.pivot;
+    if (pivot) {
       return [
         "<div class=\"chart-tip\">",
         "<div class=\"chart-tip-section\">",
-        "<div class=\"chart-tip-title\">", escapeHtml(move.direction || "Move"), "</div>",
-        "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">Start</span><span class=\"chart-tip-value\">", escapeHtml(String(move.startTickId || "-")), "</span></div>",
-        "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">End</span><span class=\"chart-tip-value\">", escapeHtml(String(move.endTickId || "-")), "</span></div>",
-        "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">Delta</span><span class=\"chart-tip-value\">", escapeHtml(formatPrice(move.priceDelta)), "</span></div>",
-        "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">Ticks</span><span class=\"chart-tip-value\">", escapeHtml(String(move.tickCount || 0)), "</span></div>",
-        "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">Duration</span><span class=\"chart-tip-value\">", escapeHtml(String(move.durationMs || 0) + " ms"), "</span></div>",
-        "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">Threshold</span><span class=\"chart-tip-value\">", escapeHtml(move.thresholdAtConfirm != null ? Number(move.thresholdAtConfirm).toFixed(4) : "-"), "</span></div>",
+        "<div class=\"chart-tip-title\">", escapeHtml(String(pivot.pivotType || "Pivot")), "</div>",
+        "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">Tick</span><span class=\"chart-tip-value\">", escapeHtml(String(pivot.tickId || "-")), "</span></div>",
+        "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">Time</span><span class=\"chart-tip-value\">", escapeHtml(formatTimestamp(pivot.tickTimeMs)), "</span></div>",
+        "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">Price</span><span class=\"chart-tip-value\">", escapeHtml(formatPrice(pivot.price)), "</span></div>",
+        "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">Threshold</span><span class=\"chart-tip-value\">", escapeHtml(pivot.threshold != null ? Number(pivot.threshold).toFixed(4) : "-"), "</span></div>",
         "</div></div>",
       ].join("");
     }
@@ -256,6 +342,21 @@
       ].join("");
     }
 
+    const liveLeg = param?.data?.liveLeg;
+    if (liveLeg) {
+      return [
+        "<div class=\"chart-tip\">",
+        "<div class=\"chart-tip-section\">",
+        "<div class=\"chart-tip-title\">Developing Leg</div>",
+        "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">Start</span><span class=\"chart-tip-value\">", escapeHtml(String(liveLeg.startTickId || "-")), "</span></div>",
+        "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">Latest</span><span class=\"chart-tip-value\">", escapeHtml(String(liveLeg.endTickId || "-")), "</span></div>",
+        "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">Direction</span><span class=\"chart-tip-value\">", escapeHtml(String(liveLeg.direction || "-")), "</span></div>",
+        "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">Threshold</span><span class=\"chart-tip-value\">", escapeHtml(liveLeg.threshold != null ? Number(liveLeg.threshold).toFixed(4) : "-"), "</span></div>",
+        "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">Latest Price</span><span class=\"chart-tip-value\">", escapeHtml(formatPrice(liveLeg.endPrice)), "</span></div>",
+        "</div></div>",
+      ].join("");
+    }
+
     return "";
   }
 
@@ -268,7 +369,7 @@
       state.chart = echarts.init(elements.chartHost, null, { renderer: "canvas" });
       state.chart.setOption({
         animation: false,
-        grid: { left: 60, right: 18, top: 16, bottom: 58 },
+        grid: { left: 58, right: 18, top: 16, bottom: 58 },
         tooltip: {
           trigger: "item",
           confine: true,
@@ -314,17 +415,167 @@
         }
         const option = state.chart.getOption();
         const zoom = option?.dataZoom?.[0] || null;
-        state.zoom = zoom ? { start: zoom.start, end: zoom.end, startValue: zoom.startValue, endValue: zoom.endValue } : null;
+        state.zoom = zoom ? {
+          start: zoom.start,
+          end: zoom.end,
+          startValue: zoom.startValue,
+          endValue: zoom.endValue,
+        } : null;
       });
       if (typeof ResizeObserver === "function") {
-        state.resizeObserver = new ResizeObserver(function () { state.chart.resize(); });
+        state.resizeObserver = new ResizeObserver(function () {
+          if (state.chart) {
+            state.chart.resize();
+          }
+        });
         state.resizeObserver.observe(elements.chartHost);
       }
       window.addEventListener("resize", function () {
-        state.chart.resize();
+        if (state.chart) {
+          state.chart.resize();
+        }
       });
     }
     return state.chart;
+  }
+
+  function renderCandleSeries(payload) {
+    const series = [];
+    const candles = Array.isArray(payload.candles) ? payload.candles : [];
+    if (!candles.length) {
+      return series;
+    }
+    series.push({
+      name: "backbone-candles",
+      type: "candlestick",
+      data: candles.map(function (candle) {
+        return {
+          value: [Number(candle.endTimeMs), Number(candle.open), Number(candle.close), Number(candle.low), Number(candle.high)],
+          candle: candle,
+        };
+      }),
+      itemStyle: {
+        color: "#7ef0c7",
+        color0: "#ff6b88",
+        borderColor: "#7ef0c7",
+        borderColor0: "#ff6b88",
+      },
+      emphasis: {
+        itemStyle: {
+          borderWidth: 1.2,
+        },
+      },
+      z: 4,
+    });
+    if (currentConfig().showBands) {
+      const bands = computeBands(candles);
+      [
+        { name: "bb-middle", data: bands.middle, color: "rgba(109, 216, 255, 0.72)" },
+        { name: "bb-upper", data: bands.upper, color: "rgba(255, 200, 87, 0.76)" },
+        { name: "bb-lower", data: bands.lower, color: "rgba(126, 240, 199, 0.68)" },
+      ].forEach(function (band) {
+        if (!band.data.length) {
+          return;
+        }
+        series.push({
+          name: band.name,
+          type: "line",
+          data: band.data,
+          showSymbol: false,
+          smooth: false,
+          lineStyle: { width: 1.4, color: band.color },
+          z: 5,
+        });
+      });
+    }
+    return series;
+  }
+
+  function renderDetailedSeries(payload) {
+    const series = [];
+    const rows = Array.isArray(payload.rows) ? payload.rows : [];
+    const pivots = Array.isArray(payload.pivots) ? payload.pivots : [];
+    if (currentConfig().showTicks && rows.length) {
+      series.push({
+        name: "ticks",
+        type: "line",
+        data: rows.map(function (row) {
+          return { value: [Number(row.timestampMs), Number(row.mid)], tick: row };
+        }),
+        showSymbol: false,
+        lineStyle: { width: 1, color: "rgba(109, 216, 255, 0.22)" },
+        z: 1,
+      });
+    }
+    if (pivots.length) {
+      series.push({
+        name: "backbone",
+        type: "line",
+        data: pivots.map(function (pivot) {
+          return { value: [Number(pivot.tickTimeMs), Number(pivot.price)], pivot: pivot };
+        }),
+        showSymbol: false,
+        lineStyle: { width: 2.6, color: "#ffb35c" },
+        itemStyle: { color: "#ffb35c" },
+        z: 4,
+      });
+      [
+        { type: "Start", color: "#6dd8ff", symbol: "diamond", size: 8 },
+        { type: "High", color: "#ff6b88", symbol: "triangle", size: 10 },
+        { type: "Low", color: "#7ef0c7", symbol: "triangle", size: 10, rotate: 180 },
+      ].forEach(function (definition) {
+        const filtered = pivots.filter(function (pivot) {
+          return pivot.pivotType === definition.type;
+        });
+        if (!filtered.length) {
+          return;
+        }
+        series.push({
+          name: definition.type.toLowerCase(),
+          type: "scatter",
+          symbol: definition.symbol,
+          symbolRotate: definition.rotate || 0,
+          symbolSize: definition.size,
+          data: filtered.map(function (pivot) {
+            return { value: [Number(pivot.tickTimeMs), Number(pivot.price)], pivot: pivot };
+          }),
+          itemStyle: { color: definition.color },
+          z: 6,
+        });
+      });
+    }
+    if (payload.liveLeg?.startTimeMs && payload.liveLeg?.endTimeMs) {
+      const liveLegPoints = [
+        {
+          value: [Number(payload.liveLeg.startTimeMs), Number(payload.liveLeg.startPrice)],
+          liveLeg: payload.liveLeg,
+        },
+      ];
+      if (
+        payload.liveLeg.candidateTimeMs
+        && payload.liveLeg.candidatePrice != null
+        && Number(payload.liveLeg.candidateTickId || 0) !== Number(payload.liveLeg.startTickId || 0)
+        && Number(payload.liveLeg.candidateTickId || 0) !== Number(payload.liveLeg.endTickId || 0)
+      ) {
+        liveLegPoints.push({
+          value: [Number(payload.liveLeg.candidateTimeMs), Number(payload.liveLeg.candidatePrice)],
+          liveLeg: payload.liveLeg,
+        });
+      }
+      liveLegPoints.push({
+        value: [Number(payload.liveLeg.endTimeMs), Number(payload.liveLeg.endPrice)],
+        liveLeg: payload.liveLeg,
+      });
+      series.push({
+        name: "developing-leg",
+        type: "line",
+        data: liveLegPoints,
+        showSymbol: false,
+        lineStyle: { width: 2, type: "dashed", color: "rgba(255, 255, 255, 0.78)" },
+        z: 5,
+      });
+    }
+    return series;
   }
 
   function renderChart(options) {
@@ -332,78 +583,12 @@
     if (!chart) {
       return;
     }
-    const resetView = Boolean(options?.resetView);
-    const series = [];
-
-    if (currentConfig().showTicks && state.rows.length) {
-      series.push({
-        name: "ticks",
-        type: "line",
-        data: state.rows.map(function (row) {
-          return { value: [Number(row.timestampMs), Number(row.mid)], tick: row };
-        }),
-        showSymbol: false,
-        lineStyle: { width: 1, color: "rgba(109, 216, 255, 0.18)" },
-        emphasis: { lineStyle: { width: 1.2 } },
-        z: 1,
-      });
-    }
-
-    if (state.pivots.length) {
-      series.push({
-        name: "backbone",
-        type: "line",
-        data: state.pivots.map(function (pivot) {
-          return { value: [Number(pivot.tickTimeMs), Number(pivot.price)], pivot: pivot };
-        }),
-        showSymbol: false,
-        lineStyle: { width: 2.6, color: "#ffb35c" },
-        itemStyle: { color: "#ffb35c" },
-        z: 5,
-      });
-    }
-
-    const pivotSeries = [
-      { type: "Start", color: "#6dd8ff", symbol: "diamond", size: 9 },
-      { type: "High", color: "#ff6b88", symbol: "triangle", size: 10 },
-      { type: "Low", color: "#7ef0c7", symbol: "triangle", size: 10, rotate: 180 },
-    ];
-    pivotSeries.forEach(function (definition) {
-      const filtered = state.pivots.filter(function (pivot) { return pivot.pivotType === definition.type; });
-      if (!filtered.length) {
-        return;
-      }
-      series.push({
-        name: definition.type.toLowerCase(),
-        type: "scatter",
-        symbol: definition.symbol,
-        symbolSize: definition.size,
-        data: filtered.map(function (pivot) {
-          return { value: [Number(pivot.tickTimeMs), Number(pivot.price)], pivot: pivot };
-        }),
-        itemStyle: { color: definition.color },
-        z: 7,
-      });
-    });
-
-    if (state.moves.length) {
-      series.push({
-        name: "moves",
-        type: "scatter",
-        symbol: "circle",
-        symbolSize: 7,
-        data: state.moves.map(function (move) {
-          const midpointTime = Number(move.startTimeMs) + ((Number(move.endTimeMs) - Number(move.startTimeMs)) / 2);
-          const midpointPrice = Number(move.startPrice) + ((Number(move.endPrice) - Number(move.startPrice)) / 2);
-          return { value: [midpointTime, midpointPrice], move: move };
-        }),
-        itemStyle: { color: "rgba(255,255,255,0.22)" },
-        z: 6,
-      });
-    }
-
+    const payload = state.payload || {};
+    const series = payload.view === "detailed"
+      ? renderDetailedSeries(payload)
+      : renderCandleSeries(payload);
     chart.setOption({ series: series }, { notMerge: true, lazyUpdate: true });
-    if (resetView) {
+    if (options?.resetView) {
       state.zoom = null;
     }
     if (state.zoom) {
@@ -420,261 +605,259 @@
     }
   }
 
-  function resetStateFromPayload(payload) {
-    state.dayId = payload.dayId || null;
-    state.reviewEndId = payload.reviewEndId || null;
-    state.pivots = Array.isArray(payload.pivots) ? payload.pivots.slice() : [];
-    state.moves = Array.isArray(payload.moves) ? payload.moves.slice() : [];
-    state.rows = Array.isArray(payload.rows) ? payload.rows.slice() : [];
-    state.stateRow = Object.assign({ brokerday: payload.brokerday || null }, payload.state || {});
-    state.lastId = Number(payload.lastId || 0);
-    state.lastMetrics = payload.metrics || null;
-  }
-
-  function mergeItems(currentItems, updates, key) {
-    const next = new Map();
-    currentItems.forEach(function (item) { next.set(String(item[key]), item); });
-    updates.forEach(function (item) { next.set(String(item[key]), item); });
-    return Array.from(next.values());
-  }
-
-  function appendTicks(updates) {
-    if (!updates.length) {
-      return;
-    }
-    const next = new Map();
-    state.rows.forEach(function (row) { next.set(String(row.id), row); });
-    updates.forEach(function (row) { next.set(String(row.id), row); });
-    state.rows = Array.from(next.values()).sort(function (left, right) { return Number(left.id) - Number(right.id); });
-  }
-
-  function applyDeltaPayload(payload) {
-    if (payload.dayChanged) {
-      loadAll(true).catch(function (error) {
-        status(error.message || "Day reload failed.", true);
-      });
-      return;
-    }
-    state.dayId = payload.dayId || state.dayId;
-    state.lastId = Math.max(Number(state.lastId || 0), Number(payload.lastId || 0));
-    state.stateRow = payload.state ? Object.assign({}, state.stateRow || {}, payload.state) : state.stateRow;
-    state.lastMetrics = payload.metrics || state.lastMetrics;
-    state.pivots = mergeItems(state.pivots, payload.pivotUpdates || [], "id")
-      .sort(function (left, right) { return Number(left.tickId) - Number(right.tickId); });
-    state.moves = mergeItems(state.moves, payload.moveUpdates || [], "id")
-      .sort(function (left, right) { return Number(left.endTickId) - Number(right.endTickId); });
-    appendTicks(payload.rows || []);
-    renderMeta();
-    renderPerf();
-    renderInfo();
-    renderChart({ resetView: false });
-  }
-
-  function clearActivity() {
-    if (state.source) {
-      state.source.close();
-      state.source = null;
-    }
-    if (state.reviewTimer) {
-      window.clearTimeout(state.reviewTimer);
-      state.reviewTimer = 0;
-    }
-    state.streamConnected = false;
-    renderPerf();
-  }
-
-  function fetchJson(url) {
-    return fetch(url).then(async function (response) {
+  function fetchJson(url, options) {
+    return fetch(url, options).then(async function (response) {
       const payload = await response.json().catch(function () { return {}; });
       if (!response.ok) {
-        throw new Error(payload?.detail || payload?.message || "Request failed.");
+        const detail = payload?.detail;
+        const message = typeof detail === "string"
+          ? detail
+          : (detail?.message || payload?.message || "Request failed.");
+        throw new Error(message);
       }
       return payload;
     });
   }
 
-  async function resolveReviewStartId(config) {
-    if (config.reviewStart) {
-      const payload = await fetchJson("/api/backbone/review-start?" + new URLSearchParams({
-        timestamp: config.reviewStart,
-        timezoneName: "Australia/Sydney",
-      }).toString());
-      elements.tickId.value = String(payload.resolvedId);
-      return payload.resolvedId;
+  function currentSmartArmed(side) {
+    const smart = state.trade.smart || {};
+    if (side === "buy") {
+      return Boolean(smart.smartBuyArmed);
     }
-    if (config.id) {
-      return Number.parseInt(config.id, 10);
+    if (side === "sell") {
+      return Boolean(smart.smartSellArmed);
     }
-    throw new Error("Review mode requires a start id or Sydney review start time.");
+    return Boolean(smart.smartCloseArmed);
   }
 
-  async function loadBootstrap(resetView) {
-    const config = currentConfig();
-    const startId = config.mode === "review" ? await resolveReviewStartId(config) : null;
-    const params = new URLSearchParams({
-      mode: config.mode,
-      window: String(config.window),
-      showTicks: config.showTicks ? "1" : "0",
-    });
-    if (startId != null) {
-      params.set("id", String(startId));
+  function tradeBrokerReady() {
+    return Boolean(state.trade.broker?.ready);
+  }
+
+  function smartContextAllowed() {
+    return !isReviewMode();
+  }
+
+  function renderTradeState() {
+    const smart = state.trade.smart || {};
+    const busy = state.trade.busy;
+    const smartCloseArmed = currentSmartArmed("close");
+    elements.smartClosePill.textContent = smartCloseArmed ? "Smart Close ON" : "Smart Close OFF";
+    elements.smartClosePill.classList.toggle("ready", smartCloseArmed);
+    if (!state.trade.authConfigured) {
+      elements.smartStatus.textContent = "Trade login is not configured on the server.";
+      elements.tradeHint.textContent = "Trading unavailable.";
+    } else if (!state.trade.authenticated) {
+      elements.smartStatus.textContent = "Smart Close state unavailable until trade login.";
+      elements.tradeHint.textContent = "Login on /live or /separation to arm Buy or Sell.";
+    } else {
+      const backendState = String(smart.state?.backendState || "idle").replaceAll("_", " ");
+      elements.smartStatus.textContent = [
+        smart.smartCloseServerSide ? "Server-side" : "Client-side",
+        smartCloseArmed ? "Smart Close ON" : "Smart Close OFF",
+        backendState,
+      ].join(" | ");
+      if (!smartContextAllowed()) {
+        elements.tradeHint.textContent = "Review anchor loaded. Smart entry stays disabled.";
+      } else if (!tradeBrokerReady()) {
+        elements.tradeHint.textContent = String(state.trade.broker?.reason || "Broker unavailable.");
+      } else {
+        elements.tradeHint.textContent = smart.state?.statusText || "Smart entry ready.";
+      }
     }
-    const payload = await fetchJson("/api/backbone/bootstrap?" + params.toString());
-    resetStateFromPayload(payload);
-    renderMeta();
-    renderPerf();
+
+    const entryReady = state.trade.authConfigured && state.trade.authenticated && smartContextAllowed() && tradeBrokerReady() && !busy;
+    elements.buyButton.disabled = !entryReady;
+    elements.sellButton.disabled = !entryReady;
+    elements.buyButton.textContent = busy ? "Working..." : (currentSmartArmed("buy") ? "Buy Armed" : "Buy");
+    elements.sellButton.textContent = busy ? "Working..." : (currentSmartArmed("sell") ? "Sell Armed" : "Sell");
     renderInfo();
-    renderChart({ resetView: Boolean(resetView) });
-    status("Loaded " + state.pivots.length + " pivot(s).", false);
-    if (config.run === "run") {
-      resumeRunIfNeeded();
-    }
   }
 
-  function connectStream(afterId) {
-    clearActivity();
-    const config = currentConfig();
-    const source = new EventSource("/api/backbone/stream?" + new URLSearchParams({
-      afterId: String(afterId || 0),
-      limit: "250",
-      showTicks: config.showTicks ? "1" : "0",
-    }).toString());
-    state.source = source;
-    source.onopen = function () {
-      state.streamConnected = true;
-      renderPerf();
-      status("Live stream connected.", false);
-    };
-    source.onmessage = function (event) {
-      applyDeltaPayload(JSON.parse(event.data));
-    };
-    source.addEventListener("heartbeat", function (event) {
-      state.lastMetrics = JSON.parse(event.data);
-      renderPerf();
+  async function refreshTradeState(options) {
+    if (state.trade.refreshPromise) {
+      return state.trade.refreshPromise;
+    }
+    if (options?.respectInterval && (Date.now() - Number(state.trade.lastRefreshAtMs || 0)) < TRADE_REFRESH_MS) {
+      return null;
+    }
+    state.trade.refreshPromise = (async function () {
+      try {
+        const auth = await fetchJson("/api/trade/me");
+        state.trade.authConfigured = auth.authConfigured !== false;
+        state.trade.authenticated = Boolean(auth.authenticated);
+        if (!state.trade.authenticated) {
+          state.trade.positions = [];
+          state.trade.smart = null;
+          state.trade.broker = auth.broker || null;
+          return;
+        }
+        const openPayload = await fetchJson("/api/trade/open");
+        state.trade.positions = Array.isArray(openPayload.positions) ? openPayload.positions : [];
+        state.trade.smart = openPayload.smart || null;
+        state.trade.broker = openPayload.broker || null;
+        state.trade.lastRefreshAtMs = Date.now();
+      } catch (error) {
+        if (!options?.silent) {
+          status(error.message || "Trade state refresh failed.", true);
+        }
+      } finally {
+        renderTradeState();
+        state.trade.refreshPromise = null;
+      }
+    })();
+    return state.trade.refreshPromise;
+  }
+
+  async function syncSmartContext() {
+    if (!state.trade.authenticated || !smartContextAllowed()) {
+      return;
+    }
+    const payload = await fetchJson("/api/trade/smart/context", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ page: "backbone", mode: "live", run: "run" }),
     });
-    source.onerror = function () {
-      clearActivity();
-      status("Live stream disconnected. Click Load or Run to reconnect.", true);
-    };
+    state.trade.smart = payload;
+    renderTradeState();
   }
 
-  async function reviewStep() {
-    const config = currentConfig();
-    if (config.mode !== "review" || config.run !== "run") {
+  async function toggleSmartEntry(side) {
+    if (state.trade.busy) {
       return;
     }
-    if (!state.dayId || !state.reviewEndId || state.lastId >= state.reviewEndId) {
-      status("Review reached the current end snapshot.", false);
+    if (!state.trade.authenticated) {
+      status("Trade login required.", true);
       return;
     }
-    const payload = await fetchJson("/api/backbone/next?" + new URLSearchParams({
-      afterId: String(state.lastId || 0),
-      limit: String(Math.max(10, Math.min(250, Math.round(50 * config.reviewSpeed)))),
-      dayId: String(state.dayId),
-      endId: String(state.reviewEndId),
-      showTicks: config.showTicks ? "1" : "0",
-    }).toString());
-    applyDeltaPayload(payload);
-    status(payload.endReached ? "Review reached the current end snapshot." : "Review running.", false);
-    if (!payload.endReached && currentConfig().run === "run") {
-      scheduleReviewStep();
+    if (!smartContextAllowed()) {
+      status("Smart entry is disabled while a review anchor is loaded.", true);
+      return;
     }
-  }
-
-  function scheduleReviewStep() {
-    if (state.reviewTimer) {
-      window.clearTimeout(state.reviewTimer);
-    }
-    const delay = Math.max(80, Math.round(450 / currentConfig().reviewSpeed));
-    state.reviewTimer = window.setTimeout(function () {
-      state.reviewTimer = 0;
-      reviewStep().catch(function (error) {
-        status(error.message || "Review fetch failed.", true);
+    state.trade.busy = true;
+    renderTradeState();
+    try {
+      await syncSmartContext();
+      const payload = await fetchJson("/api/trade/smart/entry", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ side: side, armed: !currentSmartArmed(side) }),
       });
-    }, delay);
+      state.trade.smart = payload;
+      status(side === "buy" ? "Smart Buy updated." : "Smart Sell updated.", false);
+      await refreshTradeState({ silent: true });
+    } catch (error) {
+      status(error.message || "Smart entry update failed.", true);
+    } finally {
+      state.trade.busy = false;
+      renderTradeState();
+    }
   }
 
-  function resumeRunIfNeeded() {
-    const config = currentConfig();
-    if (config.run !== "run") {
-      return;
-    }
-    if (config.mode === "live") {
-      connectStream(state.lastId || 0);
-      return;
-    }
-    scheduleReviewStep();
-  }
-
-  async function loadAll(resetView) {
+  async function loadData(resetView, options) {
     const token = state.loadToken + 1;
     state.loadToken = token;
-    clearActivity();
+    clearPolling();
     writeQuery();
+    const config = currentConfig();
+    const params = new URLSearchParams();
+    if (config.id) {
+      params.set("id", config.id);
+    }
+    let endpoint = "/api/backbone/candles";
+    if (config.view === "detailed") {
+      endpoint = "/api/backbone/detail";
+      params.set("ticks", String(config.ticks));
+    } else {
+      params.set("candles", String(config.candles));
+    }
     try {
-      await loadBootstrap(resetView);
+      const payload = await fetchJson(endpoint + "?" + params.toString());
+      if (token !== state.loadToken) {
+        return;
+      }
+      state.payload = payload;
+      state.lastMetrics = payload.metrics || null;
+      renderMeta();
+      renderPerf();
+      renderInfo();
+      renderChart({ resetView: Boolean(resetView) });
+      renderTradeState();
+      if (!options?.silentStatus) {
+        status("Loaded " + (payload.view === "detailed" ? Number(payload.rowCount || 0) + " tick(s)." : Number(payload.candleCount || 0) + " candle(s)."), false);
+      }
+      await refreshTradeState({ silent: true, respectInterval: true });
+      schedulePolling();
     } catch (error) {
       if (token === state.loadToken) {
-        status(error.message || "Load failed.", true);
+        status(error.message || "Backbone load failed.", true);
       }
     }
   }
 
   function applyInitialConfig(config) {
-    setSegment(elements.modeToggle, config.mode);
-    setSegment(elements.runToggle, config.run);
-    setSegment(elements.reviewSpeedToggle, config.reviewSpeed);
+    state.inputs.candles = clampCount("candles", config.candles);
+    state.inputs.ticks = clampCount("detailed", config.ticks);
+    setSegment(elements.viewToggle, config.view);
     elements.showTicks.checked = Boolean(config.showTicks);
-    elements.tickId.value = config.id;
-    elements.reviewStart.value = config.reviewStart;
-    elements.windowSize.value = String(config.window);
+    elements.showBands.checked = Boolean(config.showBands);
+    elements.anchorId.value = config.id;
     setSidebarCollapsed(true);
-    updateReviewFields();
+    syncControlStates();
     renderMeta();
     renderPerf();
-    renderInfo();
+    renderTradeState();
     writeQuery();
   }
 
-  bindSegment(elements.modeToggle, function (value) {
-    setSegment(elements.modeToggle, value);
-    updateReviewFields();
+  bindSegment(elements.viewToggle, function (value) {
+    setSegment(elements.viewToggle, value);
+    syncControlStates();
     writeQuery();
-    status("Mode updated. Click Load to refresh data.", false);
-  });
-  bindSegment(elements.runToggle, function (value) {
-    setSegment(elements.runToggle, value);
-    clearActivity();
-    writeQuery();
-    if (value === "run" && state.lastId != null) {
-      resumeRunIfNeeded();
-      return;
-    }
-    status("Run state updated.", false);
-  });
-  bindSegment(elements.reviewSpeedToggle, function (value) {
-    setSegment(elements.reviewSpeedToggle, value);
-    writeQuery();
+    status("View updated. Click Load to refresh data.", false);
   });
 
-  [elements.showTicks, elements.tickId, elements.reviewStart, elements.windowSize].forEach(function (control) {
+  [elements.countInput, elements.anchorId].forEach(function (control) {
     control.addEventListener("change", function () {
-      if (control === elements.windowSize) {
-        elements.windowSize.value = String(sanitizeWindowValue(elements.windowSize.value));
+      if (control === elements.countInput) {
+        const view = currentConfig().view;
+        if (view === "detailed") {
+          state.inputs.ticks = clampCount("detailed", elements.countInput.value);
+        } else {
+          state.inputs.candles = clampCount("candles", elements.countInput.value);
+        }
       }
+      syncControlStates();
       writeQuery();
-      if (control === elements.showTicks) {
-        loadAll(false).catch(function (error) {
-          status(error.message || "Display refresh failed.", true);
-        });
-      }
     });
   });
 
-  elements.sidebarToggle.addEventListener("click", function () { setSidebarCollapsed(!state.ui.sidebarCollapsed); });
-  elements.sidebarBackdrop.addEventListener("click", function () { setSidebarCollapsed(true); });
-  elements.applyButton.addEventListener("click", function () { loadAll(true); });
+  elements.showBands.addEventListener("change", function () {
+    writeQuery();
+    renderChart({ resetView: false });
+  });
+
+  elements.showTicks.addEventListener("change", function () {
+    writeQuery();
+    renderChart({ resetView: false });
+  });
+
+  elements.sidebarToggle.addEventListener("click", function () {
+    setSidebarCollapsed(!state.ui.sidebarCollapsed);
+  });
+  elements.sidebarBackdrop.addEventListener("click", function () {
+    setSidebarCollapsed(true);
+  });
+  elements.applyButton.addEventListener("click", function () {
+    loadData(true);
+  });
+  elements.buyButton.addEventListener("click", function () {
+    toggleSmartEntry("buy");
+  });
+  elements.sellButton.addEventListener("click", function () {
+    toggleSmartEntry("sell");
+  });
 
   applyInitialConfig(parseQuery());
-  loadAll(true);
+  loadData(true);
 }());
