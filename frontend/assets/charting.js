@@ -136,7 +136,11 @@
       model.initialized = false;
     }
 
-    function ensureWindow(xValues, options) {
+    function currentWindow() {
+      return model.initialized ? snapshot() : null;
+    }
+
+    function projectWindow(xValues, options) {
       const values = normalizeOrderedValues(xValues || []);
       if (!values.length) {
         reset();
@@ -146,18 +150,20 @@
         return applyWindow(defaultWindow(values));
       }
       const visibleCount = clamp(Number(model.visibleCount) || values.length, 1, values.length);
-      let startIndex = 0;
-      let endIndex = values.length - 1;
       if (model.followRightEdge) {
-        startIndex = Math.max(0, values.length - visibleCount);
-      } else {
-        const anchor = Number.isFinite(Number(model.startValue)) ? Number(model.startValue) : values[0];
-        startIndex = lowerBound(values, anchor);
-        if (startIndex >= values.length) {
-          startIndex = values.length - 1;
-        }
+        const endIndex = values.length - 1;
+        const startIndex = Math.max(0, endIndex - visibleCount + 1);
+        return applyWindow({
+          startValue: values[startIndex],
+          endValue: values[endIndex],
+          visibleCount: (endIndex - startIndex) + 1,
+          followRightEdge: endIndex >= (values.length - 1 - toleranceItems),
+        });
       }
-      endIndex = Math.min(values.length - 1, startIndex + visibleCount - 1);
+      const anchor = Number.isFinite(Number(model.startValue)) ? Number(model.startValue) : values[0];
+      let startIndex = lowerBound(values, anchor);
+      startIndex = clamp(startIndex, 0, values.length - 1);
+      let endIndex = Math.min(values.length - 1, startIndex + visibleCount - 1);
       if ((endIndex - startIndex + 1) < visibleCount) {
         startIndex = Math.max(0, endIndex - visibleCount + 1);
       }
@@ -165,7 +171,7 @@
         startValue: values[startIndex],
         endValue: values[endIndex],
         visibleCount: (endIndex - startIndex) + 1,
-        followRightEdge: model.followRightEdge && endIndex >= (values.length - 1 - toleranceItems),
+        followRightEdge: false,
       });
     }
 
@@ -187,15 +193,17 @@
     return {
       reset: reset,
       captureZoom: captureZoom,
-      ensureWindow: ensureWindow,
+      currentWindow: currentWindow,
+      projectWindow: projectWindow,
+      ensureWindow: projectWindow,
       visibleRange: function (xValues, options) {
-        const windowState = ensureWindow(xValues, options);
+        const windowState = projectWindow(xValues, options);
         return windowState
           ? { min: windowState.startValue, max: windowState.endValue }
           : null;
       },
       zoomOptions: function (xValues, options) {
-        const windowState = ensureWindow(xValues, options);
+        const windowState = projectWindow(xValues, options);
         return windowState
           ? { startValue: windowState.startValue, endValue: windowState.endValue }
           : {};

@@ -462,8 +462,10 @@
           startValue: zoom.startValue,
           endValue: zoom.endValue,
         } : null;
-        state.viewport.captureZoom(zoom, primaryXValues(state.payload));
-        applyVisibleYAxis();
+        const viewportState = state.viewport.captureZoom(zoom, primaryXValues(state.payload));
+        state.chart.setOption({
+          yAxis: visibleYBounds(state.payload, { visibleRange: viewportRange(viewportState) }),
+        }, { lazyUpdate: true });
       });
       if (typeof ResizeObserver === "function") {
         state.resizeObserver = new ResizeObserver(function () {
@@ -632,8 +634,10 @@
       .filter(Number.isFinite);
   }
 
-  function visibleXRange(payload, options) {
-    return state.viewport.visibleRange(primaryXValues(payload), options);
+  function viewportRange(viewportState) {
+    return viewportState
+      ? { min: viewportState.startValue, max: viewportState.endValue }
+      : null;
   }
 
   function pushYAxisItem(items, item) {
@@ -686,7 +690,7 @@
   function visibleYBounds(payload, options) {
     const sources = buildYAxisItems(payload);
     return charting.buildVisibleIntegerYAxis({
-      visibleRange: visibleXRange(payload, options),
+      visibleRange: options?.visibleRange || viewportRange(state.viewport.currentWindow()),
       coreItems: sources.coreItems,
       overlayItems: sources.overlayItems,
       includeOverlays: currentConfig().sizing,
@@ -719,11 +723,14 @@
       state.zoom = null;
       state.viewport.reset();
     }
-    const zoom = state.viewport.zoomOptions(primaryXValues(payload), { reset: Boolean(options?.resetView) });
+    const viewportState = state.viewport.projectWindow(primaryXValues(payload), { reset: Boolean(options?.resetView) });
+    const zoom = viewportState
+      ? { startValue: viewportState.startValue, endValue: viewportState.endValue }
+      : {};
     state.applyingZoom = true;
     chart.setOption({
       series: series,
-      yAxis: visibleYBounds(payload),
+      yAxis: visibleYBounds(payload, { visibleRange: viewportRange(viewportState) }),
       dataZoom: [
         { id: "zoom-inside", type: "inside", startValue: zoom.startValue, endValue: zoom.endValue },
         { id: "zoom-slider", type: "slider", startValue: zoom.startValue, endValue: zoom.endValue },

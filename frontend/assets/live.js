@@ -2117,7 +2117,7 @@
         const viewportState = state.viewport.captureZoom(zoom, buildPrimaryXValues());
         state.rightEdgeAnchored = Boolean(viewportState?.followRightEdge);
         state.chart.setOption({
-          yAxis: yBounds(),
+          yAxis: yBounds({ visibleRange: viewportRange(viewportState) }),
         }, { lazyUpdate: true });
         queueOverlayRender();
       });
@@ -2498,15 +2498,17 @@
     return { coreItems: coreItems, overlayItems: overlayItems };
   }
 
-  function currentVisibleXRange(options) {
-    return state.viewport.visibleRange(buildPrimaryXValues(), options);
+  function viewportRange(viewportState) {
+    return viewportState
+      ? { min: viewportState.startValue, max: viewportState.endValue }
+      : null;
   }
 
   function yBounds(options) {
     const config = currentConfig();
     const sources = buildYAxisItems(config);
     return charting.buildVisibleIntegerYAxis({
-      visibleRange: currentVisibleXRange(options),
+      visibleRange: options?.visibleRange || viewportRange(state.viewport.currentWindow()),
       coreItems: sources.coreItems,
       overlayItems: sources.overlayItems,
       includeOverlays: config.sizing,
@@ -2521,12 +2523,15 @@
       return;
     }
     const config = currentConfig();
-    const zoom = state.viewport.zoomOptions(buildPrimaryXValues(), { reset: Boolean(options?.resetView) });
-    state.rightEdgeAnchored = Boolean(state.viewport.snapshot().followRightEdge);
+    const viewportState = state.viewport.projectWindow(buildPrimaryXValues(), { reset: Boolean(options?.resetView) });
+    const zoom = viewportState
+      ? { startValue: viewportState.startValue, endValue: viewportState.endValue }
+      : {};
+    state.rightEdgeAnchored = Boolean(viewportState?.followRightEdge);
     state.applyingZoom = true;
     chart.setOption({
       series: buildSeries(config),
-      yAxis: yBounds(),
+      yAxis: yBounds({ visibleRange: viewportRange(viewportState) }),
       dataZoom: [
         { id: "zoom-inside", startValue: zoom.startValue, endValue: zoom.endValue },
         { id: "zoom-slider", startValue: zoom.startValue, endValue: zoom.endValue },
