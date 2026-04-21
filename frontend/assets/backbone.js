@@ -835,7 +835,7 @@
     if (side === "sell") {
       return Boolean(smart.smartSellArmed);
     }
-    return Boolean(smart.smartCloseArmed);
+    return Boolean(smart.smartCloseEnabled ?? smart.smartCloseArmed);
   }
 
   function tradeBrokerReady() {
@@ -886,7 +886,7 @@
       elements.smartStatus.textContent = "Smart Close state unavailable until trade login.";
       elements.tradeHint.textContent = "Login here to arm Buy or Sell.";
     } else {
-      const backendState = String(smart.state?.backendState || "idle").replaceAll("_", " ");
+      const backendState = String(smart.backendState || smart.state?.backendState || "idle").replaceAll("_", " ");
       elements.smartStatus.textContent = [
         smart.smartCloseServerSide ? "Server-side" : "Client-side",
         smartCloseArmed ? "Smart Close ON" : "Smart Close OFF",
@@ -897,7 +897,7 @@
       } else if (!tradeBrokerReady()) {
         elements.tradeHint.textContent = String(state.trade.broker?.reason || "Broker unavailable.");
       } else {
-        elements.tradeHint.textContent = smart.state?.statusText || "Smart entry ready.";
+        elements.tradeHint.textContent = smart.statusText || smart.state?.statusText || "Smart entry ready.";
       }
     }
 
@@ -1049,7 +1049,7 @@
         body: JSON.stringify({ side: side, armed: !currentSmartArmed(side) }),
       });
       state.trade.smart = payload;
-      status(side === "buy" ? "Smart Buy updated." : "Smart Sell updated.", false);
+      status(payload?.statusText || payload?.state?.statusText || "Smart entry updated.", false);
       await refreshTradeState({ silent: true });
     } catch (error) {
       status(error.message || "Smart entry update failed.", true);

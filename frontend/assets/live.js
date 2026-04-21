@@ -956,12 +956,22 @@
 
   function smartPayload() {
     return state.trade.smart.payload || {
+      smartCloseServerSide: true,
+      smartCloseDefaultOn: false,
+      smartCloseEnabled: false,
+      smartBuyArmed: false,
+      smartSellArmed: false,
+      smartCloseArmed: false,
+      hasOpenPosition: Boolean(state.trade.positions.length),
+      openPositionCount: state.trade.positions.length,
+      backendState: "idle",
+      statusText: "Smart state unavailable.",
       context: { enabled: false, reason: "Smart scalping unavailable." },
       config: { showSummary: true, minimumProfit: 0.30 },
       state: {
-        armed: { buy: false, sell: false, close: true },
-        backendState: "armed_close_waiting",
-        statusText: "Smart Close armed. Waiting for a single open position.",
+        armed: { buy: false, sell: false, close: false },
+        backendState: "idle",
+        statusText: "Smart state unavailable.",
         cooldownRemainingMs: 0,
         lastAction: null,
         lastTriggerReason: null,
@@ -990,7 +1000,14 @@
   }
 
   function currentSmartArmed(key) {
-    return Boolean(smartPayload()?.state?.armed?.[key]);
+    const smart = smartPayload();
+    if (key === "buy") {
+      return Boolean(smart.smartBuyArmed ?? smart?.state?.armed?.buy);
+    }
+    if (key === "sell") {
+      return Boolean(smart.smartSellArmed ?? smart?.state?.armed?.sell);
+    }
+    return Boolean(smart.smartCloseEnabled ?? smart.smartCloseArmed ?? smart?.state?.armed?.close);
   }
 
   function smartCooldownRemainingMs() {
@@ -1035,14 +1052,14 @@
     const smart = smartPayload();
     const stateValue = smart.state || {};
     const armed = [];
-    if (stateValue.armed?.buy) {
+    if (currentSmartArmed("buy")) {
       armed.push("Smart Buy armed");
     }
-    if (stateValue.armed?.sell) {
+    if (currentSmartArmed("sell")) {
       armed.push("Smart Sell armed");
     }
-    if (stateValue.armed?.close) {
-      armed.push("Smart Close armed");
+    if (currentSmartArmed("close")) {
+      armed.push("Smart Close ON");
     }
     if (armed.length) {
       return armed.join(" | ");
@@ -1053,7 +1070,7 @@
     if (stateValue.lastAction?.status === "triggered") {
       return "Triggered";
     }
-    return stateValue.statusText || smart.context?.reason || "Smart scalping idle.";
+    return smart.statusText || stateValue.statusText || smart.context?.reason || "Smart scalping idle.";
   }
 
   function syncSmartConfigInputs() {
@@ -1195,7 +1212,7 @@
       applySmartPayload(payload);
       renderTradeEntryOverlay();
       renderTradeLists();
-      tradeStatus(nextArmed ? ("Smart " + side.toUpperCase() + " armed.") : ("Smart " + side.toUpperCase() + " disarmed."), false);
+      tradeStatus(payload?.statusText || payload?.state?.statusText || "Smart entry updated.", false);
       scheduleSmartPolling();
     } catch (error) {
       tradeStatus(error.message || "Smart entry update failed.", true);
@@ -1219,7 +1236,7 @@
       applySmartPayload(payload);
       renderTradeEntryOverlay();
       renderTradeLists();
-      tradeStatus(nextArmed ? "Smart Close armed." : "Smart Close disarmed.", false);
+      tradeStatus(payload?.statusText || payload?.state?.statusText || "Smart Close updated.", false);
       scheduleSmartPolling();
     } catch (error) {
       tradeStatus(error.message || "Smart close update failed.", true);

@@ -3075,7 +3075,6 @@ def trade_me(request: Request, response: Response) -> Dict[str, Any]:
     payload = _trade_session_decode(request.cookies.get(TRADE_COOKIE_NAME, ""))
     username = str(payload["u"]) if payload else None
     if username:
-        SMART_SCALP_SERVICE.reset(reason="Trade session restored. Smart Close defaults to ON.", restore_close_preference=True)
         SMART_SCALP_SERVICE.touch_auth()
     return trade_auth_status_payload(authenticated=bool(username), username=username)
 
