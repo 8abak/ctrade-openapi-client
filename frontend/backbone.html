@@ -41,11 +41,11 @@
       <div class="live-sidebar-scroll">
         <header class="live-sidebar-header">
           <nav class="app-nav" aria-label="Primary">
-            <a class="app-nav-link" href="/live">Live</a>
-            <a class="app-nav-link app-nav-link-active" href="/backbone">Backbone</a>
-            <a class="app-nav-link" href="/separation">Separation</a>
-            <a class="app-nav-link" href="/bigPic">Big Pic</a>
-            <a class="app-nav-link" href="/sql">SQL</a>
+            <a class="app-nav-link" href="/live">Li</a>
+            <a class="app-nav-link app-nav-link-active" href="/backbone">Ba</a>
+            <a class="app-nav-link" href="/separation">Se</a>
+            <a class="app-nav-link" href="/bigPic">Bi</a>
+            <a class="app-nav-link" href="/sql">Sq</a>
           </nav>
           <h1>Backbone</h1>
           <p class="live-sidebar-copy">Adaptive structural pivots for the broker day as backbone candles or a detailed tick view with the current provisional leg.</p>
@@ -92,6 +92,30 @@
           <div class="live-inline-actions">
             <button class="primary-button compact-button" id="applyButton" type="button">Load</button>
           </div>
+        </section>
+
+        <section class="live-sidebar-section" id="loginPanel">
+          <header class="trade-panel-header">
+            <h2>Login</h2>
+            <div class="trade-auth-pill" id="loginStatePill">Locked</div>
+          </header>
+          <div class="status-line" id="tradeStatusLine">Trade login required.</div>
+          <form class="trade-login-form" id="tradeLoginForm" autocomplete="off">
+            <label>
+              <span>username</span>
+              <input id="tradeUsername" type="text" value="babak" maxlength="64" autocomplete="username">
+            </label>
+            <label>
+              <span>password</span>
+              <input id="tradePassword" type="password" maxlength="128" autocomplete="current-password">
+            </label>
+            <div class="live-inline-actions">
+              <button class="primary-button compact-button" id="tradeLoginButton" type="submit">Login</button>
+              <button class="ghost-button compact-button" id="tradeLogoutButton" type="button">Logout</button>
+            </div>
+          </form>
+          <div class="trade-session-copy" id="tradeSessionSummary">Trade login required.</div>
+          <div class="trade-session-copy" id="tradeBrokerSummary">Broker state unavailable.</div>
         </section>
 
         <section class="live-sidebar-section trade-sidebar-section">

@@ -36,10 +36,12 @@
     trade: {
       authenticated: false,
       authConfigured: true,
+      username: null,
       positions: [],
       smart: null,
       broker: null,
       busy: false,
+      loginBusy: false,
       lastRefreshAtMs: 0,
       refreshPromise: null,
     },
@@ -65,6 +67,15 @@
     countsSummary: document.getElementById("countsSummary"),
     thresholdSummary: document.getElementById("thresholdSummary"),
     positionSummary: document.getElementById("positionSummary"),
+    loginStatePill: document.getElementById("loginStatePill"),
+    tradeStatusLine: document.getElementById("tradeStatusLine"),
+    tradeLoginForm: document.getElementById("tradeLoginForm"),
+    tradeUsername: document.getElementById("tradeUsername"),
+    tradePassword: document.getElementById("tradePassword"),
+    tradeLoginButton: document.getElementById("tradeLoginButton"),
+    tradeLogoutButton: document.getElementById("tradeLogoutButton"),
+    tradeSessionSummary: document.getElementById("tradeSessionSummary"),
+    tradeBrokerSummary: document.getElementById("tradeBrokerSummary"),
     smartClosePill: document.getElementById("smartClosePill"),
     chartHost: document.getElementById("backboneChart"),
     buyButton: document.getElementById("backboneBuyButton"),
@@ -179,6 +190,14 @@
   function status(message, isError) {
     elements.statusLine.textContent = message;
     elements.statusLine.classList.toggle("error", Boolean(isError));
+  }
+
+  function tradeStatus(message, isError) {
+    if (!elements.tradeStatusLine) {
+      return;
+    }
+    elements.tradeStatusLine.textContent = message;
+    elements.tradeStatusLine.classList.toggle("error", Boolean(isError));
   }
 
   function escapeHtml(value) {
@@ -581,28 +600,39 @@
   function renderChart(options) {
     const chart = ensureChart();
     if (!chart) {
+      requestAnimationFrame(function () {
+        renderChart(options);
+      });
       return;
     }
     const payload = state.payload || {};
     const series = payload.view === "detailed"
       ? renderDetailedSeries(payload)
       : renderCandleSeries(payload);
-    chart.setOption({ series: series }, { notMerge: true, lazyUpdate: true });
     if (options?.resetView) {
       state.zoom = null;
     }
-    if (state.zoom) {
-      state.applyingZoom = true;
-      chart.dispatchAction({
-        type: "dataZoom",
-        dataZoomIndex: 0,
-        start: state.zoom.start,
-        end: state.zoom.end,
-        startValue: state.zoom.startValue,
-        endValue: state.zoom.endValue,
-      });
-      state.applyingZoom = false;
+    const zoom = {};
+    if (options?.resetView) {
+      zoom.start = 0;
+      zoom.end = 100;
+    } else if (state.zoom) {
+      zoom.start = state.zoom.start;
+      zoom.end = state.zoom.end;
+      zoom.startValue = state.zoom.startValue;
+      zoom.endValue = state.zoom.endValue;
     }
+    state.applyingZoom = true;
+    chart.setOption({
+      series: series,
+      dataZoom: [
+        { id: "zoom-inside", type: "inside", ...zoom },
+        { id: "zoom-slider", type: "slider", ...zoom },
+      ],
+    }, { replaceMerge: ["series"], lazyUpdate: true });
+    requestAnimationFrame(function () {
+      state.applyingZoom = false;
+    });
   }
 
   function fetchJson(url, options) {
@@ -617,6 +647,17 @@
       }
       return payload;
     });
+  }
+
+  function applyTradeSessionPayload(payload) {
+    state.trade.authConfigured = payload?.authConfigured !== false;
+    state.trade.authenticated = state.trade.authConfigured && Boolean(payload?.authenticated);
+    state.trade.username = state.trade.authenticated ? (payload?.username || null) : null;
+    state.trade.broker = payload?.broker || state.trade.broker || null;
+    if (!state.trade.authenticated) {
+      state.trade.positions = [];
+      state.trade.smart = null;
+    }
   }
 
   function currentSmartArmed(side) {
@@ -641,7 +682,34 @@
   function renderTradeState() {
     const smart = state.trade.smart || {};
     const busy = state.trade.busy;
+    const loginBusy = state.trade.loginBusy;
     const smartCloseArmed = currentSmartArmed("close");
+    if (elements.loginStatePill) {
+      elements.loginStatePill.textContent = state.trade.authenticated ? "Ready" : (state.trade.authConfigured ? "Locked" : "Unavailable");
+      elements.loginStatePill.classList.toggle("ready", state.trade.authenticated);
+    }
+    if (elements.tradeSessionSummary) {
+      elements.tradeSessionSummary.textContent = state.trade.authenticated
+        ? ((state.trade.username || "trade user") + " | " + (state.trade.broker?.symbol || "Broker"))
+        : "Trade login required.";
+    }
+    if (elements.tradeBrokerSummary) {
+      elements.tradeBrokerSummary.textContent = state.trade.broker?.reason
+        || (state.trade.broker?.ready ? "Broker ready." : "Broker state unavailable.");
+    }
+    if (elements.tradeUsername) {
+      elements.tradeUsername.disabled = !state.trade.authConfigured || loginBusy || busy || state.trade.authenticated;
+    }
+    if (elements.tradePassword) {
+      elements.tradePassword.disabled = !state.trade.authConfigured || loginBusy || busy || state.trade.authenticated;
+    }
+    if (elements.tradeLoginButton) {
+      elements.tradeLoginButton.disabled = !state.trade.authConfigured || loginBusy || busy || state.trade.authenticated;
+      elements.tradeLoginButton.textContent = loginBusy ? "Working..." : "Login";
+    }
+    if (elements.tradeLogoutButton) {
+      elements.tradeLogoutButton.disabled = !state.trade.authConfigured || loginBusy || busy || !state.trade.authenticated;
+    }
     elements.smartClosePill.textContent = smartCloseArmed ? "Smart Close ON" : "Smart Close OFF";
     elements.smartClosePill.classList.toggle("ready", smartCloseArmed);
     if (!state.trade.authConfigured) {
@@ -649,7 +717,7 @@
       elements.tradeHint.textContent = "Trading unavailable.";
     } else if (!state.trade.authenticated) {
       elements.smartStatus.textContent = "Smart Close state unavailable until trade login.";
-      elements.tradeHint.textContent = "Login on /live or /separation to arm Buy or Sell.";
+      elements.tradeHint.textContent = "Login here to arm Buy or Sell.";
     } else {
       const backendState = String(smart.state?.backendState || "idle").replaceAll("_", " ");
       elements.smartStatus.textContent = [
@@ -666,7 +734,7 @@
       }
     }
 
-    const entryReady = state.trade.authConfigured && state.trade.authenticated && smartContextAllowed() && tradeBrokerReady() && !busy;
+    const entryReady = state.trade.authConfigured && state.trade.authenticated && smartContextAllowed() && tradeBrokerReady() && !busy && !loginBusy;
     elements.buyButton.disabled = !entryReady;
     elements.sellButton.disabled = !entryReady;
     elements.buyButton.textContent = busy ? "Working..." : (currentSmartArmed("buy") ? "Buy Armed" : "Buy");
@@ -684,11 +752,8 @@
     state.trade.refreshPromise = (async function () {
       try {
         const auth = await fetchJson("/api/trade/me");
-        state.trade.authConfigured = auth.authConfigured !== false;
-        state.trade.authenticated = Boolean(auth.authenticated);
+        applyTradeSessionPayload(auth);
         if (!state.trade.authenticated) {
-          state.trade.positions = [];
-          state.trade.smart = null;
           state.trade.broker = auth.broker || null;
           return;
         }
@@ -707,6 +772,79 @@
       }
     })();
     return state.trade.refreshPromise;
+  }
+
+  async function requestTradeLogin() {
+    if (state.trade.loginBusy || state.trade.busy) {
+      return;
+    }
+    state.trade.loginBusy = true;
+    renderTradeState();
+    try {
+      const payload = await fetchJson("/api/trade/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: elements.tradeUsername.value,
+          password: elements.tradePassword.value,
+        }),
+      });
+      elements.tradePassword.value = "";
+      applyTradeSessionPayload({
+        authenticated: true,
+        username: payload.username,
+        authConfigured: true,
+        broker: state.trade.broker,
+      });
+      await refreshTradeState({ silent: true });
+      await syncSmartContext().catch(function () {});
+      tradeStatus("Trade login successful.", false);
+    } catch (error) {
+      tradeStatus(error.message || "Trade login failed.", true);
+    } finally {
+      state.trade.loginBusy = false;
+      renderTradeState();
+    }
+  }
+
+  async function requestTradeLogout() {
+    if (state.trade.loginBusy || state.trade.busy) {
+      return;
+    }
+    state.trade.busy = true;
+    renderTradeState();
+    try {
+      await fetchJson("/api/trade/logout", { method: "POST" });
+    } catch (error) {
+      void error;
+    } finally {
+      applyTradeSessionPayload({
+        authenticated: false,
+        username: null,
+        authConfigured: state.trade.authConfigured,
+        broker: state.trade.broker,
+      });
+      state.trade.busy = false;
+      renderTradeState();
+      tradeStatus("Trade session logged out.", false);
+    }
+  }
+
+  async function loadTradeSession() {
+    try {
+      const payload = await fetchJson("/api/trade/me");
+      applyTradeSessionPayload(payload);
+      renderTradeState();
+      if (payload.authenticated) {
+        await refreshTradeState({ silent: true });
+        await syncSmartContext().catch(function () {});
+      }
+      tradeStatus(payload.authenticated ? "Trade session active." : "Trade login required.", false);
+    } catch (error) {
+      applyTradeSessionPayload({ authenticated: false, username: null, authConfigured: true, broker: state.trade.broker });
+      renderTradeState();
+      tradeStatus(error.message || "Trade session check failed.", true);
+    }
   }
 
   async function syncSmartContext() {
@@ -851,6 +989,13 @@
   elements.applyButton.addEventListener("click", function () {
     loadData(true);
   });
+  elements.tradeLoginForm.addEventListener("submit", function (event) {
+    event.preventDefault();
+    requestTradeLogin();
+  });
+  elements.tradeLogoutButton.addEventListener("click", function () {
+    requestTradeLogout();
+  });
   elements.buyButton.addEventListener("click", function () {
     toggleSmartEntry("buy");
   });
@@ -859,5 +1004,6 @@
   });
 
   applyInitialConfig(parseQuery());
+  loadTradeSession();
   loadData(true);
 }());
