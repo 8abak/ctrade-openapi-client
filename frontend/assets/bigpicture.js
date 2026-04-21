@@ -6,6 +6,12 @@
   const ZOOM_IN_FACTOR = 0.55;
   const MIN_SPAN_MS = 60 * 1000;
   const MAX_SPAN_MS = 365 * 24 * 60 * 60 * 1000;
+  const charting = window.DatavisCharting;
+  const Y_AXIS_STYLE = {
+    axisLabelColor: "#91a1b8",
+    splitLineColor: "rgba(147,181,255,0.08)",
+    targetTickCount: 6,
+  };
 
   const state = {
     chart: null,
@@ -139,12 +145,22 @@
     const data = state.points.map(function (row) {
       return { value: [row.timestampMs, row.mid], row: row };
     });
-    const prices = data.map(function (item) { return Number(item.value[1]); }).filter(Number.isFinite);
+    const visibleRange = state.rangeStartTsMs != null && state.rangeEndTsMs != null
+      ? { min: Number(state.rangeStartTsMs), max: Number(state.rangeEndTsMs) }
+      : null;
+    const coreItems = state.points
+      .map(function (row) {
+        return charting.pointItem(row.timestampMs, row.mid);
+      })
+      .filter(Boolean);
     state.chart.setOption({
-      yAxis: {
-        min: prices.length ? Math.min.apply(null, prices) - 0.4 : null,
-        max: prices.length ? Math.max.apply(null, prices) + 0.4 : null,
-      },
+      yAxis: charting.buildVisibleIntegerYAxis({
+        visibleRange: visibleRange,
+        coreItems: coreItems,
+        overlayItems: [],
+        includeOverlays: false,
+        ...Y_AXIS_STYLE,
+      }),
       series: [{
         id: "bigpicture-line",
         type: "line",

@@ -11,6 +11,7 @@
     showEvents: false,
     showStructure: false,
     showRanges: false,
+    sizing: false,
     id: "",
     reviewStart: "",
     reviewSpeed: 1,
@@ -47,6 +48,12 @@
     sellExit: "#ff6b88",
     pending: "#ffc857",
   };
+  const charting = window.DatavisCharting;
+  const Y_AXIS_STYLE = {
+    axisLabelColor: "#9eadc5",
+    splitLineColor: "rgba(147,181,255,0.10)",
+    targetTickCount: 6,
+  };
 
   const state = {
     chart: null,
@@ -66,6 +73,7 @@
     rangeLastId: null,
     rightEdgeAnchored: true,
     zoom: null,
+    viewport: charting.createViewportModel({ rightEdgeToleranceItems: 1 }),
     applyingZoom: false,
     overlayFrame: 0,
     resizeObserver: null,
@@ -127,6 +135,7 @@
     showEvents: document.getElementById("showEvents"),
     showStructure: document.getElementById("showStructure"),
     showRanges: document.getElementById("showRanges"),
+    sizingToggle: document.getElementById("sizingToggle"),
     tickId: document.getElementById("tickId"),
     reviewStart: document.getElementById("reviewStart"),
     reviewSpeedToggle: document.getElementById("reviewSpeedToggle"),
@@ -227,6 +236,7 @@
       showEvents: params.has("showEvents") ? params.get("showEvents") !== "0" : DEFAULTS.showEvents,
       showStructure: params.has("showStructure") ? params.get("showStructure") !== "0" : DEFAULTS.showStructure,
       showRanges: params.has("showRanges") ? params.get("showRanges") !== "0" : DEFAULTS.showRanges,
+      sizing: params.get("sizing") === "1",
       id: params.get("id") || DEFAULTS.id,
       reviewStart: params.get("reviewStart") || DEFAULTS.reviewStart,
       reviewSpeed: REVIEW_SPEEDS.includes(speed) ? speed : DEFAULTS.reviewSpeed,
@@ -242,6 +252,7 @@
       showEvents: elements.showEvents.checked,
       showStructure: elements.showStructure.checked,
       showRanges: elements.showRanges.checked,
+      sizing: Boolean(elements.sizingToggle.checked),
       id: (elements.tickId.value || "").trim(),
       reviewStart: (elements.reviewStart.value || "").trim(),
       reviewSpeed: Number.parseFloat(elements.reviewSpeedToggle.querySelector("button.active")?.dataset.value || String(DEFAULTS.reviewSpeed)),
@@ -270,6 +281,7 @@
       showEvents: config.showEvents ? "1" : "0",
       showStructure: config.showStructure ? "1" : "0",
       showRanges: config.showRanges ? "1" : "0",
+      sizing: config.sizing ? "1" : "0",
       window: String(config.window),
       speed: String(config.reviewSpeed),
     });
@@ -288,6 +300,7 @@
       showEvents: config.showEvents ? "1" : "0",
       showStructure: config.showStructure ? "1" : "0",
       showRanges: config.showRanges ? "1" : "0",
+      sizing: config.sizing ? "1" : "0",
     };
   }
 
@@ -2101,7 +2114,11 @@
         const option = state.chart.getOption();
         const zoom = option?.dataZoom?.[0] || null;
         state.zoom = zoom ? { start: zoom.start, end: zoom.end, startValue: zoom.startValue, endValue: zoom.endValue } : null;
-        state.rightEdgeAnchored = !zoom || Number(zoom.end) >= 99.5;
+        const viewportState = state.viewport.captureZoom(zoom, buildPrimaryXValues());
+        state.rightEdgeAnchored = Boolean(viewportState?.followRightEdge);
+        state.chart.setOption({
+          yAxis: yBounds(),
+        }, { lazyUpdate: true });
         queueOverlayRender();
       });
       state.chart.getZr().on("click", function (event) {
@@ -2385,79 +2402,116 @@
     return series;
   }
 
-  function yBounds() {
-    const config = currentConfig();
-    const values = [];
-    state.rows.forEach((row) => values.push(Number(row.mid)));
+  function buildPrimaryXValues() {
+    return state.rows
+      .map((row) => Number(row.id))
+      .filter(Number.isFinite);
+  }
+
+  function pushYAxisItem(items, item) {
+    if (item) {
+      items.push(item);
+    }
+  }
+
+  function buildYAxisItems(config) {
+    const coreItems = [];
+    const overlayItems = [];
+    if (config.showTicks) {
+      state.rows.forEach((row) => {
+        pushYAxisItem(coreItems, charting.pointItem(row.id, row.mid));
+      });
+    }
     if (config.showStructure) {
       state.structureBars.forEach((bar) => {
-        values.push(Number(bar.high));
-        values.push(Number(bar.low));
+        pushYAxisItem(coreItems, charting.rangeItem(bar.startTickId, bar.endTickId, bar.low, bar.high));
       });
     }
     if (config.showRanges) {
       state.rangeBoxes.forEach((box) => {
-        values.push(Number(box.top));
-        values.push(Number(box.bottom));
+        pushYAxisItem(overlayItems, charting.rangeItem(box.startTickId, box.endTickId, box.bottom, box.top));
       });
     }
     if (config.showEvents) {
-      state.structureEvents.forEach((event) => values.push(Number(event.price)));
+      state.structureEvents.forEach((event) => {
+        pushYAxisItem(overlayItems, charting.pointItem(event.tickId, event.price));
+      });
     }
     if (isLiveTradeOverlayMode()) {
+      const currentTick = Number(state.rangeLastId);
+      const currentPrice = Number(rowAtTickId(currentTick)?.mid);
       state.trade.positions.forEach((position) => {
+        const entryTick = tickIdForTimestampMs(position.openTimestampMs);
+        pushYAxisItem(
+          overlayItems,
+          charting.rangeItem(entryTick, currentTick, position.entryPrice, currentPrice)
+        );
         const draft = pendingProtectionForPosition(position);
-        values.push(Number(position.entryPrice));
         if (draft.stopLoss != null) {
-          values.push(Number(draft.stopLoss));
+          pushYAxisItem(overlayItems, charting.rangeItem(entryTick, currentTick, draft.stopLoss, draft.stopLoss));
         }
         if (draft.takeProfit != null) {
-          values.push(Number(draft.takeProfit));
+          pushYAxisItem(overlayItems, charting.rangeItem(entryTick, currentTick, draft.takeProfit, draft.takeProfit));
         }
       });
       state.trade.pendingOrders.forEach((order) => {
+        const timestampMs = order.timestampMs || Date.now();
+        const tickId = tickIdForTimestampMs(timestampMs) ?? Number(state.rangeLastId);
         if (order.limitPrice != null) {
-          values.push(Number(order.limitPrice));
+          pushYAxisItem(overlayItems, charting.pointItem(tickId, order.limitPrice));
         }
         if (order.stopPrice != null) {
-          values.push(Number(order.stopPrice));
+          pushYAxisItem(overlayItems, charting.pointItem(tickId, order.stopPrice));
         }
       });
     }
     if (isSelectedHistoricalReviewMode()) {
-      const trade = selectedHistoricalTradeOverlay()?.trade;
-      if (trade?.entryPrice != null) {
-        values.push(Number(trade.entryPrice));
-      }
-      if (trade?.exitPrice != null) {
-        values.push(Number(trade.exitPrice));
+      const overlay = selectedHistoricalTradeVisible();
+      if (overlay?.trade) {
+        pushYAxisItem(
+          overlayItems,
+          charting.rangeItem(overlay.entryTickId, overlay.exitTickId, overlay.trade.entryPrice, overlay.trade.exitPrice)
+        );
+        pushYAxisItem(overlayItems, charting.pointItem(overlay.entryTickId, overlay.trade.entryPrice));
+        pushYAxisItem(overlayItems, charting.pointItem(overlay.exitTickId, overlay.trade.exitPrice));
       }
     }
     const paperRect = activePaperRect();
     if (paperRect) {
+      const rectStart = Number(paperRect.leftx ?? paperRect.entrytickid ?? state.rangeFirstId ?? state.rangeLastId);
+      const rectEnd = Number(paperRect.rightx ?? paperRect.closedtickid ?? paperRect.entrytickid ?? state.rangeLastId ?? rectStart);
+      pushYAxisItem(overlayItems, charting.rangeItem(rectStart, rectEnd, paperRect.lowprice, paperRect.highprice));
       [
-        paperRect.lowprice,
-        paperRect.highprice,
         paperRect.entryprice,
         paperRect.stoploss,
         paperRect.takeprofit,
         paperRect.exitprice,
         paperRect.firstprice,
         paperRect.secondprice,
-      ].forEach((value) => values.push(Number(value)));
+      ].forEach((value) => {
+        pushYAxisItem(overlayItems, charting.rangeItem(rectStart, rectEnd, value, value));
+      });
     }
     if (state.paper.firstPoint) {
-      values.push(Number(state.paper.firstPoint.price));
+      pushYAxisItem(overlayItems, charting.pointItem(state.paper.firstPoint.tickId, state.paper.firstPoint.price));
     }
-    const finite = values.filter(Number.isFinite);
-    if (!finite.length) {
-      return {};
-    }
-    const low = Math.min(...finite);
-    const high = Math.max(...finite);
-    const span = Math.max(0, high - low);
-    const padding = span > 0 ? Math.max(span * 0.06, 0.02) : 0.05;
-    return { min: low - padding, max: high + padding };
+    return { coreItems: coreItems, overlayItems: overlayItems };
+  }
+
+  function currentVisibleXRange(options) {
+    return state.viewport.visibleRange(buildPrimaryXValues(), options);
+  }
+
+  function yBounds(options) {
+    const config = currentConfig();
+    const sources = buildYAxisItems(config);
+    return charting.buildVisibleIntegerYAxis({
+      visibleRange: currentVisibleXRange(options),
+      coreItems: sources.coreItems,
+      overlayItems: sources.overlayItems,
+      includeOverlays: config.sizing,
+      ...Y_AXIS_STYLE,
+    });
   }
 
   function renderChart(options) {
@@ -2467,23 +2521,15 @@
       return;
     }
     const config = currentConfig();
-    const zoom = {};
-    if (options?.resetView || state.rightEdgeAnchored) {
-      zoom.start = 0;
-      zoom.end = 100;
-    } else if (state.zoom) {
-      zoom.start = state.zoom.start;
-      zoom.end = state.zoom.end;
-      zoom.startValue = state.zoom.startValue;
-      zoom.endValue = state.zoom.endValue;
-    }
+    const zoom = state.viewport.zoomOptions(buildPrimaryXValues(), { reset: Boolean(options?.resetView) });
+    state.rightEdgeAnchored = Boolean(state.viewport.snapshot().followRightEdge);
     state.applyingZoom = true;
     chart.setOption({
       series: buildSeries(config),
       yAxis: yBounds(),
       dataZoom: [
-        { id: "zoom-inside", ...zoom },
-        { id: "zoom-slider", ...zoom },
+        { id: "zoom-inside", startValue: zoom.startValue, endValue: zoom.endValue },
+        { id: "zoom-slider", startValue: zoom.startValue, endValue: zoom.endValue },
       ],
     }, { replaceMerge: ["series"], lazyUpdate: true });
     requestAnimationFrame(() => {
@@ -4125,6 +4171,7 @@
     applyPaperPayload(payload.rect || null);
     if (resetView) {
       state.zoom = null;
+      state.viewport.reset();
       state.rightEdgeAnchored = true;
     }
     renderMeta();
@@ -4331,6 +4378,7 @@
     elements.showEvents.checked = Boolean(config.showEvents);
     elements.showStructure.checked = Boolean(config.showStructure);
     elements.showRanges.checked = Boolean(config.showRanges);
+    elements.sizingToggle.checked = Boolean(config.sizing);
     elements.tickId.value = config.id;
     elements.reviewStart.value = config.reviewStart;
     elements.windowSize.value = String(config.window);
@@ -4370,9 +4418,14 @@
     status("Run state updated.", false);
   });
 
-  [elements.showTicks, elements.showEvents, elements.showStructure, elements.showRanges].forEach((control) => {
+  [elements.showTicks, elements.showEvents, elements.showStructure, elements.showRanges, elements.sizingToggle].forEach((control) => {
     control.addEventListener("change", function () {
       writeQuery();
+      if (control === elements.sizingToggle) {
+        renderChart({ resetView: false });
+        status("Sizing updated.", false);
+        return;
+      }
       loadAll(false).catch((error) => status(error.message || "Display refresh failed.", true));
       status("Display layers updated.", false);
     });

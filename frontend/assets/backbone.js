@@ -11,6 +11,7 @@
     ticks: 2000,
     showTicks: true,
     showBands: false,
+    sizing: false,
     id: "",
   };
   const MAX_CANDLES = 400;
@@ -19,6 +20,12 @@
   const TRADE_REFRESH_MS = 5000;
   const BANDS_PERIOD = 20;
   const BANDS_STD_MULTIPLIER = 2.0;
+  const charting = window.DatavisCharting;
+  const Y_AXIS_STYLE = {
+    axisLabelColor: "#9eadc5",
+    splitLineColor: "rgba(147,181,255,0.10)",
+    targetTickCount: 6,
+  };
 
   const state = {
     chart: null,
@@ -26,6 +33,7 @@
     lastMetrics: null,
     loadToken: 0,
     zoom: null,
+    viewport: charting.createViewportModel({ rightEdgeToleranceItems: 1 }),
     applyingZoom: false,
     resizeObserver: null,
     pollTimer: 0,
@@ -60,6 +68,7 @@
     anchorId: document.getElementById("anchorId"),
     showBands: document.getElementById("showBands"),
     showTicks: document.getElementById("showTicks"),
+    sizingToggle: document.getElementById("sizingToggle"),
     applyButton: document.getElementById("applyButton"),
     statusLine: document.getElementById("statusLine"),
     backboneMeta: document.getElementById("backboneMeta"),
@@ -103,6 +112,7 @@
       ticks: clampCount("detailed", params.get("ticks")),
       showTicks: params.has("showTicks") ? params.get("showTicks") !== "0" : DEFAULTS.showTicks,
       showBands: params.get("showBands") === "1",
+      sizing: params.get("sizing") === "1",
       id: params.get("id") || "",
     };
   }
@@ -116,6 +126,7 @@
       ticks: clampCount("detailed", state.inputs.ticks),
       showTicks: Boolean(elements.showTicks.checked),
       showBands: Boolean(elements.showBands.checked),
+      sizing: Boolean(elements.sizingToggle.checked),
       id: (elements.anchorId.value || "").trim(),
     };
   }
@@ -143,6 +154,7 @@
       ticks: String(config.ticks),
       showTicks: config.showTicks ? "1" : "0",
       showBands: config.showBands ? "1" : "0",
+      sizing: config.sizing ? "1" : "0",
     });
     if (config.id) {
       params.set("id", config.id);
@@ -450,6 +462,7 @@
           startValue: zoom.startValue,
           endValue: zoom.endValue,
         } : null;
+        state.viewport.captureZoom(zoom, primaryXValues(state.payload));
         applyVisibleYAxis();
       });
       if (typeof ResizeObserver === "function") {
@@ -608,117 +621,54 @@
     return series;
   }
 
-  function xDomainForPayload(payload) {
-    const values = [];
-    const candles = Array.isArray(payload?.candles) ? payload.candles : [];
-    candles.forEach(function (candle) {
-      values.push(Number(candle.endTimeMs));
-    });
-    const rows = Array.isArray(payload?.rows) ? payload.rows : [];
-    rows.forEach(function (row) {
-      values.push(Number(row.timestampMs));
-    });
-    const pivots = Array.isArray(payload?.pivots) ? payload.pivots : [];
-    pivots.forEach(function (pivot) {
-      values.push(Number(pivot.tickTimeMs));
-    });
-    if (payload?.liveLeg?.startTimeMs != null) {
-      values.push(Number(payload.liveLeg.startTimeMs), Number(payload.liveLeg.endTimeMs));
-      if (payload.liveLeg.candidateTimeMs != null) {
-        values.push(Number(payload.liveLeg.candidateTimeMs));
-      }
+  function primaryXValues(payload) {
+    if (payload?.view === "detailed") {
+      return (Array.isArray(payload?.rows) ? payload.rows : [])
+        .map(function (row) { return Number(row.timestampMs); })
+        .filter(Number.isFinite);
     }
-    const finite = values.filter(Number.isFinite);
-    if (!finite.length) {
-      return null;
-    }
-    return {
-      min: Math.min.apply(null, finite),
-      max: Math.max.apply(null, finite),
-    };
+    return (Array.isArray(payload?.candles) ? payload.candles : [])
+      .map(function (candle) { return Number(candle.endTimeMs); })
+      .filter(Number.isFinite);
   }
 
-  function visibleXRange(payload) {
-    const domain = xDomainForPayload(payload);
-    if (!domain) {
-      return null;
-    }
-    if (!state.zoom) {
-      return domain;
-    }
-    const startValue = Number(state.zoom.startValue);
-    const endValue = Number(state.zoom.endValue);
-    if (Number.isFinite(startValue) && Number.isFinite(endValue)) {
-      return {
-        min: Math.min(startValue, endValue),
-        max: Math.max(startValue, endValue),
-      };
-    }
-    const startPercent = Number.isFinite(Number(state.zoom.start)) ? Number(state.zoom.start) / 100 : 0;
-    const endPercent = Number.isFinite(Number(state.zoom.end)) ? Number(state.zoom.end) / 100 : 1;
-    const span = domain.max - domain.min;
-    return {
-      min: domain.min + (span * Math.max(0, Math.min(1, startPercent))),
-      max: domain.min + (span * Math.max(0, Math.min(1, endPercent))),
-    };
+  function visibleXRange(payload, options) {
+    return state.viewport.visibleRange(primaryXValues(payload), options);
   }
 
-  function snapIntegerYAxis(minValue, maxValue) {
-    let min = Math.floor(minValue);
-    let max = Math.ceil(maxValue);
-    if (min === max) {
-      max = min + 1;
+  function pushYAxisItem(items, item) {
+    if (item) {
+      items.push(item);
     }
-    return {
-      type: "value",
-      scale: true,
-      min: min,
-      max: max,
-      interval: 1,
-      minInterval: 1,
-      maxInterval: 1,
-      axisLabel: {
-        color: "#9eadc5",
-        formatter: function (value) {
-          return String(Math.round(Number(value)));
-        },
-      },
-      splitLine: { lineStyle: { color: "rgba(147,181,255,0.10)" } },
-    };
   }
 
-  function visibleYBounds(payload) {
-    const range = visibleXRange(payload);
-    const values = [];
-    const allValues = [];
+  function buildYAxisItems(payload) {
+    const config = currentConfig();
+    const coreItems = [];
+    const overlayItems = [];
     if (payload?.view === "candles") {
       const candles = Array.isArray(payload.candles) ? payload.candles : [];
       candles.forEach(function (candle) {
-        allValues.push(Number(candle.low), Number(candle.high), Number(candle.open), Number(candle.close));
-        const x = Number(candle.endTimeMs);
-        if (!Number.isFinite(x) || !range || x < range.min || x > range.max) {
-          return;
-        }
-        values.push(Number(candle.low), Number(candle.high), Number(candle.open), Number(candle.close));
+        pushYAxisItem(coreItems, charting.rangeItem(candle.endTimeMs, candle.endTimeMs, candle.low, candle.high));
       });
+      if (config.showBands) {
+        const bands = computeBands(candles);
+        [bands.middle, bands.upper, bands.lower].forEach(function (bandPoints) {
+          bandPoints.forEach(function (point) {
+            pushYAxisItem(overlayItems, charting.pointItem(point[0], point[1]));
+          });
+        });
+      }
     } else {
       const rows = Array.isArray(payload?.rows) ? payload.rows : [];
-      rows.forEach(function (row) {
-        allValues.push(Number(row.mid));
-        const x = Number(row.timestampMs);
-        if (!Number.isFinite(x) || !range || x < range.min || x > range.max) {
-          return;
-        }
-        values.push(Number(row.mid));
-      });
+      if (config.showTicks) {
+        rows.forEach(function (row) {
+          pushYAxisItem(coreItems, charting.pointItem(row.timestampMs, row.mid));
+        });
+      }
       const pivots = Array.isArray(payload?.pivots) ? payload.pivots : [];
       pivots.forEach(function (pivot) {
-        allValues.push(Number(pivot.price));
-        const x = Number(pivot.tickTimeMs);
-        if (!Number.isFinite(x) || !range || x < range.min || x > range.max) {
-          return;
-        }
-        values.push(Number(pivot.price));
+        pushYAxisItem(coreItems, charting.pointItem(pivot.tickTimeMs, pivot.price));
       });
       if (payload?.liveLeg) {
         [
@@ -726,32 +676,22 @@
           [payload.liveLeg.candidateTimeMs, payload.liveLeg.candidatePrice],
           [payload.liveLeg.endTimeMs, payload.liveLeg.endPrice],
         ].forEach(function (point) {
-          const x = Number(point[0]);
-          const y = Number(point[1]);
-          if (Number.isFinite(y)) {
-            allValues.push(y);
-          }
-          if (!Number.isFinite(x) || !Number.isFinite(y) || !range || x < range.min || x > range.max) {
-            return;
-          }
-          values.push(y);
+          pushYAxisItem(coreItems, charting.pointItem(point[0], point[1]));
         });
       }
     }
-    const finite = values.filter(Number.isFinite);
-    if (!finite.length) {
-      const fallbackValues = allValues.filter(Number.isFinite);
-      if (!fallbackValues.length) {
-        return {
-          type: "value",
-          scale: true,
-          axisLabel: { color: "#9eadc5" },
-          splitLine: { lineStyle: { color: "rgba(147,181,255,0.10)" } },
-        };
-      }
-      return snapIntegerYAxis(Math.min.apply(null, fallbackValues), Math.max.apply(null, fallbackValues));
-    }
-    return snapIntegerYAxis(Math.min.apply(null, finite), Math.max.apply(null, finite));
+    return { coreItems: coreItems, overlayItems: overlayItems };
+  }
+
+  function visibleYBounds(payload, options) {
+    const sources = buildYAxisItems(payload);
+    return charting.buildVisibleIntegerYAxis({
+      visibleRange: visibleXRange(payload, options),
+      coreItems: sources.coreItems,
+      overlayItems: sources.overlayItems,
+      includeOverlays: currentConfig().sizing,
+      ...Y_AXIS_STYLE,
+    });
   }
 
   function applyVisibleYAxis() {
@@ -777,24 +717,16 @@
       : renderCandleSeries(payload);
     if (options?.resetView) {
       state.zoom = null;
+      state.viewport.reset();
     }
-    const zoom = {};
-    if (options?.resetView) {
-      zoom.start = 0;
-      zoom.end = 100;
-    } else if (state.zoom) {
-      zoom.start = state.zoom.start;
-      zoom.end = state.zoom.end;
-      zoom.startValue = state.zoom.startValue;
-      zoom.endValue = state.zoom.endValue;
-    }
+    const zoom = state.viewport.zoomOptions(primaryXValues(payload), { reset: Boolean(options?.resetView) });
     state.applyingZoom = true;
     chart.setOption({
       series: series,
       yAxis: visibleYBounds(payload),
       dataZoom: [
-        { id: "zoom-inside", type: "inside", ...zoom },
-        { id: "zoom-slider", type: "slider", ...zoom },
+        { id: "zoom-inside", type: "inside", startValue: zoom.startValue, endValue: zoom.endValue },
+        { id: "zoom-slider", type: "slider", startValue: zoom.startValue, endValue: zoom.endValue },
       ],
     }, { replaceMerge: ["series"], lazyUpdate: true });
     requestAnimationFrame(function () {
@@ -1113,6 +1045,7 @@
     setSegment(elements.layerToggle, config.layer);
     elements.showTicks.checked = Boolean(config.showTicks);
     elements.showBands.checked = Boolean(config.showBands);
+    elements.sizingToggle.checked = Boolean(config.sizing);
     elements.anchorId.value = config.id;
     setSidebarCollapsed(true);
     syncControlStates();
@@ -1159,6 +1092,12 @@
   elements.showTicks.addEventListener("change", function () {
     writeQuery();
     renderChart({ resetView: false });
+  });
+
+  elements.sizingToggle.addEventListener("change", function () {
+    writeQuery();
+    renderChart({ resetView: false });
+    status("Sizing updated.", false);
   });
 
   elements.sidebarToggle.addEventListener("click", function () {
