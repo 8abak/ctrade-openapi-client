@@ -33,7 +33,7 @@
     lastMetrics: null,
     loadToken: 0,
     zoom: null,
-    viewport: charting.createViewportModel({ rightEdgeToleranceItems: 1 }),
+    viewport: charting.createViewportModel({ rightEdgeToleranceItems: 1, debugName: "backbone" }),
     applyingZoom: false,
     resizeObserver: null,
     pollTimer: 0,
@@ -450,12 +450,11 @@
         ],
         series: [],
       }, { notMerge: true, lazyUpdate: true });
-      state.chart.on("dataZoom", function () {
-        if (state.applyingZoom) {
+      state.chart.on("dataZoom", function (event) {
+        if (state.applyingZoom || state.viewport.currentWindow()?.applyingProgrammaticViewport) {
           return;
         }
-        const option = state.chart.getOption();
-        const zoom = option?.dataZoom?.[0] || null;
+        const zoom = charting.readChartDataZoom(state.chart, event);
         state.zoom = zoom ? {
           start: zoom.start,
           end: zoom.end,
@@ -723,7 +722,11 @@
       state.zoom = null;
       state.viewport.reset();
     }
-    const viewportState = state.viewport.projectWindow(primaryXValues(payload), { reset: Boolean(options?.resetView) });
+    state.viewport.setApplyingProgrammaticViewport(true);
+    const viewportState = state.viewport.projectWindow(primaryXValues(payload), {
+      reset: Boolean(options?.resetView),
+      applyingProgrammaticViewport: true,
+    });
     const zoom = viewportState
       ? { startValue: viewportState.startValue, endValue: viewportState.endValue }
       : {};
@@ -738,6 +741,7 @@
     }, { replaceMerge: ["series"], lazyUpdate: true });
     requestAnimationFrame(function () {
       state.applyingZoom = false;
+      state.viewport.setApplyingProgrammaticViewport(false);
     });
   }
 

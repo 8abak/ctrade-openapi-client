@@ -73,7 +73,8 @@
     rangeLastId: null,
     rightEdgeAnchored: true,
     zoom: null,
-    viewport: charting.createViewportModel({ rightEdgeToleranceItems: 1 }),
+    viewport: charting.createViewportModel({ rightEdgeToleranceItems: 1, debugName: "live" }),
+    viewportUpdateMeta: null,
     applyingZoom: false,
     overlayFrame: 0,
     resizeObserver: null,
@@ -2107,12 +2108,11 @@
         ],
         series: [],
       }, { notMerge: true, lazyUpdate: true });
-      state.chart.on("dataZoom", () => {
-        if (state.applyingZoom) {
+      state.chart.on("dataZoom", (event) => {
+        if (state.applyingZoom || state.viewport.currentWindow()?.applyingProgrammaticViewport) {
           return;
         }
-        const option = state.chart.getOption();
-        const zoom = option?.dataZoom?.[0] || null;
+        const zoom = charting.readChartDataZoom(state.chart, event);
         state.zoom = zoom ? { start: zoom.start, end: zoom.end, startValue: zoom.startValue, endValue: zoom.endValue } : null;
         const viewportState = state.viewport.captureZoom(zoom, buildPrimaryXValues());
         state.rightEdgeAnchored = Boolean(viewportState?.followRightEdge);
@@ -2523,7 +2523,13 @@
       return;
     }
     const config = currentConfig();
-    const viewportState = state.viewport.projectWindow(buildPrimaryXValues(), { reset: Boolean(options?.resetView) });
+    const updateMeta = options?.updateMeta || state.viewportUpdateMeta || null;
+    state.viewport.setApplyingProgrammaticViewport(true);
+    const viewportState = state.viewport.projectWindow(buildPrimaryXValues(), {
+      reset: Boolean(options?.resetView),
+      updateMeta: updateMeta,
+      applyingProgrammaticViewport: true,
+    });
     const zoom = viewportState
       ? { startValue: viewportState.startValue, endValue: viewportState.endValue }
       : {};
@@ -2539,6 +2545,8 @@
     }, { replaceMerge: ["series"], lazyUpdate: true });
     requestAnimationFrame(() => {
       state.applyingZoom = false;
+      state.viewport.setApplyingProgrammaticViewport(false);
+      state.viewportUpdateMeta = null;
       queueOverlayRender();
     });
   }
@@ -3099,6 +3107,7 @@
 
   function replaceRows(rows) {
     state.rows = Array.isArray(rows) ? rows.slice() : [];
+    state.viewportUpdateMeta = null;
     syncRangeFromRows();
   }
 
@@ -3140,6 +3149,7 @@
     }
     const existing = new Set(state.rows.map((row) => Number(row.id)));
     let appended = 0;
+    let droppedFromStart = 0;
     rows.forEach((row) => {
       if (!existing.has(Number(row.id))) {
         state.rows.push(row);
@@ -3150,8 +3160,10 @@
     if (appended) {
       state.rows.sort((left, right) => Number(left.id) - Number(right.id));
       if (state.rows.length > currentConfig().window) {
+        droppedFromStart = state.rows.length - currentConfig().window;
         state.rows = state.rows.slice(state.rows.length - currentConfig().window);
       }
+      state.viewportUpdateMeta = { appendedCount: appended, droppedFromStart: droppedFromStart, prependedCount: 0, reason: "append" };
       syncRangeFromRows();
       trimStructureToRows();
     }
@@ -3171,6 +3183,7 @@
     if (state.rows.length > targetWindow) {
       state.rows = state.rows.slice(0, targetWindow);
     }
+    state.viewportUpdateMeta = { appendedCount: 0, droppedFromStart: 0, prependedCount: older.length, reason: "prepend" };
     syncRangeFromRows();
     return older.length;
   }
