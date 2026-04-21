@@ -5,8 +5,9 @@
 The workflow:
 - opens an SSH session to the EC2 host with `appleboy/ssh-action`
 - changes to `/home/ec2-user/cTrade`
-- runs `git fetch origin`, `git reset --hard origin/main`, and `git clean -fd`
-- executes `deploy/scripts/deploy-datavis.sh`
+- records the current checkout commit as a fallback previous deploy commit
+- fetches `origin/main`, resets to that commit, and cleans untracked files
+- runs `deploy/scripts/deploy-datavis.sh` with both the previous and new commit SHAs
 
 Required GitHub repository secrets:
 - `EC2_HOST`
@@ -20,20 +21,41 @@ Runtime paths used by the deploy flow:
 - repo checkout: `/home/ec2-user/cTrade`
 - virtualenv: `/home/ec2-user/venvs/datavis`
 - env file: `/etc/datavis.env`
+- deploy state: `/home/ec2-user/.datavis/last_deployed_commit`
 
 Systemd units installed by deploy:
 - `datavis.service` runs `datavis.app:app` from `/home/ec2-user/venvs/datavis/bin/uvicorn`
 - `tickcollector.service` runs `/home/ec2-user/cTrade/tickCollectorRawToDB.py` from `/home/ec2-user/venvs/datavis/bin/python`
-- `separation.service` runs `python -m datavis.separation_runtime` from `/home/ec2-user/venvs/datavis/bin/python`
 - `backbone.service` runs `python -m datavis.backbone_runtime` from `/home/ec2-user/venvs/datavis/bin/python`
-- `tickcollector.service` also reads `/etc/datavis.env` when present so `DATAVIS_CTRADER_CREDS_FILE` and related runtime overrides apply to the collector too
+
+Removed services cleaned up by deploy:
+- retired legacy services listed in `deploy/scripts/deploy-datavis.sh`
+
+Deploy behavior:
+- compares the previously deployed commit to the new commit
+- logs the changed files before any restarts
+- maps changed paths to service restarts explicitly
+- applies only the changed SQL migration files for that deploy
+- reloads `systemd` only when unit files changed or on a full deploy
+- reloads nginx only when nginx-managed files changed or on a full deploy
+- restarts only the affected services
+- updates the stored successful deploy commit after the deploy passes
+
+Current service/file mapping:
+- `frontend/*`, `datavis/app.py`, `datavis/trading.py`, `datavis/smart_scalp.py`, `datavis/structure.py`, `datavis/rects.py` -> `datavis.service`
+- `datavis/backbone.py`, `datavis/backbone_runtime.py`, `datavis/backbone_jobs.py`, `datavis/brokerday.py` -> `backbone.service` and `datavis.service`
+- `tickCollectorRawToDB.py`, `datavis/tickcollector_runtime.py`, `ctrader_open_api/*`, `datavis/broker_creds.py`, `datavis/ctrader_auth.py` -> `tickcollector.service` and `datavis.service`
+- `datavis/db.py`, `requirements.txt` -> `datavis.service`, `tickcollector.service`, `backbone.service`
+- `deploy/systemd/*.service` -> `systemctl daemon-reload` plus restart of the matching installed service
+- `deploy/nginx/*`, `deploy/scripts/recover-datavis-nginx.sh` -> nginx reload via `recover-datavis-nginx.sh`
+- `deploy/sql/20260420_backbone.sql`, `deploy/sql/20260422_backbone_bigbones.sql`, `deploy/sql/20260422_retire_structure_family.sql` -> run migration, restart `datavis.service` and `backbone.service`
+- `deploy/sql/20260411_layer_zero_rects.sql`, `deploy/sql/20260419_speed_cleanup.sql` -> run migration, restart `datavis.service` and `tickcollector.service`
+- `deploy/sql/20260418_remove_legacy_structure_layer.sql`, `deploy/sql/20260421_drop_auction_layer_manual.sql` -> run migration, restart `datavis.service`
 
 Nginx recovery managed by deploy:
 - canonical site file: `/etc/nginx/conf.d/datavis.au.conf`
 - source of truth in repo: `deploy/nginx/datavis.au.conf`
-- `deploy/scripts/recover-datavis-nginx.sh` removes any stale `server_name datavis.au` block from `/etc/nginx/nginx.conf`, installs the managed site file, runs `nginx -t`, and reloads nginx
-- the managed site file keeps the app proxy on `/` and exposes read-only nginx directory browsing on `/src/` via `alias /home/ec2-user/cTrade/`
-- `/src/` blocks dotfiles, `__pycache__`, and obvious secret filenames such as `*.pem`, `*.key`, `*.crt`, and `*creds*`
+- `deploy/scripts/recover-datavis-nginx.sh` removes stale `server_name datavis.au` blocks from `/etc/nginx/nginx.conf`, installs the managed site file, runs `nginx -t`, and reloads nginx
 
 Trading runtime env vars for `/etc/datavis.env`:
 - `DATAVIS_TRADE_USERNAME` (default `babak`)
@@ -48,35 +70,10 @@ Trading runtime env vars for `/etc/datavis.env`:
 - `DATAVIS_CTRADER_SYMBOL` (default `XAUUSD`)
 - `DATAVIS_CTRADER_SYMBOL_ID` (optional; autodetected when omitted)
 - `DATAVIS_CTRADER_CONNECTION_TYPE` (`live` or `demo`)
-- optional fallback: `DATAVIS_CTRADER_CREDS_FILE` (JSON path compatible with existing `creds.json`)
-
-The deploy workflow resets and cleans the EC2 checkout, so do not store runtime-only files there.
-
-The deploy script:
-- activates `/home/ec2-user/venvs/datavis/bin/activate`
-- runs `pip install -r requirements.txt`
-- installs `/usr/local/bin/getCsv` from `deploy/bin/getCsv`
-- installs the `datavis`, `tickcollector`, and `separation` systemd units
-- installs the `backbone` systemd unit
-- disables and removes retired legacy processor services
-- applies `deploy/sql/20260418_remove_legacy_structure_layer.sql`
-- applies `deploy/sql/20260411_layer_zero_rects.sql`
-- applies `deploy/sql/20260416_separation.sql`
-- applies `deploy/sql/20260420_backbone.sql`
-- applies `deploy/sql/20260419_speed_cleanup.sql`
-- enables `datavis`, `tickcollector`, `separation`, and `backbone`
-- restarts and verifies `datavis`, `separation`, and `backbone`
-- never restarts `tickcollector`
-- performs a local health check at `http://127.0.0.1:8000/api/health` when `curl` is available
-
-Legacy cleanup:
-- `deploy/scripts/cleanup-layer0.sh` creates a public-schema backup before applying the same cleanup SQL
-- the cleanup SQL drops old derived-layer tables, preserves the raw `ticks` table, and keeps the hot-path tick indexes
+- optional fallback: `DATAVIS_CTRADER_CREDS_FILE`
 
 Operational checks:
-- deploy the change on EC2: `cd /home/ec2-user/cTrade && bash deploy/scripts/deploy-datavis.sh`
+- deploy on EC2: `cd /home/ec2-user/cTrade && bash deploy/scripts/deploy-datavis.sh`
 - validate nginx: `sudo nginx -t`
-- reload nginx: `sudo systemctl reload nginx`
-- verify source browsing: `curl -I https://www.datavis.au/src/` and then open `https://www.datavis.au/src/` in a browser
+- verify the app: `curl -I https://www.datavis.au/`
 - export one broker day: `getCsv --day 14/04`
-- export with explicit year: `getCsv --day 17/04/2026`

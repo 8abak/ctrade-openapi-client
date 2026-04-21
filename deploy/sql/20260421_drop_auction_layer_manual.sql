@@ -39,9 +39,6 @@
 --     'public.backbonepivots',
 --     'public.backbonemoves',
 --     'public.backbonestate',
---     'public.separationruns',
---     'public.separationsegments',
---     'public.separationstate',
 --     'public.rects'
 -- ]) AS t(obj)
 -- ORDER BY obj;
@@ -107,9 +104,6 @@ COMMIT;
 --     'public.backbonepivots',
 --     'public.backbonemoves',
 --     'public.backbonestate',
---     'public.separationruns',
---     'public.separationsegments',
---     'public.separationstate',
 --     'public.rects'
 -- ]) AS t(obj)
 -- ORDER BY obj;

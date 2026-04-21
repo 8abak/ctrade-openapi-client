@@ -6,6 +6,7 @@
 
   const DEFAULTS = {
     view: "candles",
+    layer: "backbone",
     candles: 35,
     ticks: 2000,
     showTicks: true,
@@ -53,6 +54,7 @@
     sidebarToggle: document.getElementById("sidebarToggle"),
     sidebarBackdrop: document.getElementById("sidebarBackdrop"),
     viewToggle: document.getElementById("viewToggle"),
+    layerToggle: document.getElementById("layerToggle"),
     countLabel: document.getElementById("countLabel"),
     countInput: document.getElementById("countInput"),
     anchorId: document.getElementById("anchorId"),
@@ -93,8 +95,10 @@
   function parseQuery() {
     const params = new URLSearchParams(window.location.search);
     const view = params.get("view") === "detailed" ? "detailed" : DEFAULTS.view;
+    const layer = params.get("layer") === "bigbones" ? "bigbones" : DEFAULTS.layer;
     return {
       view: view,
+      layer: layer,
       candles: clampCount("candles", params.get("candles")),
       ticks: clampCount("detailed", params.get("ticks")),
       showTicks: params.has("showTicks") ? params.get("showTicks") !== "0" : DEFAULTS.showTicks,
@@ -107,6 +111,7 @@
     const view = elements.viewToggle.querySelector("button.active")?.dataset.value || DEFAULTS.view;
     return {
       view: view,
+      layer: elements.layerToggle.querySelector("button.active")?.dataset.value || DEFAULTS.layer,
       candles: clampCount("candles", state.inputs.candles),
       ticks: clampCount("detailed", state.inputs.ticks),
       showTicks: Boolean(elements.showTicks.checked),
@@ -133,6 +138,7 @@
     const config = currentConfig();
     const params = new URLSearchParams({
       view: config.view,
+      layer: config.layer,
       candles: String(config.candles),
       ticks: String(config.ticks),
       showTicks: config.showTicks ? "1" : "0",
@@ -161,6 +167,9 @@
     elements.countInput.value = String(config.view === "detailed" ? config.ticks : config.candles);
     elements.showBands.disabled = config.view !== "candles";
     elements.showTicks.disabled = config.view !== "detailed";
+    elements.layerToggle.querySelectorAll("button").forEach(function (button) {
+      button.disabled = config.view !== "candles";
+    });
   }
 
   function isReviewMode() {
@@ -236,7 +245,7 @@
       ? ("ticks " + Number(payload.rowCount || 0))
       : ("candles " + Number(payload.candleCount || 0));
     elements.backboneMeta.textContent = [
-      String(payload.view || "backbone").toUpperCase(),
+      String(payload.layerLabel || "Backbone").toUpperCase(),
       payload.mode === "review" ? "review" : "broker day",
       countText,
       "left " + (payload.firstId ?? "-"),
@@ -276,12 +285,12 @@
     const payload = state.payload || {};
     const row = payload.state || {};
     elements.daySummary.textContent = payload.dayId
-      ? ("Broker day " + (payload.brokerday || "-") + " | dayId " + payload.dayId + (payload.mode === "review" ? " | review anchor " + (currentConfig().id || "-") : ""))
+      ? ((payload.layerLabel || "Backbone") + " | broker day " + (payload.brokerday || "-") + " | dayId " + payload.dayId + (payload.mode === "review" ? " | review anchor " + (currentConfig().id || "-") : ""))
       : "Broker day unavailable.";
     elements.stateSummary.textContent = row.lastProcessedTickId
-      ? ("Last processed tick " + row.lastProcessedTickId + " | direction " + (row.direction || "None"))
-      : "No backbone state yet.";
-    elements.countsSummary.textContent = Number(payload.pivotTotal || 0) + " pivots | " + Number(payload.moveTotal || 0) + " moves";
+      ? ("Last processed point " + row.lastProcessedTickId + " | direction " + (row.direction || "None"))
+      : ("No " + String(payload.layerLabel || "Backbone").toLowerCase() + " state yet.");
+    elements.countsSummary.textContent = (payload.layerLabel || "Backbone") + " | " + Number(payload.pivotTotal || 0) + " pivots | " + Number(payload.moveTotal || 0) + " moves";
     elements.thresholdSummary.textContent = row.currentThreshold != null
       ? ("Threshold " + Number(row.currentThreshold).toFixed(4))
       : "Threshold -";
@@ -315,10 +324,11 @@
   function tooltipFormatter(param) {
     const candle = param?.data?.candle;
     if (candle) {
+      const layerLabel = String(state.payload?.layerLabel || "Backbone");
       return [
         "<div class=\"chart-tip\">",
         "<div class=\"chart-tip-section\">",
-        "<div class=\"chart-tip-title\">Backbone Candle</div>",
+        "<div class=\"chart-tip-title\">", escapeHtml(layerLabel), " Candle</div>",
         "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">Move</span><span class=\"chart-tip-value\">", escapeHtml(String(candle.moveId)), "</span></div>",
         "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">Start</span><span class=\"chart-tip-value\">", escapeHtml(formatTimestamp(candle.startTimeMs)), "</span></div>",
         "<div class=\"chart-tip-row\"><span class=\"chart-tip-label\">End</span><span class=\"chart-tip-value\">", escapeHtml(formatTimestamp(candle.endTimeMs)), "</span></div>",
@@ -440,6 +450,7 @@
           startValue: zoom.startValue,
           endValue: zoom.endValue,
         } : null;
+        applyVisibleYAxis();
       });
       if (typeof ResizeObserver === "function") {
         state.resizeObserver = new ResizeObserver(function () {
@@ -597,6 +608,161 @@
     return series;
   }
 
+  function xDomainForPayload(payload) {
+    const values = [];
+    const candles = Array.isArray(payload?.candles) ? payload.candles : [];
+    candles.forEach(function (candle) {
+      values.push(Number(candle.endTimeMs));
+    });
+    const rows = Array.isArray(payload?.rows) ? payload.rows : [];
+    rows.forEach(function (row) {
+      values.push(Number(row.timestampMs));
+    });
+    const pivots = Array.isArray(payload?.pivots) ? payload.pivots : [];
+    pivots.forEach(function (pivot) {
+      values.push(Number(pivot.tickTimeMs));
+    });
+    if (payload?.liveLeg?.startTimeMs != null) {
+      values.push(Number(payload.liveLeg.startTimeMs), Number(payload.liveLeg.endTimeMs));
+      if (payload.liveLeg.candidateTimeMs != null) {
+        values.push(Number(payload.liveLeg.candidateTimeMs));
+      }
+    }
+    const finite = values.filter(Number.isFinite);
+    if (!finite.length) {
+      return null;
+    }
+    return {
+      min: Math.min.apply(null, finite),
+      max: Math.max.apply(null, finite),
+    };
+  }
+
+  function visibleXRange(payload) {
+    const domain = xDomainForPayload(payload);
+    if (!domain) {
+      return null;
+    }
+    if (!state.zoom) {
+      return domain;
+    }
+    const startValue = Number(state.zoom.startValue);
+    const endValue = Number(state.zoom.endValue);
+    if (Number.isFinite(startValue) && Number.isFinite(endValue)) {
+      return {
+        min: Math.min(startValue, endValue),
+        max: Math.max(startValue, endValue),
+      };
+    }
+    const startPercent = Number.isFinite(Number(state.zoom.start)) ? Number(state.zoom.start) / 100 : 0;
+    const endPercent = Number.isFinite(Number(state.zoom.end)) ? Number(state.zoom.end) / 100 : 1;
+    const span = domain.max - domain.min;
+    return {
+      min: domain.min + (span * Math.max(0, Math.min(1, startPercent))),
+      max: domain.min + (span * Math.max(0, Math.min(1, endPercent))),
+    };
+  }
+
+  function snapIntegerYAxis(minValue, maxValue) {
+    let min = Math.floor(minValue);
+    let max = Math.ceil(maxValue);
+    if (min === max) {
+      max = min + 1;
+    }
+    return {
+      type: "value",
+      scale: true,
+      min: min,
+      max: max,
+      interval: 1,
+      minInterval: 1,
+      maxInterval: 1,
+      axisLabel: {
+        color: "#9eadc5",
+        formatter: function (value) {
+          return String(Math.round(Number(value)));
+        },
+      },
+      splitLine: { lineStyle: { color: "rgba(147,181,255,0.10)" } },
+    };
+  }
+
+  function visibleYBounds(payload) {
+    const range = visibleXRange(payload);
+    const values = [];
+    const allValues = [];
+    if (payload?.view === "candles") {
+      const candles = Array.isArray(payload.candles) ? payload.candles : [];
+      candles.forEach(function (candle) {
+        allValues.push(Number(candle.low), Number(candle.high), Number(candle.open), Number(candle.close));
+        const x = Number(candle.endTimeMs);
+        if (!Number.isFinite(x) || !range || x < range.min || x > range.max) {
+          return;
+        }
+        values.push(Number(candle.low), Number(candle.high), Number(candle.open), Number(candle.close));
+      });
+    } else {
+      const rows = Array.isArray(payload?.rows) ? payload.rows : [];
+      rows.forEach(function (row) {
+        allValues.push(Number(row.mid));
+        const x = Number(row.timestampMs);
+        if (!Number.isFinite(x) || !range || x < range.min || x > range.max) {
+          return;
+        }
+        values.push(Number(row.mid));
+      });
+      const pivots = Array.isArray(payload?.pivots) ? payload.pivots : [];
+      pivots.forEach(function (pivot) {
+        allValues.push(Number(pivot.price));
+        const x = Number(pivot.tickTimeMs);
+        if (!Number.isFinite(x) || !range || x < range.min || x > range.max) {
+          return;
+        }
+        values.push(Number(pivot.price));
+      });
+      if (payload?.liveLeg) {
+        [
+          [payload.liveLeg.startTimeMs, payload.liveLeg.startPrice],
+          [payload.liveLeg.candidateTimeMs, payload.liveLeg.candidatePrice],
+          [payload.liveLeg.endTimeMs, payload.liveLeg.endPrice],
+        ].forEach(function (point) {
+          const x = Number(point[0]);
+          const y = Number(point[1]);
+          if (Number.isFinite(y)) {
+            allValues.push(y);
+          }
+          if (!Number.isFinite(x) || !Number.isFinite(y) || !range || x < range.min || x > range.max) {
+            return;
+          }
+          values.push(y);
+        });
+      }
+    }
+    const finite = values.filter(Number.isFinite);
+    if (!finite.length) {
+      const fallbackValues = allValues.filter(Number.isFinite);
+      if (!fallbackValues.length) {
+        return {
+          type: "value",
+          scale: true,
+          axisLabel: { color: "#9eadc5" },
+          splitLine: { lineStyle: { color: "rgba(147,181,255,0.10)" } },
+        };
+      }
+      return snapIntegerYAxis(Math.min.apply(null, fallbackValues), Math.max.apply(null, fallbackValues));
+    }
+    return snapIntegerYAxis(Math.min.apply(null, finite), Math.max.apply(null, finite));
+  }
+
+  function applyVisibleYAxis() {
+    if (!state.chart || !state.payload) {
+      return;
+    }
+    state.chart.setOption({
+      yAxis: visibleYBounds(state.payload),
+    }, { lazyUpdate: true });
+  }
+
   function renderChart(options) {
     const chart = ensureChart();
     if (!chart) {
@@ -625,6 +791,7 @@
     state.applyingZoom = true;
     chart.setOption({
       series: series,
+      yAxis: visibleYBounds(payload),
       dataZoom: [
         { id: "zoom-inside", type: "inside", ...zoom },
         { id: "zoom-slider", type: "slider", ...zoom },
@@ -908,6 +1075,7 @@
       params.set("ticks", String(config.ticks));
     } else {
       params.set("candles", String(config.candles));
+      params.set("layer", String(config.layer));
     }
     try {
       const payload = await fetchJson(endpoint + "?" + params.toString());
@@ -922,7 +1090,12 @@
       renderChart({ resetView: Boolean(resetView) });
       renderTradeState();
       if (!options?.silentStatus) {
-        status("Loaded " + (payload.view === "detailed" ? Number(payload.rowCount || 0) + " tick(s)." : Number(payload.candleCount || 0) + " candle(s)."), false);
+        status(
+          payload.view === "detailed"
+            ? ("Loaded " + Number(payload.rowCount || 0) + " tick(s).")
+            : ("Loaded " + Number(payload.candleCount || 0) + " " + String(payload.layerLabel || "Backbone") + " candle(s)."),
+          false,
+        );
       }
       await refreshTradeState({ silent: true, respectInterval: true });
       schedulePolling();
@@ -937,6 +1110,7 @@
     state.inputs.candles = clampCount("candles", config.candles);
     state.inputs.ticks = clampCount("detailed", config.ticks);
     setSegment(elements.viewToggle, config.view);
+    setSegment(elements.layerToggle, config.layer);
     elements.showTicks.checked = Boolean(config.showTicks);
     elements.showBands.checked = Boolean(config.showBands);
     elements.anchorId.value = config.id;
@@ -953,6 +1127,13 @@
     syncControlStates();
     writeQuery();
     status("View updated. Click Load to refresh data.", false);
+  });
+
+  bindSegment(elements.layerToggle, function (value) {
+    setSegment(elements.layerToggle, value);
+    syncControlStates();
+    writeQuery();
+    status("Candle layer updated. Click Load to refresh data.", false);
   });
 
   [elements.countInput, elements.anchorId].forEach(function (control) {

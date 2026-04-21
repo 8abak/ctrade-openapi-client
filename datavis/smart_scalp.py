@@ -238,7 +238,7 @@ class SmartScalpService:
             "mode": "live",
             "run": "run",
             "enabled": False,
-            "reason": "Smart entry requires the Live, Separation, or Backbone chart in Live + Run. Smart Close remains server-side.",
+            "reason": "Smart entry requires the Live or Backbone chart in Live + Run. Smart Close remains server-side.",
             "updatedAtMs": _now_ms(),
         }
 
@@ -310,8 +310,8 @@ class SmartScalpService:
             normalized_page = (page or "live").strip().lower() or "live"
             normalized_mode = (mode or "live").strip().lower() or "live"
             normalized_run = (run or "stop").strip().lower() or "stop"
-            enabled = normalized_page in {"live", "separation", "backbone"} and normalized_mode == "live" and normalized_run == "run"
-            reason = "" if enabled else "Smart entry is available only on the Live, Separation, or Backbone chart in Live + Run."
+            enabled = normalized_page in {"live", "backbone"} and normalized_mode == "live" and normalized_run == "run"
+            reason = "" if enabled else "Smart entry is available only on the Live or Backbone chart in Live + Run."
             self._context = {
                 "page": normalized_page,
                 "mode": normalized_mode,

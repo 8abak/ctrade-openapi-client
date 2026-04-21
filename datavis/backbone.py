@@ -15,15 +15,16 @@ import psycopg2
 import psycopg2.extras
 from dotenv import load_dotenv
 
+from datavis.brokerday import brokerday_bounds, brokerday_for_timestamp, tick_mid
 from datavis.db import db_connect as shared_db_connect
-from datavis.separation import brokerday_bounds, brokerday_for_timestamp, tick_mid
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
-BACKBONE_VERSION = 1
+BACKBONE_VERSION = 2
 BACKBONE_SOURCE = "adaptivehysteresis"
+BIGBONES_SOURCE = "adaptivehysteresis.bigbones"
 DEFAULT_SYMBOL = os.getenv("DATAVIS_SYMBOL", "XAUUSD").strip().upper() or "XAUUSD"
 
 SPREAD_SPAN = 100
@@ -322,7 +323,24 @@ def fetch_ticks_after_for_day(conn: Any, *, symbol: str, dayref: DayRef, after_i
         return [dict(row) for row in cur.fetchall()]
 
 
-def load_state_row(conn: Any, *, symbol: str, dayid: int) -> Optional[Dict[str, Any]]:
+def fetch_day_latest_move(conn: Any, *, dayref: DayRef, source: str) -> Optional[Dict[str, Any]]:
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT endtickid, endtime
+            FROM public.backbonemoves
+            WHERE dayid = %s
+              AND source = %s
+            ORDER BY endtickid DESC, id DESC
+            LIMIT 1
+            """,
+            (dayref.dayid, source),
+        )
+        row = cur.fetchone()
+    return dict(row) if row else None
+
+
+def load_state_row(conn: Any, *, symbol: str, dayid: int, source: str = BACKBONE_SOURCE) -> Optional[Dict[str, Any]]:
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             """
@@ -330,17 +348,26 @@ def load_state_row(conn: Any, *, symbol: str, dayid: int) -> Optional[Dict[str, 
             FROM public.backbonestate
             WHERE symbol = %s
               AND dayid = %s
+              AND source = %s
             ORDER BY id DESC
             LIMIT 1
             """,
-            (symbol, dayid),
+            (symbol, dayid, source),
         )
         row = cur.fetchone()
     return dict(row) if row else None
 
 
-def delete_day(conn: Any, *, dayid: int, symbol: str) -> None:
+def delete_day(conn: Any, *, dayid: int, symbol: str, source: Optional[str] = None) -> None:
     with conn.cursor() as cur:
+        if source:
+            cur.execute(
+                "DELETE FROM public.backbonestate WHERE symbol = %s AND dayid = %s AND source = %s",
+                (symbol, dayid, source),
+            )
+            cur.execute("DELETE FROM public.backbonemoves WHERE dayid = %s AND source = %s", (dayid, source))
+            cur.execute("DELETE FROM public.backbonepivots WHERE dayid = %s AND source = %s", (dayid, source))
+            return
         cur.execute("DELETE FROM public.backbonestate WHERE symbol = %s AND dayid = %s", (symbol, dayid))
         cur.execute("DELETE FROM public.backbonemoves WHERE dayid = %s", (dayid,))
         cur.execute("DELETE FROM public.backbonepivots WHERE dayid = %s", (dayid,))
@@ -451,16 +478,31 @@ class EwmStdTracker:
         return math.sqrt(max(0.0, float(self.variance)))
 
 
-def normalize_tick_batch(rows: Sequence[Dict[str, Any]], *, previous_spread: Optional[float]) -> List[Dict[str, Any]]:
+def normalize_input_batch(
+    rows: Sequence[Dict[str, Any]],
+    *,
+    previous_spread: Optional[float],
+    input_kind: str,
+) -> List[Dict[str, Any]]:
     prepared: List[Dict[str, Any]] = []
     raw_spreads: List[Optional[float]] = []
     last_valid = _safe_float(previous_spread)
     for row in rows:
         item = dict(row)
-        item["_midvalue"] = _safe_float(item.get("mid"))
-        if item["_midvalue"] is None:
-            item["_midvalue"] = _safe_float(tick_mid(item))
-        spread = _derive_spread(item)
+        if input_kind == "backbone_moves":
+            item["_pointid"] = int(item.get("endtickid") or 0) or None
+            item["_pointtime"] = item.get("endtime")
+            item["_midvalue"] = _safe_float(item.get("endprice"))
+            spread = _safe_float(item.get("thresholdatconfirm"))
+            if spread is None:
+                spread = abs(_safe_float(item.get("pricedelta")) or 0.0) or None
+        else:
+            item["_pointid"] = int(item.get("id") or 0) or None
+            item["_pointtime"] = item.get("timestamp")
+            item["_midvalue"] = _safe_float(item.get("mid"))
+            if item["_midvalue"] is None:
+                item["_midvalue"] = _safe_float(tick_mid(item))
+            spread = _derive_spread(item)
         raw_spreads.append(spread)
         prepared.append(item)
 
@@ -486,8 +528,10 @@ def normalize_tick_batch(rows: Sequence[Dict[str, Any]], *, previous_spread: Opt
 
 
 class BackboneEngine:
-    def __init__(self, *, symbol: str) -> None:
+    def __init__(self, *, symbol: str, source: str, input_kind: str) -> None:
         self.symbol = symbol
+        self.source = source
+        self.input_kind = input_kind
         self.abs_window = RollingPercentileWindow(window=NOISE_WINDOW, quantile=0.80, min_periods=ABS_DELTA_MIN_PERIODS)
         self.spread_ema = EmaTracker(span=SPREAD_SPAN)
         self.threshold_ema = EmaTracker(span=THRESHOLD_SMOOTH_SPAN)
@@ -575,6 +619,7 @@ class BackboneEngine:
         payload = {
             "dayid": self.dayref.dayid,
             "symbol": self.symbol,
+            "source": self.source,
             "lastprocessedtickid": self.lastprocessedtickid,
             "confirmedpivottickid": self.confirmedpivot.tickid if self.confirmedpivot else None,
             "confirmedpivottime": self.confirmedpivot.ticktime if self.confirmedpivot else None,
@@ -589,6 +634,7 @@ class BackboneEngine:
                 {
                     "engineVersion": BACKBONE_VERSION,
                     "brokerday": self.dayref.brokerday.isoformat(),
+                    "inputKind": self.input_kind,
                     "processedtickcount": self.processedtickcount,
                     "prevmid": self.prevmid,
                     "lastvalidspread": self.lastvalidspread,
@@ -607,7 +653,7 @@ class BackboneEngine:
     def process_rows(self, rows: Sequence[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         pivots: List[Dict[str, Any]] = []
         moves: List[Dict[str, Any]] = []
-        for row in normalize_tick_batch(rows, previous_spread=self.lastvalidspread):
+        for row in normalize_input_batch(rows, previous_spread=self.lastvalidspread, input_kind=self.input_kind):
             row_pivots, row_moves = self.process_tick(row)
             pivots.extend(row_pivots)
             moves.extend(row_moves)
@@ -625,8 +671,8 @@ class BackboneEngine:
                 endtime=brokerday_bounds(brokerday_for_timestamp(timestamp))[1],
             )
 
-        tickid = int(row.get("id") or 0)
-        ticktime = row.get("timestamp")
+        tickid = int(row.get("_pointid") or 0)
+        ticktime = row.get("_pointtime")
         if tickid <= 0 or not isinstance(ticktime, datetime):
             return [], []
         ticktime = _as_utc(ticktime)
@@ -708,7 +754,7 @@ class BackboneEngine:
             "price": point.price,
             "pivottype": pivottype,
             "threshold": float(threshold),
-            "source": BACKBONE_SOURCE,
+            "source": self.source,
         }
 
     def _move_row(self, start: BackbonePoint, end: BackbonePoint, *, direction: str, threshold: float) -> Dict[str, Any]:
@@ -724,7 +770,7 @@ class BackboneEngine:
             "pricedelta": float(end.price - start.price),
             "tickcount": max(1, int(end.index - start.index + 1)),
             "thresholdatconfirm": float(threshold),
-            "source": BACKBONE_SOURCE,
+            "source": self.source,
         }
 
 
@@ -786,18 +832,18 @@ def upsert_state(conn: Any, state_row: Optional[Dict[str, Any]]) -> None:
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO public.backbonestate (
-                dayid, symbol, lastprocessedtickid,
+                INSERT INTO public.backbonestate (
+                dayid, symbol, source, lastprocessedtickid,
                 confirmedpivottickid, confirmedpivottime, confirmedpivotprice,
                 direction, candidateextremetickid, candidateextremetime,
                 candidateextremeprice, currentthreshold, statejson, updatedat
             ) VALUES (
-                %(dayid)s, %(symbol)s, %(lastprocessedtickid)s,
+                %(dayid)s, %(symbol)s, %(source)s, %(lastprocessedtickid)s,
                 %(confirmedpivottickid)s, %(confirmedpivottime)s, %(confirmedpivotprice)s,
                 %(direction)s, %(candidateextremetickid)s, %(candidateextremetime)s,
                 %(candidateextremeprice)s, %(currentthreshold)s, %(statejson)s, %(updatedat)s
             )
-            ON CONFLICT (dayid, symbol)
+            ON CONFLICT (dayid, symbol, source)
             DO UPDATE SET
                 lastprocessedtickid = EXCLUDED.lastprocessedtickid,
                 confirmedpivottickid = EXCLUDED.confirmedpivottickid,
@@ -819,42 +865,93 @@ class BackboneLiveRuntime:
     def __init__(self, *, symbol: str, batch_size: int = 400) -> None:
         self.symbol = symbol
         self.batch_size = max(1, int(batch_size))
-        self.engine = BackboneEngine(symbol=symbol)
+        self.backbone_engine = BackboneEngine(symbol=symbol, source=BACKBONE_SOURCE, input_kind="ticks")
+        self.bigbones_engine = BackboneEngine(symbol=symbol, source=BIGBONES_SOURCE, input_kind="backbone_moves")
 
     def bootstrap(self, conn: Any) -> Dict[str, Any]:
         dayref = resolve_current_day_ref(conn, symbol=self.symbol)
         if dayref is None:
-            self.engine.reset()
-            return {"dayid": None, "brokerday": None, "tickcount": 0, "pivotcount": 0, "movecount": 0}
+            self.backbone_engine.reset()
+            self.bigbones_engine.reset()
+            return {
+                "dayid": None,
+                "brokerday": None,
+                "tickcount": 0,
+                "pivotcount": 0,
+                "movecount": 0,
+                "bigbonepivotcount": 0,
+                "bigbonemovecount": 0,
+            }
 
         latest_tick = fetch_day_latest_tick(conn, symbol=self.symbol, dayref=dayref)
-        state_row = load_state_row(conn, symbol=self.symbol, dayid=dayref.dayid)
-        if (
+        latest_backbone_move = fetch_day_latest_move(conn, dayref=dayref, source=BACKBONE_SOURCE)
+        state_row = load_state_row(conn, symbol=self.symbol, dayid=dayref.dayid, source=BACKBONE_SOURCE)
+        bigbones_state_row = load_state_row(conn, symbol=self.symbol, dayid=dayref.dayid, source=BIGBONES_SOURCE)
+        backbone_current = bool(
             latest_tick
             and state_row
-            and self.engine.state_matches_version(state_row)
+            and self.backbone_engine.state_matches_version(state_row)
             and int(state_row.get("lastprocessedtickid") or 0) == int(latest_tick.get("id") or 0)
+        )
+        bigbones_current = False
+        if latest_backbone_move is None:
+            bigbones_current = bigbones_state_row is None or (
+                self.bigbones_engine.state_matches_version(bigbones_state_row)
+                and int(bigbones_state_row.get("lastprocessedtickid") or 0) <= 0
+            )
+        else:
+            bigbones_current = bool(
+                bigbones_state_row
+                and self.bigbones_engine.state_matches_version(bigbones_state_row)
+                and int(bigbones_state_row.get("lastprocessedtickid") or 0) == int(latest_backbone_move.get("endtickid") or 0)
+            )
+        if (
+            backbone_current
+            and bigbones_current
         ):
-            self.engine.restore(dayref=dayref, state_row=state_row)
-            return {"dayid": dayref.dayid, "brokerday": dayref.brokerday, "tickcount": 0, "pivotcount": 0, "movecount": 0}
+            self.backbone_engine.restore(dayref=dayref, state_row=state_row)
+            if bigbones_state_row:
+                self.bigbones_engine.restore(dayref=dayref, state_row=bigbones_state_row)
+            else:
+                self.bigbones_engine.reset(dayref)
+            return {
+                "dayid": dayref.dayid,
+                "brokerday": dayref.brokerday,
+                "tickcount": 0,
+                "pivotcount": 0,
+                "movecount": 0,
+                "bigbonepivotcount": 0,
+                "bigbonemovecount": 0,
+            }
 
-        delete_day(conn, dayid=dayref.dayid, symbol=self.symbol)
-        self.engine.reset(dayref)
+        delete_day(conn, dayid=dayref.dayid, symbol=self.symbol, source=BACKBONE_SOURCE)
+        delete_day(conn, dayid=dayref.dayid, symbol=self.symbol, source=BIGBONES_SOURCE)
+        self.backbone_engine.reset(dayref)
+        self.bigbones_engine.reset(dayref)
 
         tickcount = 0
         pivotcount = 0
         movecount = 0
+        bigbonepivotcount = 0
+        bigbonemovecount = 0
         for batch in iter_ticks_for_day(conn, symbol=self.symbol, dayref=dayref, batch_size=self.batch_size):
             tickcount += len(batch)
-            pivots, moves = self.engine.process_rows(batch)
+            pivots, moves = self.backbone_engine.process_rows(batch)
+            bigbone_pivots, bigbone_moves = self.bigbones_engine.process_rows(moves)
             pivotcount += len(pivots)
             movecount += len(moves)
+            bigbonepivotcount += len(bigbone_pivots)
+            bigbonemovecount += len(bigbone_moves)
             insert_pivots(conn, pivots)
             insert_moves(conn, moves)
-            upsert_state(conn, self.engine.current_state_row())
+            insert_pivots(conn, bigbone_pivots)
+            insert_moves(conn, bigbone_moves)
+            upsert_state(conn, self.backbone_engine.current_state_row())
+            upsert_state(conn, self.bigbones_engine.current_state_row())
 
         if tickcount <= 0:
-            upsert_state(conn, self.engine.current_state_row())
+            upsert_state(conn, self.backbone_engine.current_state_row())
+            upsert_state(conn, self.bigbones_engine.current_state_row())
 
         return {
             "dayid": dayref.dayid,
@@ -862,32 +959,62 @@ class BackboneLiveRuntime:
             "tickcount": tickcount,
             "pivotcount": pivotcount,
             "movecount": movecount,
+            "bigbonepivotcount": bigbonepivotcount,
+            "bigbonemovecount": bigbonemovecount,
         }
 
     def process_once(self, conn: Any) -> Dict[str, Any]:
         dayref = resolve_current_day_ref(conn, symbol=self.symbol)
         if dayref is None:
-            return {"dayid": None, "brokerday": None, "tickcount": 0, "pivotcount": 0, "movecount": 0}
+            return {
+                "dayid": None,
+                "brokerday": None,
+                "tickcount": 0,
+                "pivotcount": 0,
+                "movecount": 0,
+                "bigbonepivotcount": 0,
+                "bigbonemovecount": 0,
+            }
 
-        if self.engine.dayref is None or self.engine.dayref.dayid != dayref.dayid:
+        if (
+            self.backbone_engine.dayref is None
+            or self.bigbones_engine.dayref is None
+            or self.backbone_engine.dayref.dayid != dayref.dayid
+            or self.bigbones_engine.dayref.dayid != dayref.dayid
+        ):
             return self.bootstrap(conn)
 
-        after_id = int(self.engine.lastprocessedtickid or 0)
+        after_id = int(self.backbone_engine.lastprocessedtickid or 0)
         rows = fetch_ticks_after_for_day(conn, symbol=self.symbol, dayref=dayref, after_id=after_id, limit=self.batch_size)
         if not rows:
-            upsert_state(conn, self.engine.current_state_row())
-            return {"dayid": dayref.dayid, "brokerday": dayref.brokerday, "tickcount": 0, "pivotcount": 0, "movecount": 0}
+            upsert_state(conn, self.backbone_engine.current_state_row())
+            upsert_state(conn, self.bigbones_engine.current_state_row())
+            return {
+                "dayid": dayref.dayid,
+                "brokerday": dayref.brokerday,
+                "tickcount": 0,
+                "pivotcount": 0,
+                "movecount": 0,
+                "bigbonepivotcount": 0,
+                "bigbonemovecount": 0,
+            }
 
-        pivots, moves = self.engine.process_rows(rows)
+        pivots, moves = self.backbone_engine.process_rows(rows)
+        bigbone_pivots, bigbone_moves = self.bigbones_engine.process_rows(moves)
         insert_pivots(conn, pivots)
         insert_moves(conn, moves)
-        upsert_state(conn, self.engine.current_state_row())
+        insert_pivots(conn, bigbone_pivots)
+        insert_moves(conn, bigbone_moves)
+        upsert_state(conn, self.backbone_engine.current_state_row())
+        upsert_state(conn, self.bigbones_engine.current_state_row())
         return {
             "dayid": dayref.dayid,
             "brokerday": dayref.brokerday,
             "tickcount": len(rows),
             "pivotcount": len(pivots),
             "movecount": len(moves),
+            "bigbonepivotcount": len(bigbone_pivots),
+            "bigbonemovecount": len(bigbone_moves),
         }
 
 
@@ -926,12 +1053,14 @@ def jobs_main() -> int:
             result = rebuild_current_day(conn, symbol=symbol, batch_size=max(1, int(args.batch_size)))
             conn.commit()
             _print(
-                "brokerday={0} dayid={1} ticks={2} pivots={3} moves={4}".format(
+                "brokerday={0} dayid={1} ticks={2} pivots={3} moves={4} bigbone_pivots={5} bigbone_moves={6}".format(
                     result["brokerday"].isoformat() if result.get("brokerday") else "-",
                     result.get("dayid"),
                     result.get("tickcount"),
                     result.get("pivotcount"),
                     result.get("movecount"),
+                    result.get("bigbonepivotcount"),
+                    result.get("bigbonemovecount"),
                 )
             )
             return 0

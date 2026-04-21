@@ -28,13 +28,12 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
 from datavis.backbone import BACKBONE_SOURCE
+from datavis.backbone import BIGBONES_SOURCE
 from datavis.backbone import load_state_row as load_backbone_state_row
 from datavis.backbone import resolve_current_day_ref as resolve_current_backbone_day_ref
 from datavis.backbone import resolve_day_ref_for_timestamp as resolve_backbone_day_ref_for_timestamp
 from datavis.db import db_connect as shared_db_connect
 from datavis.rects import RectPaperService, RectServiceError
-from datavis.separation import LEVELS as SEPARATION_LEVELS
-from datavis.separation import brokerday_for_timestamp
 from datavis.smart_scalp import SmartScalpError, SmartScalpService
 from datavis.structure import StructureEngine, replay_ticks
 from datavis.trading import CTraderGateway, load_broker_config
@@ -52,13 +51,12 @@ if DATABASE_URL.startswith("postgresql+psycopg2://"):
 TICK_SYMBOL = os.getenv("DATAVIS_SYMBOL", "XAUUSD")
 DEFAULT_WINDOW = int(os.getenv("DATAVIS_WINDOW", "2000"))
 MAX_TICK_WINDOW = int(os.getenv("DATAVIS_MAX_WINDOW", "10000"))
-DEFAULT_SEPARATION_WINDOW = int(os.getenv("DATAVIS_SEPARATION_WINDOW", "160"))
-MAX_SEPARATION_WINDOW = int(os.getenv("DATAVIS_SEPARATION_MAX_WINDOW", "4000"))
 DEFAULT_BACKBONE_REVIEW_WINDOW = int(os.getenv("DATAVIS_BACKBONE_REVIEW_WINDOW", "1200"))
 MAX_BACKBONE_REVIEW_WINDOW = int(os.getenv("DATAVIS_BACKBONE_REVIEW_MAX_WINDOW", "6000"))
 DEFAULT_BACKBONE_CANDLE_COUNT = int(os.getenv("DATAVIS_BACKBONE_CANDLE_COUNT", "35"))
 MAX_BACKBONE_CANDLE_COUNT = int(os.getenv("DATAVIS_BACKBONE_MAX_CANDLES", "400"))
 DEFAULT_BACKBONE_DETAIL_TICKS = int(os.getenv("DATAVIS_BACKBONE_DETAIL_TICKS", "2000"))
+DEFAULT_BACKBONE_LAYER = "backbone"
 DEFAULT_HISTORY_LIMIT = 2000
 DEFAULT_BIGPICTURE_POINTS = 2000
 MAX_BIGPICTURE_POINTS = int(os.getenv("DATAVIS_BIGPICTURE_MAX_POINTS", "2400"))
@@ -112,6 +110,14 @@ STREAM_ACTIVITY_LOCK = threading.Lock()
 STREAM_ACTIVITY_COUNTS: Dict[str, int] = {}
 SQL_SCHEMA_CACHE_LOCK = threading.Lock()
 SQL_SCHEMA_CACHE: Dict[str, Any] = {"expiresAtMs": 0, "payload": None}
+BACKBONE_LAYER_SOURCES = {
+    "backbone": BACKBONE_SOURCE,
+    "bigbones": BIGBONES_SOURCE,
+}
+BACKBONE_LAYER_LABELS = {
+    "backbone": "Backbone",
+    "bigbones": "BigBones",
+}
 
 
 class QueryRequest(BaseModel):
@@ -337,6 +343,11 @@ def serialize_value(value: Any) -> Any:
     if isinstance(value, (bytes, bytearray, memoryview)):
         return value.hex()
     return value
+
+
+def normalize_backbone_layer(layer: Optional[str]) -> str:
+    normalized = str(layer or DEFAULT_BACKBONE_LAYER).strip().lower()
+    return normalized if normalized in BACKBONE_LAYER_SOURCES else DEFAULT_BACKBONE_LAYER
 
 
 def serialize_tick_row(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -1547,602 +1558,6 @@ def load_previous_payload(
     return payload
 
 
-def normalize_separation_levels(levels: str, show_all: bool) -> List[str]:
-    if show_all:
-        return list(SEPARATION_LEVELS)
-    requested = [part.strip().lower() for part in str(levels or "").split(",") if part.strip()]
-    filtered = [level for level in requested if level in SEPARATION_LEVELS]
-    return filtered or list(SEPARATION_LEVELS)
-
-
-def separation_segment_columns() -> str:
-    return (
-        "id, symbol, brokerday, level, status, sourcemode, starttickid, endtickid, "
-        "starttime, endtime, startprice, endprice, highprice, lowprice, tickcount, "
-        "netmove, rangeprice, pathlength, efficiency, thickness, direction, shapetype, "
-        "angle, unitprice, version, createdat, updatedat"
-    )
-
-
-def query_current_separation_brokerday(cur: Any) -> Optional[date]:
-    latest = query_latest_tick(cur)
-    latest_timestamp = latest.get("timestamp") if latest else None
-    if latest_timestamp is None:
-        return None
-    return brokerday_for_timestamp(latest_timestamp)
-
-
-def query_separation_bounds(
-    cur: Any,
-    *,
-    levels: List[str],
-    include_open: bool,
-    brokerday: Optional[date] = None,
-) -> Dict[str, Any]:
-    where = [
-        "symbol = %s",
-        "level = ANY(%s)",
-    ]
-    params: List[Any] = [TICK_SYMBOL, levels]
-    if not include_open:
-        where.append("status = 'closed'")
-    if brokerday is not None:
-        where.append("brokerday = %s")
-        params.append(brokerday)
-    cur.execute(
-        """
-        SELECT
-            MIN(starttickid) AS first_id,
-            MAX(endtickid) AS last_id,
-            MIN(starttime) AS first_timestamp,
-            MAX(endtime) AS last_timestamp
-        FROM public.separationsegments
-        WHERE {where_sql}
-        """.format(where_sql=" AND ".join(where)),
-        tuple(params),
-    )
-    return dict(cur.fetchone() or {})
-
-
-def query_live_separation_segments(
-    cur: Any,
-    *,
-    levels: List[str],
-    window: int,
-    include_open: bool,
-) -> tuple[Optional[date], List[Dict[str, Any]], Dict[str, Any]]:
-    brokerday = query_current_separation_brokerday(cur)
-    if brokerday is None:
-        return None, [], {"first_id": None, "last_id": None, "first_timestamp": None, "last_timestamp": None}
-    select_sql = separation_segment_columns()
-    cur.execute(
-        """
-        SELECT {select_sql}
-        FROM (
-            SELECT {select_sql}
-            FROM public.separationsegments
-            WHERE symbol = %s
-              AND brokerday = %s
-              AND level = ANY(%s)
-              AND (%s OR status = 'closed')
-            ORDER BY endtickid DESC, starttickid DESC, id DESC
-            LIMIT %s
-        ) recent
-        ORDER BY endtickid ASC, starttickid ASC, id ASC
-        """.format(select_sql=select_sql),
-        (TICK_SYMBOL, brokerday, levels, include_open, window),
-    )
-    rows = [dict(row) for row in cur.fetchall()]
-    bounds = query_separation_bounds(cur, levels=levels, include_open=include_open, brokerday=brokerday)
-    return brokerday, rows, bounds
-
-
-def query_review_separation_segments(
-    cur: Any,
-    *,
-    start_id: int,
-    window: int,
-    levels: List[str],
-    include_open: bool,
-) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    select_sql = separation_segment_columns()
-    cur.execute(
-        """
-        SELECT {select_sql}
-        FROM public.separationsegments
-        WHERE symbol = %s
-          AND endtickid >= %s
-          AND level = ANY(%s)
-          AND (%s OR status = 'closed')
-        ORDER BY endtickid ASC, starttickid ASC, id ASC
-        LIMIT %s
-        """.format(select_sql=select_sql),
-        (TICK_SYMBOL, start_id, levels, include_open, window),
-    )
-    rows = [dict(row) for row in cur.fetchall()]
-    bounds = query_separation_bounds(cur, levels=levels, include_open=include_open)
-    return rows, bounds
-
-
-def query_separation_segments_after(
-    cur: Any,
-    *,
-    after_id: int,
-    limit: int,
-    levels: List[str],
-    include_open: bool,
-    end_id: Optional[int] = None,
-) -> List[Dict[str, Any]]:
-    select_sql = separation_segment_columns()
-    if end_id is None:
-        cur.execute(
-            """
-            SELECT {select_sql}
-            FROM public.separationsegments
-            WHERE symbol = %s
-              AND endtickid > %s
-              AND level = ANY(%s)
-              AND (%s OR status = 'closed')
-            ORDER BY endtickid ASC, starttickid ASC, id ASC
-            LIMIT %s
-            """.format(select_sql=select_sql),
-            (TICK_SYMBOL, after_id, levels, include_open, limit),
-        )
-    else:
-        cur.execute(
-            """
-            SELECT {select_sql}
-            FROM public.separationsegments
-            WHERE symbol = %s
-              AND endtickid > %s
-              AND endtickid <= %s
-              AND level = ANY(%s)
-              AND (%s OR status = 'closed')
-            ORDER BY endtickid ASC, starttickid ASC, id ASC
-            LIMIT %s
-            """.format(select_sql=select_sql),
-            (TICK_SYMBOL, after_id, end_id, levels, include_open, limit),
-        )
-    return [dict(row) for row in cur.fetchall()]
-
-
-def query_separation_segments_before(
-    cur: Any,
-    *,
-    before_id: int,
-    limit: int,
-    levels: List[str],
-    include_open: bool,
-) -> List[Dict[str, Any]]:
-    select_sql = separation_segment_columns()
-    cur.execute(
-        """
-        SELECT {select_sql}
-        FROM (
-            SELECT {select_sql}
-            FROM public.separationsegments
-            WHERE symbol = %s
-              AND endtickid < %s
-              AND level = ANY(%s)
-              AND (%s OR status = 'closed')
-            ORDER BY endtickid DESC, starttickid DESC, id DESC
-            LIMIT %s
-        ) older
-        ORDER BY endtickid ASC, starttickid ASC, id ASC
-        """.format(select_sql=select_sql),
-        (TICK_SYMBOL, before_id, levels, include_open, limit),
-    )
-    return [dict(row) for row in cur.fetchall()]
-
-
-def serialize_separation_segment_row(row: Dict[str, Any]) -> Dict[str, Any]:
-    starttime = row.get("starttime")
-    endtime = row.get("endtime")
-    return {
-        "id": int(row["id"]),
-        "symbol": row.get("symbol", TICK_SYMBOL),
-        "brokerday": serialize_value(row.get("brokerday")),
-        "level": row.get("level"),
-        "status": row.get("status"),
-        "sourcemode": row.get("sourcemode"),
-        "starttickid": int(row.get("starttickid") or 0),
-        "endtickid": int(row.get("endtickid") or 0),
-        "starttime": serialize_value(starttime),
-        "endtime": serialize_value(endtime),
-        "starttimeMs": dt_to_ms(starttime),
-        "endtimeMs": dt_to_ms(endtime),
-        "startprice": float(row.get("startprice") or 0.0),
-        "endprice": float(row.get("endprice") or 0.0),
-        "highprice": float(row.get("highprice") or 0.0),
-        "lowprice": float(row.get("lowprice") or 0.0),
-        "tickcount": int(row.get("tickcount") or 0),
-        "netmove": float(row.get("netmove") or 0.0),
-        "rangeprice": float(row.get("rangeprice") or 0.0),
-        "pathlength": float(row.get("pathlength") or 0.0),
-        "efficiency": float(row.get("efficiency") or 0.0),
-        "thickness": float(row.get("thickness") or 0.0),
-        "direction": row.get("direction"),
-        "shapetype": row.get("shapetype"),
-        "angle": float(row.get("angle") or 0.0),
-        "unitprice": float(row.get("unitprice") or 0.0),
-        "version": int(row.get("version") or 0),
-        "durationMs": max(0, (dt_to_ms(endtime) or 0) - (dt_to_ms(starttime) or 0)),
-    }
-
-
-def serialize_separation_segment_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    return [serialize_separation_segment_row(row) for row in rows]
-
-
-def build_separation_payload(
-    *,
-    mode: str,
-    window: int,
-    levels: List[str],
-    segments: List[Dict[str, Any]],
-    tick_rows: List[Dict[str, Any]],
-    bounds: Dict[str, Any],
-    brokerday: Optional[date],
-    review_end_id: Optional[int],
-    review_end_timestamp: Optional[datetime],
-    include_open: bool,
-    show_ticks: bool,
-    fetch_ms: float,
-) -> Dict[str, Any]:
-    serialize_started = time.perf_counter()
-    first_segment = segments[0] if segments else None
-    last_segment = segments[-1] if segments else None
-    first_id = int(first_segment["starttickid"]) if first_segment and first_segment.get("starttickid") is not None else None
-    last_id = int(last_segment["endtickid"]) if last_segment and last_segment.get("endtickid") is not None else None
-    payload = {
-        "segments": serialize_separation_segment_rows(segments),
-        "itemCount": len(segments),
-        "rows": serialize_tick_rows(tick_rows) if show_ticks else [],
-        "rowCount": len(tick_rows) if show_ticks else 0,
-        "firstId": first_id,
-        "lastId": last_id,
-        "firstTimestamp": serialize_value(first_segment.get("starttime") if first_segment else None),
-        "lastTimestamp": serialize_value(last_segment.get("endtime") if last_segment else None),
-        "firstTimestampMs": dt_to_ms(first_segment.get("starttime") if first_segment else None),
-        "lastTimestampMs": dt_to_ms(last_segment.get("endtime") if last_segment else None),
-        "mode": mode,
-        "window": window,
-        "symbol": TICK_SYMBOL,
-        "brokerday": serialize_value(brokerday),
-        "levels": levels,
-        "includeOpen": include_open,
-        "reviewEndId": review_end_id,
-        "reviewEndTimestamp": serialize_value(review_end_timestamp),
-        "hasMoreLeft": bool(bounds.get("first_id") and first_id and first_id > bounds["first_id"]),
-        "endReached": bool(mode == "review" and review_end_id is not None and last_id is not None and last_id >= review_end_id),
-    }
-    payload["metrics"] = serialize_metrics_payload(
-        fetch_ms=fetch_ms,
-        serialize_ms=elapsed_ms(serialize_started),
-        latest_row=tick_rows[-1] if tick_rows else query_like_tick_from_segment(last_segment),
-    )
-    return payload
-
-
-def query_like_tick_from_segment(segment: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    if not segment:
-        return None
-    return {"id": segment.get("endtickid"), "timestamp": segment.get("endtime")}
-
-
-def load_separation_bootstrap_payload(
-    *,
-    mode: str,
-    start_id: Optional[int],
-    window: int,
-    levels: List[str],
-    include_open: bool,
-    show_ticks: bool,
-) -> Dict[str, Any]:
-    effective_window = clamp_int(window, 1, MAX_SEPARATION_WINDOW)
-    fetch_started = time.perf_counter()
-    with db_connection(readonly=True) as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            if mode == "live":
-                brokerday, segments, bounds = query_live_separation_segments(
-                    cur,
-                    levels=levels,
-                    window=effective_window,
-                    include_open=include_open,
-                )
-            else:
-                if start_id is None:
-                    raise HTTPException(status_code=400, detail="Review mode requires an id value.")
-                brokerday = None
-                segments, bounds = query_review_separation_segments(
-                    cur,
-                    start_id=start_id,
-                    window=effective_window,
-                    levels=levels,
-                    include_open=include_open,
-                )
-            tick_rows = []
-            if show_ticks and segments:
-                tick_rows = query_rows_between(
-                    cur,
-                    int(segments[0]["starttickid"]),
-                    int(segments[-1]["endtickid"]),
-                    MAX_TICK_WINDOW,
-                )
-            tick_bounds = query_tick_bounds(cur)
-            review_end_id = tick_bounds.get("last_id") if mode == "review" else None
-            review_end_timestamp = tick_bounds.get("last_timestamp") if mode == "review" else None
-    return build_separation_payload(
-        mode=mode,
-        window=effective_window,
-        levels=levels,
-        segments=segments,
-        tick_rows=tick_rows,
-        bounds=bounds,
-        brokerday=brokerday,
-        review_end_id=review_end_id,
-        review_end_timestamp=review_end_timestamp,
-        include_open=include_open,
-        show_ticks=show_ticks,
-        fetch_ms=elapsed_ms(fetch_started),
-    )
-
-
-def load_separation_next_payload(
-    *,
-    after_id: int,
-    limit: int,
-    end_id: Optional[int],
-    levels: List[str],
-    include_open: bool,
-    show_ticks: bool,
-) -> Dict[str, Any]:
-    effective_limit = clamp_int(limit, 1, MAX_STREAM_BATCH)
-    fetch_started = time.perf_counter()
-    with db_connection(readonly=True) as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            segments = query_separation_segments_after(
-                cur,
-                after_id=after_id,
-                limit=effective_limit,
-                levels=levels,
-                include_open=include_open,
-                end_id=end_id,
-            )
-            tick_rows = query_rows_after(cur, after_id, effective_limit, end_id=end_id) if show_ticks else []
-    last_id = after_id
-    if segments:
-        last_id = max(last_id, max(int(row.get("endtickid") or 0) for row in segments))
-    if tick_rows:
-        last_id = max(last_id, int(tick_rows[-1]["id"]))
-    return {
-        "segments": serialize_separation_segment_rows(segments),
-        "itemCount": len(segments),
-        "rows": serialize_tick_rows(tick_rows) if show_ticks else [],
-        "rowCount": len(tick_rows) if show_ticks else 0,
-        "lastId": last_id,
-        "endId": end_id,
-        "endReached": bool(end_id is not None and last_id >= end_id),
-        "levels": levels,
-        "includeOpen": include_open,
-        "metrics": serialize_metrics_payload(
-            fetch_ms=elapsed_ms(fetch_started),
-            serialize_ms=0.0,
-            latest_row=(tick_rows[-1] if tick_rows else query_like_tick_from_segment(segments[-1] if segments else None)),
-        ),
-    }
-
-
-def load_separation_previous_payload(
-    *,
-    before_id: int,
-    limit: int,
-    levels: List[str],
-    include_open: bool,
-    show_ticks: bool,
-) -> Dict[str, Any]:
-    effective_limit = clamp_int(limit, 1, MAX_SEPARATION_WINDOW)
-    fetch_started = time.perf_counter()
-    with db_connection(readonly=True) as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            segments = query_separation_segments_before(
-                cur,
-                before_id=before_id,
-                limit=effective_limit,
-                levels=levels,
-                include_open=include_open,
-            )
-            bounds = query_separation_bounds(cur, levels=levels, include_open=include_open)
-            tick_rows = []
-            if show_ticks and segments:
-                tick_rows = query_rows_between(
-                    cur,
-                    int(segments[0]["starttickid"]),
-                    int(segments[-1]["endtickid"]),
-                    MAX_TICK_WINDOW,
-                )
-    first_id = int(segments[0]["starttickid"]) if segments else None
-    last_id = int(segments[-1]["endtickid"]) if segments else None
-    return {
-        "segments": serialize_separation_segment_rows(segments),
-        "itemCount": len(segments),
-        "rows": serialize_tick_rows(tick_rows) if show_ticks else [],
-        "rowCount": len(tick_rows) if show_ticks else 0,
-        "firstId": first_id,
-        "lastId": last_id,
-        "beforeId": before_id,
-        "hasMoreLeft": bool(bounds.get("first_id") and first_id and first_id > bounds["first_id"]),
-        "levels": levels,
-        "includeOpen": include_open,
-        "metrics": serialize_metrics_payload(
-            fetch_ms=elapsed_ms(fetch_started),
-            serialize_ms=0.0,
-            latest_row=(tick_rows[-1] if tick_rows else query_like_tick_from_segment(segments[-1] if segments else None)),
-        ),
-    }
-
-
-def stream_separation_events(
-    *,
-    after_id: int,
-    limit: int,
-    levels: List[str],
-    include_open: bool,
-    show_ticks: bool,
-) -> Generator[str, None, None]:
-    last_id = max(0, after_id)
-    effective_limit = clamp_int(limit, 1, MAX_STREAM_BATCH)
-    last_heartbeat = time.monotonic()
-    idle_sleep = STREAM_POLL_SECONDS
-    try:
-        with db_connection(readonly=True, autocommit=True) as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                while True:
-                    fetch_started = time.perf_counter()
-                    segments = query_separation_segments_after(
-                        cur,
-                        after_id=last_id,
-                        limit=effective_limit,
-                        levels=levels,
-                        include_open=include_open,
-                    )
-                    tick_rows = query_rows_after(cur, last_id, effective_limit) if show_ticks else []
-                    fetch_ms = elapsed_ms(fetch_started)
-                    if segments or tick_rows:
-                        last_id = max(
-                            last_id,
-                            max((int(row.get("endtickid") or 0) for row in segments), default=last_id),
-                            max((int(row.get("id") or 0) for row in tick_rows), default=last_id),
-                        )
-                        payload = {
-                            "segmentUpdates": serialize_separation_segment_rows(segments),
-                            "itemCount": len(segments),
-                            "rows": serialize_tick_rows(tick_rows) if show_ticks else [],
-                            "rowCount": len(tick_rows) if show_ticks else 0,
-                            "lastId": last_id,
-                            "streamMode": "delta",
-                            "levels": levels,
-                            "includeOpen": include_open,
-                            **serialize_metrics_payload(
-                                fetch_ms=fetch_ms,
-                                serialize_ms=0.0,
-                                latest_row=(tick_rows[-1] if tick_rows else query_like_tick_from_segment(segments[-1] if segments else None)),
-                            ),
-                        }
-                        yield format_sse(payload)
-                        last_heartbeat = time.monotonic()
-                        idle_sleep = STREAM_POLL_SECONDS
-                        continue
-
-                    now = time.monotonic()
-                    if now - last_heartbeat >= STREAM_HEARTBEAT_SECONDS:
-                        latest_row = query_latest_tick(cur)
-                        payload = {
-                            "segmentUpdates": [],
-                            "itemCount": 0,
-                            "rows": [],
-                            "rowCount": 0,
-                            "lastId": last_id,
-                            "streamMode": "heartbeat",
-                            "levels": levels,
-                            "includeOpen": include_open,
-                            **serialize_metrics_payload(fetch_ms=fetch_ms, serialize_ms=0.0, latest_row=latest_row),
-                        }
-                        yield format_sse(payload, event_name="heartbeat")
-                        last_heartbeat = now
-                    time.sleep(idle_sleep)
-                    idle_sleep = STREAM_IDLE_POLL_SECONDS
-    except GeneratorExit:
-        return
-
-
-def stream_separation_review_events(
-    *,
-    after_id: int,
-    end_id: int,
-    speed: float,
-    levels: List[str],
-    include_open: bool,
-    show_ticks: bool,
-) -> Generator[str, None, None]:
-    last_id = max(0, after_id)
-    effective_batch = clamp_int(REVIEW_STREAM_BATCH, 1, MAX_STREAM_BATCH)
-    speed_multiplier = max(0.1, float(speed or 1.0))
-    previous_time_ms: Optional[int] = None
-    try:
-        with db_connection(readonly=True, autocommit=True) as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                while last_id < end_id:
-                    fetch_started = time.perf_counter()
-                    batch_segments = query_separation_segments_after(
-                        cur,
-                        after_id=last_id,
-                        limit=effective_batch,
-                        levels=levels,
-                        include_open=include_open,
-                        end_id=end_id,
-                    )
-                    fetch_ms = elapsed_ms(fetch_started)
-                    if not batch_segments:
-                        latest_row = query_latest_tick(cur)
-                        yield format_sse(
-                            {
-                                "segmentUpdates": [],
-                                "itemCount": 0,
-                                "rows": [],
-                                "rowCount": 0,
-                                "lastId": last_id,
-                                "endId": end_id,
-                                "endReached": True,
-                                "streamMode": "complete",
-                                "levels": levels,
-                                "includeOpen": include_open,
-                                **serialize_metrics_payload(fetch_ms=fetch_ms, serialize_ms=0.0, latest_row=latest_row),
-                            }
-                        )
-                        return
-
-                    grouped: Dict[int, List[Dict[str, Any]]] = {}
-                    for segment in batch_segments:
-                        grouped.setdefault(int(segment.get("endtickid") or 0), []).append(segment)
-
-                    for group_end_id in sorted(grouped):
-                        group = grouped[group_end_id]
-                        group_time_ms = max((dt_to_ms(item.get("endtime")) or 0) for item in group)
-                        delay_ms = 0
-                        if previous_time_ms is not None and group_time_ms:
-                            delta_ms = max(0, group_time_ms - previous_time_ms)
-                            delay_ms = min(REVIEW_MAX_DELAY_MS, int(round(delta_ms / speed_multiplier)))
-                        if delay_ms > 0:
-                            time.sleep(max(REVIEW_MIN_DELAY_MS, delay_ms) / 1000.0)
-                        tick_rows = query_rows_between(cur, last_id + 1, group_end_id, MAX_STREAM_BATCH) if show_ticks else []
-                        last_id = max(last_id, group_end_id)
-                        previous_time_ms = group_time_ms or previous_time_ms
-                        yield format_sse(
-                            {
-                                "segmentUpdates": serialize_separation_segment_rows(group),
-                                "itemCount": len(group),
-                                "rows": serialize_tick_rows(tick_rows) if show_ticks else [],
-                                "rowCount": len(tick_rows) if show_ticks else 0,
-                                "lastId": last_id,
-                                "endId": end_id,
-                                "endReached": bool(last_id >= end_id),
-                                "streamMode": "delta",
-                                "levels": levels,
-                                "includeOpen": include_open,
-                                "playbackDelayMs": delay_ms,
-                                **serialize_metrics_payload(
-                                    fetch_ms=fetch_ms,
-                                    serialize_ms=0.0,
-                                    latest_row=(tick_rows[-1] if tick_rows else query_like_tick_from_segment(group[-1])),
-                                ),
-                            }
-                        )
-                        if last_id >= end_id:
-                            return
-    except GeneratorExit:
-        return
-
 
 def backbone_pivot_columns() -> str:
     return "id, dayid, tickid, ticktime, price, pivottype, threshold, source, createdat"
@@ -2162,6 +1577,7 @@ def serialize_backbone_state_row(row: Optional[Dict[str, Any]], *, brokerday: Op
     return {
         "dayId": int(day_id or row.get("dayid") or 0) or None,
         "brokerday": serialize_value(brokerday),
+        "source": row.get("source") or BACKBONE_SOURCE,
         "lastProcessedTickId": int(row.get("lastprocessedtickid") or 0) or None,
         "confirmedPivotTickId": int(row.get("confirmedpivottickid") or 0) or None,
         "confirmedPivotTime": serialize_value(row.get("confirmedpivottime")),
@@ -2255,44 +1671,59 @@ def serialize_backbone_candle_rows(rows: List[Dict[str, Any]]) -> List[Dict[str,
     return [serialize_backbone_candle_row(row) for row in rows]
 
 
-def query_backbone_item_count(cur: Any, *, table_name: str, day_id: int) -> int:
+def query_backbone_item_count(cur: Any, *, table_name: str, day_id: int, source: str = BACKBONE_SOURCE) -> int:
     if table_name not in {"backbonepivots", "backbonemoves"}:
         raise ValueError("Unsupported backbone table.")
     cur.execute(
-        "SELECT COUNT(*) AS row_count FROM public.{table_name} WHERE dayid = %s".format(table_name=table_name),
-        (day_id,),
+        "SELECT COUNT(*) AS row_count FROM public.{table_name} WHERE dayid = %s AND source = %s".format(table_name=table_name),
+        (day_id, source),
     )
     row = dict(cur.fetchone() or {})
     return int(row.get("row_count") or 0)
 
 
-def query_backbone_last_pivot_before(cur: Any, *, day_id: int, before_tick_id: int) -> Optional[Dict[str, Any]]:
+def query_backbone_last_pivot_before(
+    cur: Any,
+    *,
+    day_id: int,
+    before_tick_id: int,
+    source: str = BACKBONE_SOURCE,
+) -> Optional[Dict[str, Any]]:
     cur.execute(
         """
         SELECT {select_sql}
         FROM public.backbonepivots
         WHERE dayid = %s
+          AND source = %s
           AND tickid < %s
         ORDER BY tickid DESC, id DESC
         LIMIT 1
         """.format(select_sql=backbone_pivot_columns()),
-        (day_id, before_tick_id),
+        (day_id, source, before_tick_id),
     )
     row = cur.fetchone()
     return dict(row) if row else None
 
 
-def query_backbone_pivots_in_range(cur: Any, *, day_id: int, start_id: int, end_id: int) -> List[Dict[str, Any]]:
+def query_backbone_pivots_in_range(
+    cur: Any,
+    *,
+    day_id: int,
+    start_id: int,
+    end_id: int,
+    source: str = BACKBONE_SOURCE,
+) -> List[Dict[str, Any]]:
     cur.execute(
         """
         SELECT {select_sql}
         FROM public.backbonepivots
         WHERE dayid = %s
+          AND source = %s
           AND tickid >= %s
           AND tickid <= %s
         ORDER BY tickid ASC, id ASC
         """.format(select_sql=backbone_pivot_columns()),
-        (day_id, start_id, end_id),
+        (day_id, source, start_id, end_id),
     )
     return [dict(row) for row in cur.fetchall()]
 
@@ -2341,6 +1772,7 @@ def query_backbone_candles(
     *,
     day_id: int,
     limit: int,
+    source: str,
     start_id: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     select_sql = backbone_move_columns()
@@ -2355,6 +1787,7 @@ def query_backbone_candles(
                 SELECT {select_sql}
                 FROM public.backbonemoves
                 WHERE dayid = %s
+                  AND source = %s
                 ORDER BY endtickid DESC, id DESC
                 LIMIT %s
             ) m
@@ -2369,7 +1802,7 @@ def query_backbone_candles(
             ) agg ON TRUE
             ORDER BY m.endtickid ASC, m.id ASC
             """.format(select_sql=select_sql),
-            (day_id, limit, TICK_SYMBOL),
+            (day_id, source, limit, TICK_SYMBOL),
         )
     else:
         cur.execute(
@@ -2382,6 +1815,7 @@ def query_backbone_candles(
                 SELECT {select_sql}
                 FROM public.backbonemoves
                 WHERE dayid = %s
+                  AND source = %s
                   AND endtickid >= %s
                 ORDER BY endtickid ASC, id ASC
                 LIMIT %s
@@ -2397,21 +1831,35 @@ def query_backbone_candles(
             ) agg ON TRUE
             ORDER BY m.endtickid ASC, m.id ASC
             """.format(select_sql=select_sql),
-            (day_id, start_id, limit, TICK_SYMBOL),
+            (day_id, source, start_id, limit, TICK_SYMBOL),
         )
     return [dict(row) for row in cur.fetchall()]
 
 
-def build_backbone_candles_payload(*, dayref: Any, state_row: Optional[Dict[str, Any]], candles: List[Dict[str, Any]], pivot_total: int, move_total: int, mode: str, requested_count: int, fetch_ms: float) -> Dict[str, Any]:
+def build_backbone_candles_payload(
+    *,
+    dayref: Any,
+    state_row: Optional[Dict[str, Any]],
+    candles: List[Dict[str, Any]],
+    pivot_total: int,
+    move_total: int,
+    mode: str,
+    requested_count: int,
+    layer: str,
+    fetch_ms: float,
+) -> Dict[str, Any]:
     serialize_started = time.perf_counter()
     serialized_candles = serialize_backbone_candle_rows(candles)
     first_id = serialized_candles[0]["startTickId"] if serialized_candles else None
     last_id = serialized_candles[-1]["endTickId"] if serialized_candles else None
+    source = BACKBONE_LAYER_SOURCES[layer]
     payload = {
         "view": "candles",
+        "layer": layer,
+        "layerLabel": BACKBONE_LAYER_LABELS[layer],
         "mode": mode,
         "symbol": TICK_SYMBOL,
-        "source": BACKBONE_SOURCE,
+        "source": source,
         "dayId": int(dayref.dayid) if dayref else None,
         "brokerday": serialize_value(dayref.brokerday) if dayref else None,
         "dayStart": serialize_value(dayref.starttime) if dayref else None,
@@ -2435,7 +1883,9 @@ def build_backbone_candles_payload(*, dayref: Any, state_row: Optional[Dict[str,
     return payload
 
 
-def load_backbone_candles_payload(*, count: int, start_id: Optional[int]) -> Dict[str, Any]:
+def load_backbone_candles_payload(*, count: int, start_id: Optional[int], layer: str) -> Dict[str, Any]:
+    layer = normalize_backbone_layer(layer)
+    source = BACKBONE_LAYER_SOURCES[layer]
     effective_count = clamp_int(count, 1, MAX_BACKBONE_CANDLE_COUNT)
     fetch_started = time.perf_counter()
     with db_connection(readonly=True) as conn:
@@ -2450,6 +1900,7 @@ def load_backbone_candles_payload(*, count: int, start_id: Optional[int]) -> Dic
                     move_total=0,
                     mode="live",
                     requested_count=effective_count,
+                    layer=layer,
                     fetch_ms=elapsed_ms(fetch_started),
                 )
         else:
@@ -2458,11 +1909,11 @@ def load_backbone_candles_payload(*, count: int, start_id: Optional[int]) -> Dic
             if tick_row is None:
                 raise HTTPException(status_code=404, detail="Backbone start tick was not found.")
             dayref = resolve_backbone_day_ref_for_timestamp(conn, symbol=TICK_SYMBOL, timestamp=tick_row["timestamp"])
-        state_row = load_backbone_state_row(conn, symbol=TICK_SYMBOL, dayid=dayref.dayid)
+        state_row = load_backbone_state_row(conn, symbol=TICK_SYMBOL, dayid=dayref.dayid, source=source)
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            candles = query_backbone_candles(cur, day_id=dayref.dayid, limit=effective_count, start_id=start_id)
-            pivot_total = query_backbone_item_count(cur, table_name="backbonepivots", day_id=dayref.dayid)
-            move_total = query_backbone_item_count(cur, table_name="backbonemoves", day_id=dayref.dayid)
+            candles = query_backbone_candles(cur, day_id=dayref.dayid, limit=effective_count, source=source, start_id=start_id)
+            pivot_total = query_backbone_item_count(cur, table_name="backbonepivots", day_id=dayref.dayid, source=source)
+            move_total = query_backbone_item_count(cur, table_name="backbonemoves", day_id=dayref.dayid, source=source)
     return build_backbone_candles_payload(
         dayref=dayref,
         state_row=state_row,
@@ -2471,6 +1922,7 @@ def load_backbone_candles_payload(*, count: int, start_id: Optional[int]) -> Dic
         move_total=move_total,
         mode="review" if start_id is not None else "live",
         requested_count=effective_count,
+        layer=layer,
         fetch_ms=elapsed_ms(fetch_started),
     )
 
@@ -2495,6 +1947,8 @@ def build_backbone_detail_payload(
     last_id = serialized_rows[-1]["id"] if serialized_rows else None
     payload = {
         "view": "detailed",
+        "layer": DEFAULT_BACKBONE_LAYER,
+        "layerLabel": BACKBONE_LAYER_LABELS[DEFAULT_BACKBONE_LAYER],
         "mode": mode,
         "symbol": TICK_SYMBOL,
         "source": BACKBONE_SOURCE,
@@ -2551,17 +2005,17 @@ def load_backbone_detail_payload(*, ticks: int, start_id: Optional[int]) -> Dict
                     raise HTTPException(status_code=404, detail="Backbone start tick was not found.")
                 dayref = resolve_backbone_day_ref_for_timestamp(conn, symbol=TICK_SYMBOL, timestamp=tick_row["timestamp"])
                 tick_rows = query_ticks_for_day_from_id(cur, dayref=dayref, start_id=start_id, limit=effective_ticks)
-            state_row = load_backbone_state_row(conn, symbol=TICK_SYMBOL, dayid=dayref.dayid)
+            state_row = load_backbone_state_row(conn, symbol=TICK_SYMBOL, dayid=dayref.dayid, source=BACKBONE_SOURCE)
             first_id = int(tick_rows[0]["id"]) if tick_rows else None
             last_id = int(tick_rows[-1]["id"]) if tick_rows else None
             visible_pivots: List[Dict[str, Any]] = []
             if first_id is not None and last_id is not None:
-                anchor_pivot = query_backbone_last_pivot_before(cur, day_id=dayref.dayid, before_tick_id=first_id)
+                anchor_pivot = query_backbone_last_pivot_before(cur, day_id=dayref.dayid, before_tick_id=first_id, source=BACKBONE_SOURCE)
                 if anchor_pivot:
                     visible_pivots.append(anchor_pivot)
-                visible_pivots.extend(query_backbone_pivots_in_range(cur, day_id=dayref.dayid, start_id=first_id, end_id=last_id))
-            pivot_total = query_backbone_item_count(cur, table_name="backbonepivots", day_id=dayref.dayid)
-            move_total = query_backbone_item_count(cur, table_name="backbonemoves", day_id=dayref.dayid)
+                visible_pivots.extend(query_backbone_pivots_in_range(cur, day_id=dayref.dayid, start_id=first_id, end_id=last_id, source=BACKBONE_SOURCE))
+            pivot_total = query_backbone_item_count(cur, table_name="backbonepivots", day_id=dayref.dayid, source=BACKBONE_SOURCE)
+            move_total = query_backbone_item_count(cur, table_name="backbonemoves", day_id=dayref.dayid, source=BACKBONE_SOURCE)
         live_leg = None
         if start_id is None and tick_rows and state_row:
             latest_row = tick_rows[-1]
@@ -2606,74 +2060,101 @@ def load_backbone_detail_payload(*, ticks: int, start_id: Optional[int]) -> Dict
     )
 
 
-def query_backbone_pivots_for_day(cur: Any, *, day_id: int) -> List[Dict[str, Any]]:
+def query_backbone_pivots_for_day(cur: Any, *, day_id: int, source: str = BACKBONE_SOURCE) -> List[Dict[str, Any]]:
     cur.execute(
         """
         SELECT {select_sql}
         FROM public.backbonepivots
         WHERE dayid = %s
+          AND source = %s
         ORDER BY tickid ASC, id ASC
         """.format(select_sql=backbone_pivot_columns()),
-        (day_id,),
+        (day_id, source),
     )
     return [dict(row) for row in cur.fetchall()]
 
 
-def query_backbone_moves_for_day(cur: Any, *, day_id: int) -> List[Dict[str, Any]]:
+def query_backbone_moves_for_day(cur: Any, *, day_id: int, source: str = BACKBONE_SOURCE) -> List[Dict[str, Any]]:
     cur.execute(
         """
         SELECT {select_sql}
         FROM public.backbonemoves
         WHERE dayid = %s
+          AND source = %s
         ORDER BY endtickid ASC, id ASC
         """.format(select_sql=backbone_move_columns()),
-        (day_id,),
+        (day_id, source),
     )
     return [dict(row) for row in cur.fetchall()]
 
 
-def query_backbone_pivots_from(cur: Any, *, day_id: int, start_id: int, limit: int) -> List[Dict[str, Any]]:
+def query_backbone_pivots_from(
+    cur: Any,
+    *,
+    day_id: int,
+    start_id: int,
+    limit: int,
+    source: str = BACKBONE_SOURCE,
+) -> List[Dict[str, Any]]:
     cur.execute(
         """
         SELECT {select_sql}
         FROM public.backbonepivots
         WHERE dayid = %s
+          AND source = %s
           AND tickid >= %s
         ORDER BY tickid ASC, id ASC
         LIMIT %s
         """.format(select_sql=backbone_pivot_columns()),
-        (day_id, start_id, limit),
+        (day_id, source, start_id, limit),
     )
     return [dict(row) for row in cur.fetchall()]
 
 
-def query_backbone_moves_from(cur: Any, *, day_id: int, start_id: int, limit: int) -> List[Dict[str, Any]]:
+def query_backbone_moves_from(
+    cur: Any,
+    *,
+    day_id: int,
+    start_id: int,
+    limit: int,
+    source: str = BACKBONE_SOURCE,
+) -> List[Dict[str, Any]]:
     cur.execute(
         """
         SELECT {select_sql}
         FROM public.backbonemoves
         WHERE dayid = %s
+          AND source = %s
           AND endtickid >= %s
         ORDER BY endtickid ASC, id ASC
         LIMIT %s
         """.format(select_sql=backbone_move_columns()),
-        (day_id, start_id, limit),
+        (day_id, source, start_id, limit),
     )
     return [dict(row) for row in cur.fetchall()]
 
 
-def query_backbone_pivots_after(cur: Any, *, day_id: int, after_id: int, limit: int, end_id: Optional[int] = None) -> List[Dict[str, Any]]:
+def query_backbone_pivots_after(
+    cur: Any,
+    *,
+    day_id: int,
+    after_id: int,
+    limit: int,
+    end_id: Optional[int] = None,
+    source: str = BACKBONE_SOURCE,
+) -> List[Dict[str, Any]]:
     if end_id is None:
         cur.execute(
             """
             SELECT {select_sql}
             FROM public.backbonepivots
             WHERE dayid = %s
+              AND source = %s
               AND tickid > %s
             ORDER BY tickid ASC, id ASC
             LIMIT %s
             """.format(select_sql=backbone_pivot_columns()),
-            (day_id, after_id, limit),
+            (day_id, source, after_id, limit),
         )
     else:
         cur.execute(
@@ -2681,28 +2162,38 @@ def query_backbone_pivots_after(cur: Any, *, day_id: int, after_id: int, limit: 
             SELECT {select_sql}
             FROM public.backbonepivots
             WHERE dayid = %s
+              AND source = %s
               AND tickid > %s
               AND tickid <= %s
             ORDER BY tickid ASC, id ASC
             LIMIT %s
             """.format(select_sql=backbone_pivot_columns()),
-            (day_id, after_id, end_id, limit),
+            (day_id, source, after_id, end_id, limit),
         )
     return [dict(row) for row in cur.fetchall()]
 
 
-def query_backbone_moves_after(cur: Any, *, day_id: int, after_id: int, limit: int, end_id: Optional[int] = None) -> List[Dict[str, Any]]:
+def query_backbone_moves_after(
+    cur: Any,
+    *,
+    day_id: int,
+    after_id: int,
+    limit: int,
+    end_id: Optional[int] = None,
+    source: str = BACKBONE_SOURCE,
+) -> List[Dict[str, Any]]:
     if end_id is None:
         cur.execute(
             """
             SELECT {select_sql}
             FROM public.backbonemoves
             WHERE dayid = %s
+              AND source = %s
               AND endtickid > %s
             ORDER BY endtickid ASC, id ASC
             LIMIT %s
             """.format(select_sql=backbone_move_columns()),
-            (day_id, after_id, limit),
+            (day_id, source, after_id, limit),
         )
     else:
         cur.execute(
@@ -2710,12 +2201,13 @@ def query_backbone_moves_after(cur: Any, *, day_id: int, after_id: int, limit: i
             SELECT {select_sql}
             FROM public.backbonemoves
             WHERE dayid = %s
+              AND source = %s
               AND endtickid > %s
               AND endtickid <= %s
             ORDER BY endtickid ASC, id ASC
             LIMIT %s
             """.format(select_sql=backbone_move_columns()),
-            (day_id, after_id, end_id, limit),
+            (day_id, source, after_id, end_id, limit),
         )
     return [dict(row) for row in cur.fetchall()]
 
@@ -3492,11 +2984,6 @@ def live_page() -> FileResponse:
     return FileResponse(FRONTEND_DIR / "live.html")
 
 
-@app.get("/separation", include_in_schema=False)
-def separation_page() -> FileResponse:
-    return FileResponse(FRONTEND_DIR / "separation.html")
-
-
 @app.get("/backbone", include_in_schema=False)
 def backbone_page() -> FileResponse:
     return FileResponse(FRONTEND_DIR / "backbone.html")
@@ -3859,14 +3346,6 @@ def live_rect_manual_close(rect_id: int, payload: RectModeRequest) -> Dict[str, 
         _handle_rect_error(exc)
 
 
-@app.get("/api/separation/review-start")
-def separation_review_start(
-    timestamp: str = Query(..., min_length=1),
-    timezoneName: str = Query(DEFAULT_REVIEW_TIMEZONE, min_length=1),
-) -> Dict[str, Any]:
-    return live_review_start(timestamp=timestamp, timezoneName=timezoneName)
-
-
 @app.get("/api/backbone/review-start")
 def backbone_review_start(
     timestamp: str = Query(..., min_length=1),
@@ -3878,9 +3357,10 @@ def backbone_review_start(
 @app.get("/api/backbone/candles")
 def backbone_candles(
     candles: int = Query(DEFAULT_BACKBONE_CANDLE_COUNT, ge=1, le=MAX_BACKBONE_CANDLE_COUNT),
+    layer: str = Query(DEFAULT_BACKBONE_LAYER),
     id: Optional[int] = Query(None, ge=1),
 ) -> Dict[str, Any]:
-    return load_backbone_candles_payload(count=candles, start_id=id)
+    return load_backbone_candles_payload(count=candles, start_id=id, layer=layer)
 
 
 @app.get("/api/backbone/detail")
@@ -4043,118 +3523,6 @@ def live_review_stream(
 
 
 
-@app.get("/api/separation/bootstrap")
-def separation_bootstrap(
-    mode: str = Query("live", pattern="^(live|review)$"),
-    id: Optional[int] = Query(None, ge=1),
-    window: int = Query(DEFAULT_SEPARATION_WINDOW, ge=1, le=MAX_SEPARATION_WINDOW),
-    levels: str = Query("micro,median,macro"),
-    showAll: bool = Query(True),
-    includeOpen: bool = Query(True),
-    showTicks: bool = Query(False),
-) -> Dict[str, Any]:
-    return load_separation_bootstrap_payload(
-        mode=mode,
-        start_id=id,
-        window=window,
-        levels=normalize_separation_levels(levels, showAll),
-        include_open=includeOpen,
-        show_ticks=showTicks,
-    )
-
-
-@app.get("/api/separation/next")
-def separation_next(
-    afterId: int = Query(..., ge=0),
-    limit: int = Query(250, ge=1, le=MAX_STREAM_BATCH),
-    endId: Optional[int] = Query(None, ge=1),
-    levels: str = Query("micro,median,macro"),
-    showAll: bool = Query(True),
-    includeOpen: bool = Query(True),
-    showTicks: bool = Query(False),
-) -> Dict[str, Any]:
-    return load_separation_next_payload(
-        after_id=afterId,
-        limit=limit,
-        end_id=endId,
-        levels=normalize_separation_levels(levels, showAll),
-        include_open=includeOpen,
-        show_ticks=showTicks,
-    )
-
-
-@app.get("/api/separation/previous")
-def separation_previous(
-    beforeId: int = Query(..., ge=1),
-    limit: int = Query(DEFAULT_SEPARATION_WINDOW, ge=1, le=MAX_SEPARATION_WINDOW),
-    levels: str = Query("micro,median,macro"),
-    showAll: bool = Query(True),
-    includeOpen: bool = Query(True),
-    showTicks: bool = Query(False),
-) -> Dict[str, Any]:
-    return load_separation_previous_payload(
-        before_id=beforeId,
-        limit=limit,
-        levels=normalize_separation_levels(levels, showAll),
-        include_open=includeOpen,
-        show_ticks=showTicks,
-    )
-
-
-@app.get("/api/separation/stream")
-def separation_stream(
-    afterId: int = Query(0, ge=0),
-    limit: int = Query(250, ge=1, le=MAX_STREAM_BATCH),
-    levels: str = Query("micro,median,macro"),
-    showAll: bool = Query(True),
-    includeOpen: bool = Query(True),
-    showTicks: bool = Query(False),
-) -> StreamingResponse:
-    return StreamingResponse(
-        stream_separation_events(
-            after_id=afterId,
-            limit=limit,
-            levels=normalize_separation_levels(levels, showAll),
-            include_open=includeOpen,
-            show_ticks=showTicks,
-        ),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
-
-
-@app.get("/api/separation/review-stream")
-def separation_review_stream(
-    afterId: int = Query(0, ge=0),
-    endId: int = Query(..., ge=1),
-    speed: float = Query(1.0, gt=0),
-    levels: str = Query("micro,median,macro"),
-    showAll: bool = Query(True),
-    includeOpen: bool = Query(True),
-    showTicks: bool = Query(False),
-) -> StreamingResponse:
-    return StreamingResponse(
-        stream_separation_review_events(
-            after_id=afterId,
-            end_id=endId,
-            speed=speed,
-            levels=normalize_separation_levels(levels, showAll),
-            include_open=includeOpen,
-            show_ticks=showTicks,
-        ),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
-
-
 @app.get("/api/backbone/bootstrap")
 def backbone_bootstrap(
     mode: str = Query("live", pattern="^(live|review)$"),
@@ -4206,3 +3574,4 @@ def backbone_stream(
             "X-Accel-Buffering": "no",
         },
     )
+

@@ -43,12 +43,11 @@
           <nav class="app-nav" aria-label="Primary">
             <a class="app-nav-link" href="/live">Li</a>
             <a class="app-nav-link app-nav-link-active" href="/backbone">Ba</a>
-            <a class="app-nav-link" href="/separation">Se</a>
             <a class="app-nav-link" href="/bigPic">Bi</a>
             <a class="app-nav-link" href="/sql">Sq</a>
           </nav>
           <h1>Backbone</h1>
-          <p class="live-sidebar-copy">Adaptive structural pivots for the broker day as backbone candles or a detailed tick view with the current provisional leg.</p>
+          <p class="live-sidebar-copy">Adaptive structural pivots for the broker day as Backbone candles, BigBones, or a detailed tick view with the current provisional leg.</p>
           <div class="meta-strip" id="backboneMeta">Waiting for backbone...</div>
           <div class="meta-strip" id="backbonePerf">Snapshot idle.</div>
           <div class="status-line live-status" id="statusLine">Ready.</div>
@@ -61,6 +60,14 @@
               <div class="segmented" id="viewToggle">
                 <button type="button" data-value="candles">Candles</button>
                 <button type="button" data-value="detailed">Detailed</button>
+              </div>
+            </div>
+
+            <div class="live-control-field live-control-field-wide">
+              <span>candle layer</span>
+              <div class="segmented" id="layerToggle">
+                <button type="button" data-value="backbone">Backbone</button>
+                <button type="button" data-value="bigbones">BigBones</button>
               </div>
             </div>
 

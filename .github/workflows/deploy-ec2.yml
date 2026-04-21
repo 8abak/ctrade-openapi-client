@@ -24,7 +24,9 @@ jobs:
           port: ${{ secrets.EC2_PORT || '22' }}
           script: |
             cd /home/ec2-user/cTrade
+            PREVIOUS_SHA="$(git rev-parse HEAD)"
             git fetch origin
-            git reset --hard origin/main
+            NEW_SHA="$(git rev-parse origin/main)"
+            git reset --hard "$NEW_SHA"
             git clean -fd
-            bash deploy/scripts/deploy-datavis.sh
+            DEPLOY_PREVIOUS_SHA="$PREVIOUS_SHA" DEPLOY_NEW_SHA="$NEW_SHA" bash deploy/scripts/deploy-datavis.sh

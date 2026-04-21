@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Sequence, Tuple
 import psycopg2
 from dotenv import load_dotenv
 
-from datavis.separation import BROKER_DAY_START_HOUR, BROKER_TIMEZONE
+from datavis.brokerday import BROKER_DAY_START_HOUR, BROKER_TIMEZONE
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
