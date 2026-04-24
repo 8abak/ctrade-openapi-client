@@ -34,6 +34,7 @@
     down: { fill: "rgba(126,240,199,0.36)", stroke: "#7ef0c7" },
     range: { fill: "rgba(109,216,255,0.20)", stroke: "#6dd8ff" },
   };
+  const MAVG_FALLBACK_COLORS = ["#ffd166", "#8ecae6", "#ef476f", "#90be6d", "#cdb4db", "#f4a261"];
   const TRADE_POLL_INTERVAL_MS = 15000;
   const TRADE_HISTORY_REFRESH_INTERVAL_MS = 60000;
   const SMART_POLL_INTERVAL_MS = 2000;
@@ -86,6 +87,12 @@
       firstPoint: null,
       defaultSmartCloseEnabled: true,
     },
+    mavg: {
+      configs: [],
+      pointsByConfig: {},
+      selectedIds: null,
+      cursorId: 0,
+    },
     trade: {
       authConfigured: true,
       authError: null,
@@ -137,6 +144,8 @@
     showStructure: document.getElementById("showStructure"),
     showRanges: document.getElementById("showRanges"),
     sizingToggle: document.getElementById("sizingToggle"),
+    mavgOptions: document.getElementById("mavgOptions"),
+    mavgSummary: document.getElementById("mavgSummary"),
     tickId: document.getElementById("tickId"),
     reviewStart: document.getElementById("reviewStart"),
     reviewSpeedToggle: document.getElementById("reviewSpeedToggle"),
@@ -328,6 +337,88 @@
     });
   }
 
+  function formatMavgWindow(seconds) {
+    const totalSeconds = Math.max(1, Number(seconds) || 0);
+    if (totalSeconds % 3600 === 0) {
+      return String(Math.round(totalSeconds / 3600)) + "h";
+    }
+    if (totalSeconds % 60 === 0) {
+      return String(Math.round(totalSeconds / 60)) + "m";
+    }
+    return String(totalSeconds) + "s";
+  }
+
+  function fallbackMavgColor(index) {
+    return MAVG_FALLBACK_COLORS[index % MAVG_FALLBACK_COLORS.length];
+  }
+
+  function mavgConfigColor(config, index) {
+    return config?.color || fallbackMavgColor(index);
+  }
+
+  function mavgConfigLabel(config) {
+    if (!config) {
+      return "MAvg";
+    }
+    const name = String(config.name || "").trim();
+    if (name) {
+      return name;
+    }
+    return [String(config.method || "").toUpperCase(), formatMavgWindow(config.windowseconds), String(config.source || "").toLowerCase()]
+      .filter(Boolean)
+      .join(" ");
+  }
+
+  function syncSelectedMavgIds() {
+    const availableIds = state.mavg.configs.map((config) => Number(config.id)).filter(Number.isFinite);
+    if (!availableIds.length) {
+      state.mavg.selectedIds = [];
+      return;
+    }
+    if (!Array.isArray(state.mavg.selectedIds) || !state.mavg.selectedIds.length) {
+      state.mavg.selectedIds = availableIds.slice();
+      return;
+    }
+    const availableSet = new Set(availableIds);
+    const selected = state.mavg.selectedIds.map(Number).filter((id) => availableSet.has(id));
+    state.mavg.selectedIds = selected.length ? selected : availableIds.slice();
+  }
+
+  function activeMavgConfigs() {
+    syncSelectedMavgIds();
+    const selected = new Set((state.mavg.selectedIds || []).map(Number));
+    return state.mavg.configs.filter((config) => selected.has(Number(config.id)));
+  }
+
+  function renderMavgControls() {
+    if (!elements.mavgOptions || !elements.mavgSummary) {
+      return;
+    }
+    if (!state.mavg.configs.length) {
+      elements.mavgOptions.innerHTML = "<div class=\"sql-empty\">No saved MA overlays are enabled.</div>";
+      elements.mavgSummary.textContent = "Enable rows in public.mavgconfig to show saved overlays here.";
+      return;
+    }
+    syncSelectedMavgIds();
+    const selected = new Set((state.mavg.selectedIds || []).map(Number));
+    elements.mavgOptions.innerHTML = state.mavg.configs.map(function (config, index) {
+      const configId = Number(config.id);
+      const checked = selected.has(configId) ? " checked" : "";
+      const label = mavgConfigLabel(config);
+      const color = mavgConfigColor(config, index);
+      return [
+        "<label class=\"compact-check mavg-check\">",
+        "<span class=\"mavg-check-label\">",
+        "<input type=\"checkbox\" data-mavg-id=\"", String(configId), "\"", checked, ">",
+        "<span class=\"mavg-swatch\" style=\"background:", String(color), ";\"></span>",
+        "<span>", label, "</span>",
+        "</span>",
+        "</label>",
+      ].join("");
+    }).join("");
+    elements.mavgSummary.textContent = String(activeMavgConfigs().length) + " / " + String(state.mavg.configs.length) + " MA overlays shown.";
+  }
+
   function status(message, isError) {
     elements.statusLine.textContent = message;
     elements.statusLine.classList.toggle("error", Boolean(isError));
@@ -343,6 +434,7 @@
     elements.liveMeta.textContent = [
       currentConfig().mode.toUpperCase(),
       "ticks " + state.rows.length + "/" + currentConfig().window,
+      "mavg " + activeMavgConfigs().length + "/" + state.mavg.configs.length,
       "left " + state.rangeFirstId,
       "right " + state.rangeLastId,
       state.hasMoreLeft ? "more-left yes" : "more-left no",
@@ -1419,6 +1511,109 @@
     return state.rows.find((row) => Number(row.id) === rounded) || null;
   }
 
+  function replaceMavgPayload(payload) {
+    if (Array.isArray(payload?.mavgConfigs)) {
+      state.mavg.configs = payload.mavgConfigs.slice();
+    }
+    const grouped = {};
+    (payload?.mavgPoints || []).forEach(function (point) {
+      const configId = Number(point?.configId);
+      const tickId = Number(point?.tickId);
+      const value = Number(point?.value);
+      if (!Number.isFinite(configId) || !Number.isFinite(tickId) || !Number.isFinite(value)) {
+        return;
+      }
+      if (!grouped[configId]) {
+        grouped[configId] = [];
+      }
+      grouped[configId].push(point);
+    });
+    Object.keys(grouped).forEach(function (configId) {
+      grouped[configId].sort(function (left, right) {
+        return Number(left.tickId) - Number(right.tickId);
+      });
+    });
+    state.mavg.pointsByConfig = grouped;
+    state.mavg.cursorId = Number(payload?.mavgCursorId || 0);
+    syncSelectedMavgIds();
+    trimMavgToRows();
+    renderMavgControls();
+  }
+
+  function mergeMavgPoints(points, cursorId) {
+    const normalizedCursor = Number(cursorId);
+    if (Number.isFinite(normalizedCursor) && normalizedCursor > Number(state.mavg.cursorId || 0)) {
+      state.mavg.cursorId = normalizedCursor;
+    }
+    if (!Array.isArray(points) || !points.length) {
+      return 0;
+    }
+    let changed = 0;
+    points.forEach(function (point) {
+      const configId = Number(point?.configId);
+      const tickId = Number(point?.tickId);
+      const value = Number(point?.value);
+      if (!Number.isFinite(configId) || !Number.isFinite(tickId) || !Number.isFinite(value)) {
+        return;
+      }
+      const list = state.mavg.pointsByConfig[configId] || [];
+      const existingIndex = list.findIndex(function (item) {
+        return Number(item.tickId) === tickId;
+      });
+      if (existingIndex >= 0) {
+        list[existingIndex] = point;
+      } else {
+        list.push(point);
+      }
+      list.sort(function (left, right) {
+        return Number(left.tickId) - Number(right.tickId);
+      });
+      state.mavg.pointsByConfig[configId] = list;
+      changed += 1;
+    });
+    trimMavgToRows();
+    return changed;
+  }
+
+  function trimMavgToRows() {
+    if (!state.rows.length) {
+      return;
+    }
+    const firstId = Number(state.rows[0]?.id);
+    const lastId = Number(state.rows[state.rows.length - 1]?.id);
+    if (!Number.isFinite(firstId) || !Number.isFinite(lastId)) {
+      return;
+    }
+    Object.keys(state.mavg.pointsByConfig).forEach(function (configId) {
+      state.mavg.pointsByConfig[configId] = (state.mavg.pointsByConfig[configId] || []).filter(function (point) {
+        const tickId = Number(point?.tickId);
+        return Number.isFinite(tickId) && tickId >= firstId && tickId <= lastId;
+      });
+    });
+  }
+
+  function mavgPointsAtTickId(tickId) {
+    const rounded = Math.round(Number(tickId));
+    if (!Number.isFinite(rounded)) {
+      return [];
+    }
+    const byId = new Map();
+    activeMavgConfigs().forEach(function (config, index) {
+      const point = (state.mavg.pointsByConfig[Number(config.id)] || []).find(function (item) {
+        return Number(item.tickId) === rounded;
+      });
+      if (!point) {
+        return;
+      }
+      byId.set(Number(config.id), {
+        label: mavgConfigLabel(config),
+        value: Number(point.value),
+        color: mavgConfigColor(config, index),
+      });
+    });
+    return Array.from(byId.values());
+  }
+
   function eventsAtTickId(tickId) {
     const rounded = Math.round(Number(tickId));
     if (!Number.isFinite(rounded)) {
@@ -2041,6 +2236,12 @@
         tooltipRow("Id", Math.round(tickId)),
       ]));
     }
+    const mavgRows = mavgPointsAtTickId(tickId);
+    if (mavgRows.length) {
+      sections.push(tooltipSection("Moving Avg", mavgRows.map(function (item) {
+        return tooltipRow(item.label, formatPrice(item.value));
+      })));
+    }
     const events = eventsAtTickId(tickId);
     if (events.length) {
       sections.push(tooltipSection("Events", events.map((event) => tooltipRow(event.type, formatPrice(event.price)))));
@@ -2322,6 +2523,24 @@
         z: 5,
       });
     }
+    activeMavgConfigs().forEach(function (mavgConfig, index) {
+      series.push({
+        id: "mavg-" + String(mavgConfig.id),
+        name: mavgConfigLabel(mavgConfig),
+        type: "line",
+        showSymbol: false,
+        hoverAnimation: false,
+        animation: false,
+        data: (state.mavg.pointsByConfig[Number(mavgConfig.id)] || []).map(function (point) {
+          return [Number(point.tickId), Number(point.value)];
+        }),
+        lineStyle: {
+          color: mavgConfigColor(mavgConfig, index),
+          width: 1.5,
+        },
+        z: 6,
+      });
+    });
     if (config.showStructure) {
       series.push({
         id: "structure-candles",
@@ -2403,9 +2622,20 @@
   }
 
   function buildPrimaryXValues() {
-    return state.rows
+    const values = state.rows
       .map((row) => Number(row.id))
       .filter(Number.isFinite);
+    activeMavgConfigs().forEach(function (config) {
+      (state.mavg.pointsByConfig[Number(config.id)] || []).forEach(function (point) {
+        const tickId = Number(point.tickId);
+        if (Number.isFinite(tickId)) {
+          values.push(tickId);
+        }
+      });
+    });
+    return Array.from(new Set(values)).sort(function (left, right) {
+      return left - right;
+    });
   }
 
   function pushYAxisItem(items, item) {
@@ -2422,6 +2652,11 @@
         pushYAxisItem(coreItems, charting.pointItem(row.id, row.mid));
       });
     }
+    activeMavgConfigs().forEach(function (mavgConfig) {
+      (state.mavg.pointsByConfig[Number(mavgConfig.id)] || []).forEach(function (point) {
+        pushYAxisItem(coreItems, charting.pointItem(point.tickId, point.value));
+      });
+    });
     if (config.showStructure) {
       state.structureBars.forEach((bar) => {
         pushYAxisItem(coreItems, charting.rangeItem(bar.startTickId, bar.endTickId, bar.low, bar.high));
@@ -3109,6 +3344,7 @@
     state.rows = Array.isArray(rows) ? rows.slice() : [];
     state.viewportUpdateMeta = null;
     syncRangeFromRows();
+    trimMavgToRows();
   }
 
   function replaceStructure(payload) {
@@ -3166,6 +3402,7 @@
       state.viewportUpdateMeta = { appendedCount: appended, droppedFromStart: droppedFromStart, prependedCount: 0, reason: "append" };
       syncRangeFromRows();
       trimStructureToRows();
+      trimMavgToRows();
     }
     return appended;
   }
@@ -3185,6 +3422,7 @@
     }
     state.viewportUpdateMeta = { appendedCount: 0, droppedFromStart: 0, prependedCount: older.length, reason: "prepend" };
     syncRangeFromRows();
+    trimMavgToRows();
     return older.length;
   }
 
@@ -3208,6 +3446,7 @@
       applyPaperPayload(payload.rect || null);
     }
     const appended = dedupeAppend(payload.rows || []);
+    const mavgChanged = mergeMavgPoints(payload.mavgPoints || [], payload.mavgCursorId);
     state.structureBars = mergeById(state.structureBars, payload.structureBarUpdates || []);
     state.rangeBoxes = mergeById(state.rangeBoxes, payload.rangeBoxUpdates || []);
     if (Array.isArray(payload.structureEvents) && payload.structureEvents.length) {
@@ -3218,7 +3457,7 @@
       state.structureEvents = Array.from(byKey.values()).sort((left, right) => Number(left.tickId) - Number(right.tickId) || Number(left.id) - Number(right.id));
     }
     trimStructureToRows();
-    return appended || (payload.structureBarUpdates || []).length || (payload.rangeBoxUpdates || []).length || (payload.structureEvents || []).length;
+    return appended || mavgChanged || (payload.structureBarUpdates || []).length || (payload.rangeBoxUpdates || []).length || (payload.structureEvents || []).length;
   }
 
   function clearActivity() {
@@ -4181,6 +4420,7 @@
     const payload = await fetchJson(bootstrapUrl(config, startId));
     state.loadedWindow = Number(payload.window) || config.window;
     replaceRows(payload.rows || []);
+    replaceMavgPayload(payload);
     replaceStructure(payload);
     applyRangePayload(payload);
     state.reviewEndId = payload.reviewEndId || null;
@@ -4210,6 +4450,7 @@
     const config = currentConfig();
     const source = new EventSource("/api/live/stream?" + new URLSearchParams({
       afterId: String(afterId || 0),
+      afterMavgId: String(state.mavg.cursorId || 0),
       limit: "250",
       window: String(config.window),
       ...visibilityParams(config),
@@ -4302,11 +4543,12 @@
     const payload = await fetchJson(nextUrl(config, state.rangeLastId, state.reviewEndId, limit));
     state.lastMetrics = payload.metrics || null;
     const appended = dedupeAppend(payload.rows || []);
+    const mavgChanged = mergeMavgPoints(payload.mavgPoints || [], payload.mavgCursorId);
     replaceStructure(payload);
     applyRangePayload(payload);
     renderMeta();
     renderPerf();
-    if (appended || payload.structureBars?.length || payload.rangeBoxes?.length || payload.structureEvents?.length) {
+    if (appended || mavgChanged || payload.structureBars?.length || payload.rangeBoxes?.length || payload.structureEvents?.length) {
       renderChart({ shiftWithRun: true });
     }
     status(payload.endReached ? "Review reached the current end snapshot." : "Review running.", false);
@@ -4359,6 +4601,7 @@
       applyPaperPayload(payload.rect || null);
     }
     const prepended = dedupePrepend(payload.rows || [], targetWindow);
+    replaceMavgPayload(payload);
     replaceStructure(payload);
     applyRangePayload(payload);
     state.loadedWindow = prepended ? targetWindow : state.loadedWindow;
@@ -4448,6 +4691,30 @@
       status("Display layers updated.", false);
     });
   });
+
+  if (elements.mavgOptions) {
+    elements.mavgOptions.addEventListener("change", function (event) {
+      const input = event.target.closest("input[data-mavg-id]");
+      if (!input) {
+        return;
+      }
+      const configId = Number(input.dataset.mavgId);
+      if (!Number.isFinite(configId)) {
+        return;
+      }
+      syncSelectedMavgIds();
+      const selected = new Set((state.mavg.selectedIds || []).map(Number));
+      if (input.checked) {
+        selected.add(configId);
+      } else {
+        selected.delete(configId);
+      }
+      state.mavg.selectedIds = Array.from(selected.values());
+      renderMavgControls();
+      renderMeta();
+      renderChart({ shiftWithRun: false });
+    });
+  }
 
   bindSegment(elements.reviewSpeedToggle, function (value) {
     setSegment(elements.reviewSpeedToggle, value);

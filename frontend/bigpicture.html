@@ -59,6 +59,13 @@
               <span>target visible points</span>
               <input id="pointTarget" type="number" min="200" max="2400" inputmode="numeric" value="2000">
             </label>
+            <div class="live-control-field live-control-field-wide">
+              <span>moving averages</span>
+              <div class="live-check-grid mavg-check-grid" id="mavgOptions">
+                <div class="sql-empty">Loading MA overlays...</div>
+              </div>
+              <div class="trade-session-copy" id="mavgSummary">Saved overlays are loaded from the database.</div>
+            </div>
           </div>
 
           <div class="live-inline-actions">

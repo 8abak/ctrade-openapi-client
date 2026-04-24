@@ -10,6 +10,7 @@ import hmac
 import hashlib
 import threading
 import time
+from collections import defaultdict
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
@@ -33,6 +34,10 @@ from datavis.backbone import load_state_row as load_backbone_state_row
 from datavis.backbone import resolve_current_day_ref as resolve_current_backbone_day_ref
 from datavis.backbone import resolve_day_ref_for_timestamp as resolve_backbone_day_ref_for_timestamp
 from datavis.db import db_connect as shared_db_connect
+from datavis.mavg import list_page_config_rows as list_mavg_config_rows
+from datavis.mavg import query_point_rows_after_value_id as query_mavg_points_after_value_id
+from datavis.mavg import query_point_rows_for_tick_range as query_mavg_points_for_tick_range
+from datavis.mavg import query_point_rows_for_time_range as query_mavg_points_for_time_range
 from datavis.rects import RectPaperService, RectServiceError
 from datavis.smart_scalp import SmartScalpError, SmartScalpService
 from datavis.structure import StructureEngine, replay_ticks
@@ -374,6 +379,100 @@ def serialize_tick_row(row: Dict[str, Any]) -> Dict[str, Any]:
 
 def serialize_tick_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [serialize_tick_row(row) for row in rows]
+
+
+def serialize_mavg_config_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": int(row["id"]),
+        "name": str(row.get("name") or ""),
+        "method": str(row.get("method") or ""),
+        "source": str(row.get("source") or ""),
+        "windowseconds": int(row.get("windowseconds") or 0),
+        "showOnLive": bool(row.get("showonlive")),
+        "showOnBig": bool(row.get("showonbig")),
+        "color": row.get("color"),
+    }
+
+
+def serialize_mavg_point_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    ticktime = row.get("ticktime")
+    return {
+        "valueId": int(row["id"]),
+        "configId": int(row["configid"]),
+        "tickId": int(row["tickid"]),
+        "timestamp": serialize_value(ticktime),
+        "timestampMs": dt_to_ms(ticktime),
+        "value": float(row["value"]),
+    }
+
+
+def serialize_mavg_points(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [serialize_mavg_point_row(row) for row in rows]
+
+
+def empty_mavg_payload() -> Dict[str, Any]:
+    return {"mavgConfigs": [], "mavgPoints": [], "mavgCursorId": None}
+
+
+def mavg_payload_for_tick_range(
+    cur: Any,
+    *,
+    page: str,
+    start_id: Optional[int],
+    end_id: Optional[int],
+    include_configs: bool,
+) -> Dict[str, Any]:
+    if start_id is None or end_id is None or end_id < start_id:
+        return empty_mavg_payload() if include_configs else {"mavgPoints": [], "mavgCursorId": None}
+    config_rows = list_mavg_config_rows(cur, page=page) if include_configs else []
+    if include_configs and not config_rows:
+        return empty_mavg_payload()
+    point_rows = query_mavg_points_for_tick_range(cur, page=page, start_id=int(start_id), end_id=int(end_id))
+    return {
+        "mavgConfigs": [serialize_mavg_config_row(row) for row in config_rows] if include_configs else [],
+        "mavgPoints": serialize_mavg_points(point_rows),
+        "mavgCursorId": max((int(row["id"]) for row in point_rows), default=None),
+    }
+
+
+def mavg_payload_for_time_range(
+    cur: Any,
+    *,
+    page: str,
+    start_ts: Optional[datetime],
+    end_ts: Optional[datetime],
+    target_points: int,
+) -> Dict[str, Any]:
+    if start_ts is None or end_ts is None:
+        return empty_mavg_payload()
+    config_rows = list_mavg_config_rows(cur, page=page)
+    if not config_rows:
+        return empty_mavg_payload()
+    point_rows = query_mavg_points_for_time_range(
+        cur,
+        page=page,
+        start_ts=start_ts,
+        end_ts=end_ts,
+        target_points=target_points,
+    )
+    return {
+        "mavgConfigs": [serialize_mavg_config_row(row) for row in config_rows],
+        "mavgPoints": serialize_mavg_points(point_rows),
+        "mavgCursorId": max((int(row["id"]) for row in point_rows), default=None),
+    }
+
+
+def mavg_updates_payload(
+    cur: Any,
+    *,
+    page: str,
+    after_value_id: int,
+) -> Dict[str, Any]:
+    point_rows = query_mavg_points_after_value_id(cur, page=page, after_value_id=max(0, int(after_value_id or 0)))
+    return {
+        "mavgPoints": serialize_mavg_points(point_rows),
+        "mavgCursorId": max((int(row["id"]) for row in point_rows), default=max(0, int(after_value_id or 0))),
+    }
 
 
 def serialize_metrics_payload(
@@ -1211,6 +1310,7 @@ def build_bigpicture_payload(
     source_bounds: Dict[str, Any],
     global_bounds: Dict[str, Any],
     fetch_ms: float,
+    mavg_payload: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     first_row = rows[0] if rows else None
     last_row = rows[-1] if rows else None
@@ -1237,6 +1337,7 @@ def build_bigpicture_payload(
         serialize_ms=0.0,
         latest_row=last_row,
     )
+    payload.update(mavg_payload or empty_mavg_payload())
     return payload
 
 
@@ -1247,6 +1348,13 @@ def load_bigpicture_bootstrap_payload(points: int) -> Dict[str, Any]:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             global_bounds = query_tick_bounds(cur)
             rows = query_bootstrap_rows(cur, mode="live", start_id=None, window=target_points, end_id=None)
+            mavg_payload = mavg_payload_for_time_range(
+                cur,
+                page="big",
+                start_ts=rows[0]["timestamp"] if rows else None,
+                end_ts=rows[-1]["timestamp"] if rows else None,
+                target_points=target_points,
+            )
     return build_bigpicture_payload(
         rows=rows,
         requested_start_ts=rows[0]["timestamp"] if rows else None,
@@ -1254,6 +1362,7 @@ def load_bigpicture_bootstrap_payload(points: int) -> Dict[str, Any]:
         source_bounds={"row_count": len(rows)},
         global_bounds=global_bounds,
         fetch_ms=elapsed_ms(fetch_started),
+        mavg_payload=mavg_payload,
     )
 
 
@@ -1279,6 +1388,13 @@ def load_bigpicture_window_payload(
                 end_ts=end_ts,
                 target_points=points,
             )
+            mavg_payload = mavg_payload_for_time_range(
+                cur,
+                page="big",
+                start_ts=start_ts,
+                end_ts=end_ts,
+                target_points=points,
+            )
     if not rows:
         raise HTTPException(status_code=404, detail="No ticks were found for the requested big picture range.")
     return build_bigpicture_payload(
@@ -1288,6 +1404,7 @@ def load_bigpicture_window_payload(
         source_bounds=source_bounds,
         global_bounds=global_bounds,
         fetch_ms=elapsed_ms(fetch_started),
+        mavg_payload=mavg_payload,
     )
 
 
@@ -1377,6 +1494,7 @@ def build_range_payload(
     show_events: bool,
     show_structure: bool,
     show_ranges: bool,
+    mavg_payload: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     serialize_started = time.perf_counter()
     first_row = replay_rows[0] if replay_rows else None
@@ -1412,6 +1530,7 @@ def build_range_payload(
         serialize_ms=elapsed_ms(serialize_started),
         latest_row=last_row,
     )
+    payload.update(mavg_payload or empty_mavg_payload())
     return payload
 
 
@@ -1445,6 +1564,15 @@ def load_bootstrap_payload(
                 window=effective_window,
                 end_id=review_end_id,
             )
+            replay_first_id = int(rows[0]["id"]) if rows else None
+            replay_last_id = int(rows[-1]["id"]) if rows else None
+            mavg_payload = mavg_payload_for_tick_range(
+                cur,
+                page="live",
+                start_id=replay_first_id,
+                end_id=replay_last_id,
+                include_configs=True,
+            )
     payload = build_range_payload(
         mode=mode,
         window=effective_window,
@@ -1458,6 +1586,7 @@ def load_bootstrap_payload(
         show_events=show_events,
         show_structure=show_structure,
         show_ranges=show_ranges,
+        mavg_payload=mavg_payload,
     )
     payload["rect"] = rect_snapshot_for_mode(mode)
     return payload
@@ -1486,6 +1615,13 @@ def load_next_payload(
                 if (show_events or show_structure or show_ranges) and last_seen_id
                 else []
             )
+            mavg_payload = mavg_payload_for_tick_range(
+                cur,
+                page="live",
+                start_id=(after_id + 1) if tick_rows else None,
+                end_id=last_seen_id if tick_rows else None,
+                include_configs=False,
+            )
     serialize_started = time.perf_counter()
     snapshot = apply_structure_flags(
         structure_snapshot(replay_rows, enabled=show_events or show_structure or show_ranges),
@@ -1500,6 +1636,7 @@ def load_next_payload(
         "endId": end_id,
         "endReached": bool(end_id is not None and last_seen_id >= end_id),
         **snapshot,
+        **mavg_payload,
         "metrics": serialize_metrics_payload(
             fetch_ms=elapsed_ms(fetch_started),
             serialize_ms=elapsed_ms(serialize_started),
@@ -1533,6 +1670,15 @@ def load_previous_payload(
                 replay_rows = query_rows_between(cur, int(first_row["id"]), int(range_end_id), MAX_TICK_WINDOW)
             else:
                 replay_rows = []
+            replay_first_id = int(replay_rows[0]["id"]) if replay_rows else (int(first_row["id"]) if first_row else None)
+            replay_last_id = int(replay_rows[-1]["id"]) if replay_rows else (int(range_end_id) if range_end_id else None)
+            mavg_payload = mavg_payload_for_tick_range(
+                cur,
+                page="live",
+                start_id=replay_first_id,
+                end_id=replay_last_id,
+                include_configs=True,
+            )
     serialize_started = time.perf_counter()
     snapshot = apply_structure_flags(
         structure_snapshot(replay_rows, enabled=show_events or show_structure or show_ranges),
@@ -1549,6 +1695,7 @@ def load_previous_payload(
         "beforeId": before_id,
         "hasMoreLeft": bool(bounds.get("firstId") and first_row_id and first_row_id > bounds["firstId"]),
         **snapshot,
+        **mavg_payload,
         "metrics": serialize_metrics_payload(
             fetch_ms=elapsed_ms(fetch_started),
             serialize_ms=elapsed_ms(serialize_started),
@@ -2555,6 +2702,7 @@ def stream_backbone_events(
 def stream_events(
     *,
     after_id: int,
+    after_mavg_id: int,
     limit: int,
     window: int,
     show_ticks: bool,
@@ -2566,6 +2714,7 @@ def stream_events(
     stream_name: str = "live_stream",
 ) -> Generator[str, None, None]:
     last_id = max(0, after_id)
+    last_mavg_id = max(0, after_mavg_id)
     effective_limit = clamp_int(limit, 1, MAX_STREAM_BATCH)
     effective_window = clamp_int(window, 1, max_window)
     last_heartbeat = time.monotonic()
@@ -2591,9 +2740,12 @@ def stream_events(
                         fetch_started = time.perf_counter()
                         tick_rows = query_rows_after(cur, last_id, effective_limit)
                         fetch_ms = elapsed_ms(fetch_started)
-                        if tick_rows:
+                        mavg_payload = mavg_updates_payload(cur, page="live", after_value_id=last_mavg_id)
+                        mavg_points = list(mavg_payload.get("mavgPoints") or [])
+                        last_mavg_id = int(mavg_payload.get("mavgCursorId") or last_mavg_id)
+                        if tick_rows or mavg_points:
                             serialize_started = time.perf_counter()
-                            latest_tick_row = tick_rows[-1]
+                            latest_tick_row = tick_rows[-1] if tick_rows else query_latest_tick(cur)
                             payload_rows = serialize_tick_rows(tick_rows) if show_ticks else []
                             updates = {"bars": [], "rangeBoxes": [], "events": []}
                             if engine is not None:
@@ -2611,13 +2763,16 @@ def stream_events(
                                 for row in tick_rows:
                                     rect_snapshot = RECT_PAPER_SERVICE.process_tick(rect_mode, row) or rect_snapshot
 
-                            last_id = int(latest_tick_row["id"])
+                            if tick_rows:
+                                last_id = int(latest_tick_row["id"])
                             payload = {
                                 "rows": payload_rows,
                                 "rowCount": len(payload_rows),
                                 "structureBarUpdates": updates["bars"] if show_structure else [],
                                 "rangeBoxUpdates": updates["rangeBoxes"] if show_ranges else [],
                                 "structureEvents": updates["events"] if show_events else [],
+                                "mavgPoints": mavg_points,
+                                "mavgCursorId": last_mavg_id,
                                 "lastId": last_id,
                                 "streamMode": "delta",
                                 "rect": rect_snapshot,
@@ -2641,6 +2796,8 @@ def stream_events(
                                 "structureBarUpdates": [],
                                 "rangeBoxUpdates": [],
                                 "structureEvents": [],
+                                "mavgPoints": [],
+                                "mavgCursorId": last_mavg_id,
                                 "lastId": last_id,
                                 "streamMode": "heartbeat",
                                 "rect": rect_snapshot_for_mode(rect_mode) if rect_mode else None,
@@ -2701,6 +2858,15 @@ def stream_review_events(
                         fetch_started = time.perf_counter()
                         batch_rows = query_rows_after(cur, last_id, effective_batch, end_id=end_id)
                         fetch_ms = elapsed_ms(fetch_started)
+                        mavg_rows = query_mavg_points_for_tick_range(
+                            cur,
+                            page="live",
+                            start_id=(last_id + 1) if batch_rows else 0,
+                            end_id=int(batch_rows[-1]["id"]) if batch_rows else 0,
+                        ) if batch_rows else []
+                        mavg_rows_by_tickid: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+                        for mavg_row in mavg_rows:
+                            mavg_rows_by_tickid[int(mavg_row["tickid"])].append(mavg_row)
                         if not batch_rows:
                             payload = {
                                 "rows": [],
@@ -2708,6 +2874,7 @@ def stream_review_events(
                                 "structureBarUpdates": [],
                                 "rangeBoxUpdates": [],
                                 "structureEvents": [],
+                                "mavgPoints": [],
                                 "lastId": last_id,
                                 "endId": end_id,
                                 "endReached": True,
@@ -2750,6 +2917,8 @@ def stream_review_events(
                                 "structureBarUpdates": updates["bars"] if show_structure else [],
                                 "rangeBoxUpdates": updates["rangeBoxes"] if show_ranges else [],
                                 "structureEvents": updates["events"] if show_events else [],
+                                "mavgPoints": serialize_mavg_points(mavg_rows_by_tickid.get(last_id, [])),
+                                "mavgCursorId": max((int(item["id"]) for item in mavg_rows_by_tickid.get(last_id, [])), default=None),
                                 "lastId": last_id,
                                 "endId": end_id,
                                 "endReached": bool(last_id >= end_id),
@@ -3461,6 +3630,7 @@ def live_previous(
 @app.get("/api/live/stream")
 def live_stream(
     afterId: int = Query(0, ge=0),
+    afterMavgId: int = Query(0, ge=0),
     limit: int = Query(250, ge=1, le=MAX_STREAM_BATCH),
     window: int = Query(DEFAULT_WINDOW, ge=1, le=MAX_TICK_WINDOW),
     showTicks: bool = Query(True),
@@ -3471,6 +3641,7 @@ def live_stream(
     return StreamingResponse(
         stream_events(
             after_id=afterId,
+            after_mavg_id=afterMavgId,
             limit=limit,
             window=window,
             show_ticks=showTicks,
