@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Deque, Dict, Generator, Iterable, List, Optional, Sequence
+from typing import Any, Deque, Dict, Generator, Iterable, List, Optional, Sequence, Set
 
 import psycopg2
 import psycopg2.extras
@@ -26,6 +26,7 @@ EXPORT_BATCH_SIZE = 5000
 MOTION_WINDOWS = (3, 10, 30)
 DEFAULT_SIGNAL_RULE = "motion_v1_basic_acceleration"
 MICRO_BURST_SIGNAL_RULE = "motion_v2_micro_burst"
+BEST_FINGERPRINT_SIGNAL_RULE = "motion_v3_best_fingerprints"
 LOOKAHEAD_SECONDS = 300
 RISKFREE_DISTANCE = 0.30
 TARGET_DISTANCE = 1.00
@@ -33,9 +34,17 @@ STOP_DISTANCE = 1.00
 SIGNAL_ACCEL_EPSILON = 0.01
 MAX_REASONABLE_SPREAD = 0.50
 MAX_WINDOW_SECONDS = max(MOTION_WINDOWS)
+MIN_FINGERPRINT_SIGNALS = 20
+SPREADMULTIPLE3_BUCKET_STEP = 1.0
+EFFICIENCY3_BUCKET_STEP = 0.1
+VELOCITY3_BUCKET_STEP = 0.05
+ACCELERATION3_BUCKET_STEP = 0.01
+VELOCITY10_BUCKET_STEP = 0.02
+ACCELERATION10_BUCKET_STEP = 0.005
 SIGNAL_RULE_COOLDOWN_SECONDS = {
     DEFAULT_SIGNAL_RULE: 10,
     MICRO_BURST_SIGNAL_RULE: 20,
+    BEST_FINGERPRINT_SIGNAL_RULE: 10,
 }
 
 
@@ -205,6 +214,101 @@ class PendingSignal:
         }
 
 
+@dataclass(frozen=True)
+class FingerprintKey:
+    side: str
+    state3: Optional[str]
+    state10: Optional[str]
+    state30: Optional[str]
+    sm3bucket: Optional[int]
+    eff3bucket: Optional[int]
+    v3bucket: Optional[int]
+    a3bucket: Optional[int]
+    v10bucket: Optional[int]
+    a10bucket: Optional[int]
+
+
+@dataclass
+class FingerprintAggregate:
+    total: int = 0
+    targets: int = 0
+    riskfree: int = 0
+    stops: int = 0
+    seconds_to_riskfree_sum: float = 0.0
+    seconds_to_riskfree_count: int = 0
+    maxadverse_sum: float = 0.0
+    maxadverse_count: int = 0
+    score_sum: float = 0.0
+    score_count: int = 0
+
+    def observe(self, row: Dict[str, Any]) -> None:
+        self.total += 1
+        outcome = str(row.get("outcome") or "").strip().lower()
+        if outcome == "target_before_stop":
+            self.targets += 1
+        elif outcome == "riskfree_before_stop":
+            self.riskfree += 1
+        elif outcome == "stop_before_riskfree":
+            self.stops += 1
+
+        seconds_to_riskfree = _safe_float(row.get("seconds_to_riskfree"))
+        if seconds_to_riskfree is not None and outcome in {"target_before_stop", "riskfree_before_stop"}:
+            self.seconds_to_riskfree_sum += seconds_to_riskfree
+            self.seconds_to_riskfree_count += 1
+
+        maxadverse = _safe_float(row.get("maxadverse"))
+        if maxadverse is not None:
+            self.maxadverse_sum += maxadverse
+            self.maxadverse_count += 1
+
+        score = _safe_float(row.get("score"))
+        if score is not None:
+            self.score_sum += score
+            self.score_count += 1
+
+    @property
+    def useful(self) -> int:
+        return self.targets + self.riskfree
+
+    def _average(self, total: float, count: int) -> Optional[float]:
+        if count <= 0:
+            return None
+        return float(total / count)
+
+    def as_row(self, *, signalrule: str, key: FingerprintKey, baseline_useful_pct: Optional[float]) -> Dict[str, Any]:
+        total = max(1, int(self.total))
+        target_pct = float(self.targets * 100.0 / total)
+        useful_pct = float(self.useful * 100.0 / total)
+        stop_pct = float(self.stops * 100.0 / total)
+        lift: Optional[float] = None
+        if baseline_useful_pct is not None and baseline_useful_pct > 0:
+            lift = float(useful_pct / baseline_useful_pct)
+        return {
+            "signalrule": signalrule,
+            "side": key.side,
+            "state3": key.state3,
+            "state10": key.state10,
+            "state30": key.state30,
+            "sm3bucket": key.sm3bucket,
+            "eff3bucket": key.eff3bucket,
+            "v3bucket": key.v3bucket,
+            "a3bucket": key.a3bucket,
+            "v10bucket": key.v10bucket,
+            "a10bucket": key.a10bucket,
+            "total": self.total,
+            "targets": self.targets,
+            "riskfree": self.riskfree,
+            "stops": self.stops,
+            "targetpct": target_pct,
+            "usefulpct": useful_pct,
+            "stoppct": stop_pct,
+            "avgsectoriskfree": self._average(self.seconds_to_riskfree_sum, self.seconds_to_riskfree_count),
+            "avgmaxadverse": self._average(self.maxadverse_sum, self.maxadverse_count),
+            "avgscore": self._average(self.score_sum, self.score_count),
+            "lift": lift,
+        }
+
+
 class TickHistory:
     def __init__(self, *, windows: Sequence[int]) -> None:
         self.windows = tuple(sorted({max(1, int(window)) for window in windows}))
@@ -305,6 +409,64 @@ def _safe_float(value: Any) -> Optional[float]:
     if not math.isfinite(numeric):
         return None
     return numeric
+
+
+def _normalize_text(value: Any) -> Optional[str]:
+    text = str(value or "").strip().lower()
+    return text or None
+
+
+def _bucket_floor(value: Any, *, step: float) -> Optional[int]:
+    numeric = _safe_float(value)
+    if numeric is None or step <= 0:
+        return None
+    return int(math.floor(numeric / step))
+
+
+def _bucket_round(value: Any, *, step: float) -> Optional[int]:
+    numeric = _safe_float(value)
+    if numeric is None or step <= 0:
+        return None
+    scaled = numeric / step
+    if scaled >= 0:
+        return int(math.floor(scaled + 0.5))
+    return int(math.ceil(scaled - 0.5))
+
+
+def build_fingerprint_key(
+    *,
+    side: Any,
+    state3: Any,
+    state10: Any,
+    state30: Any,
+    spreadmultiple3: Any,
+    efficiency3: Any,
+    velocity3: Any,
+    acceleration3: Any,
+    velocity10: Any,
+    acceleration10: Any,
+) -> Optional[FingerprintKey]:
+    normalized_side = _normalize_text(side)
+    if normalized_side not in {"buy", "sell"}:
+        return None
+    return FingerprintKey(
+        side=normalized_side,
+        state3=_normalize_text(state3),
+        state10=_normalize_text(state10),
+        state30=_normalize_text(state30),
+        sm3bucket=_bucket_floor(spreadmultiple3, step=SPREADMULTIPLE3_BUCKET_STEP),
+        eff3bucket=_bucket_floor(efficiency3, step=EFFICIENCY3_BUCKET_STEP),
+        v3bucket=_bucket_round(velocity3, step=VELOCITY3_BUCKET_STEP),
+        a3bucket=_bucket_round(acceleration3, step=ACCELERATION3_BUCKET_STEP),
+        v10bucket=_bucket_round(velocity10, step=VELOCITY10_BUCKET_STEP),
+        a10bucket=_bucket_round(acceleration10, step=ACCELERATION10_BUCKET_STEP),
+    )
+
+
+def _format_metric(value: Optional[float]) -> str:
+    if value is None:
+        return "-"
+    return "{0:.2f}".format(value)
 
 
 def _derive_spread(row: Dict[str, Any]) -> Optional[float]:
@@ -442,6 +604,90 @@ def iter_ticks_with_motionpoints_between(
             yield [dict(row) for row in rows]
 
 
+def iter_signals_between(
+    conn: Any,
+    *,
+    start_ts: datetime,
+    end_ts: datetime,
+    signalrule: str,
+    batch_size: int,
+) -> Iterable[List[Dict[str, Any]]]:
+    with conn.cursor(name="motion_signals_between", cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.itersize = max(1, int(batch_size))
+        cur.execute(
+            """
+            SELECT
+                id,
+                timestamp,
+                side,
+                state3,
+                state10,
+                state30,
+                spreadmultiple3,
+                efficiency3,
+                velocity3,
+                acceleration3,
+                velocity10,
+                acceleration10,
+                outcome,
+                seconds_to_riskfree,
+                maxadverse,
+                score
+            FROM public.motionsignal
+            WHERE timestamp >= %s
+              AND timestamp <= %s
+              AND signalrule = %s
+            ORDER BY timestamp ASC, id ASC
+            """,
+            (start_ts, end_ts, signalrule),
+        )
+        while True:
+            rows = cur.fetchmany(cur.itersize)
+            if not rows:
+                return
+            yield [dict(row) for row in rows]
+
+
+def ensure_motionfingerprint_table(conn: Any) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS public.motionfingerprint (
+                id BIGSERIAL PRIMARY KEY,
+                signalrule TEXT,
+                side TEXT,
+                state3 TEXT,
+                state10 TEXT,
+                state30 TEXT,
+                sm3bucket INTEGER,
+                eff3bucket INTEGER,
+                v3bucket INTEGER,
+                a3bucket INTEGER,
+                v10bucket INTEGER,
+                a10bucket INTEGER,
+                total INTEGER,
+                targets INTEGER,
+                riskfree INTEGER,
+                stops INTEGER,
+                targetpct DOUBLE PRECISION,
+                usefulpct DOUBLE PRECISION,
+                stoppct DOUBLE PRECISION,
+                avgsectoriskfree DOUBLE PRECISION,
+                avgmaxadverse DOUBLE PRECISION,
+                avgscore DOUBLE PRECISION,
+                lift DOUBLE PRECISION,
+                createdat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+
+            CREATE INDEX IF NOT EXISTS motionfingerprint_signalrule_createdat_idx
+                ON public.motionfingerprint (signalrule, createdat DESC);
+
+            CREATE INDEX IF NOT EXISTS motionfingerprint_signalrule_lift_desc_idx
+                ON public.motionfingerprint (signalrule, lift DESC, usefulpct DESC, total DESC);
+            """
+        )
+
+
 def load_seed_tick(conn: Any, *, symbol: str, before_ts: datetime) -> Optional[Dict[str, Any]]:
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
@@ -516,6 +762,18 @@ def delete_signal_range(conn: Any, *, start_ts: datetime, end_ts: datetime, sign
               AND signalrule = %s
             """,
             (start_ts, end_ts, signalrule),
+        )
+
+
+def delete_motionfingerprints(conn: Any, *, signalrule: str) -> None:
+    ensure_motionfingerprint_table(conn)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM public.motionfingerprint
+            WHERE signalrule = %s
+            """,
+            (signalrule,),
         )
 
 
@@ -734,6 +992,145 @@ def insert_signals(conn: Any, rows: Sequence[Dict[str, Any]]) -> None:
             ) for row in rows],
             page_size=min(max(1, len(rows)), 500),
         )
+
+
+def insert_motionfingerprints(conn: Any, rows: Sequence[Dict[str, Any]]) -> None:
+    if not rows:
+        return
+    ensure_motionfingerprint_table(conn)
+    with conn.cursor() as cur:
+        psycopg2.extras.execute_values(
+            cur,
+            """
+            INSERT INTO public.motionfingerprint (
+                signalrule,
+                side,
+                state3,
+                state10,
+                state30,
+                sm3bucket,
+                eff3bucket,
+                v3bucket,
+                a3bucket,
+                v10bucket,
+                a10bucket,
+                total,
+                targets,
+                riskfree,
+                stops,
+                targetpct,
+                usefulpct,
+                stoppct,
+                avgsectoriskfree,
+                avgmaxadverse,
+                avgscore,
+                lift
+            ) VALUES %s
+            """,
+            [(
+                row["signalrule"],
+                row["side"],
+                row["state3"],
+                row["state10"],
+                row["state30"],
+                row["sm3bucket"],
+                row["eff3bucket"],
+                row["v3bucket"],
+                row["a3bucket"],
+                row["v10bucket"],
+                row["a10bucket"],
+                row["total"],
+                row["targets"],
+                row["riskfree"],
+                row["stops"],
+                row["targetpct"],
+                row["usefulpct"],
+                row["stoppct"],
+                row["avgsectoriskfree"],
+                row["avgmaxadverse"],
+                row["avgscore"],
+                row["lift"],
+            ) for row in rows],
+            page_size=min(max(1, len(rows)), 500),
+        )
+
+
+def load_top_motionfingerprints(
+    conn: Any,
+    *,
+    signalrule: str,
+    usefulpct_at_least: float = 65.0,
+    stoppct_at_most: float = 35.0,
+    total_at_least: int = MIN_FINGERPRINT_SIGNALS,
+    avgsectoriskfree_at_most: float = 20.0,
+) -> List[Dict[str, Any]]:
+    ensure_motionfingerprint_table(conn)
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT
+                id,
+                signalrule,
+                side,
+                state3,
+                state10,
+                state30,
+                sm3bucket,
+                eff3bucket,
+                v3bucket,
+                a3bucket,
+                v10bucket,
+                a10bucket,
+                total,
+                targets,
+                riskfree,
+                stops,
+                targetpct,
+                usefulpct,
+                stoppct,
+                avgsectoriskfree,
+                avgmaxadverse,
+                avgscore,
+                lift,
+                createdat
+            FROM public.motionfingerprint
+            WHERE signalrule = %s
+              AND usefulpct >= %s
+              AND stoppct <= %s
+              AND total >= %s
+              AND avgsectoriskfree <= %s
+            ORDER BY lift DESC NULLS LAST, usefulpct DESC, avgscore DESC NULLS LAST, total DESC, id ASC
+            """,
+            (
+                signalrule,
+                float(usefulpct_at_least),
+                float(stoppct_at_most),
+                int(total_at_least),
+                float(avgsectoriskfree_at_most),
+            ),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+
+def load_signal_outcome_comparison(
+    conn: Any,
+    *,
+    start_ts: datetime,
+    end_ts: datetime,
+) -> List[Dict[str, Any]]:
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT signalrule, side, outcome, count(*) AS total
+            FROM public.motionsignal
+            WHERE timestamp >= %s
+              AND timestamp <= %s
+            GROUP BY signalrule, side, outcome
+            ORDER BY signalrule ASC, side ASC, outcome ASC
+            """,
+            (start_ts, end_ts),
+        )
+        return [dict(row) for row in cur.fetchall()]
 
 
 def update_motionstate(conn: Any, *, lasttickid: Optional[int]) -> None:
@@ -1019,6 +1416,7 @@ def build_signal_candidate(
     points: Dict[int, Dict[str, Any]],
     last_signal_at: Dict[str, datetime],
     signalrule: str,
+    allowed_fingerprints: Optional[Set[FingerprintKey]] = None,
 ) -> Optional[PendingSignal]:
     state3 = str(points.get(3, {}).get("motionstate") or "")
     state10 = str(points.get(10, {}).get("motionstate") or "")
@@ -1058,6 +1456,38 @@ def build_signal_candidate(
             side = "buy"
         elif state3 in {"fast_down", "building_down"} and velocity3 < 0 and acceleration3 < 0 and abs(velocity10) < abs(velocity3) * 0.6:
             side = "sell"
+    elif signalrule == BEST_FINGERPRINT_SIGNAL_RULE:
+        if not allowed_fingerprints:
+            return None
+        buy_key = build_fingerprint_key(
+            side="buy",
+            state3=state3,
+            state10=state10,
+            state30=state30,
+            spreadmultiple3=spreadmultiple3,
+            efficiency3=efficiency3,
+            velocity3=velocity3,
+            acceleration3=acceleration3,
+            velocity10=velocity10,
+            acceleration10=acceleration10,
+        )
+        sell_key = build_fingerprint_key(
+            side="sell",
+            state3=state3,
+            state10=state10,
+            state30=state30,
+            spreadmultiple3=spreadmultiple3,
+            efficiency3=efficiency3,
+            velocity3=velocity3,
+            acceleration3=acceleration3,
+            velocity10=velocity10,
+            acceleration10=acceleration10,
+        )
+        buy_match = buy_key in allowed_fingerprints if buy_key is not None else False
+        sell_match = sell_key in allowed_fingerprints if sell_key is not None else False
+        if buy_match == sell_match:
+            return None
+        side = "buy" if buy_match else "sell"
     else:
         raise ValueError("unsupported signal rule: {0}".format(signalrule))
     if side is None:
@@ -1331,6 +1761,91 @@ def motionpoints_from_signal_row(row: Dict[str, Any]) -> Dict[int, Dict[str, Any
     }
 
 
+def analyze_winning_fingerprints(
+    conn: Any,
+    *,
+    start_ts: datetime,
+    end_ts: datetime,
+    batch_size: int,
+    source_signalrule: str,
+    fingerprint_signalrule: str,
+) -> Dict[str, Any]:
+    start_ts = _as_utc(start_ts)
+    end_ts = _as_utc(end_ts)
+    if start_ts is None or end_ts is None or end_ts <= start_ts:
+        raise ValueError("invalid analyze-winners time range")
+
+    aggregates: Dict[FingerprintKey, FingerprintAggregate] = {}
+    total_signals = 0
+    useful_signals = 0
+
+    for batch in iter_signals_between(
+        conn,
+        start_ts=start_ts,
+        end_ts=end_ts,
+        signalrule=source_signalrule,
+        batch_size=batch_size,
+    ):
+        for row in batch:
+            key = build_fingerprint_key(
+                side=row.get("side"),
+                state3=row.get("state3"),
+                state10=row.get("state10"),
+                state30=row.get("state30"),
+                spreadmultiple3=row.get("spreadmultiple3"),
+                efficiency3=row.get("efficiency3"),
+                velocity3=row.get("velocity3"),
+                acceleration3=row.get("acceleration3"),
+                velocity10=row.get("velocity10"),
+                acceleration10=row.get("acceleration10"),
+            )
+            if key is None:
+                continue
+            total_signals += 1
+            outcome = str(row.get("outcome") or "").strip().lower()
+            if outcome in {"target_before_stop", "riskfree_before_stop"}:
+                useful_signals += 1
+            aggregates.setdefault(key, FingerprintAggregate()).observe(row)
+
+    baseline_useful_pct: Optional[float] = None
+    if total_signals > 0:
+        baseline_useful_pct = float(useful_signals * 100.0 / total_signals)
+
+    all_rows = [
+        aggregate.as_row(
+            signalrule=fingerprint_signalrule,
+            key=key,
+            baseline_useful_pct=baseline_useful_pct,
+        )
+        for key, aggregate in aggregates.items()
+    ]
+    all_rows.sort(
+        key=lambda row: (
+            float(row.get("lift") or -1e9),
+            float(row.get("usefulpct") or -1e9),
+            float(row.get("avgscore") or -1e9),
+            int(row.get("total") or 0),
+            int(row.get("targets") or 0),
+        ),
+        reverse=True,
+    )
+
+    delete_motionfingerprints(conn, signalrule=fingerprint_signalrule)
+    insert_motionfingerprints(conn, all_rows)
+
+    ranked_rows = [row for row in all_rows if int(row.get("total") or 0) >= MIN_FINGERPRINT_SIGNALS]
+    return {
+        "source_signalrule": source_signalrule,
+        "fingerprint_signalrule": fingerprint_signalrule,
+        "start": start_ts,
+        "end": end_ts,
+        "baseline_usefulpct": baseline_useful_pct,
+        "signals": total_signals,
+        "fingerprint_rows": len(all_rows),
+        "ranked_rows": ranked_rows,
+    }
+
+
 def recreate_signals_from_motionpoints(
     conn: Any,
     *,
@@ -1353,6 +1868,26 @@ def recreate_signals_from_motionpoints(
     last_signal_at = load_signal_cooldowns(conn, before_ts=start_ts, signalrule=signalrule)
     pending_signals: Deque[PendingSignal] = deque()
     pending_signal_rows: List[Dict[str, Any]] = []
+    selected_fingerprint_rows: List[Dict[str, Any]] = []
+    allowed_fingerprints: Optional[Set[FingerprintKey]] = None
+    if signalrule == BEST_FINGERPRINT_SIGNAL_RULE:
+        selected_fingerprint_rows = load_top_motionfingerprints(conn, signalrule=signalrule)
+        allowed_fingerprints = {
+            FingerprintKey(
+                side=str(row.get("side") or "").strip().lower(),
+                state3=_normalize_text(row.get("state3")),
+                state10=_normalize_text(row.get("state10")),
+                state30=_normalize_text(row.get("state30")),
+                sm3bucket=row.get("sm3bucket"),
+                eff3bucket=row.get("eff3bucket"),
+                v3bucket=row.get("v3bucket"),
+                a3bucket=row.get("a3bucket"),
+                v10bucket=row.get("v10bucket"),
+                a10bucket=row.get("a10bucket"),
+            )
+            for row in selected_fingerprint_rows
+            if str(row.get("side") or "").strip().lower() in {"buy", "sell"}
+        }
     tickcount = 0
     signal_count = 0
 
@@ -1376,6 +1911,7 @@ def recreate_signals_from_motionpoints(
                     points=motionpoints_from_signal_row(raw_row),
                     last_signal_at=last_signal_at,
                     signalrule=signalrule,
+                    allowed_fingerprints=allowed_fingerprints,
                 )
                 if candidate is not None:
                     pending_signals.append(candidate)
@@ -1407,6 +1943,8 @@ def recreate_signals_from_motionpoints(
         "end": end_ts,
         "tickcount": tickcount,
         "motionsignal_count": signal_count,
+        "selected_fingerprint_count": len(allowed_fingerprints or set()),
+        "comparison_rows": load_signal_outcome_comparison(conn, start_ts=start_ts, end_ts=end_ts),
     }
 
 
@@ -1482,6 +2020,96 @@ def export_motion_tables(
     }
 
 
+def print_ranked_fingerprints(result: Dict[str, Any]) -> None:
+    _print(
+        "source_rule={0} fingerprint_rule={1} start={2} end={3} signals={4} baseline_usefulpct={5} fingerprints={6}".format(
+            result["source_signalrule"],
+            result["fingerprint_signalrule"],
+            result["start"].isoformat(),
+            result["end"].isoformat(),
+            result["signals"],
+            _format_metric(result.get("baseline_usefulpct")),
+            result["fingerprint_rows"],
+        )
+    )
+    rows = list(result.get("ranked_rows") or [])
+    if not rows:
+        _print("No fingerprints met the minimum signal threshold.")
+        return
+    _print(
+        "\t".join(
+            [
+                "rank",
+                "side",
+                "state3",
+                "state10",
+                "state30",
+                "sm3",
+                "eff3",
+                "v3",
+                "a3",
+                "v10",
+                "a10",
+                "total",
+                "targets",
+                "riskfree",
+                "stops",
+                "target_pct",
+                "useful_pct",
+                "stop_pct",
+                "avg_seconds_to_riskfree",
+                "avg_maxadverse",
+                "avg_score",
+                "lift",
+            ]
+        )
+    )
+    for index, row in enumerate(rows, start=1):
+        _print(
+            "\t".join(
+                [
+                    str(index),
+                    str(row.get("side") or "-"),
+                    str(row.get("state3") or "-"),
+                    str(row.get("state10") or "-"),
+                    str(row.get("state30") or "-"),
+                    str(row.get("sm3bucket") if row.get("sm3bucket") is not None else "-"),
+                    str(row.get("eff3bucket") if row.get("eff3bucket") is not None else "-"),
+                    str(row.get("v3bucket") if row.get("v3bucket") is not None else "-"),
+                    str(row.get("a3bucket") if row.get("a3bucket") is not None else "-"),
+                    str(row.get("v10bucket") if row.get("v10bucket") is not None else "-"),
+                    str(row.get("a10bucket") if row.get("a10bucket") is not None else "-"),
+                    str(row.get("total") or 0),
+                    str(row.get("targets") or 0),
+                    str(row.get("riskfree") or 0),
+                    str(row.get("stops") or 0),
+                    _format_metric(_safe_float(row.get("targetpct"))),
+                    _format_metric(_safe_float(row.get("usefulpct"))),
+                    _format_metric(_safe_float(row.get("stoppct"))),
+                    _format_metric(_safe_float(row.get("avgsectoriskfree"))),
+                    _format_metric(_safe_float(row.get("avgmaxadverse"))),
+                    _format_metric(_safe_float(row.get("avgscore"))),
+                    _format_metric(_safe_float(row.get("lift"))),
+                ]
+            )
+        )
+
+
+def print_signal_outcome_comparison(rows: Sequence[Dict[str, Any]]) -> None:
+    _print("signalrule\tside\toutcome\ttotal")
+    for row in rows:
+        _print(
+            "\t".join(
+                [
+                    str(row.get("signalrule") or "-"),
+                    str(row.get("side") or "-"),
+                    str(row.get("outcome") or "-"),
+                    str(row.get("total") or 0),
+                ]
+            )
+        )
+
+
 def parse_timestamp_arg(value: str) -> datetime:
     parsed = datetime.fromisoformat(str(value).strip())
     if parsed.tzinfo is None:
@@ -1531,6 +2159,20 @@ def build_parser() -> argparse.ArgumentParser:
     add_range_arguments(export)
     export.add_argument("--output-dir", default=str(BASE_DIR / "logs"), help="Directory to write CSV exports into.")
 
+    analyze = subparsers.add_parser("analyze-winners", help="Rank high-value fingerprints from recent motionsignal rows.")
+    add_range_arguments(analyze)
+    analyze.add_argument(
+        "--source-rule",
+        default=DEFAULT_SIGNAL_RULE,
+        choices=sorted({DEFAULT_SIGNAL_RULE, MICRO_BURST_SIGNAL_RULE, BEST_FINGERPRINT_SIGNAL_RULE}),
+        help="Existing motionsignal rule to analyze as the source population.",
+    )
+    analyze.add_argument(
+        "--fingerprint-rule",
+        default=BEST_FINGERPRINT_SIGNAL_RULE,
+        help="Fingerprint rule name to write into public.motionfingerprint.",
+    )
+
     recreate_signals = subparsers.add_parser("recreate-signals", help="Rebuild motionsignal rows from existing motionpoint rows for a time range.")
     add_range_arguments(recreate_signals)
     recreate_signals.add_argument("--rule", required=True, choices=sorted(SIGNAL_RULE_COOLDOWN_SECONDS), help="Signal rule to recreate.")
@@ -1568,6 +2210,18 @@ def jobs_main() -> int:
                 )
             )
             return 0
+        if args.command == "analyze-winners":
+            result = analyze_winning_fingerprints(
+                conn,
+                start_ts=target_range.start,
+                end_ts=target_range.end,
+                batch_size=batch_size,
+                source_signalrule=str(args.source_rule),
+                fingerprint_signalrule=str(args.fingerprint_rule),
+            )
+            conn.commit()
+            print_ranked_fingerprints(result)
+            return 0
         if args.command == "recreate-signals":
             result = recreate_signals_from_motionpoints(
                 conn,
@@ -1589,6 +2243,9 @@ def jobs_main() -> int:
                     result["motionsignal_count"],
                 )
             )
+            if result["signalrule"] == BEST_FINGERPRINT_SIGNAL_RULE:
+                _print("selected_fingerprints={0}".format(result["selected_fingerprint_count"]))
+            print_signal_outcome_comparison(result.get("comparison_rows") or [])
             return 0
 
         export_result = export_motion_tables(
