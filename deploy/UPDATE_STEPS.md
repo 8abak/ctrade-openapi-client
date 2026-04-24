@@ -116,6 +116,20 @@ Inspect recorded action state:
 cat /home/ec2-user/.datavis/update_steps_state.json
 ```
 
+## Current Motion Release
+
+For the raw-mid motion/trade-spot research layer in this branch:
+
+1. Run `deploy/sql/20260424_motion_trade_spots.sql`.
+2. Restart `datavis.service` only if app/routes changed.
+3. Run `python -m datavis.motion_trade_spots backfill --last-broker-days 2`.
+4. Export:
+   `logs/motionpoint_last2days.csv`
+   `logs/motionsignal_last2days.csv`
+5. Do not start any trading service unless that is added intentionally in a later release.
+
+This branch does add `/api/motion/signals/recent`, so the current `deploy/update_steps.json` includes a `datavis.service` restart. No trading worker is introduced here.
+
 ## Authoring rules
 
 When you add a push that changes deploy requirements:
@@ -127,4 +141,4 @@ When you add a push that changes deploy requirements:
 5. Use `required=false` only for actions that should warn without failing the deploy.
 6. Keep verification commands human-readable and cheap.
 
-The current manifest is intentionally concrete for the moving-average release: it applies `deploy/sql/20260424_mavg.sql`, installs and activates `deploy/systemd/mavg.service`, restarts `datavis.service`, runs a recent MA backfill, and prints final service status.
+The current manifest is intentionally concrete for the motion research release: it applies `deploy/sql/20260424_motion_trade_spots.sql`, restarts `datavis.service` because the app routes changed, backfills the last two broker days, exports the motion research CSVs, and does not start any trading service.

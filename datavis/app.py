@@ -411,6 +411,24 @@ def serialize_mavg_points(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [serialize_mavg_point_row(row) for row in rows]
 
 
+def serialize_motion_signal_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "tickid": int(row["tickid"]),
+        "timestamp": serialize_value(row.get("timestamp")),
+        "side": str(row.get("side") or ""),
+        "mid": float(row["mid"]) if row.get("mid") is not None else None,
+        "spread": float(row["spread"]) if row.get("spread") is not None else None,
+        "velocity3": float(row["velocity3"]) if row.get("velocity3") is not None else None,
+        "acceleration3": float(row["acceleration3"]) if row.get("acceleration3") is not None else None,
+        "efficiency3": float(row["efficiency3"]) if row.get("efficiency3") is not None else None,
+        "spreadmultiple3": float(row["spreadmultiple3"]) if row.get("spreadmultiple3") is not None else None,
+        "velocity10": float(row["velocity10"]) if row.get("velocity10") is not None else None,
+        "acceleration10": float(row["acceleration10"]) if row.get("acceleration10") is not None else None,
+        "outcome": row.get("outcome"),
+        "score": float(row["score"]) if row.get("score") is not None else None,
+    }
+
+
 def empty_mavg_payload() -> Dict[str, Any]:
     return {"mavgConfigs": [], "mavgPoints": [], "mavgCursorId": None}
 
@@ -3255,6 +3273,40 @@ def sql_schema(_: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
 @app.post("/api/sql/query")
 def sql_query(payload: QueryRequest, _: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
     return execute_query(payload.sql)
+
+
+@app.get("/api/motion/signals/recent")
+def motion_signals_recent(limit: int = Query(200, ge=1, le=1000)) -> Dict[str, Any]:
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                    tickid,
+                    timestamp,
+                    side,
+                    mid,
+                    spread,
+                    velocity3,
+                    acceleration3,
+                    efficiency3,
+                    spreadmultiple3,
+                    velocity10,
+                    acceleration10,
+                    outcome,
+                    score
+                FROM public.motionsignal
+                ORDER BY timestamp DESC, id DESC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            rows = [dict(row) for row in cur.fetchall()]
+    return {
+        "signals": [serialize_motion_signal_row(row) for row in rows],
+        "count": len(rows),
+        "serverTimeMs": now_ms(),
+    }
 
 
 @app.post("/api/trade/login")
