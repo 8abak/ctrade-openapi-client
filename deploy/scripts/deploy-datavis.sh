@@ -8,6 +8,8 @@ DEFAULT_DATABASE_URL="postgresql://babak:babak33044@localhost:5432/trading"
 HEALTH_URL="http://127.0.0.1:8000/api/health"
 DEPLOY_STATE_DIR="/home/ec2-user/.datavis"
 LAST_DEPLOYED_SHA_FILE="${DEPLOY_STATE_DIR}/last_deployed_commit"
+UPDATE_STEPS_SCRIPT="deploy/scripts/run-update-steps.sh"
+UPDATE_STEPS_MANIFEST="deploy/update_steps.json"
 UNIT_FILES=("datavis" "tickcollector" "backbone")
 AUTO_MIGRATION_FILES=(
   "deploy/sql/20260411_layer_zero_rects.sql"
@@ -283,6 +285,7 @@ on_error() {
   show_service_status "datavis"
   show_service_status "tickcollector"
   show_service_status "backbone"
+  show_service_status "mavg"
 }
 
 trap on_error ERR
@@ -331,6 +334,8 @@ log_change_summary "$previous_sha" "$new_sha"
 
 log "Activating virtual environment"
 source "$VENV_ACTIVATE"
+export DATAVIS_DEPLOY_STATE_DIR="$DEPLOY_STATE_DIR"
+export DATAVIS_DEFAULT_DATABASE_URL="$DEFAULT_DATABASE_URL"
 
 log "Installing Python dependencies"
 pip install -r requirements.txt
@@ -353,19 +358,25 @@ fi
 
 restart_selected_services
 
-if [[ -n "${RESTART_SERVICES[datavis]:-}" || "$FULL_DEPLOY" -eq 1 ]]; then
-  if command -v curl >/dev/null 2>&1; then
-    log "Running local health check"
-    for _ in {1..10}; do
-      if curl --fail --silent --show-error "$HEALTH_URL" >/dev/null; then
-        write_success_commit "$new_sha"
-        log "Deployment succeeded"
-        exit 0
-      fi
-      sleep 2
-    done
-    curl --fail --silent --show-error "$HEALTH_URL" >/dev/null
-  fi
+if [[ ! -f "$UPDATE_STEPS_MANIFEST" ]]; then
+  log "Missing update manifest: ${UPDATE_STEPS_MANIFEST}"
+  exit 1
+fi
+
+log "Running typed update steps from ${UPDATE_STEPS_MANIFEST}"
+bash "$UPDATE_STEPS_SCRIPT" --manifest "$UPDATE_STEPS_MANIFEST"
+
+if command -v curl >/dev/null 2>&1; then
+  log "Running local health check"
+  for _ in {1..10}; do
+    if curl --fail --silent --show-error "$HEALTH_URL" >/dev/null; then
+      write_success_commit "$new_sha"
+      log "Deployment succeeded"
+      exit 0
+    fi
+    sleep 2
+  done
+  curl --fail --silent --show-error "$HEALTH_URL" >/dev/null
 fi
 
 write_success_commit "$new_sha"

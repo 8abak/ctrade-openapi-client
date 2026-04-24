@@ -2,6 +2,8 @@
 
 `Deploy datavis to EC2` runs on every push to `main` and on manual `workflow_dispatch`.
 
+Every change that requires a migration, service install, service restart, backfill, or other deploy-time update must update `deploy/update_steps.json` in the same push.
+
 The workflow:
 - opens an SSH session to the EC2 host with `appleboy/ssh-action`
 - changes to `/home/ec2-user/cTrade`
@@ -36,10 +38,19 @@ Deploy behavior:
 - logs the changed files before any restarts
 - maps changed paths to service restarts explicitly
 - applies only the changed SQL migration files for that deploy
+- executes the typed update manifest in `deploy/update_steps.json`
 - reloads `systemd` only when unit files changed or on a full deploy
 - reloads nginx only when nginx-managed files changed or on a full deploy
 - restarts only the affected services
 - updates the stored successful deploy commit after the deploy passes
+
+Typed update workflow:
+- manifest file: `deploy/update_steps.json`
+- runner entrypoint: `deploy/scripts/run-update-steps.sh`
+- implementation: `deploy/scripts/run_update_steps.py`
+- docs: `deploy/UPDATE_STEPS.md`
+- persistent log: `/home/ec2-user/.datavis/update_steps.log`
+- persistent state: `/home/ec2-user/.datavis/update_steps_state.json`
 
 Current service/file mapping:
 - `frontend/*`, `datavis/app.py`, `datavis/trading.py`, `datavis/smart_scalp.py`, `datavis/structure.py`, `datavis/rects.py` -> `datavis.service`
@@ -74,6 +85,7 @@ Trading runtime env vars for `/etc/datavis.env`:
 
 Operational checks:
 - deploy on EC2: `cd /home/ec2-user/cTrade && bash deploy/scripts/deploy-datavis.sh`
+- run update steps only: `cd /home/ec2-user/cTrade && source /home/ec2-user/venvs/datavis/bin/activate && set -a && source /etc/datavis.env && set +a && bash deploy/scripts/run-update-steps.sh`
 - validate nginx: `sudo nginx -t`
 - verify the app: `curl -I https://www.datavis.au/`
 - export one broker day: `getCsv --day 14/04`

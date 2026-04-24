@@ -1,0 +1,96 @@
+{
+  "version": "20260424_mavg",
+  "description": "Install and activate moving-average database, service, and recent backfill workflow.",
+  "actions": [
+    {
+      "id": "run_mavg_sql",
+      "description": "Create moving-average tables, indexes, and seed configs.",
+      "type": "run_sql_file",
+      "file": "deploy/sql/20260424_mavg.sql",
+      "required": true,
+      "safe_to_rerun": true,
+      "timeout_seconds": 120
+    },
+    {
+      "id": "install_mavg_service",
+      "description": "Install the moving-average systemd unit from the repo.",
+      "type": "install_systemd_unit",
+      "file": "deploy/systemd/mavg.service",
+      "service": "mavg.service",
+      "required": true,
+      "safe_to_rerun": true,
+      "timeout_seconds": 60
+    },
+    {
+      "id": "daemon_reload_after_mavg_install",
+      "description": "Reload systemd so the installed moving-average unit is recognized.",
+      "type": "daemon_reload",
+      "required": true,
+      "safe_to_rerun": true,
+      "timeout_seconds": 60
+    },
+    {
+      "id": "enable_mavg_service",
+      "description": "Enable the moving-average worker at boot.",
+      "type": "enable_service",
+      "service": "mavg.service",
+      "required": true,
+      "safe_to_rerun": true,
+      "timeout_seconds": 60
+    },
+    {
+      "id": "start_mavg_service",
+      "description": "Start the moving-average worker for the first time after deploy.",
+      "type": "start_service",
+      "service": "mavg.service",
+      "required": true,
+      "safe_to_rerun": true,
+      "timeout_seconds": 60
+    },
+    {
+      "id": "restart_datavis_for_mavg_routes",
+      "description": "Restart datavis so the new moving-average routes and frontend assets are loaded.",
+      "type": "restart_service",
+      "service": "datavis.service",
+      "required": true,
+      "safe_to_rerun": true,
+      "timeout_seconds": 60
+    },
+    {
+      "id": "restart_mavg_after_datavis_restart",
+      "description": "Restart the moving-average worker after the schema and app restart are complete.",
+      "type": "restart_service",
+      "service": "mavg.service",
+      "required": true,
+      "safe_to_rerun": true,
+      "timeout_seconds": 60
+    },
+    {
+      "id": "backfill_recent_mavg",
+      "description": "Backfill recent moving-average values for the active symbol.",
+      "type": "backfill_command",
+      "command": "python -m datavis.mavg_jobs --symbol \"${DATAVIS_SYMBOL:-XAUUSD}\" backfill-recent --days 1.0",
+      "required": false,
+      "safe_to_rerun": true,
+      "timeout_seconds": 900
+    },
+    {
+      "id": "verify_datavis_service",
+      "description": "Show detailed datavis systemd status after the deploy actions complete.",
+      "type": "verify_command",
+      "command": "sudo systemctl status datavis.service --no-pager -l",
+      "required": false,
+      "safe_to_rerun": true,
+      "timeout_seconds": 60
+    },
+    {
+      "id": "verify_mavg_service",
+      "description": "Show detailed moving-average systemd status after the deploy actions complete.",
+      "type": "verify_command",
+      "command": "sudo systemctl status mavg.service --no-pager -l",
+      "required": false,
+      "safe_to_rerun": true,
+      "timeout_seconds": 60
+    }
+  ]
+}
