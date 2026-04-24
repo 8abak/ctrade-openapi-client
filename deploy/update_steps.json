@@ -1,51 +1,15 @@
 {
   "version": "20260424_motion_trade_spots",
-  "description": "Install the motion/trade-spot research schema, restart datavis only because motion routes changed, backfill the last two broker days, and export research CSVs without starting any trading worker.",
+  "description": "Run the journaled motion trade spots update runner so SQL, backfill, validation, and the datavis restart share one auditable command path.",
   "actions": [
     {
-      "id": "run_motion_trade_spots_sql",
-      "description": "Create motionpoint, motionsignal, and motionstate tables for raw-mid research.",
-      "type": "run_sql_file",
-      "file": "deploy/sql/20260424_motion_trade_spots.sql",
-      "required": true,
-      "safe_to_rerun": true,
-      "timeout_seconds": 120
-    },
-    {
-      "id": "restart_datavis_for_motion_routes",
-      "description": "Restart datavis because this release adds a read-only motion signals API route.",
-      "type": "restart_service",
-      "service": "datavis.service",
-      "required": true,
-      "safe_to_rerun": true,
-      "timeout_seconds": 60
-    },
-    {
-      "id": "backfill_motion_trade_spots_last2days",
-      "description": "Backfill motionpoint and motionsignal for the last two broker trading days.",
-      "type": "backfill_command",
-      "command": "python -m datavis.motion_trade_spots backfill --last-broker-days 2",
-      "required": false,
-      "safe_to_rerun": true,
-      "timeout_seconds": 3600
-    },
-    {
-      "id": "export_motion_trade_spots_csv",
-      "description": "Export last-two-day motion research tables into logs/motionpoint_last2days.csv and logs/motionsignal_last2days.csv.",
+      "id": "apply_motion_trade_spots_update",
+      "description": "Run the motion trade spots update runner with journaling, DB validation, backfill, datavis restart, and API verification.",
       "type": "run_command",
-      "command": "python -m datavis.motion_trade_spots export --last-broker-days 2 --output-dir logs",
-      "required": false,
+      "command": "bash deploy/scripts/apply-update-steps.sh",
+      "required": true,
       "safe_to_rerun": true,
-      "timeout_seconds": 1800
-    },
-    {
-      "id": "verify_datavis_service",
-      "description": "Show detailed datavis systemd status after the motion research deploy completes.",
-      "type": "verify_command",
-      "command": "sudo systemctl status datavis.service --no-pager -l",
-      "required": false,
-      "safe_to_rerun": true,
-      "timeout_seconds": 60
+      "timeout_seconds": 5400
     }
   ]
 }

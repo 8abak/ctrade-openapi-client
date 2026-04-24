@@ -17,9 +17,6 @@ from dotenv import load_dotenv
 
 from datavis.backbone import describe_days_table
 from datavis.brokerday import BROKER_TIMEZONE, brokerday_bounds, brokerday_for_timestamp, tick_mid
-from datavis.db import db_connect as shared_db_connect
-
-
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
@@ -259,18 +256,18 @@ def database_url() -> str:
             if value.startswith("postgresql+psycopg2://"):
                 return value.replace("postgresql+psycopg2://", "postgresql://", 1)
             return value
-    return ""
+    raise RuntimeError(
+        "No DATABASE_URL or DATAVIS_DB_URL was available. Set DATABASE_URL or DATAVIS_DB_URL before running datavis.motion_trade_spots."
+    )
 
 
 def db_connect(*, readonly: bool = False, autocommit: bool = False) -> Any:
     url = database_url()
-    if url:
-        conn = psycopg2.connect(url)
-        conn.autocommit = autocommit
-        if readonly:
-            conn.set_session(readonly=True, autocommit=autocommit)
-        return conn
-    return shared_db_connect(readonly=readonly, autocommit=autocommit)
+    conn = psycopg2.connect(url)
+    conn.autocommit = autocommit
+    if readonly:
+        conn.set_session(readonly=True, autocommit=autocommit)
+    return conn
 
 
 @contextmanager
