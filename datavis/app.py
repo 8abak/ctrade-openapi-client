@@ -109,6 +109,7 @@ TRADE_GATEWAY = CTraderGateway(BROKER_CONFIG)
 AUDIT_LOGGER = logging.getLogger("datavis.trade.audit")
 PERF_LOGGER = logging.getLogger("datavis.perf")
 STREAM_LOGGER = logging.getLogger("datavis.stream")
+MAVG_LOGGER = logging.getLogger("datavis.mavg")
 SQL_SCHEMA_CACHE_TTL_MS = max(1000, int(os.getenv("DATAVIS_SQL_SCHEMA_CACHE_MS", "30000")))
 HOT_PATH_LOG_THRESHOLD_MS = max(5.0, float(os.getenv("DATAVIS_HOT_PATH_LOG_MS", "75")))
 STREAM_ACTIVITY_LOCK = threading.Lock()
@@ -414,6 +415,29 @@ def empty_mavg_payload() -> Dict[str, Any]:
     return {"mavgConfigs": [], "mavgPoints": [], "mavgCursorId": None}
 
 
+def log_mavg_query_failure(operation: str, *, page: str, detail: str = "") -> None:
+    suffix = " {0}".format(detail) if detail else ""
+    MAVG_LOGGER.exception("Moving-average query failed: operation=%s page=%s%s", operation, page, suffix)
+
+
+def safe_query_mavg_points_for_tick_range(
+    cur: Any,
+    *,
+    page: str,
+    start_id: int,
+    end_id: int,
+) -> List[Dict[str, Any]]:
+    try:
+        return query_mavg_points_for_tick_range(cur, page=page, start_id=start_id, end_id=end_id)
+    except Exception:
+        log_mavg_query_failure(
+            "tick_range_rows",
+            page=page,
+            detail="start_id={0} end_id={1}".format(start_id, end_id),
+        )
+        return []
+
+
 def mavg_payload_for_tick_range(
     cur: Any,
     *,
@@ -422,17 +446,26 @@ def mavg_payload_for_tick_range(
     end_id: Optional[int],
     include_configs: bool,
 ) -> Dict[str, Any]:
+    empty_payload = empty_mavg_payload() if include_configs else {"mavgPoints": [], "mavgCursorId": None}
     if start_id is None or end_id is None or end_id < start_id:
-        return empty_mavg_payload() if include_configs else {"mavgPoints": [], "mavgCursorId": None}
-    config_rows = list_mavg_config_rows(cur, page=page) if include_configs else []
-    if include_configs and not config_rows:
-        return empty_mavg_payload()
-    point_rows = query_mavg_points_for_tick_range(cur, page=page, start_id=int(start_id), end_id=int(end_id))
-    return {
-        "mavgConfigs": [serialize_mavg_config_row(row) for row in config_rows] if include_configs else [],
-        "mavgPoints": serialize_mavg_points(point_rows),
-        "mavgCursorId": max((int(row["id"]) for row in point_rows), default=None),
-    }
+        return empty_payload
+    try:
+        config_rows = list_mavg_config_rows(cur, page=page) if include_configs else []
+        if include_configs and not config_rows:
+            return empty_mavg_payload()
+        point_rows = query_mavg_points_for_tick_range(cur, page=page, start_id=int(start_id), end_id=int(end_id))
+        return {
+            "mavgConfigs": [serialize_mavg_config_row(row) for row in config_rows] if include_configs else [],
+            "mavgPoints": serialize_mavg_points(point_rows),
+            "mavgCursorId": max((int(row["id"]) for row in point_rows), default=None),
+        }
+    except Exception:
+        log_mavg_query_failure(
+            "tick_range",
+            page=page,
+            detail="start_id={0} end_id={1}".format(start_id, end_id),
+        )
+        return empty_payload
 
 
 def mavg_payload_for_time_range(
@@ -445,21 +478,33 @@ def mavg_payload_for_time_range(
 ) -> Dict[str, Any]:
     if start_ts is None or end_ts is None:
         return empty_mavg_payload()
-    config_rows = list_mavg_config_rows(cur, page=page)
-    if not config_rows:
+    try:
+        config_rows = list_mavg_config_rows(cur, page=page)
+        if not config_rows:
+            return empty_mavg_payload()
+        point_rows = query_mavg_points_for_time_range(
+            cur,
+            page=page,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            target_points=target_points,
+        )
+        return {
+            "mavgConfigs": [serialize_mavg_config_row(row) for row in config_rows],
+            "mavgPoints": serialize_mavg_points(point_rows),
+            "mavgCursorId": max((int(row["id"]) for row in point_rows), default=None),
+        }
+    except Exception:
+        log_mavg_query_failure(
+            "time_range",
+            page=page,
+            detail="start_ts={0} end_ts={1} target_points={2}".format(
+                serialize_value(start_ts),
+                serialize_value(end_ts),
+                target_points,
+            ),
+        )
         return empty_mavg_payload()
-    point_rows = query_mavg_points_for_time_range(
-        cur,
-        page=page,
-        start_ts=start_ts,
-        end_ts=end_ts,
-        target_points=target_points,
-    )
-    return {
-        "mavgConfigs": [serialize_mavg_config_row(row) for row in config_rows],
-        "mavgPoints": serialize_mavg_points(point_rows),
-        "mavgCursorId": max((int(row["id"]) for row in point_rows), default=None),
-    }
 
 
 def mavg_updates_payload(
@@ -468,11 +513,16 @@ def mavg_updates_payload(
     page: str,
     after_value_id: int,
 ) -> Dict[str, Any]:
-    point_rows = query_mavg_points_after_value_id(cur, page=page, after_value_id=max(0, int(after_value_id or 0)))
-    return {
-        "mavgPoints": serialize_mavg_points(point_rows),
-        "mavgCursorId": max((int(row["id"]) for row in point_rows), default=max(0, int(after_value_id or 0))),
-    }
+    cursor_id = max(0, int(after_value_id or 0))
+    try:
+        point_rows = query_mavg_points_after_value_id(cur, page=page, after_value_id=cursor_id)
+        return {
+            "mavgPoints": serialize_mavg_points(point_rows),
+            "mavgCursorId": max((int(row["id"]) for row in point_rows), default=cursor_id),
+        }
+    except Exception:
+        log_mavg_query_failure("updates", page=page, detail="after_value_id={0}".format(cursor_id))
+        return {"mavgPoints": [], "mavgCursorId": cursor_id}
 
 
 def serialize_metrics_payload(
@@ -2858,7 +2908,7 @@ def stream_review_events(
                         fetch_started = time.perf_counter()
                         batch_rows = query_rows_after(cur, last_id, effective_batch, end_id=end_id)
                         fetch_ms = elapsed_ms(fetch_started)
-                        mavg_rows = query_mavg_points_for_tick_range(
+                        mavg_rows = safe_query_mavg_points_for_tick_range(
                             cur,
                             page="live",
                             start_id=(last_id + 1) if batch_rows else 0,

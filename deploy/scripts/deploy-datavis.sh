@@ -10,7 +10,7 @@ DEPLOY_STATE_DIR="/home/ec2-user/.datavis"
 LAST_DEPLOYED_SHA_FILE="${DEPLOY_STATE_DIR}/last_deployed_commit"
 UPDATE_STEPS_SCRIPT="deploy/scripts/run-update-steps.sh"
 UPDATE_STEPS_MANIFEST="deploy/update_steps.json"
-UNIT_FILES=("datavis" "tickcollector" "backbone")
+UNIT_FILES=("datavis" "tickcollector" "backbone" "mavg")
 AUTO_MIGRATION_FILES=(
   "deploy/sql/20260411_layer_zero_rects.sql"
   "deploy/sql/20260418_remove_legacy_structure_layer.sql"
@@ -18,6 +18,7 @@ AUTO_MIGRATION_FILES=(
   "deploy/sql/20260420_backbone.sql"
   "deploy/sql/20260422_backbone_bigbones.sql"
   "deploy/sql/20260422_retire_structure_family.sql"
+  "deploy/sql/20260424_mavg.sql"
 )
 REMOVED_SERVICES=(
   "separation"
@@ -110,6 +111,10 @@ migration_service_mapping() {
     deploy/sql/20260418_remove_legacy_structure_layer.sql)
       mark_service "datavis"
       ;;
+    deploy/sql/20260424_mavg.sql)
+      mark_service "datavis"
+      mark_service "mavg"
+      ;;
     *)
       log "Unknown migration mapping for ${migration_path}; defaulting to datavis + backbone"
       mark_service "datavis"
@@ -140,6 +145,13 @@ classify_changed_file() {
     frontend/*|datavis/app.py|datavis/trading.py|datavis/smart_scalp.py|datavis/structure.py|datavis/rects.py)
       mark_service "datavis"
       ;;
+    datavis/mavg.py)
+      mark_service "datavis"
+      mark_service "mavg"
+      ;;
+    datavis/mavg_jobs.py|datavis/mavg_runtime.py)
+      mark_service "mavg"
+      ;;
     datavis/backbone.py|datavis/backbone_runtime.py|datavis/backbone_jobs.py|datavis/brokerday.py)
       mark_service "datavis"
       mark_service "backbone"
@@ -153,7 +165,7 @@ classify_changed_file() {
       local service_name
       service_name="$(basename "$path" .service)"
       case "$service_name" in
-        datavis|tickcollector|backbone)
+        datavis|tickcollector|backbone|mavg)
           mark_service "$service_name"
           ;;
       esac
@@ -222,7 +234,7 @@ restart_selected_services() {
     log "No runtime services selected for restart"
     return
   fi
-  for service_name in datavis tickcollector backbone; do
+  for service_name in datavis tickcollector backbone mavg; do
     if [[ -n "${RESTART_SERVICES[$service_name]:-}" ]]; then
       log "Restarting ${service_name}.service"
       sudo systemctl restart "${service_name}.service"
@@ -264,7 +276,7 @@ log_change_summary() {
     log "Selected service restarts: none"
   else
     log "Selected service restarts:"
-    for service_name in datavis tickcollector backbone; do
+    for service_name in datavis tickcollector backbone mavg; do
       if [[ -n "${RESTART_SERVICES[$service_name]:-}" ]]; then
         printf '  %s.service\n' "$service_name"
       fi

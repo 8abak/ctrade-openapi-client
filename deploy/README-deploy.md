@@ -29,6 +29,7 @@ Systemd units installed by deploy:
 - `datavis.service` runs `datavis.app:app` from `/home/ec2-user/venvs/datavis/bin/uvicorn`
 - `tickcollector.service` runs `/home/ec2-user/cTrade/tickCollectorRawToDB.py` from `/home/ec2-user/venvs/datavis/bin/python`
 - `backbone.service` runs `python -m datavis.backbone_runtime` from `/home/ec2-user/venvs/datavis/bin/python`
+- `mavg.service` runs `python -m datavis.mavg_runtime` from `/home/ec2-user/venvs/datavis/bin/python`
 
 Removed services cleaned up by deploy:
 - retired legacy services listed in `deploy/scripts/deploy-datavis.sh`
@@ -54,6 +55,8 @@ Typed update workflow:
 
 Current service/file mapping:
 - `frontend/*`, `datavis/app.py`, `datavis/trading.py`, `datavis/smart_scalp.py`, `datavis/structure.py`, `datavis/rects.py` -> `datavis.service`
+- `datavis/mavg.py` -> `datavis.service` and `mavg.service`
+- `datavis/mavg_jobs.py`, `datavis/mavg_runtime.py` -> `mavg.service`
 - `datavis/backbone.py`, `datavis/backbone_runtime.py`, `datavis/backbone_jobs.py`, `datavis/brokerday.py` -> `backbone.service` and `datavis.service`
 - `tickCollectorRawToDB.py`, `datavis/tickcollector_runtime.py`, `ctrader_open_api/*`, `datavis/broker_creds.py`, `datavis/ctrader_auth.py` -> `tickcollector.service` and `datavis.service`
 - `datavis/db.py`, `requirements.txt` -> `datavis.service`, `tickcollector.service`, `backbone.service`
@@ -61,6 +64,7 @@ Current service/file mapping:
 - `deploy/nginx/*`, `deploy/scripts/recover-datavis-nginx.sh` -> nginx reload via `recover-datavis-nginx.sh`
 - `deploy/sql/20260420_backbone.sql`, `deploy/sql/20260422_backbone_bigbones.sql`, `deploy/sql/20260422_retire_structure_family.sql` -> run migration, restart `datavis.service` and `backbone.service`
 - `deploy/sql/20260411_layer_zero_rects.sql`, `deploy/sql/20260419_speed_cleanup.sql` -> run migration, restart `datavis.service` and `tickcollector.service`
+- `deploy/sql/20260424_mavg.sql` -> run migration, restart `datavis.service` and `mavg.service`
 - `deploy/sql/20260418_remove_legacy_structure_layer.sql`, `deploy/sql/20260421_drop_auction_layer_manual.sql` -> run migration, restart `datavis.service`
 
 Nginx recovery managed by deploy:
