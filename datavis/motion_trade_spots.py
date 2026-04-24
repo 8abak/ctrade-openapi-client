@@ -24,15 +24,19 @@ DEFAULT_SYMBOL = os.getenv("DATAVIS_SYMBOL", "XAUUSD").strip().upper() or "XAUUS
 DEFAULT_BATCH_SIZE = 1000
 EXPORT_BATCH_SIZE = 5000
 MOTION_WINDOWS = (3, 10, 30)
-SIGNAL_RULE = "motion_v1_basic_acceleration"
+DEFAULT_SIGNAL_RULE = "motion_v1_basic_acceleration"
+MICRO_BURST_SIGNAL_RULE = "motion_v2_micro_burst"
 LOOKAHEAD_SECONDS = 300
 RISKFREE_DISTANCE = 0.30
 TARGET_DISTANCE = 1.00
 STOP_DISTANCE = 1.00
-SIGNAL_COOLDOWN_SECONDS = 10
 SIGNAL_ACCEL_EPSILON = 0.01
 MAX_REASONABLE_SPREAD = 0.50
 MAX_WINDOW_SECONDS = max(MOTION_WINDOWS)
+SIGNAL_RULE_COOLDOWN_SECONDS = {
+    DEFAULT_SIGNAL_RULE: 10,
+    MICRO_BURST_SIGNAL_RULE: 20,
+}
 
 
 @dataclass(frozen=True)
@@ -380,6 +384,64 @@ def iter_ticks_between(
             yield [dict(row) for row in rows]
 
 
+def iter_ticks_with_motionpoints_between(
+    conn: Any,
+    *,
+    symbol: str,
+    start_ts: datetime,
+    end_ts: datetime,
+    batch_size: int,
+) -> Iterable[List[Dict[str, Any]]]:
+    with conn.cursor(name="motion_ticks_points_between", cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.itersize = max(1, int(batch_size))
+        cur.execute(
+            """
+            SELECT
+                t.id,
+                t.timestamp,
+                t.bid,
+                t.ask,
+                t.mid,
+                t.spread,
+                mp3.velocity AS velocity3,
+                mp3.acceleration AS acceleration3,
+                mp3.efficiency AS efficiency3,
+                mp3.spreadmultiple AS spreadmultiple3,
+                mp3.motionstate AS state3,
+                mp10.velocity AS velocity10,
+                mp10.acceleration AS acceleration10,
+                mp10.efficiency AS efficiency10,
+                mp10.spreadmultiple AS spreadmultiple10,
+                mp10.motionstate AS state10,
+                mp30.velocity AS velocity30,
+                mp30.acceleration AS acceleration30,
+                mp30.efficiency AS efficiency30,
+                mp30.spreadmultiple AS spreadmultiple30,
+                mp30.motionstate AS state30
+            FROM public.ticks t
+            LEFT JOIN public.motionpoint mp3
+                ON mp3.tickid = t.id
+               AND mp3.windowsec = 3
+            LEFT JOIN public.motionpoint mp10
+                ON mp10.tickid = t.id
+               AND mp10.windowsec = 10
+            LEFT JOIN public.motionpoint mp30
+                ON mp30.tickid = t.id
+               AND mp30.windowsec = 30
+            WHERE t.symbol = %s
+              AND t.timestamp >= %s
+              AND t.timestamp <= %s
+            ORDER BY t.timestamp ASC, t.id ASC
+            """,
+            (symbol, start_ts, end_ts),
+        )
+        while True:
+            rows = cur.fetchmany(cur.itersize)
+            if not rows:
+                return
+            yield [dict(row) for row in rows]
+
+
 def load_seed_tick(conn: Any, *, symbol: str, before_ts: datetime) -> Optional[Dict[str, Any]]:
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
@@ -423,7 +485,7 @@ def load_seed_motion_states(conn: Any, *, before_ts: datetime) -> Dict[int, Moti
     return result
 
 
-def load_signal_cooldowns(conn: Any, *, before_ts: datetime) -> Dict[str, datetime]:
+def load_signal_cooldowns(conn: Any, *, before_ts: datetime, signalrule: str) -> Dict[str, datetime]:
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             """
@@ -433,7 +495,7 @@ def load_signal_cooldowns(conn: Any, *, before_ts: datetime) -> Dict[str, dateti
               AND timestamp < %s
             ORDER BY side ASC, timestamp DESC, id DESC
             """,
-            (SIGNAL_RULE, before_ts),
+            (signalrule, before_ts),
         )
         rows = [dict(row) for row in cur.fetchall()]
     result: Dict[str, datetime] = {}
@@ -444,7 +506,7 @@ def load_signal_cooldowns(conn: Any, *, before_ts: datetime) -> Dict[str, dateti
     return result
 
 
-def delete_backfill_range(conn: Any, *, start_ts: datetime, end_ts: datetime) -> None:
+def delete_signal_range(conn: Any, *, start_ts: datetime, end_ts: datetime, signalrule: str) -> None:
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -453,8 +515,12 @@ def delete_backfill_range(conn: Any, *, start_ts: datetime, end_ts: datetime) ->
               AND timestamp <= %s
               AND signalrule = %s
             """,
-            (start_ts, end_ts, SIGNAL_RULE),
+            (start_ts, end_ts, signalrule),
         )
+
+
+def delete_motionpoint_range(conn: Any, *, start_ts: datetime, end_ts: datetime) -> None:
+    with conn.cursor() as cur:
         cur.execute(
             """
             DELETE FROM public.motionpoint
@@ -464,6 +530,11 @@ def delete_backfill_range(conn: Any, *, start_ts: datetime, end_ts: datetime) ->
             """,
             (start_ts, end_ts, list(MOTION_WINDOWS)),
         )
+
+
+def delete_backfill_range(conn: Any, *, start_ts: datetime, end_ts: datetime, signalrule: str) -> None:
+    delete_signal_range(conn, start_ts=start_ts, end_ts=end_ts, signalrule=signalrule)
+    delete_motionpoint_range(conn, start_ts=start_ts, end_ts=end_ts)
 
 
 def insert_motionpoints(conn: Any, rows: Sequence[Dict[str, Any]]) -> None:
@@ -947,8 +1018,13 @@ def build_signal_candidate(
     tick_row: Dict[str, Any],
     points: Dict[int, Dict[str, Any]],
     last_signal_at: Dict[str, datetime],
+    signalrule: str,
 ) -> Optional[PendingSignal]:
     state3 = str(points.get(3, {}).get("motionstate") or "")
+    state10 = str(points.get(10, {}).get("motionstate") or "")
+    state30 = str(points.get(30, {}).get("motionstate") or "")
+    velocity3 = _safe_float(points.get(3, {}).get("velocity"))
+    acceleration3 = _safe_float(points.get(3, {}).get("acceleration"))
     velocity10 = _safe_float(points.get(10, {}).get("velocity"))
     acceleration10 = _safe_float(points.get(10, {}).get("acceleration"))
     efficiency3 = _safe_float(points.get(3, {}).get("efficiency"))
@@ -962,19 +1038,34 @@ def build_signal_candidate(
         return None
     if spread <= 0 or spread > MAX_REASONABLE_SPREAD:
         return None
-    if efficiency3 is None or spreadmultiple3 is None or efficiency3 < 0.45 or spreadmultiple3 < 2.5:
-        return None
 
     side: Optional[str] = None
-    if state3 in {"fast_up", "building_up"} and velocity10 is not None and velocity10 > 0 and acceleration10 is not None and acceleration10 >= -SIGNAL_ACCEL_EPSILON:
-        side = "buy"
-    elif state3 in {"fast_down", "building_down"} and velocity10 is not None and velocity10 < 0 and acceleration10 is not None and acceleration10 <= SIGNAL_ACCEL_EPSILON:
-        side = "sell"
+    if signalrule == DEFAULT_SIGNAL_RULE:
+        if efficiency3 is None or spreadmultiple3 is None or efficiency3 < 0.45 or spreadmultiple3 < 2.5:
+            return None
+        if state3 in {"fast_up", "building_up"} and velocity10 is not None and velocity10 > 0 and acceleration10 is not None and acceleration10 >= -SIGNAL_ACCEL_EPSILON:
+            side = "buy"
+        elif state3 in {"fast_down", "building_down"} and velocity10 is not None and velocity10 < 0 and acceleration10 is not None and acceleration10 <= SIGNAL_ACCEL_EPSILON:
+            side = "sell"
+    elif signalrule == MICRO_BURST_SIGNAL_RULE:
+        if state10 != "choppy" or state30 != "choppy":
+            return None
+        if efficiency3 is None or efficiency3 < 0.6:
+            return None
+        if velocity3 is None or acceleration3 is None or velocity10 is None:
+            return None
+        if state3 in {"fast_up", "building_up"} and velocity3 > 0 and acceleration3 > 0 and abs(velocity10) < abs(velocity3) * 0.6:
+            side = "buy"
+        elif state3 in {"fast_down", "building_down"} and velocity3 < 0 and acceleration3 < 0 and abs(velocity10) < abs(velocity3) * 0.6:
+            side = "sell"
+    else:
+        raise ValueError("unsupported signal rule: {0}".format(signalrule))
     if side is None:
         return None
 
     previous_signal_at = last_signal_at.get(side)
-    if previous_signal_at is not None and (ticktime - previous_signal_at).total_seconds() < SIGNAL_COOLDOWN_SECONDS:
+    cooldown_seconds = int(SIGNAL_RULE_COOLDOWN_SECONDS[signalrule])
+    if previous_signal_at is not None and (ticktime - previous_signal_at).total_seconds() < cooldown_seconds:
         return None
 
     if side == "buy":
@@ -986,13 +1077,13 @@ def build_signal_candidate(
             bid=bid,
             ask=ask,
             spread=spread,
-            velocity3=_safe_float(points.get(3, {}).get("velocity")),
-            acceleration3=_safe_float(points.get(3, {}).get("acceleration")),
-            efficiency3=_safe_float(points.get(3, {}).get("efficiency")),
-            spreadmultiple3=_safe_float(points.get(3, {}).get("spreadmultiple")),
+            velocity3=velocity3,
+            acceleration3=acceleration3,
+            efficiency3=efficiency3,
+            spreadmultiple3=spreadmultiple3,
             state3=points.get(3, {}).get("motionstate"),
-            velocity10=_safe_float(points.get(10, {}).get("velocity")),
-            acceleration10=_safe_float(points.get(10, {}).get("acceleration")),
+            velocity10=velocity10,
+            acceleration10=acceleration10,
             efficiency10=_safe_float(points.get(10, {}).get("efficiency")),
             spreadmultiple10=_safe_float(points.get(10, {}).get("spreadmultiple")),
             state10=points.get(10, {}).get("motionstate"),
@@ -1005,7 +1096,7 @@ def build_signal_candidate(
             stopprice=ask - STOP_DISTANCE,
             targetprice=ask + TARGET_DISTANCE,
             lookaheadsec=LOOKAHEAD_SECONDS,
-            signalrule=SIGNAL_RULE,
+            signalrule=signalrule,
         )
     else:
         candidate = PendingSignal(
@@ -1016,13 +1107,13 @@ def build_signal_candidate(
             bid=bid,
             ask=ask,
             spread=spread,
-            velocity3=_safe_float(points.get(3, {}).get("velocity")),
-            acceleration3=_safe_float(points.get(3, {}).get("acceleration")),
-            efficiency3=_safe_float(points.get(3, {}).get("efficiency")),
-            spreadmultiple3=_safe_float(points.get(3, {}).get("spreadmultiple")),
+            velocity3=velocity3,
+            acceleration3=acceleration3,
+            efficiency3=efficiency3,
+            spreadmultiple3=spreadmultiple3,
             state3=points.get(3, {}).get("motionstate"),
-            velocity10=_safe_float(points.get(10, {}).get("velocity")),
-            acceleration10=_safe_float(points.get(10, {}).get("acceleration")),
+            velocity10=velocity10,
+            acceleration10=acceleration10,
             efficiency10=_safe_float(points.get(10, {}).get("efficiency")),
             spreadmultiple10=_safe_float(points.get(10, {}).get("spreadmultiple")),
             state10=points.get(10, {}).get("motionstate"),
@@ -1035,7 +1126,7 @@ def build_signal_candidate(
             stopprice=bid + STOP_DISTANCE,
             targetprice=bid - TARGET_DISTANCE,
             lookaheadsec=LOOKAHEAD_SECONDS,
-            signalrule=SIGNAL_RULE,
+            signalrule=signalrule,
         )
     last_signal_at[side] = ticktime
     return candidate
@@ -1091,16 +1182,19 @@ def backfill_motion_trade_spots(
     start_ts: datetime,
     end_ts: datetime,
     batch_size: int,
+    signalrule: str = DEFAULT_SIGNAL_RULE,
 ) -> Dict[str, Any]:
     start_ts = _as_utc(start_ts)
     end_ts = _as_utc(end_ts)
     if start_ts is None or end_ts is None or end_ts <= start_ts:
         raise ValueError("invalid backfill time range")
+    if signalrule not in SIGNAL_RULE_COOLDOWN_SECONDS:
+        raise ValueError("unsupported signal rule: {0}".format(signalrule))
 
     effective_start = start_ts - timedelta(seconds=MAX_WINDOW_SECONDS)
     evaluation_end = end_ts + timedelta(seconds=LOOKAHEAD_SECONDS)
 
-    delete_backfill_range(conn, start_ts=start_ts, end_ts=end_ts)
+    delete_backfill_range(conn, start_ts=start_ts, end_ts=end_ts, signalrule=signalrule)
 
     history = TickHistory(windows=MOTION_WINDOWS)
     seed_tick = load_seed_tick(conn, symbol=symbol, before_ts=effective_start)
@@ -1116,7 +1210,7 @@ def backfill_motion_trade_spots(
         )
 
     previous_states = load_seed_motion_states(conn, before_ts=effective_start)
-    last_signal_at = load_signal_cooldowns(conn, before_ts=start_ts)
+    last_signal_at = load_signal_cooldowns(conn, before_ts=start_ts, signalrule=signalrule)
     pending_signals: Deque[PendingSignal] = deque()
     pending_motion_rows: List[Dict[str, Any]] = []
     pending_signal_rows: List[Dict[str, Any]] = []
@@ -1168,6 +1262,7 @@ def backfill_motion_trade_spots(
                     tick_row=tick_row,
                     points=current_points,
                     last_signal_at=last_signal_at,
+                    signalrule=signalrule,
                 )
                 if candidate is not None:
                     pending_signals.append(candidate)
@@ -1207,6 +1302,111 @@ def backfill_motion_trade_spots(
         "motionpoint_count": motionpoint_count,
         "motionsignal_count": signal_count,
         "lasttickid": lasttickid,
+    }
+
+
+def motionpoints_from_signal_row(row: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
+    return {
+        3: {
+            "velocity": row.get("velocity3"),
+            "acceleration": row.get("acceleration3"),
+            "efficiency": row.get("efficiency3"),
+            "spreadmultiple": row.get("spreadmultiple3"),
+            "motionstate": row.get("state3"),
+        },
+        10: {
+            "velocity": row.get("velocity10"),
+            "acceleration": row.get("acceleration10"),
+            "efficiency": row.get("efficiency10"),
+            "spreadmultiple": row.get("spreadmultiple10"),
+            "motionstate": row.get("state10"),
+        },
+        30: {
+            "velocity": row.get("velocity30"),
+            "acceleration": row.get("acceleration30"),
+            "efficiency": row.get("efficiency30"),
+            "spreadmultiple": row.get("spreadmultiple30"),
+            "motionstate": row.get("state30"),
+        },
+    }
+
+
+def recreate_signals_from_motionpoints(
+    conn: Any,
+    *,
+    symbol: str,
+    start_ts: datetime,
+    end_ts: datetime,
+    batch_size: int,
+    signalrule: str,
+) -> Dict[str, Any]:
+    start_ts = _as_utc(start_ts)
+    end_ts = _as_utc(end_ts)
+    if start_ts is None or end_ts is None or end_ts <= start_ts:
+        raise ValueError("invalid recreate-signals time range")
+    if signalrule not in SIGNAL_RULE_COOLDOWN_SECONDS:
+        raise ValueError("unsupported signal rule: {0}".format(signalrule))
+
+    evaluation_end = end_ts + timedelta(seconds=LOOKAHEAD_SECONDS)
+    delete_signal_range(conn, start_ts=start_ts, end_ts=end_ts, signalrule=signalrule)
+
+    last_signal_at = load_signal_cooldowns(conn, before_ts=start_ts, signalrule=signalrule)
+    pending_signals: Deque[PendingSignal] = deque()
+    pending_signal_rows: List[Dict[str, Any]] = []
+    tickcount = 0
+    signal_count = 0
+
+    for batch in iter_ticks_with_motionpoints_between(
+        conn,
+        symbol=symbol,
+        start_ts=start_ts,
+        end_ts=evaluation_end,
+        batch_size=batch_size,
+    ):
+        for raw_row in batch:
+            tickcount += 1
+            tick_row = _normalize_tick_row(raw_row)
+            ticktime = tick_row.get("timestamp")
+            if ticktime is None:
+                continue
+
+            if start_ts <= ticktime <= end_ts:
+                candidate = build_signal_candidate(
+                    tick_row=tick_row,
+                    points=motionpoints_from_signal_row(raw_row),
+                    last_signal_at=last_signal_at,
+                    signalrule=signalrule,
+                )
+                if candidate is not None:
+                    pending_signals.append(candidate)
+
+            if pending_signals:
+                for signal in pending_signals:
+                    signal.update(tick_row)
+                signal_count += finalize_expired_signals(
+                    pending_signals,
+                    current_time=ticktime,
+                    finalized_rows=pending_signal_rows,
+                )
+
+            if len(pending_signal_rows) >= 200:
+                insert_signals(conn, pending_signal_rows)
+                pending_signal_rows = []
+
+    while pending_signals:
+        pending_signal_rows.append(pending_signals.popleft().finalize_row())
+        signal_count += 1
+
+    if pending_signal_rows:
+        insert_signals(conn, pending_signal_rows)
+
+    return {
+        "symbol": symbol,
+        "signalrule": signalrule,
+        "start": start_ts,
+        "end": end_ts,
+        "tickcount": tickcount,
+        "motionsignal_count": signal_count,
     }
 
 
@@ -1270,7 +1470,7 @@ def export_motion_tables(
               AND signalrule = %s
             ORDER BY timestamp ASC, id ASC
         """,
-        params=(start_ts, end_ts, SIGNAL_RULE),
+        params=(start_ts, end_ts, DEFAULT_SIGNAL_RULE),
         output_path=motionsignal_path,
         cursor_name="motionsignal_export",
     )
@@ -1330,6 +1530,10 @@ def build_parser() -> argparse.ArgumentParser:
     export = subparsers.add_parser("export", help="Export motionpoint and motionsignal CSV files for a time range.")
     add_range_arguments(export)
     export.add_argument("--output-dir", default=str(BASE_DIR / "logs"), help="Directory to write CSV exports into.")
+
+    recreate_signals = subparsers.add_parser("recreate-signals", help="Rebuild motionsignal rows from existing motionpoint rows for a time range.")
+    add_range_arguments(recreate_signals)
+    recreate_signals.add_argument("--rule", required=True, choices=sorted(SIGNAL_RULE_COOLDOWN_SECONDS), help="Signal rule to recreate.")
     return parser
 
 
@@ -1348,6 +1552,7 @@ def jobs_main() -> int:
                 start_ts=target_range.start,
                 end_ts=target_range.end,
                 batch_size=batch_size,
+                signalrule=DEFAULT_SIGNAL_RULE,
             )
             conn.commit()
             _print(
@@ -1360,6 +1565,28 @@ def jobs_main() -> int:
                     result["motionpoint_count"],
                     result["motionsignal_count"],
                     result["lasttickid"],
+                )
+            )
+            return 0
+        if args.command == "recreate-signals":
+            result = recreate_signals_from_motionpoints(
+                conn,
+                symbol=symbol,
+                start_ts=target_range.start,
+                end_ts=target_range.end,
+                batch_size=batch_size,
+                signalrule=str(args.rule),
+            )
+            conn.commit()
+            _print(
+                "symbol={0} rule={1} brokerdays={2} start={3} end={4} ticks={5} motionsignals={6}".format(
+                    result["symbol"],
+                    result["signalrule"],
+                    brokerdays_text,
+                    result["start"].isoformat(),
+                    result["end"].isoformat(),
+                    result["tickcount"],
+                    result["motionsignal_count"],
                 )
             )
             return 0
