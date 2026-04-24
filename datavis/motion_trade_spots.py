@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Deque, Dict, Generator, Iterable, List, Optional, Sequence, Set
+from typing import Any, Deque, Dict, FrozenSet, Generator, Iterable, List, Optional, Sequence, Set
 
 import psycopg2
 import psycopg2.extras
@@ -41,6 +41,20 @@ VELOCITY3_BUCKET_STEP = 0.05
 ACCELERATION3_BUCKET_STEP = 0.01
 VELOCITY10_BUCKET_STEP = 0.02
 ACCELERATION10_BUCKET_STEP = 0.005
+SCENARIO_MIN_SIGNALS = 50
+SCENARIO_MIN_USEFUL_PCT = 60.0
+SCENARIO_MAX_STOP_PCT = 35.0
+SCENARIO_MAX_SECONDS_TO_RISKFREE = 20.0
+SCENARIO_MAX_MAX_ADVERSE = 3.0
+DEFAULT_DIRECTIONAL_STATES: FrozenSet[str] = frozenset({"fast_up", "building_up", "fast_down", "building_down"})
+MICRO_BURST_SCENARIO_FAMILIES: FrozenSet[str] = frozenset(
+    {
+        "micro_burst_choppy",
+        "micro_burst_short_confirm",
+        "strict_micro_burst",
+    }
+)
+CONTINUATION_SCENARIO_FAMILIES: FrozenSet[str] = frozenset({"continuation"})
 SIGNAL_RULE_COOLDOWN_SECONDS = {
     DEFAULT_SIGNAL_RULE: 10,
     MICRO_BURST_SIGNAL_RULE: 20,
@@ -215,6 +229,92 @@ class PendingSignal:
 
 
 @dataclass(frozen=True)
+class SignalGenerationConfig:
+    signalrule: str
+    strategy: str
+    family: Optional[str]
+    min_efficiency3: Optional[float]
+    min_spreadmultiple3: Optional[float]
+    max_spreadmultiple3: Optional[float]
+    require_state10: Optional[str]
+    require_state30: Optional[str]
+    allow_state3: FrozenSet[str]
+    velocity10_ratio_max: Optional[float]
+    cooldownsec: int
+    riskfreeusd: float
+    targetusd: float
+    stopusd: float
+    lookaheadsec: int
+
+
+@dataclass(frozen=True)
+class MotionModelScenario:
+    id: int
+    scenarioname: str
+    signalrule: str
+    family: Optional[str]
+    min_efficiency3: Optional[float]
+    min_spreadmultiple3: Optional[float]
+    max_spreadmultiple3: Optional[float]
+    require_state10: Optional[str]
+    require_state30: Optional[str]
+    allow_state3: FrozenSet[str]
+    velocity10_ratio_max: Optional[float]
+    cooldownsec: int
+    riskfreeusd: float
+    targetusd: float
+    stopusd: float
+    lookaheadsec: int
+    isactive: bool
+    createdat: Optional[datetime]
+
+    @classmethod
+    def from_row(cls, row: Dict[str, Any]) -> "MotionModelScenario":
+        riskfreeusd = _safe_float(row.get("riskfreeusd"))
+        targetusd = _safe_float(row.get("targetusd"))
+        stopusd = _safe_float(row.get("stopusd"))
+        return cls(
+            id=int(row.get("id") or 0),
+            scenarioname=str(row.get("scenarioname") or "").strip(),
+            signalrule=str(row.get("signalrule") or "").strip(),
+            family=_normalize_text(row.get("family")),
+            min_efficiency3=_safe_float(row.get("min_efficiency3")),
+            min_spreadmultiple3=_safe_float(row.get("min_spreadmultiple3")),
+            max_spreadmultiple3=_safe_float(row.get("max_spreadmultiple3")),
+            require_state10=_normalize_text(row.get("require_state10")),
+            require_state30=_normalize_text(row.get("require_state30")),
+            allow_state3=_normalize_text_set(row.get("allow_state3")),
+            velocity10_ratio_max=_safe_float(row.get("velocity10_ratio_max")),
+            cooldownsec=max(1, _safe_int(row.get("cooldownsec"), default=SIGNAL_RULE_COOLDOWN_SECONDS[DEFAULT_SIGNAL_RULE])),
+            riskfreeusd=max(0.0, riskfreeusd if riskfreeusd is not None else RISKFREE_DISTANCE),
+            targetusd=max(0.0, targetusd if targetusd is not None else TARGET_DISTANCE),
+            stopusd=max(0.0, stopusd if stopusd is not None else STOP_DISTANCE),
+            lookaheadsec=max(1, _safe_int(row.get("lookaheadsec"), default=LOOKAHEAD_SECONDS)),
+            isactive=bool(row.get("isactive", True)),
+            createdat=_as_utc(row.get("createdat")),
+        )
+
+    def signal_config(self) -> SignalGenerationConfig:
+        return SignalGenerationConfig(
+            signalrule=self.signalrule,
+            strategy=scenario_strategy_from_family(self.family),
+            family=self.family,
+            min_efficiency3=self.min_efficiency3,
+            min_spreadmultiple3=self.min_spreadmultiple3,
+            max_spreadmultiple3=self.max_spreadmultiple3,
+            require_state10=self.require_state10,
+            require_state30=self.require_state30,
+            allow_state3=self.allow_state3,
+            velocity10_ratio_max=self.velocity10_ratio_max,
+            cooldownsec=self.cooldownsec,
+            riskfreeusd=self.riskfreeusd,
+            targetusd=self.targetusd,
+            stopusd=self.stopusd,
+            lookaheadsec=self.lookaheadsec,
+        )
+
+
+@dataclass(frozen=True)
 class FingerprintKey:
     side: str
     state3: Optional[str]
@@ -306,6 +406,105 @@ class FingerprintAggregate:
             "avgmaxadverse": self._average(self.maxadverse_sum, self.maxadverse_count),
             "avgscore": self._average(self.score_sum, self.score_count),
             "lift": lift,
+        }
+
+
+@dataclass
+class SignalSummaryAggregate:
+    signals: int = 0
+    targets: int = 0
+    riskfree: int = 0
+    stops: int = 0
+    nodecision: int = 0
+    seconds_to_riskfree_sum: float = 0.0
+    seconds_to_riskfree_count: int = 0
+    maxadverse_sum: float = 0.0
+    maxadverse_count: int = 0
+    score_sum: float = 0.0
+    score_count: int = 0
+
+    def observe(self, row: Dict[str, Any]) -> None:
+        self.signals += 1
+        outcome = str(row.get("outcome") or "").strip().lower()
+        if outcome == "target_before_stop":
+            self.targets += 1
+        elif outcome == "riskfree_before_stop":
+            self.riskfree += 1
+        elif outcome == "stop_before_riskfree":
+            self.stops += 1
+        else:
+            self.nodecision += 1
+
+        seconds_to_riskfree = _safe_float(row.get("seconds_to_riskfree"))
+        if seconds_to_riskfree is not None and outcome in {"target_before_stop", "riskfree_before_stop"}:
+            self.seconds_to_riskfree_sum += seconds_to_riskfree
+            self.seconds_to_riskfree_count += 1
+
+        maxadverse = _safe_float(row.get("maxadverse"))
+        if maxadverse is not None:
+            self.maxadverse_sum += maxadverse
+            self.maxadverse_count += 1
+
+        score = _safe_float(row.get("score"))
+        if score is not None:
+            self.score_sum += score
+            self.score_count += 1
+
+    @property
+    def useful(self) -> int:
+        return self.targets + self.riskfree
+
+    def _average(self, total: float, count: int) -> Optional[float]:
+        if count <= 0:
+            return None
+        return float(total / count)
+
+    def as_result_row(
+        self,
+        *,
+        scenarioid: int,
+        signalrule: str,
+        fromts: datetime,
+        tots: datetime,
+        riskfreeusd: float,
+        targetusd: float,
+        stopusd: float,
+    ) -> Dict[str, Any]:
+        total = max(1, int(self.signals))
+        targetpct = float(self.targets * 100.0 / total)
+        usefulpct = float(self.useful * 100.0 / total)
+        stoppct = float(self.stops * 100.0 / total)
+        avg_seconds_to_riskfree = self._average(self.seconds_to_riskfree_sum, self.seconds_to_riskfree_count)
+        avg_maxadverse = self._average(self.maxadverse_sum, self.maxadverse_count)
+        avg_score = self._average(self.score_sum, self.score_count)
+        passed_constraints = (
+            self.signals >= SCENARIO_MIN_SIGNALS
+            and usefulpct >= SCENARIO_MIN_USEFUL_PCT
+            and stoppct <= SCENARIO_MAX_STOP_PCT
+            and avg_seconds_to_riskfree is not None
+            and avg_seconds_to_riskfree <= SCENARIO_MAX_SECONDS_TO_RISKFREE
+            and avg_maxadverse is not None
+            and avg_maxadverse <= SCENARIO_MAX_MAX_ADVERSE
+        )
+        profitproxy = float(self.targets * targetusd + self.riskfree * riskfreeusd - self.stops * stopusd)
+        return {
+            "scenarioid": scenarioid,
+            "signalrule": signalrule,
+            "fromts": fromts,
+            "tots": tots,
+            "signals": self.signals,
+            "targets": self.targets,
+            "riskfree": self.riskfree,
+            "stops": self.stops,
+            "nodecision": self.nodecision,
+            "targetpct": targetpct,
+            "usefulpct": usefulpct,
+            "stoppct": stoppct,
+            "avgsecondstoriskfree": avg_seconds_to_riskfree,
+            "avgmaxadverse": avg_maxadverse,
+            "avgscore": avg_score,
+            "profitproxy": profitproxy,
+            "passedconstraints": passed_constraints,
         }
 
 
@@ -411,9 +610,32 @@ def _safe_float(value: Any) -> Optional[float]:
     return numeric
 
 
+def _safe_int(value: Any, *, default: int = 0) -> int:
+    if value is None:
+        return int(default)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
 def _normalize_text(value: Any) -> Optional[str]:
     text = str(value or "").strip().lower()
     return text or None
+
+
+def _normalize_text_set(values: Any) -> FrozenSet[str]:
+    if values is None:
+        return frozenset()
+    if isinstance(values, str):
+        iterable: Iterable[Any] = [values]
+    else:
+        try:
+            iterable = list(values)
+        except TypeError:
+            iterable = [values]
+    normalized = {_normalize_text(value) for value in iterable}
+    return frozenset(value for value in normalized if value)
 
 
 def _bucket_floor(value: Any, *, step: float) -> Optional[int]:
@@ -500,6 +722,85 @@ def _csv_value(value: Any) -> Any:
     if isinstance(value, datetime):
         return value.isoformat()
     return value
+
+
+def scenario_strategy_from_family(family: Optional[str]) -> str:
+    normalized_family = _normalize_text(family)
+    if normalized_family in MICRO_BURST_SCENARIO_FAMILIES:
+        return "micro_burst"
+    if normalized_family in CONTINUATION_SCENARIO_FAMILIES or normalized_family is None:
+        return "continuation"
+    raise ValueError("unsupported scenario family: {0}".format(family))
+
+
+def build_named_signal_config(signalrule: str) -> SignalGenerationConfig:
+    if signalrule == DEFAULT_SIGNAL_RULE:
+        return SignalGenerationConfig(
+            signalrule=signalrule,
+            strategy="continuation",
+            family="continuation",
+            min_efficiency3=0.45,
+            min_spreadmultiple3=2.5,
+            max_spreadmultiple3=None,
+            require_state10=None,
+            require_state30=None,
+            allow_state3=DEFAULT_DIRECTIONAL_STATES,
+            velocity10_ratio_max=None,
+            cooldownsec=SIGNAL_RULE_COOLDOWN_SECONDS[signalrule],
+            riskfreeusd=RISKFREE_DISTANCE,
+            targetusd=TARGET_DISTANCE,
+            stopusd=STOP_DISTANCE,
+            lookaheadsec=LOOKAHEAD_SECONDS,
+        )
+    if signalrule == MICRO_BURST_SIGNAL_RULE:
+        return SignalGenerationConfig(
+            signalrule=signalrule,
+            strategy="micro_burst",
+            family="micro_burst_choppy",
+            min_efficiency3=0.60,
+            min_spreadmultiple3=None,
+            max_spreadmultiple3=None,
+            require_state10="choppy",
+            require_state30="choppy",
+            allow_state3=DEFAULT_DIRECTIONAL_STATES,
+            velocity10_ratio_max=0.60,
+            cooldownsec=SIGNAL_RULE_COOLDOWN_SECONDS[signalrule],
+            riskfreeusd=RISKFREE_DISTANCE,
+            targetusd=TARGET_DISTANCE,
+            stopusd=STOP_DISTANCE,
+            lookaheadsec=LOOKAHEAD_SECONDS,
+        )
+    if signalrule == BEST_FINGERPRINT_SIGNAL_RULE:
+        return SignalGenerationConfig(
+            signalrule=signalrule,
+            strategy="fingerprint",
+            family="best_fingerprint",
+            min_efficiency3=None,
+            min_spreadmultiple3=None,
+            max_spreadmultiple3=None,
+            require_state10=None,
+            require_state30=None,
+            allow_state3=frozenset(),
+            velocity10_ratio_max=None,
+            cooldownsec=SIGNAL_RULE_COOLDOWN_SECONDS[signalrule],
+            riskfreeusd=RISKFREE_DISTANCE,
+            targetusd=TARGET_DISTANCE,
+            stopusd=STOP_DISTANCE,
+            lookaheadsec=LOOKAHEAD_SECONDS,
+        )
+    raise ValueError("unsupported signal rule: {0}".format(signalrule))
+
+
+def _allowed_state3_values(config: SignalGenerationConfig) -> FrozenSet[str]:
+    return config.allow_state3 or DEFAULT_DIRECTIONAL_STATES
+
+
+def _side_from_state3(state3: Optional[str]) -> Optional[str]:
+    if state3 in {"fast_up", "building_up"}:
+        return "buy"
+    if state3 in {"fast_down", "building_down"}:
+        return "sell"
+    return None
 
 
 def latest_tick(conn: Any, *, symbol: str) -> Optional[Dict[str, Any]]:
@@ -688,6 +989,101 @@ def ensure_motionfingerprint_table(conn: Any) -> None:
         )
 
 
+def ensure_motionmodel_tables(conn: Any) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS public.motionmodelscenario (
+                id BIGSERIAL PRIMARY KEY,
+                scenarioname TEXT NOT NULL,
+                signalrule TEXT NOT NULL,
+                family TEXT,
+                min_efficiency3 DOUBLE PRECISION,
+                min_spreadmultiple3 DOUBLE PRECISION,
+                max_spreadmultiple3 DOUBLE PRECISION,
+                require_state10 TEXT,
+                require_state30 TEXT,
+                allow_state3 TEXT[],
+                velocity10_ratio_max DOUBLE PRECISION,
+                cooldownsec INTEGER,
+                riskfreeusd DOUBLE PRECISION,
+                targetusd DOUBLE PRECISION,
+                stopusd DOUBLE PRECISION,
+                lookaheadsec INTEGER,
+                isactive BOOLEAN NOT NULL DEFAULT TRUE,
+                createdat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS motionmodelscenario_signalrule_uidx
+                ON public.motionmodelscenario (signalrule);
+
+            CREATE INDEX IF NOT EXISTS motionmodelscenario_isactive_family_idx
+                ON public.motionmodelscenario (isactive, family, scenarioname);
+
+            CREATE TABLE IF NOT EXISTS public.motionmodelresult (
+                id BIGSERIAL PRIMARY KEY,
+                scenarioid BIGINT REFERENCES public.motionmodelscenario (id),
+                signalrule TEXT,
+                fromts TIMESTAMPTZ,
+                tots TIMESTAMPTZ,
+                signals INTEGER,
+                targets INTEGER,
+                riskfree INTEGER,
+                stops INTEGER,
+                nodecision INTEGER,
+                targetpct DOUBLE PRECISION,
+                usefulpct DOUBLE PRECISION,
+                stoppct DOUBLE PRECISION,
+                avgsecondstoriskfree DOUBLE PRECISION,
+                avgmaxadverse DOUBLE PRECISION,
+                avgscore DOUBLE PRECISION,
+                profitproxy DOUBLE PRECISION,
+                passedconstraints BOOLEAN,
+                createdat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+
+            CREATE INDEX IF NOT EXISTS motionmodelresult_scenarioid_createdat_idx
+                ON public.motionmodelresult (scenarioid, createdat DESC);
+
+            CREATE INDEX IF NOT EXISTS motionmodelresult_signalrule_fromts_tots_idx
+                ON public.motionmodelresult (signalrule, fromts, tots);
+            """
+        )
+
+
+def load_active_motion_model_scenarios(conn: Any) -> List[MotionModelScenario]:
+    ensure_motionmodel_tables(conn)
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT
+                id,
+                scenarioname,
+                signalrule,
+                family,
+                min_efficiency3,
+                min_spreadmultiple3,
+                max_spreadmultiple3,
+                require_state10,
+                require_state30,
+                allow_state3,
+                velocity10_ratio_max,
+                cooldownsec,
+                riskfreeusd,
+                targetusd,
+                stopusd,
+                lookaheadsec,
+                isactive,
+                createdat
+            FROM public.motionmodelscenario
+            WHERE isactive = TRUE
+            ORDER BY family ASC NULLS LAST, scenarioname ASC, id ASC
+            """
+        )
+        rows = [dict(row) for row in cur.fetchall()]
+    return [MotionModelScenario.from_row(row) for row in rows]
+
+
 def load_seed_tick(conn: Any, *, symbol: str, before_ts: datetime) -> Optional[Dict[str, Any]]:
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
@@ -774,6 +1170,20 @@ def delete_motionfingerprints(conn: Any, *, signalrule: str) -> None:
             WHERE signalrule = %s
             """,
             (signalrule,),
+        )
+
+
+def delete_motionmodel_results(conn: Any, *, scenarioid: int, fromts: datetime, tots: datetime) -> None:
+    ensure_motionmodel_tables(conn)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM public.motionmodelresult
+            WHERE scenarioid = %s
+              AND fromts = %s
+              AND tots = %s
+            """,
+            (scenarioid, fromts, tots),
         )
 
 
@@ -1050,6 +1460,57 @@ def insert_motionfingerprints(conn: Any, rows: Sequence[Dict[str, Any]]) -> None
                 row["avgmaxadverse"],
                 row["avgscore"],
                 row["lift"],
+            ) for row in rows],
+            page_size=min(max(1, len(rows)), 500),
+        )
+
+
+def insert_motionmodel_results(conn: Any, rows: Sequence[Dict[str, Any]]) -> None:
+    if not rows:
+        return
+    ensure_motionmodel_tables(conn)
+    with conn.cursor() as cur:
+        psycopg2.extras.execute_values(
+            cur,
+            """
+            INSERT INTO public.motionmodelresult (
+                scenarioid,
+                signalrule,
+                fromts,
+                tots,
+                signals,
+                targets,
+                riskfree,
+                stops,
+                nodecision,
+                targetpct,
+                usefulpct,
+                stoppct,
+                avgsecondstoriskfree,
+                avgmaxadverse,
+                avgscore,
+                profitproxy,
+                passedconstraints
+            ) VALUES %s
+            """,
+            [(
+                row["scenarioid"],
+                row["signalrule"],
+                row["fromts"],
+                row["tots"],
+                row["signals"],
+                row["targets"],
+                row["riskfree"],
+                row["stops"],
+                row["nodecision"],
+                row["targetpct"],
+                row["usefulpct"],
+                row["stoppct"],
+                row["avgsecondstoriskfree"],
+                row["avgmaxadverse"],
+                row["avgscore"],
+                row["profitproxy"],
+                row["passedconstraints"],
             ) for row in rows],
             page_size=min(max(1, len(rows)), 500),
         )
@@ -1415,12 +1876,15 @@ def build_signal_candidate(
     tick_row: Dict[str, Any],
     points: Dict[int, Dict[str, Any]],
     last_signal_at: Dict[str, datetime],
-    signalrule: str,
+    config: SignalGenerationConfig,
     allowed_fingerprints: Optional[Set[FingerprintKey]] = None,
 ) -> Optional[PendingSignal]:
-    state3 = str(points.get(3, {}).get("motionstate") or "")
-    state10 = str(points.get(10, {}).get("motionstate") or "")
-    state30 = str(points.get(30, {}).get("motionstate") or "")
+    state3_raw = points.get(3, {}).get("motionstate")
+    state10_raw = points.get(10, {}).get("motionstate")
+    state30_raw = points.get(30, {}).get("motionstate")
+    state3 = _normalize_text(state3_raw)
+    state10 = _normalize_text(state10_raw)
+    state30 = _normalize_text(state30_raw)
     velocity3 = _safe_float(points.get(3, {}).get("velocity"))
     acceleration3 = _safe_float(points.get(3, {}).get("acceleration"))
     velocity10 = _safe_float(points.get(10, {}).get("velocity"))
@@ -1438,25 +1902,7 @@ def build_signal_candidate(
         return None
 
     side: Optional[str] = None
-    if signalrule == DEFAULT_SIGNAL_RULE:
-        if efficiency3 is None or spreadmultiple3 is None or efficiency3 < 0.45 or spreadmultiple3 < 2.5:
-            return None
-        if state3 in {"fast_up", "building_up"} and velocity10 is not None and velocity10 > 0 and acceleration10 is not None and acceleration10 >= -SIGNAL_ACCEL_EPSILON:
-            side = "buy"
-        elif state3 in {"fast_down", "building_down"} and velocity10 is not None and velocity10 < 0 and acceleration10 is not None and acceleration10 <= SIGNAL_ACCEL_EPSILON:
-            side = "sell"
-    elif signalrule == MICRO_BURST_SIGNAL_RULE:
-        if state10 != "choppy" or state30 != "choppy":
-            return None
-        if efficiency3 is None or efficiency3 < 0.6:
-            return None
-        if velocity3 is None or acceleration3 is None or velocity10 is None:
-            return None
-        if state3 in {"fast_up", "building_up"} and velocity3 > 0 and acceleration3 > 0 and abs(velocity10) < abs(velocity3) * 0.6:
-            side = "buy"
-        elif state3 in {"fast_down", "building_down"} and velocity3 < 0 and acceleration3 < 0 and abs(velocity10) < abs(velocity3) * 0.6:
-            side = "sell"
-    elif signalrule == BEST_FINGERPRINT_SIGNAL_RULE:
+    if config.strategy == "fingerprint":
         if not allowed_fingerprints:
             return None
         buy_key = build_fingerprint_key(
@@ -1489,12 +1935,46 @@ def build_signal_candidate(
             return None
         side = "buy" if buy_match else "sell"
     else:
-        raise ValueError("unsupported signal rule: {0}".format(signalrule))
-    if side is None:
-        return None
+        if config.min_efficiency3 is not None and (efficiency3 is None or efficiency3 < config.min_efficiency3):
+            return None
+        if config.min_spreadmultiple3 is not None and (spreadmultiple3 is None or spreadmultiple3 < config.min_spreadmultiple3):
+            return None
+        if config.max_spreadmultiple3 is not None and (spreadmultiple3 is None or spreadmultiple3 > config.max_spreadmultiple3):
+            return None
+        if config.require_state10 is not None and state10 != config.require_state10:
+            return None
+        if config.require_state30 is not None and state30 != config.require_state30:
+            return None
+        allowed_state3 = _allowed_state3_values(config)
+        if state3 is None or state3 not in allowed_state3:
+            return None
+        side = _side_from_state3(state3)
+        if side is None:
+            return None
+        if config.strategy == "continuation":
+            if velocity10 is None or acceleration10 is None:
+                return None
+            if side == "buy" and (velocity10 <= 0 or acceleration10 < -SIGNAL_ACCEL_EPSILON):
+                return None
+            if side == "sell" and (velocity10 >= 0 or acceleration10 > SIGNAL_ACCEL_EPSILON):
+                return None
+        elif config.strategy == "micro_burst":
+            if velocity3 is None or acceleration3 is None or velocity10 is None:
+                return None
+            if side == "buy" and (velocity3 <= 0 or acceleration3 <= 0):
+                return None
+            if side == "sell" and (velocity3 >= 0 or acceleration3 >= 0):
+                return None
+            if config.velocity10_ratio_max is not None:
+                if abs(velocity3) <= 0:
+                    return None
+                if abs(velocity10) > abs(velocity3) * float(config.velocity10_ratio_max):
+                    return None
+        else:
+            raise ValueError("unsupported signal strategy: {0}".format(config.strategy))
 
     previous_signal_at = last_signal_at.get(side)
-    cooldown_seconds = int(SIGNAL_RULE_COOLDOWN_SECONDS[signalrule])
+    cooldown_seconds = int(config.cooldownsec)
     if previous_signal_at is not None and (ticktime - previous_signal_at).total_seconds() < cooldown_seconds:
         return None
 
@@ -1511,22 +1991,22 @@ def build_signal_candidate(
             acceleration3=acceleration3,
             efficiency3=efficiency3,
             spreadmultiple3=spreadmultiple3,
-            state3=points.get(3, {}).get("motionstate"),
+            state3=state3_raw,
             velocity10=velocity10,
             acceleration10=acceleration10,
             efficiency10=_safe_float(points.get(10, {}).get("efficiency")),
             spreadmultiple10=_safe_float(points.get(10, {}).get("spreadmultiple")),
-            state10=points.get(10, {}).get("motionstate"),
+            state10=state10_raw,
             velocity30=_safe_float(points.get(30, {}).get("velocity")),
             acceleration30=_safe_float(points.get(30, {}).get("acceleration")),
             efficiency30=_safe_float(points.get(30, {}).get("efficiency")),
             spreadmultiple30=_safe_float(points.get(30, {}).get("spreadmultiple")),
-            state30=points.get(30, {}).get("motionstate"),
-            riskfreeprice=ask + RISKFREE_DISTANCE,
-            stopprice=ask - STOP_DISTANCE,
-            targetprice=ask + TARGET_DISTANCE,
-            lookaheadsec=LOOKAHEAD_SECONDS,
-            signalrule=signalrule,
+            state30=state30_raw,
+            riskfreeprice=ask + config.riskfreeusd,
+            stopprice=ask - config.stopusd,
+            targetprice=ask + config.targetusd,
+            lookaheadsec=config.lookaheadsec,
+            signalrule=config.signalrule,
         )
     else:
         candidate = PendingSignal(
@@ -1541,22 +2021,22 @@ def build_signal_candidate(
             acceleration3=acceleration3,
             efficiency3=efficiency3,
             spreadmultiple3=spreadmultiple3,
-            state3=points.get(3, {}).get("motionstate"),
+            state3=state3_raw,
             velocity10=velocity10,
             acceleration10=acceleration10,
             efficiency10=_safe_float(points.get(10, {}).get("efficiency")),
             spreadmultiple10=_safe_float(points.get(10, {}).get("spreadmultiple")),
-            state10=points.get(10, {}).get("motionstate"),
+            state10=state10_raw,
             velocity30=_safe_float(points.get(30, {}).get("velocity")),
             acceleration30=_safe_float(points.get(30, {}).get("acceleration")),
             efficiency30=_safe_float(points.get(30, {}).get("efficiency")),
             spreadmultiple30=_safe_float(points.get(30, {}).get("spreadmultiple")),
-            state30=points.get(30, {}).get("motionstate"),
-            riskfreeprice=bid - RISKFREE_DISTANCE,
-            stopprice=bid + STOP_DISTANCE,
-            targetprice=bid - TARGET_DISTANCE,
-            lookaheadsec=LOOKAHEAD_SECONDS,
-            signalrule=signalrule,
+            state30=state30_raw,
+            riskfreeprice=bid - config.riskfreeusd,
+            stopprice=bid + config.stopusd,
+            targetprice=bid - config.targetusd,
+            lookaheadsec=config.lookaheadsec,
+            signalrule=config.signalrule,
         )
     last_signal_at[side] = ticktime
     return candidate
@@ -1618,11 +2098,10 @@ def backfill_motion_trade_spots(
     end_ts = _as_utc(end_ts)
     if start_ts is None or end_ts is None or end_ts <= start_ts:
         raise ValueError("invalid backfill time range")
-    if signalrule not in SIGNAL_RULE_COOLDOWN_SECONDS:
-        raise ValueError("unsupported signal rule: {0}".format(signalrule))
+    config = build_named_signal_config(signalrule)
 
     effective_start = start_ts - timedelta(seconds=MAX_WINDOW_SECONDS)
-    evaluation_end = end_ts + timedelta(seconds=LOOKAHEAD_SECONDS)
+    evaluation_end = end_ts + timedelta(seconds=config.lookaheadsec)
 
     delete_backfill_range(conn, start_ts=start_ts, end_ts=end_ts, signalrule=signalrule)
 
@@ -1692,7 +2171,7 @@ def backfill_motion_trade_spots(
                     tick_row=tick_row,
                     points=current_points,
                     last_signal_at=last_signal_at,
-                    signalrule=signalrule,
+                    config=config,
                 )
                 if candidate is not None:
                     pending_signals.append(candidate)
@@ -1758,6 +2237,99 @@ def motionpoints_from_signal_row(row: Dict[str, Any]) -> Dict[int, Dict[str, Any
             "spreadmultiple": row.get("spreadmultiple30"),
             "motionstate": row.get("state30"),
         },
+    }
+
+
+def flush_signal_rows(
+    conn: Any,
+    *,
+    rows: List[Dict[str, Any]],
+    summary: Optional[SignalSummaryAggregate] = None,
+) -> None:
+    if not rows:
+        return
+    if summary is not None:
+        for row in rows:
+            summary.observe(row)
+    insert_signals(conn, rows)
+    rows.clear()
+
+
+def recreate_signals_for_config(
+    conn: Any,
+    *,
+    symbol: str,
+    start_ts: datetime,
+    end_ts: datetime,
+    batch_size: int,
+    config: SignalGenerationConfig,
+    allowed_fingerprints: Optional[Set[FingerprintKey]] = None,
+) -> Dict[str, Any]:
+    start_ts = _as_utc(start_ts)
+    end_ts = _as_utc(end_ts)
+    if start_ts is None or end_ts is None or end_ts <= start_ts:
+        raise ValueError("invalid recreate-signals time range")
+
+    evaluation_end = end_ts + timedelta(seconds=config.lookaheadsec)
+    delete_signal_range(conn, start_ts=start_ts, end_ts=end_ts, signalrule=config.signalrule)
+
+    last_signal_at = load_signal_cooldowns(conn, before_ts=start_ts, signalrule=config.signalrule)
+    pending_signals: Deque[PendingSignal] = deque()
+    pending_signal_rows: List[Dict[str, Any]] = []
+    summary = SignalSummaryAggregate()
+    tickcount = 0
+    signal_count = 0
+
+    for batch in iter_ticks_with_motionpoints_between(
+        conn,
+        symbol=symbol,
+        start_ts=start_ts,
+        end_ts=evaluation_end,
+        batch_size=batch_size,
+    ):
+        for raw_row in batch:
+            tickcount += 1
+            tick_row = _normalize_tick_row(raw_row)
+            ticktime = tick_row.get("timestamp")
+            if ticktime is None:
+                continue
+
+            if start_ts <= ticktime <= end_ts:
+                candidate = build_signal_candidate(
+                    tick_row=tick_row,
+                    points=motionpoints_from_signal_row(raw_row),
+                    last_signal_at=last_signal_at,
+                    config=config,
+                    allowed_fingerprints=allowed_fingerprints,
+                )
+                if candidate is not None:
+                    pending_signals.append(candidate)
+
+            if pending_signals:
+                for signal in pending_signals:
+                    signal.update(tick_row)
+                signal_count += finalize_expired_signals(
+                    pending_signals,
+                    current_time=ticktime,
+                    finalized_rows=pending_signal_rows,
+                )
+
+            if len(pending_signal_rows) >= 200:
+                flush_signal_rows(conn, rows=pending_signal_rows, summary=summary)
+
+    while pending_signals:
+        pending_signal_rows.append(pending_signals.popleft().finalize_row())
+        signal_count += 1
+
+    flush_signal_rows(conn, rows=pending_signal_rows, summary=summary)
+    return {
+        "symbol": symbol,
+        "signalrule": config.signalrule,
+        "start": start_ts,
+        "end": end_ts,
+        "tickcount": tickcount,
+        "motionsignal_count": signal_count,
+        "summary": summary,
     }
 
 
@@ -1855,21 +2427,9 @@ def recreate_signals_from_motionpoints(
     batch_size: int,
     signalrule: str,
 ) -> Dict[str, Any]:
-    start_ts = _as_utc(start_ts)
-    end_ts = _as_utc(end_ts)
-    if start_ts is None or end_ts is None or end_ts <= start_ts:
-        raise ValueError("invalid recreate-signals time range")
-    if signalrule not in SIGNAL_RULE_COOLDOWN_SECONDS:
-        raise ValueError("unsupported signal rule: {0}".format(signalrule))
-
-    evaluation_end = end_ts + timedelta(seconds=LOOKAHEAD_SECONDS)
-    delete_signal_range(conn, start_ts=start_ts, end_ts=end_ts, signalrule=signalrule)
-
-    last_signal_at = load_signal_cooldowns(conn, before_ts=start_ts, signalrule=signalrule)
-    pending_signals: Deque[PendingSignal] = deque()
-    pending_signal_rows: List[Dict[str, Any]] = []
     selected_fingerprint_rows: List[Dict[str, Any]] = []
     allowed_fingerprints: Optional[Set[FingerprintKey]] = None
+    config = build_named_signal_config(signalrule)
     if signalrule == BEST_FINGERPRINT_SIGNAL_RULE:
         selected_fingerprint_rows = load_top_motionfingerprints(conn, signalrule=signalrule)
         allowed_fingerprints = {
@@ -1888,63 +2448,114 @@ def recreate_signals_from_motionpoints(
             for row in selected_fingerprint_rows
             if str(row.get("side") or "").strip().lower() in {"buy", "sell"}
         }
-    tickcount = 0
-    signal_count = 0
-
-    for batch in iter_ticks_with_motionpoints_between(
+    result = recreate_signals_for_config(
         conn,
         symbol=symbol,
         start_ts=start_ts,
-        end_ts=evaluation_end,
+        end_ts=end_ts,
         batch_size=batch_size,
-    ):
-        for raw_row in batch:
-            tickcount += 1
-            tick_row = _normalize_tick_row(raw_row)
-            ticktime = tick_row.get("timestamp")
-            if ticktime is None:
-                continue
+        config=config,
+        allowed_fingerprints=allowed_fingerprints,
+    )
+    return {
+        "symbol": result["symbol"],
+        "signalrule": result["signalrule"],
+        "start": result["start"],
+        "end": result["end"],
+        "tickcount": result["tickcount"],
+        "motionsignal_count": result["motionsignal_count"],
+        "selected_fingerprint_count": len(allowed_fingerprints or set()),
+        "comparison_rows": load_signal_outcome_comparison(conn, start_ts=result["start"], end_ts=result["end"]),
+    }
 
-            if start_ts <= ticktime <= end_ts:
-                candidate = build_signal_candidate(
-                    tick_row=tick_row,
-                    points=motionpoints_from_signal_row(raw_row),
-                    last_signal_at=last_signal_at,
-                    signalrule=signalrule,
-                    allowed_fingerprints=allowed_fingerprints,
+
+def _rank_motion_model_row(row: Dict[str, Any]) -> Any:
+    usefulpct = _safe_float(row.get("usefulpct"))
+    avg_seconds = _safe_float(row.get("avgsecondstoriskfree"))
+    avg_maxadverse = _safe_float(row.get("avgmaxadverse"))
+    signals = _safe_int(row.get("signals"))
+    return (
+        0 if bool(row.get("passedconstraints")) else 1,
+        -(usefulpct if usefulpct is not None else -1e9),
+        avg_seconds if avg_seconds is not None else float("inf"),
+        avg_maxadverse if avg_maxadverse is not None else float("inf"),
+        -signals,
+        str(row.get("signalrule") or ""),
+    )
+
+
+def run_motion_model_scenarios(
+    conn: Any,
+    *,
+    symbol: str,
+    start_ts: datetime,
+    end_ts: datetime,
+    batch_size: int,
+) -> Dict[str, Any]:
+    start_ts = _as_utc(start_ts)
+    end_ts = _as_utc(end_ts)
+    if start_ts is None or end_ts is None or end_ts <= start_ts:
+        raise ValueError("invalid run-scenarios time range")
+
+    scenarios = load_active_motion_model_scenarios(conn)
+    ranked_rows: List[Dict[str, Any]] = []
+    if not scenarios:
+        return {
+            "symbol": symbol,
+            "start": start_ts,
+            "end": end_ts,
+            "scenario_count": 0,
+            "ranked_rows": ranked_rows,
+        }
+
+    for index, scenario in enumerate(scenarios, start=1):
+        result = recreate_signals_for_config(
+            conn,
+            symbol=symbol,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            batch_size=batch_size,
+            config=scenario.signal_config(),
+        )
+        delete_motionmodel_results(conn, scenarioid=scenario.id, fromts=start_ts, tots=end_ts)
+        result_row = result["summary"].as_result_row(
+            scenarioid=scenario.id,
+            signalrule=scenario.signalrule,
+            fromts=start_ts,
+            tots=end_ts,
+            riskfreeusd=scenario.riskfreeusd,
+            targetusd=scenario.targetusd,
+            stopusd=scenario.stopusd,
+        )
+        insert_motionmodel_results(conn, [result_row])
+        conn.commit()
+        ranked_rows.append(
+            {
+                "scenarioid": scenario.id,
+                "scenarioname": scenario.scenarioname,
+                "family": scenario.family,
+                **result_row,
+            }
+        )
+        if index == 1 or index % 25 == 0 or index == len(scenarios):
+            _print(
+                "scenario_progress={0}/{1} signalrule={2} signals={3} usefulpct={4} passed={5}".format(
+                    index,
+                    len(scenarios),
+                    scenario.signalrule,
+                    result_row["signals"],
+                    _format_metric(_safe_float(result_row.get("usefulpct"))),
+                    "yes" if result_row["passedconstraints"] else "no",
                 )
-                if candidate is not None:
-                    pending_signals.append(candidate)
+            )
 
-            if pending_signals:
-                for signal in pending_signals:
-                    signal.update(tick_row)
-                signal_count += finalize_expired_signals(
-                    pending_signals,
-                    current_time=ticktime,
-                    finalized_rows=pending_signal_rows,
-                )
-
-            if len(pending_signal_rows) >= 200:
-                insert_signals(conn, pending_signal_rows)
-                pending_signal_rows = []
-
-    while pending_signals:
-        pending_signal_rows.append(pending_signals.popleft().finalize_row())
-        signal_count += 1
-
-    if pending_signal_rows:
-        insert_signals(conn, pending_signal_rows)
-
+    ranked_rows.sort(key=_rank_motion_model_row)
     return {
         "symbol": symbol,
-        "signalrule": signalrule,
         "start": start_ts,
         "end": end_ts,
-        "tickcount": tickcount,
-        "motionsignal_count": signal_count,
-        "selected_fingerprint_count": len(allowed_fingerprints or set()),
-        "comparison_rows": load_signal_outcome_comparison(conn, start_ts=start_ts, end_ts=end_ts),
+        "scenario_count": len(scenarios),
+        "ranked_rows": ranked_rows,
     }
 
 
@@ -2110,6 +2721,68 @@ def print_signal_outcome_comparison(rows: Sequence[Dict[str, Any]]) -> None:
         )
 
 
+def print_ranked_motion_model_results(result: Dict[str, Any]) -> None:
+    rows = list(result.get("ranked_rows") or [])
+    _print(
+        "symbol={0} start={1} end={2} scenarios={3}".format(
+            result.get("symbol") or DEFAULT_SYMBOL,
+            result["start"].isoformat(),
+            result["end"].isoformat(),
+            result.get("scenario_count") or 0,
+        )
+    )
+    if not rows:
+        _print("No active scenarios were available.")
+        return
+    _print(
+        "\t".join(
+            [
+                "rank",
+                "pass",
+                "scenario",
+                "family",
+                "signalrule",
+                "signals",
+                "targets",
+                "riskfree",
+                "stops",
+                "nodecision",
+                "target_pct",
+                "useful_pct",
+                "stop_pct",
+                "avg_seconds_to_riskfree",
+                "avg_maxadverse",
+                "avg_score",
+                "profit_proxy",
+            ]
+        )
+    )
+    for index, row in enumerate(rows, start=1):
+        _print(
+            "\t".join(
+                [
+                    str(index),
+                    "yes" if bool(row.get("passedconstraints")) else "no",
+                    str(row.get("scenarioname") or "-"),
+                    str(row.get("family") or "-"),
+                    str(row.get("signalrule") or "-"),
+                    str(row.get("signals") or 0),
+                    str(row.get("targets") or 0),
+                    str(row.get("riskfree") or 0),
+                    str(row.get("stops") or 0),
+                    str(row.get("nodecision") or 0),
+                    _format_metric(_safe_float(row.get("targetpct"))),
+                    _format_metric(_safe_float(row.get("usefulpct"))),
+                    _format_metric(_safe_float(row.get("stoppct"))),
+                    _format_metric(_safe_float(row.get("avgsecondstoriskfree"))),
+                    _format_metric(_safe_float(row.get("avgmaxadverse"))),
+                    _format_metric(_safe_float(row.get("avgscore"))),
+                    _format_metric(_safe_float(row.get("profitproxy"))),
+                ]
+            )
+        )
+
+
 def parse_timestamp_arg(value: str) -> datetime:
     parsed = datetime.fromisoformat(str(value).strip())
     if parsed.tzinfo is None:
@@ -2176,6 +2849,9 @@ def build_parser() -> argparse.ArgumentParser:
     recreate_signals = subparsers.add_parser("recreate-signals", help="Rebuild motionsignal rows from existing motionpoint rows for a time range.")
     add_range_arguments(recreate_signals)
     recreate_signals.add_argument("--rule", required=True, choices=sorted(SIGNAL_RULE_COOLDOWN_SECONDS), help="Signal rule to recreate.")
+
+    run_scenarios = subparsers.add_parser("run-scenarios", help="Run active PostgreSQL motion-model research scenarios over a time range.")
+    add_range_arguments(run_scenarios)
     return parser
 
 
@@ -2246,6 +2922,16 @@ def jobs_main() -> int:
             if result["signalrule"] == BEST_FINGERPRINT_SIGNAL_RULE:
                 _print("selected_fingerprints={0}".format(result["selected_fingerprint_count"]))
             print_signal_outcome_comparison(result.get("comparison_rows") or [])
+            return 0
+        if args.command == "run-scenarios":
+            result = run_motion_model_scenarios(
+                conn,
+                symbol=symbol,
+                start_ts=target_range.start,
+                end_ts=target_range.end,
+                batch_size=batch_size,
+            )
+            print_ranked_motion_model_results(result)
             return 0
 
         export_result = export_motion_tables(

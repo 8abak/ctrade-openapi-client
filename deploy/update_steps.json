@@ -1,6 +1,6 @@
 {
-  "version": "20260424_motion_trade_spots",
-  "description": "Run the journaled motion trade spots update runner so SQL, backfill, validation, and the datavis restart share one auditable command path.",
+  "version": "20260425_motion_model_scenarios",
+  "description": "Run the journaled motion research update runner so SQL, backfill, validation, and the datavis restart share one auditable command path.",
   "actions": [
     {
       "id": "apply_motion_trade_spots_update",

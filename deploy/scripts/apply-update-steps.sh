@@ -8,7 +8,12 @@ TIMESTAMP="$(date '+%Y%m%d_%H%M%S')"
 RELATIVE_JOURNAL_PATH="logs/update_journal/update_${TIMESTAMP}.log"
 JOURNAL_PATH="${REPO_ROOT}/${RELATIVE_JOURNAL_PATH}"
 ENV_FILE="/etc/datavis.env"
-SQL_FILE="deploy/sql/20260424_motion_trade_spots.sql"
+SQL_FILES=(
+  "deploy/sql/20260424_motion_trade_spots.sql"
+  "deploy/sql/20260425_motion_fingerprints.sql"
+  "deploy/sql/20260425_motion_model_scenarios.sql"
+)
+VALIDATION_SQL_FILE="deploy/sql/20260425_motion_model_scenarios_validation.sql"
 API_URL="http://127.0.0.1:8000/api/motion/signals/recent?limit=5"
 
 mkdir -p "${LOG_DIR}"
@@ -76,12 +81,14 @@ fi
 printf '[apply-update-steps] Testing database connection\n'
 psql "${DB_URL}" -v ON_ERROR_STOP=1 -c "select now(), current_database(), current_user;"
 
-if [[ -f "${SQL_FILE}" ]]; then
-  printf '[apply-update-steps] Applying SQL migration %s\n' "${SQL_FILE}"
-  psql "${DB_URL}" -v ON_ERROR_STOP=1 -f "${SQL_FILE}"
-else
-  printf '[apply-update-steps] WARNING: SQL migration file not found, skipping: %s\n' "${SQL_FILE}"
-fi
+for sql_file in "${SQL_FILES[@]}"; do
+  if [[ -f "${sql_file}" ]]; then
+    printf '[apply-update-steps] Applying SQL migration %s\n' "${sql_file}"
+    psql "${DB_URL}" -v ON_ERROR_STOP=1 -f "${sql_file}"
+  else
+    printf '[apply-update-steps] WARNING: SQL migration file not found, skipping: %s\n' "${sql_file}"
+  fi
+done
 
 printf '[apply-update-steps] Running motion trade spots backfill\n'
 "${PYTHON_BIN}" -m datavis.motion_trade_spots backfill --last-broker-days 2
@@ -103,6 +110,13 @@ from public.motionsignal
 order by score desc
 limit 20;
 SQL
+
+if [[ -f "${VALIDATION_SQL_FILE}" ]]; then
+  printf '[apply-update-steps] Running scenario validation SQL %s\n' "${VALIDATION_SQL_FILE}"
+  psql "${DB_URL}" -v ON_ERROR_STOP=1 -f "${VALIDATION_SQL_FILE}"
+else
+  printf '[apply-update-steps] WARNING: validation SQL file not found, skipping: %s\n' "${VALIDATION_SQL_FILE}"
+fi
 
 printf '[apply-update-steps] Restarting datavis.service\n'
 sudo systemctl restart datavis.service

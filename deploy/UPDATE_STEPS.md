@@ -1,6 +1,6 @@
 # Update Steps Workflow
 
-`deploy/update_steps.json` remains the machine-readable manifest for EC2 deploys, but the current motion/trade-spots release now delegates to one journaled runner so SQL, backfill, restart, and validation all use the same environment-loading and DB-resolution path.
+`deploy/update_steps.json` remains the machine-readable manifest for EC2 deploys, but the current motion research release now delegates to one journaled runner so SQL, backfill, restart, and validation all use the same environment-loading and DB-resolution path.
 
 ## One-command runner
 
@@ -20,9 +20,10 @@ That script:
 - normalizes `postgresql+psycopg2://` to `postgresql://` before using `psql`
 - fails clearly when neither env var is available
 - tests the DB connection
-- applies `deploy/sql/20260424_motion_trade_spots.sql` when the file exists
+- applies `deploy/sql/20260424_motion_trade_spots.sql`, `deploy/sql/20260425_motion_fingerprints.sql`, and `deploy/sql/20260425_motion_model_scenarios.sql` when those files exist
 - runs `python -m datavis.motion_trade_spots backfill --last-broker-days 2`
 - runs validation queries against `public.motionpoint` and `public.motionsignal`
+- runs `deploy/sql/20260425_motion_model_scenarios_validation.sql`
 - restarts `datavis.service`
 - calls `http://127.0.0.1:8000/api/motion/signals/recent?limit=5` when the service is active
 
@@ -79,7 +80,86 @@ order by score desc
 limit 20;
 ```
 
-Those queries, plus the local API response from `/api/motion/signals/recent?limit=5`, are the proof that the motion migration and backfill completed successfully.
+The runner also executes `deploy/sql/20260425_motion_model_scenarios_validation.sql`, which checks:
+
+```sql
+select family, isactive, count(*) as scenarios
+from public.motionmodelscenario
+group by family, isactive
+order by family, isactive desc;
+
+select
+    s.scenarioname,
+    s.family,
+    r.signalrule,
+    r.signals,
+    r.usefulpct,
+    r.stoppct,
+    r.avgsecondstoriskfree,
+    r.avgmaxadverse,
+    r.profitproxy,
+    r.passedconstraints
+from public.motionmodelresult r
+join public.motionmodelscenario s on s.id = r.scenarioid
+order by
+    r.passedconstraints desc,
+    r.usefulpct desc nulls last,
+    r.avgsecondstoriskfree asc nulls last,
+    r.avgmaxadverse asc nulls last,
+    r.signals desc nulls last,
+    r.createdat desc
+limit 50;
+```
+
+Those queries, plus the local API response from `/api/motion/signals/recent?limit=5`, are the proof that the motion migration and backfill completed successfully and that the scenario framework is available for research runs.
+
+## Scenario workflow
+
+This framework is research-only:
+
+- no broker execution
+- no frontend change
+- no tickcollector change
+
+The model reuses existing `public.motionpoint` rows, varies controllable inputs, recreates `public.motionsignal` rows per scenario `signalrule`, evaluates outcomes under scenario-specific `riskfreeusd` / `targetusd` / `stopusd` / `lookaheadsec`, and stores summaries in `public.motionmodelresult`.
+
+Run the scenario sweep with:
+
+```bash
+python -m datavis.motion_trade_spots run-scenarios --last-broker-days 2
+```
+
+Seeded active scenario families are:
+
+- `micro_burst_choppy`
+- `micro_burst_short_confirm`
+- `continuation`
+- `strict_micro_burst`
+
+The seed migration expands those families across these parameter grids:
+
+- `efficiency3`: `0.55`, `0.60`, `0.65`
+- `spreadmultiple3`: `2.5-5`, `3-5`, `3-7`
+- `cooldownsec`: `10`, `20`, `30`
+- `riskfreeusd`: `0.20`, `0.30`, `0.40`
+- `targetusd`: `0.70`, `1.00`
+- `stopusd`: `0.70`, `1.00`
+
+Scenario constraints:
+
+- `signals >= 50`
+- `usefulpct >= 60`
+- `stoppct <= 35`
+- `avgsecondstoriskfree <= 20`
+- `avgmaxadverse <= 3.0`
+
+Scenario ranking order:
+
+- `passedconstraints` first
+- `usefulpct` descending
+- `avgsecondstoriskfree` ascending
+- `avgmaxadverse` ascending
+- `signals` descending
 
 ## Fingerprint workflow
 
