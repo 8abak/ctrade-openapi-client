@@ -105,12 +105,33 @@
   }
 
   async function fetchJson(url, options) {
-    const response = await fetch(url, options);
-    const payload = await response.json().catch(() => ({}));
+    const response = await fetch(url, Object.assign({ credentials: "same-origin" }, options || {}));
+    const rawText = await response.text();
+    let payload = {};
+    if (rawText) {
+      try {
+        payload = JSON.parse(rawText);
+      } catch (_error) {
+        payload = response.ok ? {} : {
+          ok: false,
+          error: rawText || response.statusText || ("HTTP " + response.status),
+          detail: rawText || response.statusText || ("HTTP " + response.status),
+        };
+      }
+    }
     if (!response.ok) {
       throw payload;
     }
     return payload;
+  }
+
+  function postJson(url, payload) {
+    return fetchJson(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify(payload),
+    });
   }
 
   function renderConnection(context) {
@@ -239,11 +260,7 @@
     elements.resultsMeta.textContent = "Running SQL...";
     setStatus("Running SQL...", null);
     try {
-      const payload = await fetchJson("/api/sql/query", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sql: sql }),
-      });
+      const payload = await postJson("/api/sql/query", { sql: sql });
       renderResults(payload);
       setStatus("SQL completed.", "success");
     } catch (error) {
@@ -274,11 +291,7 @@
     syncActionControls();
     setStatus("Exporting CSV...", null);
     try {
-      const response = await fetchJson("/api/sql/export-csv", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
+      const response = await postJson("/api/sql/export-csv", payload);
       const parts = [
         "CSV export completed:",
         response.filename || "unnamed.csv",

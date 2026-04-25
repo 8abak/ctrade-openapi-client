@@ -25,6 +25,7 @@ import psycopg2.extras
 import sqlparse
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
@@ -599,6 +600,20 @@ def require_sql_admin(credentials: Optional[HTTPBasicCredentials] = Depends(secu
         )
 
     return credentials.username
+
+
+@app.exception_handler(HTTPException)
+async def datavis_http_exception_handler(request: Request, exc: HTTPException):
+    if request.url.path.startswith("/api/sql/export-csv"):
+        detail = exc.detail
+        if isinstance(detail, dict):
+            message = detail.get("error") or detail.get("message") or "CSV export failed."
+            content = {"ok": False, "error": message, "detail": detail}
+        else:
+            message = str(detail)
+            content = {"ok": False, "error": message, "detail": message}
+        return JSONResponse(status_code=exc.status_code, content=content, headers=exc.headers)
+    return await http_exception_handler(request, exc)
 
 
 def _trade_session_sign(raw_payload: str) -> str:
