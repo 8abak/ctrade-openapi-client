@@ -75,7 +75,11 @@
   }
 
   function errorMessage(error) {
-    const detail = error && error.detail ? error.detail : error;
+    const detail = error && error.detail
+      ? (typeof error.detail === "object" && error.error && !error.detail.error
+        ? Object.assign({ error: error.error }, error.detail)
+        : error.detail)
+      : error;
     if (!detail) {
       return "Request failed.";
     }
@@ -94,6 +98,12 @@
     }
     if (detail.sqlstate) {
       parts.push("SQLSTATE " + detail.sqlstate);
+    }
+    if (detail.stage) {
+      parts.push("stage: " + detail.stage);
+    }
+    if (detail.path) {
+      parts.push(detail.path);
     }
     return parts.join(" | ");
   }

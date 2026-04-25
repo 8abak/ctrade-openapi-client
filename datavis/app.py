@@ -1015,6 +1015,20 @@ def sanitize_sql_export_filename(filename: Optional[str]) -> str:
     return safe_stem + ".csv"
 
 
+def csv_export_column_names(description: Any) -> List[str]:
+    names: List[str] = []
+    for index, item in enumerate(description or [], start=1):
+        name = getattr(item, "name", None)
+        if not name and isinstance(item, (list, tuple)) and item:
+            name = item[0]
+        names.append(str(name or f"column_{index}"))
+    return names
+
+
+def csv_export_row_values(row: Any) -> List[Any]:
+    return [serialize_value(value) for value in row]
+
+
 def sql_export_row_count_from_status(status_message: Optional[str]) -> Optional[int]:
     match = re.match(r"^COPY\s+(\d+)$", str(status_message or "").strip(), flags=re.IGNORECASE)
     if not match:
@@ -1076,15 +1090,14 @@ def remove_sql_export_file(path: Path) -> None:
 
 def export_query_to_csv(sql_text: str, filename: Optional[str] = None) -> Dict[str, Any]:
     statement = require_exportable_select_statement(sql_text)
+    SQL_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
     safe_name, export_path, relative_path = resolve_sql_export_target(filename)
     download_url = "/api/sql/export-csv/{0}".format(safe_name)
     started = time.perf_counter()
     row_count = 0
-    export_sql = (
-        f"COPY (SELECT * FROM ({statement}) AS sql_export_source LIMIT {SQL_EXPORT_MAX_ROWS + 1}) "
-        "TO STDOUT WITH (FORMAT CSV, HEADER TRUE)"
-    )
+    export_sql = f"SELECT * FROM ({statement}) AS sql_export_source LIMIT %s"
     next_progress_log_at = SQL_EXPORT_LOG_EVERY_ROWS
+    active_stage = "initializing"
     SQL_EXPORT_LOGGER.info(
         "sql_export_started filename=%s path=%s batch_size=%s max_rows=%s timeout_ms=%s",
         safe_name,
@@ -1097,38 +1110,65 @@ def export_query_to_csv(sql_text: str, filename: Optional[str] = None) -> Dict[s
     with db_connection(readonly=True, autocommit=False) as conn:
         try:
             with conn.cursor() as cur:
+                active_stage = "set_timeouts"
                 cur.execute("SET LOCAL statement_timeout = %s", (SQL_EXPORT_TIMEOUT_MS,))
                 cur.execute("SET LOCAL lock_timeout = %s", (LOCK_TIMEOUT_MS,))
-                with export_path.open("w", newline="", encoding="utf-8") as handle:
-                    cur.copy_expert(export_sql, handle)
-                    row_count = sql_export_row_count_from_status(getattr(cur, "statusmessage", None)) or 0
-            if row_count <= 0 and export_path.exists():
-                row_count = count_csv_export_rows(export_path)
-            if row_count > SQL_EXPORT_MAX_ROWS:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        "CSV export exceeded the configured row limit of {0}. "
-                        "Refine the query or raise DATAVIS_SQL_EXPORT_MAX_ROWS."
-                    ).format(SQL_EXPORT_MAX_ROWS),
-                )
-            while row_count >= next_progress_log_at:
+                active_stage = "execute_query"
+                cur.execute(export_sql, (SQL_EXPORT_MAX_ROWS + 1,))
+                if cur.description is None:
+                    raise HTTPException(status_code=400, detail="CSV export query did not return a result set.")
+                column_names = csv_export_column_names(cur.description)
                 SQL_EXPORT_LOGGER.info(
-                    "sql_export_progress filename=%s path=%s rows=%s",
+                    "sql_export_query_ready filename=%s path=%s columns=%s",
                     safe_name,
                     relative_path,
-                    next_progress_log_at,
+                    len(column_names),
                 )
-                next_progress_log_at += SQL_EXPORT_LOG_EVERY_ROWS
+                active_stage = "open_output"
+                with export_path.open("w", newline="", encoding="utf-8") as handle:
+                    writer = csv.writer(handle)
+                    active_stage = "write_header"
+                    writer.writerow(column_names)
+                    while True:
+                        active_stage = "fetch_rows"
+                        batch = cur.fetchmany(SQL_EXPORT_BATCH_SIZE)
+                        if not batch:
+                            break
+                        batch_size = len(batch)
+                        if row_count + batch_size > SQL_EXPORT_MAX_ROWS:
+                            allowed = max(0, SQL_EXPORT_MAX_ROWS - row_count)
+                            if allowed > 0:
+                                active_stage = "write_rows"
+                                writer.writerows(csv_export_row_values(row) for row in batch[:allowed])
+                                row_count += allowed
+                            raise HTTPException(
+                                status_code=400,
+                                detail=(
+                                    "CSV export exceeded the configured row limit of {0}. "
+                                    "Refine the query or raise DATAVIS_SQL_EXPORT_MAX_ROWS."
+                                ).format(SQL_EXPORT_MAX_ROWS),
+                            )
+                        active_stage = "write_rows"
+                        writer.writerows(csv_export_row_values(row) for row in batch)
+                        row_count += batch_size
+                        while row_count >= next_progress_log_at:
+                            SQL_EXPORT_LOGGER.info(
+                                "sql_export_progress filename=%s path=%s rows=%s",
+                                safe_name,
+                                relative_path,
+                                next_progress_log_at,
+                            )
+                            next_progress_log_at += SQL_EXPORT_LOG_EVERY_ROWS
             conn.commit()
         except HTTPException as exc:
             conn.rollback()
             remove_sql_export_file(export_path)
             SQL_EXPORT_LOGGER.warning(
-                "sql_export_failed filename=%s path=%s rows=%s reason=%s",
+                "sql_export_failed filename=%s path=%s rows=%s stage=%s reason=%s",
                 safe_name,
                 relative_path,
                 row_count,
+                active_stage,
                 exc.detail,
             )
             raise
@@ -1136,15 +1176,20 @@ def export_query_to_csv(sql_text: str, filename: Optional[str] = None) -> Dict[s
             conn.rollback()
             remove_sql_export_file(export_path)
             SQL_EXPORT_LOGGER.exception(
-                "sql_export_failed filename=%s path=%s rows=%s",
+                "sql_export_failed filename=%s path=%s rows=%s stage=%s",
                 safe_name,
                 relative_path,
                 row_count,
+                active_stage,
             )
             if isinstance(exc, psycopg2.Error):
+                detail = serialize_pg_error(exc, statement=statement)
+                detail["stage"] = active_stage
+                detail["filename"] = safe_name
+                detail["path"] = relative_path
                 raise HTTPException(
                     status_code=400,
-                    detail=serialize_pg_error(exc, statement=statement),
+                    detail=detail,
                 ) from exc
             raise HTTPException(
                 status_code=500,
@@ -1152,6 +1197,9 @@ def export_query_to_csv(sql_text: str, filename: Optional[str] = None) -> Dict[s
                     "message": str(exc) or exc.__class__.__name__,
                     "exceptionType": exc.__class__.__name__,
                     "statement": statement,
+                    "stage": active_stage,
+                    "filename": safe_name,
+                    "path": relative_path,
                 },
             ) from exc
 
