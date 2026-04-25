@@ -299,7 +299,7 @@
 
     state.exporting = true;
     syncActionControls();
-    setStatus("Exporting CSV...", null);
+    setStatus("Export running... This may take a while for large result sets.", null);
     try {
       const response = await postJson("/api/sql/export-csv", payload);
       const parts = [

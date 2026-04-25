@@ -74,7 +74,6 @@ STATEMENT_TIMEOUT_MS = int(os.getenv("DATAVIS_SQL_TIMEOUT_MS", "15000"))
 LOCK_TIMEOUT_MS = int(os.getenv("DATAVIS_SQL_LOCK_TIMEOUT_MS", "3000"))
 SQL_EXPORT_DIR = BASE_DIR / "logs" / "sql_exports"
 SQL_EXPORT_BATCH_SIZE = max(1000, int(os.getenv("DATAVIS_SQL_EXPORT_BATCH_SIZE", "5000")))
-SQL_EXPORT_MAX_ROWS = max(1, int(os.getenv("DATAVIS_SQL_EXPORT_MAX_ROWS", "500000")))
 SQL_EXPORT_TIMEOUT_MS = max(STATEMENT_TIMEOUT_MS, int(os.getenv("DATAVIS_SQL_EXPORT_TIMEOUT_MS", "60000")))
 SQL_EXPORT_LOG_EVERY_ROWS = max(SQL_EXPORT_BATCH_SIZE, int(os.getenv("DATAVIS_SQL_EXPORT_LOG_EVERY_ROWS", "50000")))
 SQL_ADMIN_USER = os.getenv("DATAVIS_SQL_ADMIN_USER", "").strip()
@@ -1074,33 +1073,71 @@ def remove_sql_export_file(path: Path) -> None:
         SQL_EXPORT_LOGGER.warning("sql_export_cleanup_failed path=%s", path, exc_info=True)
 
 
+def remove_sql_export_artifacts(*paths: Path) -> None:
+    for path in paths:
+        remove_sql_export_file(path)
+
+
+def sql_export_metadata_target(export_path: Path, relative_path: str) -> tuple[Path, str]:
+    metadata_path = export_path.with_suffix(".json")
+    metadata_relative_path = Path(relative_path).with_suffix(".json").as_posix()
+    return metadata_path, metadata_relative_path
+
+
+def write_sql_export_metadata(
+    *,
+    metadata_path: Path,
+    safe_name: str,
+    relative_path: str,
+    metadata_relative_path: str,
+    statement: str,
+    row_count: int,
+    elapsed_ms_value: float,
+) -> None:
+    payload = {
+        "filename": safe_name,
+        "path": relative_path,
+        "metadataPath": metadata_relative_path,
+        "exportedAt": datetime.now(timezone.utc).isoformat(),
+        "query": statement,
+        "rowCount": row_count,
+        "batchSize": SQL_EXPORT_BATCH_SIZE,
+        "timeoutMs": SQL_EXPORT_TIMEOUT_MS,
+        "elapsedMs": elapsed_ms_value,
+    }
+    metadata_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+
+
 def export_query_to_csv(sql_text: str, filename: Optional[str] = None) -> Dict[str, Any]:
     statement = require_exportable_select_statement(sql_text)
     SQL_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
     safe_name, export_path, relative_path = resolve_sql_export_target(filename)
+    metadata_path, metadata_relative_path = sql_export_metadata_target(export_path, relative_path)
     download_url = "/api/sql/export-csv/{0}".format(safe_name)
     started = time.perf_counter()
     row_count = 0
-    export_sql = f"SELECT * FROM ({statement}) AS sql_export_source LIMIT %s"
     next_progress_log_at = SQL_EXPORT_LOG_EVERY_ROWS
     active_stage = "initializing"
+    cursor_name = "sql_export_{0}_{1}".format(export_path.stem[:32], secrets.token_hex(4))
     SQL_EXPORT_LOGGER.info(
-        "sql_export_started filename=%s path=%s batch_size=%s max_rows=%s timeout_ms=%s",
+        "sql_export_started filename=%s path=%s batch_size=%s timeout_ms=%s cursor=%s",
         safe_name,
         relative_path,
         SQL_EXPORT_BATCH_SIZE,
-        SQL_EXPORT_MAX_ROWS,
         SQL_EXPORT_TIMEOUT_MS,
+        cursor_name,
     )
 
     with db_connection(readonly=True, autocommit=False) as conn:
         try:
-            with conn.cursor() as cur:
+            with conn.cursor() as settings_cur:
                 active_stage = "set_timeouts"
-                cur.execute("SET LOCAL statement_timeout = %s", (SQL_EXPORT_TIMEOUT_MS,))
-                cur.execute("SET LOCAL lock_timeout = %s", (LOCK_TIMEOUT_MS,))
+                settings_cur.execute("SET LOCAL statement_timeout = %s", (SQL_EXPORT_TIMEOUT_MS,))
+                settings_cur.execute("SET LOCAL lock_timeout = %s", (LOCK_TIMEOUT_MS,))
+            with conn.cursor(name=cursor_name) as cur:
+                cur.itersize = SQL_EXPORT_BATCH_SIZE
                 active_stage = "execute_query"
-                cur.execute(export_sql, (SQL_EXPORT_MAX_ROWS + 1,))
+                cur.execute(f"SELECT * FROM ({statement}) AS sql_export_source")
                 if cur.description is None:
                     raise HTTPException(status_code=400, detail="CSV export query did not return a result set.")
                 column_names = csv_export_column_names(cur.description)
@@ -1115,27 +1152,16 @@ def export_query_to_csv(sql_text: str, filename: Optional[str] = None) -> Dict[s
                     writer = csv.writer(handle)
                     active_stage = "write_header"
                     writer.writerow(column_names)
+                    handle.flush()
                     while True:
                         active_stage = "fetch_rows"
                         batch = cur.fetchmany(SQL_EXPORT_BATCH_SIZE)
                         if not batch:
                             break
                         batch_size = len(batch)
-                        if row_count + batch_size > SQL_EXPORT_MAX_ROWS:
-                            allowed = max(0, SQL_EXPORT_MAX_ROWS - row_count)
-                            if allowed > 0:
-                                active_stage = "write_rows"
-                                writer.writerows(csv_export_row_values(row) for row in batch[:allowed])
-                                row_count += allowed
-                            raise HTTPException(
-                                status_code=400,
-                                detail=(
-                                    "CSV export exceeded the configured row limit of {0}. "
-                                    "Refine the query or raise DATAVIS_SQL_EXPORT_MAX_ROWS."
-                                ).format(SQL_EXPORT_MAX_ROWS),
-                            )
                         active_stage = "write_rows"
                         writer.writerows(csv_export_row_values(row) for row in batch)
+                        handle.flush()
                         row_count += batch_size
                         while row_count >= next_progress_log_at:
                             SQL_EXPORT_LOGGER.info(
@@ -1148,7 +1174,7 @@ def export_query_to_csv(sql_text: str, filename: Optional[str] = None) -> Dict[s
             conn.commit()
         except HTTPException as exc:
             conn.rollback()
-            remove_sql_export_file(export_path)
+            remove_sql_export_artifacts(export_path, metadata_path)
             SQL_EXPORT_LOGGER.warning(
                 "sql_export_failed filename=%s path=%s rows=%s stage=%s reason=%s",
                 safe_name,
@@ -1160,7 +1186,7 @@ def export_query_to_csv(sql_text: str, filename: Optional[str] = None) -> Dict[s
             raise
         except Exception as exc:
             conn.rollback()
-            remove_sql_export_file(export_path)
+            remove_sql_export_artifacts(export_path, metadata_path)
             SQL_EXPORT_LOGGER.exception(
                 "sql_export_failed filename=%s path=%s rows=%s stage=%s",
                 safe_name,
@@ -1189,10 +1215,32 @@ def export_query_to_csv(sql_text: str, filename: Optional[str] = None) -> Dict[s
                 },
             ) from exc
 
+    active_stage = "write_metadata"
+    elapsed_ms_value = elapsed_ms(started)
+    try:
+        write_sql_export_metadata(
+            metadata_path=metadata_path,
+            safe_name=safe_name,
+            relative_path=relative_path,
+            metadata_relative_path=metadata_relative_path,
+            statement=statement,
+            row_count=row_count,
+            elapsed_ms_value=elapsed_ms_value,
+        )
+    except Exception:
+        SQL_EXPORT_LOGGER.warning(
+            "sql_export_metadata_failed filename=%s path=%s metadata_path=%s",
+            safe_name,
+            relative_path,
+            metadata_relative_path,
+            exc_info=True,
+        )
+
     payload = {
         "ok": True,
         "filename": safe_name,
         "path": relative_path,
+        "metadataPath": metadata_relative_path,
         "rows": row_count,
         "download_url": download_url,
     }
@@ -1201,7 +1249,7 @@ def export_query_to_csv(sql_text: str, filename: Optional[str] = None) -> Dict[s
         safe_name,
         relative_path,
         row_count,
-        elapsed_ms(started),
+        elapsed_ms_value,
     )
     return payload
 
