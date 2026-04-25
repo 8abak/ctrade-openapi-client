@@ -3492,8 +3492,8 @@ def sql_query(payload: QueryRequest, _: Optional[str] = Depends(require_sql_admi
     return execute_query(payload.sql)
 
 
-@app.post("/api/sql/export-csv")
-def sql_export_csv(payload: QueryExportRequest, _: Optional[str] = Depends(require_sql_admin)) -> JSONResponse | Dict[str, Any]:
+@app.post("/api/sql/export-csv", response_model=None)
+def sql_export_csv(payload: QueryExportRequest, _: Optional[str] = Depends(require_sql_admin)):
     try:
         return export_query_to_csv(payload.query, payload.filename)
     except HTTPException as exc:

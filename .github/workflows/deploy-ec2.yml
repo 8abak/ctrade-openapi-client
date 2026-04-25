@@ -22,11 +22,11 @@ jobs:
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           port: ${{ secrets.EC2_PORT || '22' }}
+          script_stop: true
           script: |
+            set -euo pipefail
             cd /home/ec2-user/cTrade
-            PREVIOUS_SHA="$(git rev-parse HEAD)"
-            git fetch origin
-            NEW_SHA="$(git rev-parse origin/main)"
-            git reset --hard "$NEW_SHA"
-            git clean -fd
-            DEPLOY_PREVIOUS_SHA="$PREVIOUS_SHA" DEPLOY_NEW_SHA="$NEW_SHA" bash deploy/scripts/deploy-datavis.sh
+            git fetch origin main
+            git reset --hard origin/main
+            bash deploy/scripts/apply-update-steps.sh
+            cat deploy/updateJournal.md

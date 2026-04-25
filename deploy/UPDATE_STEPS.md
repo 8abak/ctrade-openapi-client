@@ -1,43 +1,46 @@
-# Update Steps Workflow
+# Current Update Steps
 
-This release adds server-side CSV export support to the SQL page.
+This file is intentionally replaced for each release. It only describes the steps required for the current update.
 
-- backend change: `datavis/app.py`
-- frontend change: `frontend/sql.html`, `frontend/assets/sql.js`, and styling
-- SQL migration: not required for this feature
+## Current update
 
-## Manual EC2 steps
+Fix the FastAPI startup crash caused by the SQL CSV export endpoint response typing in `datavis/app.py`.
 
-After `git pull` on EC2, run the typed update manifest:
+## Automatic deploy flow for this update
+
+1. The GitHub Actions deploy workflow SSHes into EC2.
+2. EC2 runs:
 
 ```bash
 cd /home/ec2-user/cTrade
-source /home/ec2-user/venvs/datavis/bin/activate
-bash deploy/scripts/run-update-steps.sh
+git fetch origin main
+git reset --hard origin/main
+bash deploy/scripts/apply-update-steps.sh
+cat deploy/updateJournal.md
 ```
 
-For this release the manifest does two things:
+3. `deploy/scripts/apply-update-steps.sh` reads `deploy/update_steps.json` and runs only the current steps below.
 
-- restarts `datavis.service`
-- verifies local app health with `curl http://127.0.0.1:8000/api/health`
+## Current steps executed by apply-update-steps.sh
 
-## Browser refresh
+1. Restart `datavis.service`.
+2. Retry `http://127.0.0.1:8000/api/health` once per second for up to 20 seconds.
 
-The SQL page frontend changed, so refresh the `/sql` browser tab after the deploy. A hard refresh is useful if the browser keeps an older cached script.
+## Not required for this update
 
-## CSV export runtime notes
+- No SQL migration.
+- No motion backfill.
+- No scenario rerun.
+- No unrelated service restarts.
 
-- exported files are written under `logs/sql_exports/`
-- the folder is created automatically on the first export
-- exports only allow a single read-only `SELECT` or `WITH ... SELECT ...` query
-- no SQL migration is needed unless a future change adds tracking tables or other schema objects
+## Manual EC2 fallback
 
-## Expected validation
-
-After the restart, confirm the app is healthy:
+If the GitHub workflow fails, run the same commands directly on EC2:
 
 ```bash
-curl --fail --silent http://127.0.0.1:8000/api/health
+cd /home/ec2-user/cTrade
+git fetch origin main
+git reset --hard origin/main
+bash deploy/scripts/apply-update-steps.sh
+cat deploy/updateJournal.md
 ```
-
-Then test a SQL export from the app or with `curl` against `/api/sql/export-csv`.

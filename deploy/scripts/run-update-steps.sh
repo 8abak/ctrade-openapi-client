@@ -4,4 +4,5 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-exec python3 "${REPO_ROOT}/deploy/scripts/run_update_steps.py" "$@"
+cd "${REPO_ROOT}"
+exec bash "${REPO_ROOT}/deploy/scripts/apply-update-steps.sh" "$@"
