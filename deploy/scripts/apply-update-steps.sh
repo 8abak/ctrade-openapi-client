@@ -65,6 +65,37 @@ log() {
   fi
 }
 
+run_health_check() {
+  local attempts=30
+  local sleep_seconds=2
+  local attempt=0
+  local service_state=""
+
+  for ((attempt = 1; attempt <= attempts; attempt += 1)); do
+    service_state="$(sudo systemctl is-active datavis.service 2>&1 || true)"
+    log "Health check attempt ${attempt}/${attempts}; datavis.service state: ${service_state}"
+
+    if curl -fsS "${HEALTH_URL}" | while IFS= read -r line; do
+      log "health check: ${line}"
+    done; then
+      return 0
+    fi
+
+    if [[ "${attempt}" -lt "${attempts}" ]]; then
+      sleep "${sleep_seconds}"
+    fi
+  done
+
+  log "Health check failed after ${attempts} attempts."
+  sudo systemctl status datavis.service --no-pager -l | while IFS= read -r line; do
+    log "systemctl status: ${line}"
+  done || true
+  sudo journalctl -u datavis.service -n 80 --no-pager | while IFS= read -r line; do
+    log "journalctl: ${line}"
+  done || true
+  return 1
+}
+
 write_summary() {
   if [[ -e "${SUMMARY_PATH}" && ! -f "${SUMMARY_PATH}" ]]; then
     log "Skipping summary write because ${SUMMARY_PATH} is not a regular file."
@@ -90,8 +121,7 @@ result: ${RUN_RESULT}
 log: logs/update_journal/$(basename "${RUN_LOG_PATH}")
 steps:
 1. restart datavis.service
-2. sleep 5
-3. health check ${HEALTH_URL}
+2. health check retry every 2 seconds for up to 60 seconds
 EOF
 }
 
@@ -129,13 +159,8 @@ main() {
   log "Restarting datavis.service"
   sudo systemctl restart datavis.service
 
-  log "Sleeping 5 seconds before health check"
-  sleep 5
-
-  log "Running health check: ${HEALTH_URL}"
-  curl -fsS "${HEALTH_URL}" | while IFS= read -r line; do
-    log "health check: ${line}"
-  done
+  log "Running health check with retries: ${HEALTH_URL}"
+  run_health_check
 }
 
 main "$@"
