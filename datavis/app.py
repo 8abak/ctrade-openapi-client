@@ -1029,20 +1029,6 @@ def csv_export_row_values(row: Any) -> List[Any]:
     return [serialize_value(value) for value in row]
 
 
-def sql_export_row_count_from_status(status_message: Optional[str]) -> Optional[int]:
-    match = re.match(r"^COPY\s+(\d+)$", str(status_message or "").strip(), flags=re.IGNORECASE)
-    if not match:
-        return None
-    return int(match.group(1))
-
-
-def count_csv_export_rows(path: Path) -> int:
-    with path.open("r", newline="", encoding="utf-8") as handle:
-        reader = csv.reader(handle)
-        next(reader, None)
-        return sum(1 for _ in reader)
-
-
 def resolve_sql_export_target(filename: Optional[str]) -> tuple[str, Path, str]:
     exports_dir = SQL_EXPORT_DIR.resolve()
     exports_dir.mkdir(parents=True, exist_ok=True)
