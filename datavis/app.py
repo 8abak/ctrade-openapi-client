@@ -1119,6 +1119,8 @@ def export_query_to_csv(sql_text: str, filename: Optional[str] = None) -> Dict[s
     next_progress_log_at = SQL_EXPORT_LOG_EVERY_ROWS
     active_stage = "initializing"
     cursor_name = "sql_export_{0}_{1}".format(export_path.stem[:32], secrets.token_hex(4))
+    export_sql = f"SELECT * FROM ({statement}) AS sql_export_source"
+    describe_sql = f"{export_sql} LIMIT 0"
     SQL_EXPORT_LOGGER.info(
         "sql_export_started filename=%s path=%s batch_size=%s timeout_ms=%s cursor=%s",
         safe_name,
@@ -1134,19 +1136,21 @@ def export_query_to_csv(sql_text: str, filename: Optional[str] = None) -> Dict[s
                 active_stage = "set_timeouts"
                 settings_cur.execute("SET LOCAL statement_timeout = %s", (SQL_EXPORT_TIMEOUT_MS,))
                 settings_cur.execute("SET LOCAL lock_timeout = %s", (LOCK_TIMEOUT_MS,))
-            with conn.cursor(name=cursor_name) as cur:
-                cur.itersize = SQL_EXPORT_BATCH_SIZE
-                active_stage = "execute_query"
-                cur.execute(f"SELECT * FROM ({statement}) AS sql_export_source")
-                if cur.description is None:
+                active_stage = "describe_query"
+                settings_cur.execute(describe_sql)
+                if settings_cur.description is None:
                     raise HTTPException(status_code=400, detail="CSV export query did not return a result set.")
-                column_names = csv_export_column_names(cur.description)
+                column_names = csv_export_column_names(settings_cur.description)
                 SQL_EXPORT_LOGGER.info(
                     "sql_export_query_ready filename=%s path=%s columns=%s",
                     safe_name,
                     relative_path,
                     len(column_names),
                 )
+            with conn.cursor(name=cursor_name) as cur:
+                cur.itersize = SQL_EXPORT_BATCH_SIZE
+                active_stage = "execute_query"
+                cur.execute(export_sql)
                 active_stage = "open_output"
                 with export_path.open("w", newline="", encoding="utf-8") as handle:
                     writer = csv.writer(handle)
