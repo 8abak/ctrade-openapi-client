@@ -9,12 +9,11 @@ Deployment runs automatically on every push to `main` and on manual `workflow_di
 It:
 
 - changes to the repo root
-- safely loads `/etc/datavis.env` when readable on EC2
-- prefers `DATABASE_URL` over `DATAVIS_DB_URL`
-- normalizes `postgresql+psycopg2://` to `postgresql://`
-- runs only the ordered actions in `deploy/update_steps.json`
-- writes a timestamped detailed log under `logs/update_journal/`
-- rewrites `deploy/updateJournal.md` on every run with the latest result only
+- creates a timestamped detailed log under `logs/update_journal/`
+- restarts `datavis.service` with a literal `sudo systemctl restart datavis.service`
+- sleeps 5 seconds
+- runs a local `curl -fsS http://127.0.0.1:8000/api/health` check
+- optionally rewrites `deploy/updateJournal.md` with a small latest-run summary
 - fails the deployment immediately when any step fails
 
 ## GitHub Actions flow
@@ -39,28 +38,24 @@ Optional secret:
 
 - `EC2_PORT` if SSH is not on port `22`
 
-## Update manifest
+## Current steps
 
-Every release must replace the current update instructions instead of appending to them.
-
-- human-readable current instructions: `deploy/UPDATE_STEPS.md`
-- machine-readable current instructions: `deploy/update_steps.json`
-
-For this release the current steps are only:
+For this release the runner does only:
 
 1. restart `datavis.service`
-2. retry local `/api/health`
+2. sleep 5 seconds
+3. run local `/api/health`
 
 No SQL migration, backfill, or scenario rerun is part of this release.
 
 ## Journaling
 
-Every deployment run refreshes:
+Every deployment run writes:
 
-- latest summary: `deploy/updateJournal.md`
 - timestamped detailed logs: `logs/update_journal/update_YYYYMMDD_HHMMSS.log`
+- latest summary when writable: `deploy/updateJournal.md`
 
-The summary includes the run date/time, commit hash, latest commit message, overall result, and per-step results with the last journal lines for each step.
+The summary is best-effort only; deployment does not depend on it.
 
 ## Manual EC2 fallback
 

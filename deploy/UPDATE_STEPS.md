@@ -19,7 +19,7 @@ bash deploy/scripts/apply-update-steps.sh
 cat deploy/updateJournal.md
 ```
 
-3. `deploy/scripts/apply-update-steps.sh` reads `deploy/update_steps.json` and runs only the current steps below.
+3. `deploy/scripts/apply-update-steps.sh` is currently a static deploy runner. It does not parse `deploy/update_steps.json`.
 4. If deployment logging fails because `logs/` or `deploy/updateJournal.md` was previously created by `sudo` or `root`, run this one-time repair on EC2 and rerun the deploy:
 
 ```bash
@@ -30,7 +30,9 @@ chmod -R u+rwX logs
 ## Current steps executed by apply-update-steps.sh
 
 1. Restart `datavis.service`.
-2. Run the local health check at `http://127.0.0.1:8000/api/health`.
+   Command: `sudo systemctl restart datavis.service`
+2. Sleep 5 seconds.
+3. Run the local health check at `http://127.0.0.1:8000/api/health`.
 
 ## Not required for this update
 
