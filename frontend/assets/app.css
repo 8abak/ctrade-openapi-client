@@ -902,7 +902,7 @@ select {
 
 .sql-main-panel {
   display: grid;
-  grid-template-rows: minmax(170px, 32vh) minmax(0, 1fr);
+  grid-template-rows: minmax(320px, 42vh) minmax(0, 1fr);
   gap: 0.75rem;
   overflow: hidden;
 }
@@ -916,11 +916,11 @@ select {
 }
 
 .sql-editor-panel {
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(240px, 1fr) auto;
 }
 
 .sql-results-panel {
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
 }
 
 .sql-panel-toolbar {
@@ -928,6 +928,22 @@ select {
   align-items: center;
   justify-content: space-between;
   gap: 0.75rem;
+  flex-wrap: nowrap;
+}
+
+.sql-toolbar-meta {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+}
+
+.sql-toolbar-help {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .sql-toolbar-actions,
@@ -942,9 +958,15 @@ select {
   justify-content: flex-end;
 }
 
+.sql-toolbar-actions-inline {
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+}
+
 .sql-filename-input {
   min-height: 2.35rem;
-  min-width: min(18rem, 100%);
+  width: 18rem;
+  min-width: 14rem;
   padding: 0.55rem 0.8rem;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -963,10 +985,14 @@ select {
   color: var(--accent);
 }
 
+.status-line a {
+  color: var(--accent);
+}
+
 #sqlEditor {
   width: 100%;
   min-width: 0;
-  min-height: 0;
+  min-height: 240px;
   resize: none;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -1146,7 +1172,7 @@ select {
   }
 
   .sql-main-panel {
-    grid-template-rows: minmax(220px, 34vh) minmax(360px, 1fr);
+    grid-template-rows: minmax(280px, 38vh) minmax(360px, 1fr);
   }
 
   .sql-panel-toolbar {
@@ -1154,9 +1180,20 @@ select {
     flex-direction: column;
   }
 
+  .sql-toolbar-meta {
+    width: 100%;
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .sql-toolbar-help {
+    white-space: normal;
+  }
+
   .sql-toolbar-actions {
     width: 100%;
     justify-content: stretch;
+    flex-wrap: wrap;
   }
 
   .sql-filename-input,

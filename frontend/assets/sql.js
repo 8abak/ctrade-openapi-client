@@ -16,10 +16,7 @@
     exportButton: document.getElementById("exportCsvButton"),
     runButton: document.getElementById("runQueryButton"),
     status: document.getElementById("queryStatus"),
-    exportStatus: document.getElementById("exportStatus"),
-    exportLinkHost: document.getElementById("exportLinkHost"),
     resultsMeta: document.getElementById("resultsMeta"),
-    resultsError: document.getElementById("resultsError"),
     resultsHost: document.getElementById("resultsHost"),
   };
 
@@ -52,34 +49,22 @@
     return "select * from " + relation + " limit 100";
   }
 
-  function setStatus(message, tone) {
-    elements.status.textContent = message;
+  function setStatus(message, tone, options) {
     elements.status.classList.remove("error", "success");
     if (tone) {
       elements.status.classList.add(tone);
     }
-  }
-
-  function setExportStatus(message, tone) {
-    elements.exportStatus.textContent = message;
-    elements.exportStatus.classList.remove("error", "success");
-    if (tone) {
-      elements.exportStatus.classList.add(tone);
+    elements.status.replaceChildren();
+    const text = document.createElement("span");
+    text.textContent = message;
+    elements.status.appendChild(text);
+    if (options && options.linkUrl && options.linkLabel) {
+      elements.status.appendChild(document.createTextNode(" "));
+      const link = document.createElement("a");
+      link.href = options.linkUrl;
+      link.textContent = options.linkLabel;
+      elements.status.appendChild(link);
     }
-  }
-
-  function clearExportLink() {
-    elements.exportLinkHost.hidden = true;
-    elements.exportLinkHost.innerHTML = "";
-  }
-
-  function renderExportLink(filename) {
-    if (!filename) {
-      clearExportLink();
-      return;
-    }
-    elements.exportLinkHost.hidden = false;
-    elements.exportLinkHost.innerHTML = "<a href=\"/api/sql/export-csv/" + encodeURIComponent(filename) + "\">Download CSV</a>";
   }
 
   function syncActionControls() {
@@ -87,11 +72,6 @@
     elements.runButton.disabled = busy;
     elements.exportButton.disabled = busy;
     elements.exportFilename.disabled = busy;
-  }
-
-  function clearError() {
-    elements.resultsError.hidden = true;
-    elements.resultsError.innerHTML = "";
   }
 
   function errorMessage(error) {
@@ -118,10 +98,9 @@
     return parts.join(" | ");
   }
 
-  function showError(error) {
+  function showRunError(error) {
     const message = errorMessage(error);
-    elements.resultsError.hidden = false;
-    elements.resultsError.innerHTML = escapeHtml(message);
+    elements.resultsMeta.textContent = "Query failed.";
     setStatus(message, "error");
   }
 
@@ -238,12 +217,11 @@
   }
 
   async function loadTables() {
-    clearError();
     const payload = await fetchJson("/api/sql/schema");
     state.publicTables = Array.isArray(payload.public) ? payload.public : (payload.tables || []).filter((table) => table.schema === "public");
     renderConnection(payload.context);
     renderTables();
-    setStatus("Loaded " + state.publicTables.length + " public table(s).", "success");
+    setStatus("Ready.", null);
   }
 
   async function runQuery() {
@@ -258,7 +236,7 @@
 
     state.running = true;
     syncActionControls();
-    clearError();
+    elements.resultsMeta.textContent = "Running SQL...";
     setStatus("Running SQL...", null);
     try {
       const payload = await fetchJson("/api/sql/query", {
@@ -269,7 +247,7 @@
       renderResults(payload);
       setStatus("SQL completed.", "success");
     } catch (error) {
-      showError(error);
+      showRunError(error);
     } finally {
       state.running = false;
       syncActionControls();
@@ -282,8 +260,7 @@
     }
     const query = elements.editor.value.trim();
     if (!query) {
-      clearExportLink();
-      setExportStatus("failed\nerror: SQL text is required.", "error");
+      setStatus("SQL text is required.", "error");
       return;
     }
 
@@ -295,25 +272,26 @@
 
     state.exporting = true;
     syncActionControls();
-    clearError();
-    clearExportLink();
-    setExportStatus("started\nrequesting server-side CSV export...", null);
+    setStatus("Exporting CSV...", null);
     try {
       const response = await fetchJson("/api/sql/export-csv", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      setExportStatus([
-        "completed",
-        response.filename ? "filename: " + response.filename : null,
-        response.path ? "path: " + response.path : null,
-        typeof response.rows === "number" ? "rows: " + response.rows : null,
-      ].filter(Boolean).join("\n"), "success");
-      renderExportLink(response.filename);
+      const parts = [
+        "CSV export completed:",
+        response.filename || "unnamed.csv",
+      ];
+      if (typeof response.rows === "number") {
+        parts.push("rows: " + response.rows);
+      }
+      setStatus(parts.join(" "), "success", response.download_url ? {
+        linkUrl: response.download_url,
+        linkLabel: "Download CSV",
+      } : null);
     } catch (error) {
-      clearExportLink();
-      setExportStatus("failed\nerror: " + errorMessage(error), "error");
+      setStatus(errorMessage(error), "error");
     } finally {
       state.exporting = false;
       syncActionControls();
@@ -359,7 +337,7 @@
   });
 
   loadTables().catch((error) => {
-    showError(error);
+    setStatus(errorMessage(error), "error");
     elements.publicTableList.innerHTML = "<div class=\"sql-empty\">Could not load public tables.</div>";
   });
 }());

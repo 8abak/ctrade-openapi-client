@@ -819,20 +819,6 @@ def serialize_pg_error(exc: Exception, statement: Optional[str] = None) -> Dict[
     }
 
 
-def format_sql_error_message(exc: Exception, statement: Optional[str] = None) -> str:
-    detail = serialize_pg_error(exc, statement=statement)
-    parts = [detail.get("message") or "SQL failed."]
-    if detail.get("line") and detail.get("column"):
-        parts.append("line {0}, column {1}".format(detail["line"], detail["column"]))
-    if detail.get("detail"):
-        parts.append(str(detail["detail"]))
-    if detail.get("hint"):
-        parts.append("hint: {0}".format(detail["hint"]))
-    if detail.get("sqlstate"):
-        parts.append("SQLSTATE {0}".format(detail["sqlstate"]))
-    return " | ".join(str(part) for part in parts if part)
-
-
 def fetch_sql_context(conn: Any) -> Dict[str, Any]:
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
@@ -1074,6 +1060,7 @@ def remove_sql_export_file(path: Path) -> None:
 def export_query_to_csv(sql_text: str, filename: Optional[str] = None) -> Dict[str, Any]:
     statement = require_exportable_select_statement(sql_text)
     safe_name, export_path, relative_path = resolve_sql_export_target(filename)
+    download_url = "/api/sql/export-csv/{0}".format(safe_name)
     started = time.perf_counter()
     row_count = 0
     cursor_name = "sql_export_{0}".format(secrets.token_hex(8))
@@ -1149,7 +1136,7 @@ def export_query_to_csv(sql_text: str, filename: Optional[str] = None) -> Dict[s
             if isinstance(exc, psycopg2.Error):
                 raise HTTPException(
                     status_code=400,
-                    detail=format_sql_error_message(exc, statement=statement),
+                    detail=serialize_pg_error(exc, statement=statement),
                 ) from exc
             raise HTTPException(status_code=500, detail="CSV export failed.") from exc
 
@@ -1158,6 +1145,7 @@ def export_query_to_csv(sql_text: str, filename: Optional[str] = None) -> Dict[s
         "filename": safe_name,
         "path": relative_path,
         "rows": row_count,
+        "download_url": download_url,
     }
     SQL_EXPORT_LOGGER.info(
         "sql_export_completed filename=%s path=%s rows=%s elapsed_ms=%.2f",
@@ -3498,8 +3486,12 @@ def sql_export_csv(payload: QueryExportRequest, _: Optional[str] = Depends(requi
         return export_query_to_csv(payload.query, payload.filename)
     except HTTPException as exc:
         detail = exc.detail
-        message = (detail.get("error") or detail.get("message")) if isinstance(detail, dict) else str(detail)
-        return JSONResponse(status_code=exc.status_code, content={"ok": False, "error": message})
+        if isinstance(detail, dict):
+            message = detail.get("error") or detail.get("message") or "CSV export failed."
+            content = {"ok": False, "error": message, "detail": detail}
+        else:
+            content = {"ok": False, "error": str(detail), "detail": str(detail)}
+        return JSONResponse(status_code=exc.status_code, content=content)
 
 
 @app.get("/api/sql/export-csv/{filename}")

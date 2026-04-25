@@ -4,7 +4,7 @@ This file is intentionally replaced for each release. It only describes the step
 
 ## Current update
 
-Fix the FastAPI startup crash caused by the SQL CSV export endpoint response typing in `datavis/app.py`.
+Update the SQL workbench CSV export flow and layout cleanup.
 
 ## Automatic deploy flow for this update
 
@@ -24,14 +24,17 @@ cat deploy/updateJournal.md
 ## Current steps executed by apply-update-steps.sh
 
 1. Restart `datavis.service`.
-2. Retry `http://127.0.0.1:8000/api/health` once per second for up to 20 seconds.
 
 ## Not required for this update
 
 - No SQL migration.
-- No motion backfill.
+- No backfill.
 - No scenario rerun.
 - No unrelated service restarts.
+
+## Manual browser step
+
+- Hard refresh the SQL page after deploy so the updated JS and CSS are loaded.
 
 ## Manual EC2 fallback
 
