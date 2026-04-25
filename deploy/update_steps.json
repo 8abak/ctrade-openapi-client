@@ -1,6 +1,6 @@
 {
   "version": "20260425_sql_export_layout_cleanup",
-  "description": "Current deploy steps for the SQL export backend/frontend cleanup. Git sync is handled before this runner starts; restart datavis.service, then hard refresh the browser to pick up the updated SQL assets. No SQL migration, backfill, or scenario rerun is required.",
+  "description": "Current deploy steps for the SQL export backend/frontend cleanup. Git sync is handled before this runner starts; restart datavis.service, then run the local datavis health check. No SQL migration, backfill, or scenario rerun is required.",
   "actions": [
     {
       "id": "restart_datavis_service",
@@ -9,6 +9,16 @@
       "type": "restart_service",
       "service": "datavis.service",
       "timeout_seconds": 60
+    },
+    {
+      "id": "health_check_datavis",
+      "name": "Health check datavis",
+      "description": "Verify the FastAPI service is healthy after restart.",
+      "type": "health_check",
+      "url": "http://127.0.0.1:8000/api/health",
+      "timeout_seconds": 5,
+      "retries": 20,
+      "interval_seconds": 1
     }
   ]
 }

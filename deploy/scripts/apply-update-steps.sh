@@ -26,6 +26,10 @@ LAST_COMMAND_FAILURE=""
 STEP_NOTE_RESULT=""
 CURRENT_STEP_INDEX=-1
 CURRENT_STEP_LOG=""
+LOG_OUTPUT_READY=0
+
+LOG_ROOT_DIR="${REPO_ROOT}/logs"
+SQL_EXPORT_DIR="${REPO_ROOT}/logs/sql_exports"
 
 declare -a STEP_NAMES=()
 declare -a STEP_RESULTS=()
@@ -41,11 +45,74 @@ log() {
   local message="$*"
   local rendered
   rendered="[$(timestamp_now)] ${message}"
-  printf '%s\n' "${rendered}" >> "${RUN_LOG_PATH}"
-  if [[ -n "${CURRENT_STEP_LOG}" ]]; then
-    printf '%s\n' "${rendered}" >> "${CURRENT_STEP_LOG}"
+  if [[ "${LOG_OUTPUT_READY}" -eq 1 ]]; then
+    printf '%s\n' "${rendered}" >> "${RUN_LOG_PATH}"
+    if [[ -n "${CURRENT_STEP_LOG}" ]]; then
+      printf '%s\n' "${rendered}" >> "${CURRENT_STEP_LOG}"
+    fi
   fi
   printf '%s\n' "${rendered}"
+}
+
+permission_repair_message() {
+  cat <<'EOF'
+Deployment logging paths are not writable by the current deploy user.
+One-time repair on EC2:
+  sudo chown -R ec2-user:ec2-user logs deploy/updateJournal.md
+  chmod -R u+rwX logs
+Then rerun the deployment.
+EOF
+}
+
+fail_permission_check() {
+  local target="$1"
+  printf 'Deployment logging preflight failed for %s\n' "${target}" >&2
+  permission_repair_message >&2
+  exit 1
+}
+
+ensure_writable_dir() {
+  local path="$1"
+  local probe_path=""
+
+  if [[ -e "${path}" && ! -d "${path}" ]]; then
+    fail_permission_check "${path}"
+  fi
+  if ! mkdir -p "${path}" 2>/dev/null; then
+    fail_permission_check "${path}"
+  fi
+  chmod u+rwx "${path}" 2>/dev/null || true
+  if [[ ! -w "${path}" || ! -x "${path}" ]]; then
+    fail_permission_check "${path}"
+  fi
+  probe_path="${path}/.permission_probe_${TIMESTAMP}_$$"
+  if ! : > "${probe_path}" 2>/dev/null; then
+    fail_permission_check "${path}"
+  fi
+  rm -f "${probe_path}" 2>/dev/null || true
+}
+
+ensure_writable_file() {
+  local path="$1"
+
+  if [[ -e "${path}" && ! -f "${path}" ]]; then
+    fail_permission_check "${path}"
+  fi
+  if ! touch "${path}" 2>/dev/null; then
+    fail_permission_check "${path}"
+  fi
+  chmod u+rw "${path}" 2>/dev/null || true
+  if [[ ! -w "${path}" ]]; then
+    fail_permission_check "${path}"
+  fi
+}
+
+prepare_deployment_output_paths() {
+  ensure_writable_dir "${LOG_ROOT_DIR}"
+  ensure_writable_dir "${LOG_DIR}"
+  ensure_writable_dir "${SQL_EXPORT_DIR}"
+  ensure_writable_dir "$(dirname "${SUMMARY_PATH}")"
+  ensure_writable_file "${SUMMARY_PATH}"
 }
 
 trim_whitespace() {
@@ -197,16 +264,20 @@ cleanup() {
   if [[ "${exit_code}" -eq 0 && "${OVERALL_RESULT}" != "failed" ]]; then
     OVERALL_RESULT="success"
   fi
-  render_summary
+  if [[ "${LOG_OUTPUT_READY}" -eq 1 ]]; then
+    render_summary
+  fi
   CURRENT_STEP_INDEX=-1
   CURRENT_STEP_LOG=""
   if [[ -n "${TMP_DIR}" && -d "${TMP_DIR}" ]]; then
     rm -rf "${TMP_DIR}"
   fi
-  if [[ "${exit_code}" -eq 0 ]]; then
-    log "Deployment completed successfully"
-  else
-    log "Deployment failed"
+  if [[ "${LOG_OUTPUT_READY}" -eq 1 ]]; then
+    if [[ "${exit_code}" -eq 0 ]]; then
+      log "Deployment completed successfully"
+    else
+      log "Deployment failed"
+    fi
   fi
 }
 
@@ -558,10 +629,11 @@ execute_manifest_steps() {
 }
 
 main() {
-  mkdir -p "${LOG_DIR}"
+  prepare_deployment_output_paths
   : > "${RUN_LOG_PATH}"
   : > "${SUMMARY_PATH}"
   TMP_DIR="$(mktemp -d "${LOG_DIR}/.apply-update-steps.${TIMESTAMP}.XXXXXX")"
+  LOG_OUTPUT_READY=1
 
   cd "${REPO_ROOT}"
 

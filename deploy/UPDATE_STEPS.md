@@ -4,7 +4,7 @@ This file is intentionally replaced for each release. It only describes the step
 
 ## Current update
 
-Update the SQL workbench CSV export flow and layout cleanup.
+Update the SQL workbench CSV export flow and deployment logging permission handling.
 
 ## Automatic deploy flow for this update
 
@@ -20,10 +20,17 @@ cat deploy/updateJournal.md
 ```
 
 3. `deploy/scripts/apply-update-steps.sh` reads `deploy/update_steps.json` and runs only the current steps below.
+4. If deployment logging fails because `logs/` or `deploy/updateJournal.md` was previously created by `sudo` or `root`, run this one-time repair on EC2 and rerun the deploy:
+
+```bash
+sudo chown -R ec2-user:ec2-user logs deploy/updateJournal.md
+chmod -R u+rwX logs
+```
 
 ## Current steps executed by apply-update-steps.sh
 
 1. Restart `datavis.service`.
+2. Run the local health check at `http://127.0.0.1:8000/api/health`.
 
 ## Not required for this update
 
