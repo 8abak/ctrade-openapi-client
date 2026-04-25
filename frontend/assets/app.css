@@ -930,6 +930,39 @@ select {
   gap: 0.75rem;
 }
 
+.sql-toolbar-actions,
+.sql-toolbar-buttons {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.sql-toolbar-actions {
+  justify-content: flex-end;
+}
+
+.sql-filename-input {
+  min-height: 2.35rem;
+  min-width: min(18rem, 100%);
+  padding: 0.55rem 0.8rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #080e17;
+  color: var(--text);
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.8rem;
+}
+
+.sql-export-link {
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.sql-export-link a {
+  color: var(--accent);
+}
+
 #sqlEditor {
   width: 100%;
   min-width: 0;
@@ -1119,5 +1152,15 @@ select {
   .sql-panel-toolbar {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .sql-toolbar-actions {
+    width: 100%;
+    justify-content: stretch;
+  }
+
+  .sql-filename-input,
+  .sql-toolbar-buttons {
+    width: 100%;
   }
 }

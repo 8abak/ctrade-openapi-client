@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import csv
+import re
 import secrets
 import base64
 import hmac
@@ -69,6 +71,11 @@ MAX_STREAM_BATCH = 1000
 MAX_QUERY_ROWS = int(os.getenv("DATAVIS_SQL_MAX_ROWS", "1000"))
 STATEMENT_TIMEOUT_MS = int(os.getenv("DATAVIS_SQL_TIMEOUT_MS", "15000"))
 LOCK_TIMEOUT_MS = int(os.getenv("DATAVIS_SQL_LOCK_TIMEOUT_MS", "3000"))
+SQL_EXPORT_DIR = BASE_DIR / "logs" / "sql_exports"
+SQL_EXPORT_BATCH_SIZE = max(1000, int(os.getenv("DATAVIS_SQL_EXPORT_BATCH_SIZE", "5000")))
+SQL_EXPORT_MAX_ROWS = max(1, int(os.getenv("DATAVIS_SQL_EXPORT_MAX_ROWS", "500000")))
+SQL_EXPORT_TIMEOUT_MS = max(STATEMENT_TIMEOUT_MS, int(os.getenv("DATAVIS_SQL_EXPORT_TIMEOUT_MS", "60000")))
+SQL_EXPORT_LOG_EVERY_ROWS = max(SQL_EXPORT_BATCH_SIZE, int(os.getenv("DATAVIS_SQL_EXPORT_LOG_EVERY_ROWS", "50000")))
 SQL_ADMIN_USER = os.getenv("DATAVIS_SQL_ADMIN_USER", "").strip()
 SQL_ADMIN_PASSWORD = os.getenv("DATAVIS_SQL_ADMIN_PASSWORD", "")
 STREAM_POLL_SECONDS = max(0.02, float(os.getenv("DATAVIS_STREAM_POLL_SECONDS", "0.05")))
@@ -110,6 +117,7 @@ AUDIT_LOGGER = logging.getLogger("datavis.trade.audit")
 PERF_LOGGER = logging.getLogger("datavis.perf")
 STREAM_LOGGER = logging.getLogger("datavis.stream")
 MAVG_LOGGER = logging.getLogger("datavis.mavg")
+SQL_EXPORT_LOGGER = logging.getLogger("datavis.sql.export")
 SQL_SCHEMA_CACHE_TTL_MS = max(1000, int(os.getenv("DATAVIS_SQL_SCHEMA_CACHE_MS", "30000")))
 HOT_PATH_LOG_THRESHOLD_MS = max(5.0, float(os.getenv("DATAVIS_HOT_PATH_LOG_MS", "75")))
 STREAM_ACTIVITY_LOCK = threading.Lock()
@@ -128,6 +136,11 @@ BACKBONE_LAYER_LABELS = {
 
 class QueryRequest(BaseModel):
     sql: str
+
+
+class QueryExportRequest(BaseModel):
+    query: str
+    filename: Optional[str] = Field(None, max_length=200)
 
 
 class TradeLoginRequest(BaseModel):
@@ -806,6 +819,20 @@ def serialize_pg_error(exc: Exception, statement: Optional[str] = None) -> Dict[
     }
 
 
+def format_sql_error_message(exc: Exception, statement: Optional[str] = None) -> str:
+    detail = serialize_pg_error(exc, statement=statement)
+    parts = [detail.get("message") or "SQL failed."]
+    if detail.get("line") and detail.get("column"):
+        parts.append("line {0}, column {1}".format(detail["line"], detail["column"]))
+    if detail.get("detail"):
+        parts.append(str(detail["detail"]))
+    if detail.get("hint"):
+        parts.append("hint: {0}".format(detail["hint"]))
+    if detail.get("sqlstate"):
+        parts.append("SQLSTATE {0}".format(detail["sqlstate"]))
+    return " | ".join(str(part) for part in parts if part)
+
+
 def fetch_sql_context(conn: Any) -> Dict[str, Any]:
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
@@ -948,6 +975,196 @@ def execute_query(sql_text: str) -> Dict[str, Any]:
         statement_count=len(statements),
         result_sets=sum(1 for item in results if item.get("hasResultSet")),
         rows_returned=sum(int(item.get("rowCount") or 0) for item in results if item.get("hasResultSet")),
+    )
+    return payload
+
+
+def require_exportable_select_statement(sql_text: str) -> str:
+    statements = split_sql_script(sql_text)
+    if len(statements) != 1:
+        raise HTTPException(status_code=400, detail="CSV export only supports a single SELECT or WITH query.")
+
+    statement = statements[0].strip()
+    parsed = sqlparse.parse(statement)
+    if not parsed:
+        raise HTTPException(status_code=400, detail="SQL text is required.")
+
+    statement_type = str(parsed[0].get_type() or "").upper()
+    head = statement_head(statement).upper()
+    if head not in {"SELECT", "WITH"} or statement_type != "SELECT":
+        raise HTTPException(status_code=400, detail="CSV export only allows read-only SELECT or WITH queries.")
+    return statement
+
+
+def csv_export_cell(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, memoryview):
+        return value.tobytes().hex()
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value).hex()
+    return value
+
+
+def default_sql_export_filename() -> str:
+    return datetime.now().strftime("sql_export_%Y%m%d_%H%M%S.csv")
+
+
+def sanitize_sql_export_filename(filename: Optional[str]) -> str:
+    raw = str(filename or "").strip()
+    if not raw:
+        raw = default_sql_export_filename()
+    raw = raw.replace("\\", "/").rsplit("/", 1)[-1]
+    if raw.lower().endswith(".csv"):
+        raw = raw[:-4]
+    safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "_", raw).strip("._-")
+    if not safe_stem:
+        safe_stem = default_sql_export_filename()[:-4]
+    safe_stem = safe_stem[:120].rstrip("._-") or default_sql_export_filename()[:-4]
+    return safe_stem + ".csv"
+
+
+def resolve_sql_export_target(filename: Optional[str]) -> tuple[str, Path, str]:
+    exports_dir = SQL_EXPORT_DIR.resolve()
+    exports_dir.mkdir(parents=True, exist_ok=True)
+    supplied_name = bool(str(filename or "").strip())
+    safe_name = sanitize_sql_export_filename(filename)
+    export_path = (exports_dir / safe_name).resolve()
+    if not supplied_name and export_path.exists():
+        stem = export_path.stem
+        suffix = export_path.suffix or ".csv"
+        counter = 1
+        while export_path.exists():
+            safe_name = "{0}_{1:02d}{2}".format(stem, counter, suffix)
+            export_path = (exports_dir / safe_name).resolve()
+            counter += 1
+    try:
+        export_path.relative_to(exports_dir)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid CSV export filename.") from exc
+    relative_path = (Path("logs") / "sql_exports" / safe_name).as_posix()
+    return safe_name, export_path, relative_path
+
+
+def resolve_sql_export_download(filename: str) -> tuple[str, Path]:
+    requested = str(filename or "").strip()
+    if not requested:
+        raise HTTPException(status_code=400, detail="Export filename is required.")
+    safe_name = sanitize_sql_export_filename(requested)
+    if safe_name != requested:
+        raise HTTPException(status_code=400, detail="Invalid export filename.")
+    export_path = (SQL_EXPORT_DIR.resolve() / safe_name).resolve()
+    try:
+        export_path.relative_to(SQL_EXPORT_DIR.resolve())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid export filename.") from exc
+    return safe_name, export_path
+
+
+def remove_sql_export_file(path: Path) -> None:
+    try:
+        if path.exists():
+            path.unlink()
+    except OSError:
+        SQL_EXPORT_LOGGER.warning("sql_export_cleanup_failed path=%s", path, exc_info=True)
+
+
+def export_query_to_csv(sql_text: str, filename: Optional[str] = None) -> Dict[str, Any]:
+    statement = require_exportable_select_statement(sql_text)
+    safe_name, export_path, relative_path = resolve_sql_export_target(filename)
+    started = time.perf_counter()
+    row_count = 0
+    cursor_name = "sql_export_{0}".format(secrets.token_hex(8))
+    next_progress_log_at = SQL_EXPORT_LOG_EVERY_ROWS
+    SQL_EXPORT_LOGGER.info(
+        "sql_export_started filename=%s path=%s batch_size=%s max_rows=%s timeout_ms=%s",
+        safe_name,
+        relative_path,
+        SQL_EXPORT_BATCH_SIZE,
+        SQL_EXPORT_MAX_ROWS,
+        SQL_EXPORT_TIMEOUT_MS,
+    )
+
+    with db_connection(readonly=True, autocommit=False) as conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SET LOCAL statement_timeout = %s", (SQL_EXPORT_TIMEOUT_MS,))
+                cur.execute("SET LOCAL lock_timeout = %s", (LOCK_TIMEOUT_MS,))
+
+            with export_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.writer(handle)
+                with conn.cursor(name=cursor_name) as cur:
+                    cur.itersize = SQL_EXPORT_BATCH_SIZE
+                    cur.execute(statement)
+                    columns = [item.name for item in (cur.description or [])]
+                    if not columns:
+                        raise HTTPException(status_code=400, detail="CSV export query must return a result set.")
+                    writer.writerow(columns)
+                    while True:
+                        batch = cur.fetchmany(SQL_EXPORT_BATCH_SIZE)
+                        if not batch:
+                            break
+                        if row_count + len(batch) > SQL_EXPORT_MAX_ROWS:
+                            raise HTTPException(
+                                status_code=400,
+                                detail=(
+                                    "CSV export exceeded the configured row limit of {0}. "
+                                    "Refine the query or raise DATAVIS_SQL_EXPORT_MAX_ROWS."
+                                ).format(SQL_EXPORT_MAX_ROWS),
+                            )
+                        for row in batch:
+                            writer.writerow([csv_export_cell(value) for value in row])
+                        row_count += len(batch)
+                        if row_count >= next_progress_log_at:
+                            SQL_EXPORT_LOGGER.info(
+                                "sql_export_progress filename=%s path=%s rows=%s",
+                                safe_name,
+                                relative_path,
+                                row_count,
+                            )
+                            next_progress_log_at += SQL_EXPORT_LOG_EVERY_ROWS
+            conn.commit()
+        except HTTPException as exc:
+            conn.rollback()
+            remove_sql_export_file(export_path)
+            SQL_EXPORT_LOGGER.warning(
+                "sql_export_failed filename=%s path=%s rows=%s reason=%s",
+                safe_name,
+                relative_path,
+                row_count,
+                exc.detail,
+            )
+            raise
+        except Exception as exc:
+            conn.rollback()
+            remove_sql_export_file(export_path)
+            SQL_EXPORT_LOGGER.exception(
+                "sql_export_failed filename=%s path=%s rows=%s",
+                safe_name,
+                relative_path,
+                row_count,
+            )
+            if isinstance(exc, psycopg2.Error):
+                raise HTTPException(
+                    status_code=400,
+                    detail=format_sql_error_message(exc, statement=statement),
+                ) from exc
+            raise HTTPException(status_code=500, detail="CSV export failed.") from exc
+
+    payload = {
+        "ok": True,
+        "filename": safe_name,
+        "path": relative_path,
+        "rows": row_count,
+    }
+    SQL_EXPORT_LOGGER.info(
+        "sql_export_completed filename=%s path=%s rows=%s elapsed_ms=%.2f",
+        safe_name,
+        relative_path,
+        row_count,
+        elapsed_ms(started),
     )
     return payload
 
@@ -3273,6 +3490,24 @@ def sql_schema(_: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
 @app.post("/api/sql/query")
 def sql_query(payload: QueryRequest, _: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
     return execute_query(payload.sql)
+
+
+@app.post("/api/sql/export-csv")
+def sql_export_csv(payload: QueryExportRequest, _: Optional[str] = Depends(require_sql_admin)) -> JSONResponse | Dict[str, Any]:
+    try:
+        return export_query_to_csv(payload.query, payload.filename)
+    except HTTPException as exc:
+        detail = exc.detail
+        message = (detail.get("error") or detail.get("message")) if isinstance(detail, dict) else str(detail)
+        return JSONResponse(status_code=exc.status_code, content={"ok": False, "error": message})
+
+
+@app.get("/api/sql/export-csv/{filename}")
+def sql_export_csv_download(filename: str, _: Optional[str] = Depends(require_sql_admin)) -> FileResponse:
+    safe_name, export_path = resolve_sql_export_download(filename)
+    if not export_path.is_file():
+        raise HTTPException(status_code=404, detail="Export file not found.")
+    return FileResponse(path=export_path, media_type="text/csv", filename=safe_name)
 
 
 @app.get("/api/motion/signals/recent")

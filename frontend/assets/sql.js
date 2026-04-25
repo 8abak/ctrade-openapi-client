@@ -3,6 +3,7 @@
     publicTables: [],
     activeTable: null,
     running: false,
+    exporting: false,
   };
 
   const elements = {
@@ -11,8 +12,12 @@
     tableList: document.getElementById("tableList"),
     publicTableList: document.getElementById("publicTableList"),
     editor: document.getElementById("sqlEditor"),
+    exportFilename: document.getElementById("exportFilename"),
+    exportButton: document.getElementById("exportCsvButton"),
     runButton: document.getElementById("runQueryButton"),
     status: document.getElementById("queryStatus"),
+    exportStatus: document.getElementById("exportStatus"),
+    exportLinkHost: document.getElementById("exportLinkHost"),
     resultsMeta: document.getElementById("resultsMeta"),
     resultsError: document.getElementById("resultsError"),
     resultsHost: document.getElementById("resultsHost"),
@@ -55,6 +60,35 @@
     }
   }
 
+  function setExportStatus(message, tone) {
+    elements.exportStatus.textContent = message;
+    elements.exportStatus.classList.remove("error", "success");
+    if (tone) {
+      elements.exportStatus.classList.add(tone);
+    }
+  }
+
+  function clearExportLink() {
+    elements.exportLinkHost.hidden = true;
+    elements.exportLinkHost.innerHTML = "";
+  }
+
+  function renderExportLink(filename) {
+    if (!filename) {
+      clearExportLink();
+      return;
+    }
+    elements.exportLinkHost.hidden = false;
+    elements.exportLinkHost.innerHTML = "<a href=\"/api/sql/export-csv/" + encodeURIComponent(filename) + "\">Download CSV</a>";
+  }
+
+  function syncActionControls() {
+    const busy = state.running || state.exporting;
+    elements.runButton.disabled = busy;
+    elements.exportButton.disabled = busy;
+    elements.exportFilename.disabled = busy;
+  }
+
   function clearError() {
     elements.resultsError.hidden = true;
     elements.resultsError.innerHTML = "";
@@ -68,7 +102,7 @@
     if (typeof detail === "string") {
       return detail;
     }
-    const parts = [detail.message || "SQL failed."];
+    const parts = [detail.error || detail.message || "SQL failed."];
     if (detail.line && detail.column) {
       parts.push("line " + detail.line + ", column " + detail.column);
     }
@@ -213,7 +247,7 @@
   }
 
   async function runQuery() {
-    if (state.running) {
+    if (state.running || state.exporting) {
       return;
     }
     const sql = elements.editor.value.trim();
@@ -223,7 +257,7 @@
     }
 
     state.running = true;
-    elements.runButton.disabled = true;
+    syncActionControls();
     clearError();
     setStatus("Running SQL...", null);
     try {
@@ -238,7 +272,51 @@
       showError(error);
     } finally {
       state.running = false;
-      elements.runButton.disabled = false;
+      syncActionControls();
+    }
+  }
+
+  async function exportCsv() {
+    if (state.running || state.exporting) {
+      return;
+    }
+    const query = elements.editor.value.trim();
+    if (!query) {
+      clearExportLink();
+      setExportStatus("failed\nerror: SQL text is required.", "error");
+      return;
+    }
+
+    const payload = { query: query };
+    const filename = elements.exportFilename.value.trim();
+    if (filename) {
+      payload.filename = filename;
+    }
+
+    state.exporting = true;
+    syncActionControls();
+    clearError();
+    clearExportLink();
+    setExportStatus("started\nrequesting server-side CSV export...", null);
+    try {
+      const response = await fetchJson("/api/sql/export-csv", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      setExportStatus([
+        "completed",
+        response.filename ? "filename: " + response.filename : null,
+        response.path ? "path: " + response.path : null,
+        typeof response.rows === "number" ? "rows: " + response.rows : null,
+      ].filter(Boolean).join("\n"), "success");
+      renderExportLink(response.filename);
+    } catch (error) {
+      clearExportLink();
+      setExportStatus("failed\nerror: " + errorMessage(error), "error");
+    } finally {
+      state.exporting = false;
+      syncActionControls();
     }
   }
 
@@ -253,6 +331,7 @@
     runQuery();
   }
 
+  elements.exportButton.addEventListener("click", exportCsv);
   elements.runButton.addEventListener("click", runQuery);
 
   elements.tableFilter.addEventListener("input", renderTables);

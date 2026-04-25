@@ -46,10 +46,18 @@
             <div class="sql-label">Query</div>
             <div class="sql-muted">Ctrl+Enter runs SQL. Cmd+Enter works on Mac.</div>
           </div>
-          <button class="primary-button compact-button" id="runQueryButton" type="button">Run</button>
+          <div class="sql-toolbar-actions">
+            <input id="exportFilename" class="sql-filename-input" type="text" placeholder="optional export filename">
+            <div class="sql-toolbar-buttons">
+              <button class="ghost-button compact-button" id="exportCsvButton" type="button">CSV</button>
+              <button class="primary-button compact-button" id="runQueryButton" type="button">Run</button>
+            </div>
+          </div>
         </div>
         <textarea id="sqlEditor" spellcheck="false">select * from public.ticks order by id desc limit 100</textarea>
         <div class="status-line" id="queryStatus">Ready.</div>
+        <div class="status-line" id="exportStatus">No CSV export started yet.</div>
+        <div class="sql-export-link" id="exportLinkHost" hidden></div>
       </section>
 
       <section class="panel sql-results-panel">

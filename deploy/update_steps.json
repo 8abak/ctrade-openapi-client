@@ -1,15 +1,24 @@
 {
-  "version": "20260425_motion_model_scenarios",
-  "description": "Run the journaled motion research update runner so SQL, backfill, validation, and the datavis restart share one auditable command path.",
+  "version": "20260425_sql_export_csv",
+  "description": "Restart datavis.service for the SQL CSV export backend/frontend update, then verify local API health. Browser refresh is required for /sql; no SQL migration is required for this feature.",
   "actions": [
     {
-      "id": "apply_motion_trade_spots_update",
-      "description": "Run the motion trade spots update runner with journaling, DB validation, backfill, datavis restart, and API verification.",
-      "type": "run_command",
-      "command": "bash deploy/scripts/apply-update-steps.sh",
+      "id": "restart_datavis_for_sql_export_csv",
+      "description": "Restart datavis.service so the SQL CSV export routes and frontend assets are live after pull.",
+      "type": "restart_service",
+      "service": "datavis.service",
       "required": true,
       "safe_to_rerun": true,
-      "timeout_seconds": 5400
+      "timeout_seconds": 120
+    },
+    {
+      "id": "verify_datavis_health_after_sql_export_csv",
+      "description": "Verify local datavis health after the restart.",
+      "type": "verify_command",
+      "command": "curl --fail --silent http://127.0.0.1:8000/api/health",
+      "required": true,
+      "safe_to_rerun": true,
+      "timeout_seconds": 60
     }
   ]
 }

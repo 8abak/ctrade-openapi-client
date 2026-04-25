@@ -145,15 +145,15 @@ stop_seed AS (
 seed_rows AS (
     SELECT
         format(
-            '%s eff=%.2f sm=%.1f-%.1f cooldown=%s rf=%.2f target=%.2f stop=%.2f',
+            '%s eff=%s sm=%s-%s cooldown=%s rf=%s target=%s stop=%s',
             family_seed.scenario_prefix,
-            efficiency_seed.min_efficiency3,
-            spread_seed.min_spreadmultiple3,
-            spread_seed.max_spreadmultiple3,
+            round(efficiency_seed.min_efficiency3::numeric, 2)::text,
+            round(spread_seed.min_spreadmultiple3::numeric, 1)::text,
+            round(spread_seed.max_spreadmultiple3::numeric, 1)::text,
             cooldown_seed.cooldownsec,
-            riskfree_seed.riskfreeusd,
-            target_seed.targetusd,
-            stop_seed.stopusd
+            round(riskfree_seed.riskfreeusd::numeric, 2)::text,
+            round(target_seed.targetusd::numeric, 2)::text,
+            round(stop_seed.stopusd::numeric, 2)::text
         ) AS scenarioname,
         format(
             'scenario_%s_e%s_sm%s_cd%s_rf%s_t%s_s%s',
