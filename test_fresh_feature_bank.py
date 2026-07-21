@@ -132,6 +132,81 @@ def compact_config() -> FreshFeatureBankConfig:
 
 
 class FreshFeatureBankTests(unittest.TestCase):
+    def test_200ms_clock_retains_repeat_volume_without_false_acceleration(self):
+        points: list[Tick] = []
+        tick_id = 1
+        for sample in range(1_001):
+            elapsed = sample * 0.2
+            mid = 2_900.0 + 0.02 * elapsed + 0.1 * math.sin(elapsed)
+            for _ in range(2):
+                points.append(quote(tick_id, elapsed, mid))
+                tick_id += 1
+        config = FreshFeatureBankConfig(
+            members=members(),
+            output_selection=FreshFeatureBankOutputSelection(
+                include_all_columns=False,
+                candidate_families=(
+                    NamedFeatureFamily(
+                        family_name="observed-clock-proof",
+                        required_columns=(
+                            "250ms_mid_acceleration",
+                            "500ms_mid_acceleration",
+                            "250ms_tick_count",
+                            "250ms_arrival_rate",
+                        ),
+                    ),
+                ),
+                selected_candidate_families=("observed-clock-proof",),
+            ),
+        )
+        frame = compute_fresh_feature_bank(points, config=config)
+        usable = frame["feature_ready"] & ~frame["gap_detected"]
+
+        self.assertEqual(len(frame), len(points))
+        self.assertEqual(frame["tick_id"].tolist(), list(range(1, len(points) + 1)))
+        self.assertTrue(frame["timestamp"].duplicated().any())
+        self.assertEqual(
+            int(frame.loc[usable, "250ms_mid_acceleration"].notna().sum()),
+            0,
+        )
+        self.assertGreaterEqual(
+            int(frame.loc[usable, "500ms_mid_acceleration"].notna().sum()),
+            1_000,
+        )
+        first_repeat = int(frame.index[usable & frame["timestamp"].duplicated()][0])
+        self.assertEqual(
+            float(frame.loc[first_repeat, "250ms_tick_count"]),
+            float(frame.loc[first_repeat - 1, "250ms_tick_count"]) + 1.0,
+        )
+        self.assertGreater(
+            float(frame.loc[first_repeat, "250ms_arrival_rate"]),
+            float(frame.loc[first_repeat - 1, "250ms_arrival_rate"]),
+        )
+
+    def test_250ms_acceleration_is_finite_when_clock_density_supports_it(self):
+        points = irregular_points(240.0)
+        config = FreshFeatureBankConfig(
+            members=members(),
+            output_selection=FreshFeatureBankOutputSelection(
+                include_all_columns=False,
+                candidate_families=(
+                    NamedFeatureFamily(
+                        family_name="clock-density-proof",
+                        required_columns=("250ms_mid_acceleration",),
+                    ),
+                ),
+                selected_candidate_families=("clock-density-proof",),
+            ),
+        )
+        frame = compute_fresh_feature_bank(points, config=config)
+        usable = frame["feature_ready"] & ~frame["gap_detected"]
+
+        self.assertTrue(frame["timestamp"].duplicated().any())
+        self.assertGreaterEqual(
+            int(frame.loc[usable, "250ms_mid_acceleration"].notna().sum()),
+            1_000,
+        )
+
     def test_nine_model_bank_exactly_matches_nine_separate_runs(self):
         points = irregular_points()
         config = full_config()

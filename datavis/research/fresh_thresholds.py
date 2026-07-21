@@ -181,6 +181,8 @@ class SessionBalancedQuantileFitter:
             (spec.name, rank): [] for spec in specs for rank in config.ranks
         }
         self._finite_counts = {spec.name: 0 for spec in specs}
+        self._support_counts = {spec.name: 0 for spec in specs}
+        self._maximum_session_support = {spec.name: 0 for spec in specs}
         self._frozen = False
 
     def add_session(self, anchor: str, frame: pd.DataFrame) -> None:
@@ -214,6 +216,11 @@ class SessionBalancedQuantileFitter:
             if np.any(np.isinf(raw)):
                 raise ValueError(f"measurement {spec.column} contains infinity")
             values = _transformed(raw, spec.transform)
+            support = int(values.size)
+            self._support_counts[spec.name] += support
+            self._maximum_session_support[spec.name] = max(
+                self._maximum_session_support[spec.name], support
+            )
             if values.size < self._config.minimum_finite_values_per_session:
                 continue
             self._finite_counts[spec.name] += int(values.size)
@@ -229,15 +236,24 @@ class SessionBalancedQuantileFitter:
         self._frozen = True
         if not self._anchors:
             raise ValueError("at least one chronological training session is required")
+        insufficient = []
+        first_rank = self._config.ranks[0]
+        for spec in self._specs:
+            eligible_sessions = len(self._per_rank[(spec.name, first_rank)])
+            if eligible_sessions < self._config.minimum_eligible_sessions:
+                insufficient.append(
+                    f"{spec.name!r}: {eligible_sessions} eligible sessions, "
+                    f"{self._support_counts[spec.name]} total supporting values, "
+                    f"{self._maximum_session_support[spec.name]} maximum in one session"
+                )
+        if insufficient:
+            raise ValueError(
+                "quantile support gate failed for " + "; ".join(insufficient)
+            )
         thresholds: list[QuantileThreshold] = []
         for spec in self._specs:
             for rank in self._config.ranks:
                 session_values = self._per_rank[(spec.name, rank)]
-                if len(session_values) < self._config.minimum_eligible_sessions:
-                    raise ValueError(
-                        f"measurement {spec.name!r} has only "
-                        f"{len(session_values)} eligible sessions"
-                    )
                 value = float(np.median(np.asarray(session_values, dtype=float)))
                 if not math.isfinite(value):
                     raise ValueError("fitted thresholds must be finite")

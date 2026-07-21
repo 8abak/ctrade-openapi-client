@@ -1,1 +1,1 @@
-fresh-xauusd-run-2026-07-22-v11-exact-sparse-replay
+fresh-xauusd-run-2026-07-22-v12-cadence-supported-acceleration

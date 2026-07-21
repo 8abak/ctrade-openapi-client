@@ -230,6 +230,9 @@ class FreshCandidateGridTests(unittest.TestCase):
         )
         self.assertEqual(len(specs), len({item.name for item in specs}))
         self.assertTrue(any(item.column == "250ms_mid_speed" for item in specs))
+        self.assertFalse(
+            any(item.column == "250ms_mid_acceleration" for item in specs)
+        )
         self.assertTrue(any(item.column == "30s_mid_speed" for item in specs))
         for model_id in MODELS:
             self.assertTrue(
@@ -242,6 +245,32 @@ class FreshCandidateGridTests(unittest.TestCase):
         self.assertFalse(
             any(token in item.column.casefold() for item in specs for token in forbidden)
         )
+
+    def test_fastest_pivot_uses_supported_acceleration_confirmation(self):
+        grid = build_fresh_candidate_grid(bank(), kalman_model_ids=MODELS)
+        fastest = [
+            candidate
+            for candidate in grid.candidates
+            if candidate.family == COUNTERTREND_PIVOT
+            and candidate.config.movement_column == "250ms_mid_speed"
+        ]
+        self.assertEqual(len(fastest), 3)
+        self.assertTrue(
+            all(
+                candidate.structure_id == "raw10-speed250-accel500"
+                and candidate.config.acceleration_column
+                == "500ms_mid_acceleration"
+                for candidate in fastest
+            )
+        )
+
+        required = {item.name for item in grid.required_measurements}
+        provenance = {
+            item.measurement
+            for candidate in grid.candidates
+            for item in candidate.threshold_provenance
+        }
+        self.assertEqual(required, provenance)
 
     def test_missing_bank_contract_and_excess_model_budget_are_rejected(self):
         complete = bank(())

@@ -133,7 +133,6 @@ def fresh_candidate_quantile_measurements(
         "500ms_mid_speed",
         "1s_mid_speed",
         "2s_mid_speed",
-        "250ms_mid_acceleration",
         "500ms_mid_acceleration",
         "1s_mid_acceleration",
         "2s_mid_acceleration",
@@ -391,8 +390,14 @@ _PULLBACK_STRUCTURES = (
     _PullbackStructure("ewma30-fast2", "ewma_30s_slope", "2s_mid_speed", "2s_mid_acceleration", "30s_mid_range", 0.55, 0.10, 0.90, 500, 8_000),
 )
 
+# The discovery-only support gate in sealed run 29874435384 found no session
+# with the required 1,000 finite 250 ms acceleration observations.  The feed's
+# cadence cannot identify the two distinct ~83 ms subintervals that measurement
+# needs.  Retain the supported 250 ms speed onset, but confirm it with the
+# already registered 500 ms causal acceleration.  No price outcome informed
+# this structural availability correction.
 _PIVOT_STRUCTURES = (
-    _PivotStructure("raw10-fast250", "10s_mid_speed", "250ms_mid_speed", "250ms_mid_acceleration", "10s_mid_range", 0.35, 0.05, 0.65, 0.025, 0.45, 0.30, 75, 1_500),
+    _PivotStructure("raw10-speed250-accel500", "10s_mid_speed", "250ms_mid_speed", "500ms_mid_acceleration", "10s_mid_range", 0.35, 0.05, 0.65, 0.025, 0.45, 0.30, 75, 1_500),
     _PivotStructure("raw10-fast500", "10s_mid_speed", "500ms_mid_speed", "500ms_mid_acceleration", "10s_mid_range", 0.45, 0.06, 0.75, 0.040, 0.40, 0.40, 125, 2_500),
     _PivotStructure("raw30-fast1", "30s_mid_speed", "1s_mid_speed", "1s_mid_acceleration", "30s_mid_range", 0.35, 0.06, 0.75, 0.050, 0.35, 0.45, 250, 5_000),
     _PivotStructure("ewma10-fast500", "ewma_10s_slope", "500ms_mid_speed", "500ms_mid_acceleration", "10s_mid_range", 0.45, 0.08, 0.80, 0.050, 0.40, 0.40, 125, 3_000),

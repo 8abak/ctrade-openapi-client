@@ -94,6 +94,43 @@ class FreshThresholdTests(unittest.TestCase):
                 config=CONFIG,
             )
 
+    def test_support_failure_reports_every_under_supported_measurement(self):
+        first = pd.DataFrame(
+            {
+                "feature_ready": [True, True, True],
+                "gap_detected": [False, False, False],
+                "zero": [np.nan, np.nan, np.nan],
+                "thin": [1.0, 2.0, 3.0],
+            }
+        )
+        second = pd.DataFrame(
+            {
+                "feature_ready": [True, True, True],
+                "gap_detected": [False, False, False],
+                "zero": [np.nan, np.nan, np.nan],
+                "thin": [4.0, 5.0, np.nan],
+            }
+        )
+        fitter = SessionBalancedQuantileFitter(
+            measurements=(
+                QuantileMeasurementSpec("zero", "zero", "identity"),
+                QuantileMeasurementSpec("thin", "thin", "identity"),
+            ),
+            config=CONFIG,
+        )
+        fitter.add_session("2026-01-02", first)
+        fitter.add_session("2026-01-05", second)
+
+        with self.assertRaises(ValueError) as raised:
+            fitter.freeze()
+        message = str(raised.exception)
+        self.assertIn("'zero': 0 eligible sessions", message)
+        self.assertIn("0 total supporting values", message)
+        self.assertIn("0 maximum in one session", message)
+        self.assertIn("'thin': 1 eligible sessions", message)
+        self.assertIn("5 total supporting values", message)
+        self.assertIn("3 maximum in one session", message)
+
     def test_incremental_fitter_matches_mapping_and_freezes_once(self):
         frames = {
             "2026-01-02": frame([1, 2, 3, 4]),
