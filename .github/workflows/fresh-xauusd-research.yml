@@ -71,6 +71,63 @@ jobs:
           run_id="$3"
           attempt="$4"
           production_repo="/home/ec2-user/cTrade"
+
+          remove_scoped_directory() {
+            candidate="$1"
+            [[ -d "${candidate}" ]] || return 0
+            resolved="$(readlink -f -- "${candidate}")"
+            case "${resolved}" in
+              /tmp/fresh-xauusd-worktree.*|/tmp/fresh-xauusd-output.*)
+                rm -rf -- "${resolved}"
+                ;;
+              *)
+                printf 'refusing unscoped directory cleanup: %s\n' "${resolved}" >&2
+                return 1
+                ;;
+            esac
+          }
+
+          remove_scoped_file() {
+            candidate="$1"
+            [[ -f "${candidate}" ]] || return 0
+            resolved="$(readlink -f -- "${candidate}")"
+            case "${resolved}" in
+              /tmp/fresh-xauusd-run.*.log|/tmp/fresh-xauusd-*.tgz)
+                rm -f -- "${resolved}"
+                ;;
+              *)
+                printf 'refusing unscoped file cleanup: %s\n' "${resolved}" >&2
+                return 1
+                ;;
+            esac
+          }
+
+          while IFS= read -r registered_worktree; do
+            case "${registered_worktree}" in
+              /tmp/fresh-xauusd-worktree.*)
+                git -C "${production_repo}" worktree remove --force \
+                  "${registered_worktree}" || \
+                  remove_scoped_directory "${registered_worktree}"
+                ;;
+            esac
+          done < <(
+            git -C "${production_repo}" worktree list --porcelain |
+              sed -n 's/^worktree //p'
+          )
+          git -C "${production_repo}" worktree prune
+          shopt -s nullglob
+          for stale_directory in \
+            /tmp/fresh-xauusd-worktree.* \
+            /tmp/fresh-xauusd-output.*; do
+            remove_scoped_directory "${stale_directory}"
+          done
+          for stale_file in \
+            /tmp/fresh-xauusd-run.*.log \
+            /tmp/fresh-xauusd-*.tgz; do
+            remove_scoped_file "${stale_file}"
+          done
+          shopt -u nullglob
+
           worktree="$(mktemp -d /tmp/fresh-xauusd-worktree.XXXXXX)"
           output="$(mktemp -d /tmp/fresh-xauusd-output.XXXXXX)"
           log_path="$(mktemp /tmp/fresh-xauusd-run.XXXXXX.log)"
@@ -85,6 +142,12 @@ jobs:
               cp "${log_path}" "${output}/server-run.log"
             fi
             tar -czf "${archive}" -C "${output}" .
+            cd /tmp
+            git -C "${production_repo}" worktree remove --force \
+              "${worktree}" || remove_scoped_directory "${worktree}"
+            git -C "${production_repo}" worktree prune
+            remove_scoped_directory "${output}"
+            remove_scoped_file "${log_path}"
             exit "${status}"
           }
           trap finalize EXIT
@@ -100,7 +163,9 @@ jobs:
           research_venv="${worktree}/.fresh-venv"
           python3 -m venv "${research_venv}"
           research_python="${research_venv}/bin/python"
-          "${research_python}" -m pip install --disable-pip-version-check \
+          "${research_python}" -m pip install \
+            --disable-pip-version-check \
+            --no-cache-dir \
             numpy==2.0.2 \
             pandas==2.2.3 \
             psycopg2-binary==2.9.10 \
@@ -127,6 +192,23 @@ jobs:
             "${EC2_USER}@${EC2_HOST}:${archive_remote}" \
             "${archive_name}"
           scp_status=$?
+          if [[ "${scp_status}" -eq 0 ]]; then
+            ssh "${ssh_options[@]}" "${EC2_USER}@${EC2_HOST}" \
+              bash -s -- "${archive_remote}" <<'REMOTE_CLEANUP'
+          set -Eeuo pipefail
+          archive="$1"
+          resolved="$(readlink -f -- "${archive}")"
+          case "${resolved}" in
+            /tmp/fresh-xauusd-*.tgz)
+              rm -f -- "${resolved}"
+              ;;
+            *)
+              printf 'refusing unscoped archive cleanup: %s\n' "${resolved}" >&2
+              exit 1
+              ;;
+          esac
+          REMOTE_CLEANUP
+          fi
           rm -f "${key_path}"
           echo "archive=${archive_name}" >> "${GITHUB_OUTPUT}"
           if [[ "${scp_status}" -ne 0 ]]; then
