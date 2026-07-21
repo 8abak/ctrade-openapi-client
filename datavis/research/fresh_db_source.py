@@ -31,7 +31,12 @@ from datetime import date, datetime, timezone
 from typing import Any, Protocol
 from uuid import uuid4
 
-from datavis.research.fresh_data import CoverageStatus, FreshDataConfig, FreshDataError
+from datavis.research.fresh_data import (
+    CoverageStatus,
+    FreshDataConfig,
+    FreshDataError,
+    InvalidQuoteSample,
+)
 from datavis.research.fresh_sessions import (
     AssignedBrokerTick,
     BrokerSessionBounds,
@@ -58,6 +63,25 @@ ORDER BY timestamp ASC, id ASC
 
 class FreshDbSourceError(FreshDataError):
     """A database row or source configuration cannot be replayed safely."""
+
+
+class _InvalidExecutableQuote(FreshDbSourceError):
+    """A well-formed row whose bid/ask cannot be executed safely."""
+
+    def __init__(
+        self,
+        *,
+        row_number: int,
+        tick_id: int,
+        symbol: str,
+        timestamp_utc: datetime,
+        reason: str,
+    ) -> None:
+        super().__init__(f"database row {row_number}: {reason}")
+        self.tick_id = tick_id
+        self.symbol = symbol
+        self.timestamp_utc = timestamp_utc
+        self.reason = reason
 
 
 class ServerSideCursor(Protocol):
@@ -93,14 +117,10 @@ class FreshDbSessionInventory:
     normalized_quote_count: int
     duplicate_quote_count: int
     duplicate_group_count: int
+    invalid_quote_count: int
+    invalid_quote_samples: tuple[InvalidQuoteSample, ...]
     locked_quote_count: int
     audit: SessionCompletenessAudit
-
-    @property
-    def invalid_quote_count(self) -> int:
-        """Invalid database quotes are fatal, so successful scans always have zero."""
-
-        return 0
 
     @property
     def first_timestamp_utc(self) -> datetime | None:
@@ -150,7 +170,11 @@ class FreshDbSessionInventory:
     def coverage_status(self) -> CoverageStatus:
         if self.raw_row_count == 0:
             return "empty"
-        if self.normalized_quote_count == 0 or self.audit.has_unexpected_outage:
+        if (
+            self.invalid_quote_count > 0
+            or self.normalized_quote_count == 0
+            or self.audit.has_unexpected_outage
+        ):
             return "ineligible"
         return "complete" if self.audit.boundary_complete else "partial"
 
@@ -260,7 +284,13 @@ def _row_to_tick(
     bid = _validated_price(raw_bid, "bid", row_number)
     ask = _validated_price(raw_ask, "ask", row_number)
     if ask < bid:
-        raise FreshDbSourceError(f"database row {row_number}: crossed quote")
+        raise _InvalidExecutableQuote(
+            row_number=row_number,
+            tick_id=raw_id,
+            symbol=raw_symbol,
+            timestamp_utc=timestamp_utc,
+            reason="crossed quote",
+        )
     return BrokerTick(
         id=raw_id,
         symbol=raw_symbol,
@@ -356,7 +386,9 @@ def scan_fresh_db_session(
     The sole SQL statement is :data:`BROKER_SESSION_QUERY`.  Its lower bound is
     inclusive and its upper bound is exclusive.  ``config.chunk_rows`` controls
     both the named cursor's transfer size and each explicit ``fetchmany`` call.
-    Malformed or out-of-range database rows are fatal rather than quarantined.
+    Malformed, out-of-range, or structurally inconsistent database rows are
+    fatal. A well-formed crossed quote is quarantined, never forwarded through
+    ``on_tick``, and makes the entire session ineligible.
 
     A PostgreSQL named cursor requires an open transaction.  Therefore a
     connection explicitly configured with ``autocommit=True`` is rejected; the
@@ -380,6 +412,8 @@ def scan_fresh_db_session(
     normalized_count = 0
     duplicate_count = 0
     duplicate_group_count = 0
+    invalid_count = 0
+    invalid_samples: list[InvalidQuoteSample] = []
     locked_count = 0
     seen_ids = _IdIntervalSet()
     previous_key: tuple[datetime, int] | None = None
@@ -404,12 +438,27 @@ def scan_fresh_db_session(
                 break
             for row in batch:
                 raw_count += 1
-                tick = _row_to_tick(
-                    row,
-                    row_number=raw_count,
-                    expected_symbol=symbol,
-                    bounds=bounds,
-                )
+                try:
+                    tick = _row_to_tick(
+                        row,
+                        row_number=raw_count,
+                        expected_symbol=symbol,
+                        bounds=bounds,
+                    )
+                except _InvalidExecutableQuote as exc:
+                    invalid_count += 1
+                    if len(invalid_samples) < config.maximum_issue_samples:
+                        invalid_samples.append(
+                            InvalidQuoteSample(
+                                source="postgresql:public.ticks",
+                                row_number=raw_count,
+                                tick_id=exc.tick_id,
+                                symbol=exc.symbol,
+                                timestamp_utc=exc.timestamp_utc,
+                                reason=exc.reason,
+                            )
+                        )
+                    continue
                 timestamp_utc = tick.timestamp_utc
                 order_key = (timestamp_utc, tick.id)
                 if previous_key is not None and order_key <= previous_key:
@@ -482,10 +531,12 @@ def scan_fresh_db_session(
         cursor_name=selected_cursor_name,
         fetch_batch_rows=config.chunk_rows,
         raw_row_count=raw_count,
-        valid_quote_count=raw_count,
+        valid_quote_count=raw_count - invalid_count,
         normalized_quote_count=normalized_count,
         duplicate_quote_count=duplicate_count,
         duplicate_group_count=duplicate_group_count,
+        invalid_quote_count=invalid_count,
+        invalid_quote_samples=tuple(invalid_samples),
         locked_quote_count=locked_count,
         audit=audit,
     )

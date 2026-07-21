@@ -70,6 +70,8 @@ def scanned(anchor: date, *, complete: bool = True) -> FreshScannedSession:
         normalized_quote_count=100 if complete else 0,
         duplicate_quote_count=0,
         duplicate_group_count=0,
+        invalid_quote_count=0,
+        invalid_quote_samples=(),
         locked_quote_count=0,
         audit=audit,
     )

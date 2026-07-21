@@ -26,7 +26,7 @@ from datavis.research.fresh_protocol import canonical_hash
 from datavis.research.fresh_sessions import AssignedBrokerTick, broker_session_bounds
 
 
-INVENTORY_SCHEMA = "fresh-xauusd-source-inventory/v1"
+INVENTORY_SCHEMA = "fresh-xauusd-source-inventory/v2"
 CORPUS_SCHEMA = "fresh-xauusd-normalized-corpus/v1"
 _UTC = timezone.utc
 
@@ -97,6 +97,17 @@ def session_inventory_record(scanned: FreshScannedSession) -> dict[str, Any]:
         "duplicateQuoteCount": item.duplicate_quote_count,
         "duplicateGroupCount": item.duplicate_group_count,
         "invalidQuoteCount": item.invalid_quote_count,
+        "invalidQuoteSamples": [
+            {
+                "source": sample.source,
+                "rowNumber": sample.row_number,
+                "tickId": sample.tick_id,
+                "symbol": sample.symbol,
+                "timestampUtc": sample.timestamp_utc.isoformat(),
+                "reason": sample.reason,
+            }
+            for sample in item.invalid_quote_samples
+        ],
         "lockedQuoteCount": item.locked_quote_count,
         "firstTimestampUtc": _iso(item.first_timestamp_utc),
         "lastTimestampUtc": _iso(item.last_timestamp_utc),

@@ -251,7 +251,6 @@ class FreshDbSourceTests(unittest.TestCase):
         cases = (
             ("symbol", quote(1, moment, symbol="EURUSD"), "symbol"),
             ("timezone", quote(1, moment.replace(tzinfo=None)), "timezone-aware"),
-            ("crossed", quote(1, moment, 101.0, 100.0), "crossed"),
             ("infinite", quote(1, moment, 100.0, float("inf")), "finite"),
             ("string_price", quote(1, moment, "100.0", 100.2), "numeric"),
             ("shape", (1, "XAUUSD", moment, 100.0), "five selected"),
@@ -267,6 +266,43 @@ class FreshDbSourceTests(unittest.TestCase):
                         cursor_name=f"bad_{label}",
                     )
                 self.assertTrue(connection.cursor_instance.closed)
+
+    def test_crossed_quote_quarantines_the_entire_session(self):
+        anchor = date(2026, 1, 15)
+        bounds = broker_session_bounds(anchor)
+        connection = FakeConnection(
+            [
+                quote(1, bounds.start_utc + timedelta(seconds=10)),
+                quote(
+                    2,
+                    bounds.start_utc + timedelta(seconds=20),
+                    bid=101.0,
+                    ask=100.0,
+                ),
+                quote(3, bounds.end_utc - timedelta(seconds=10)),
+            ]
+        )
+        emitted = []
+
+        inventory = scan_fresh_db_session(
+            connection,
+            anchor,
+            config=source_config(),
+            on_tick=emitted.append,
+            cursor_name="crossed_quote_test",
+        )
+
+        self.assertEqual([item.tick.id for item in emitted], [1, 3])
+        self.assertEqual(inventory.raw_row_count, 3)
+        self.assertEqual(inventory.valid_quote_count, 2)
+        self.assertEqual(inventory.normalized_quote_count, 2)
+        self.assertEqual(inventory.invalid_quote_count, 1)
+        self.assertEqual(len(inventory.invalid_quote_samples), 1)
+        sample = inventory.invalid_quote_samples[0]
+        self.assertEqual(sample.tick_id, 2)
+        self.assertEqual(sample.reason, "crossed quote")
+        self.assertEqual(inventory.coverage_status, "ineligible")
+        self.assertFalse(inventory.is_complete)
 
     def test_strict_order_and_unique_ids_are_checked_across_fetch_batches(self):
         anchor = date(2026, 1, 15)
