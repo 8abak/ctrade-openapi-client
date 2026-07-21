@@ -1,2 +1,14 @@
 __pycache__/
 *.py[cod]
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+creds.json
+
+# Generated research data and exports
+data/
+artifacts/
+logs/sql_exports/
+*.part

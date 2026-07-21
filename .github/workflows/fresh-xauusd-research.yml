@@ -1,0 +1,132 @@
+name: Fresh XAUUSD chronological research
+
+on:
+  push:
+    branches:
+      - codex/xauusd-fresh-walkforward
+    paths:
+      - .github/research-launch.txt
+  workflow_dispatch:
+
+concurrency:
+  group: fresh-xauusd-research
+  cancel-in-progress: false
+
+jobs:
+  research:
+    name: Run sealed chronological study on EC2
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Check out frozen research code
+        uses: actions/checkout@v4
+
+      - name: Run the frozen study on the data host
+        id: remote
+        shell: bash
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          EC2_PORT: ${{ secrets.EC2_PORT || '22' }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          FRESH_BRANCH: ${{ github.ref_name }}
+          FRESH_SHA: ${{ github.sha }}
+          FRESH_RUN_ID: ${{ github.run_id }}
+          FRESH_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -uo pipefail
+          key_path="${RUNNER_TEMP}/fresh-research-key"
+          archive_name="fresh-xauusd-${FRESH_RUN_ID}-${FRESH_RUN_ATTEMPT}.tgz"
+          archive_remote="/tmp/${archive_name}"
+          printf '%s\n' "${EC2_SSH_KEY}" > "${key_path}"
+          chmod 600 "${key_path}"
+          ssh_options=(
+            -i "${key_path}"
+            -p "${EC2_PORT}"
+            -o BatchMode=yes
+            -o StrictHostKeyChecking=accept-new
+            -o ServerAliveInterval=30
+            -o ServerAliveCountMax=20
+          )
+          scp_options=(
+            -i "${key_path}"
+            -P "${EC2_PORT}"
+            -o BatchMode=yes
+            -o StrictHostKeyChecking=accept-new
+          )
+
+          set +e
+          ssh "${ssh_options[@]}" "${EC2_USER}@${EC2_HOST}" \
+            bash -s -- \
+            "${FRESH_BRANCH}" \
+            "${FRESH_SHA}" \
+            "${FRESH_RUN_ID}" \
+            "${FRESH_RUN_ATTEMPT}" <<'REMOTE'
+          set -Eeuo pipefail
+          branch="$1"
+          sha="$2"
+          run_id="$3"
+          attempt="$4"
+          production_repo="/home/ec2-user/cTrade"
+          worktree="$(mktemp -d /tmp/fresh-xauusd-worktree.XXXXXX)"
+          output="$(mktemp -d /tmp/fresh-xauusd-output.XXXXXX)"
+          log_path="$(mktemp /tmp/fresh-xauusd-run.XXXXXX.log)"
+          archive="/tmp/fresh-xauusd-${run_id}-${attempt}.tgz"
+
+          finalize() {
+            status="$?"
+            trap - EXIT
+            set +e
+            printf '%s\n' "${status}" > "${output}/remote-exit-status.txt"
+            if [[ -f "${log_path}" ]]; then
+              cp "${log_path}" "${output}/server-run.log"
+            fi
+            tar -czf "${archive}" -C "${output}" .
+            exit "${status}"
+          }
+          trap finalize EXIT
+
+          cd "${production_repo}"
+          git fetch origin "${branch}"
+          git worktree add --detach "${worktree}" "${sha}"
+          cd "${worktree}"
+          set -a
+          source /etc/datavis.env
+          set +a
+
+          python3 -c 'import numpy, pandas, psycopg2, dotenv' >/dev/null 2>&1 || \
+            python3 -m pip install --user numpy pandas psycopg2-binary python-dotenv
+
+          set +e
+          python3 -m datavis.research.fresh_pipeline_cli \
+            --repository-root "${worktree}" \
+            --output-dir "${output}" \
+            --execute 2>&1 | tee "${log_path}"
+          research_status="${PIPESTATUS[0]}"
+          set -e
+          exit "${research_status}"
+          REMOTE
+          research_status=$?
+
+          scp "${scp_options[@]}" \
+            "${EC2_USER}@${EC2_HOST}:${archive_remote}" \
+            "${archive_name}"
+          scp_status=$?
+          rm -f "${key_path}"
+          echo "archive=${archive_name}" >> "${GITHUB_OUTPUT}"
+          if [[ "${scp_status}" -ne 0 ]]; then
+            exit "${scp_status}"
+          fi
+          exit "${research_status}"
+
+      - name: Upload immutable research artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fresh-xauusd-${{ github.run_id }}-${{ github.run_attempt }}
+          path: fresh-xauusd-${{ github.run_id }}-${{ github.run_attempt }}.tgz
+          if-no-files-found: warn
+          retention-days: 30
