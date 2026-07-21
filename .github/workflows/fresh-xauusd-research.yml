@@ -94,7 +94,7 @@ jobs:
           git worktree add --detach "${worktree}" "${sha}"
           cd "${worktree}"
           set -a
-          source /etc/datavis.env
+          eval "$(sudo cat /etc/datavis.env)"
           set +a
 
           python3 -c 'import numpy, pandas, psycopg2, dotenv' >/dev/null 2>&1 || \
