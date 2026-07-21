@@ -414,6 +414,61 @@ class FreshEntryDiagnosticTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             settings(quantity=math.nan)
 
+    def test_trusted_session_tuple_matches_default_with_repeat_and_gap(self):
+        points = (
+            Tick(id=1, timestamp=BASE, bid=100.0, ask=100.2),
+            Tick(id=2, timestamp=BASE, bid=100.0, ask=100.2),
+            Tick(
+                id=3,
+                timestamp=BASE + timedelta(milliseconds=1),
+                bid=100.3,
+                ask=100.5,
+            ),
+            Tick(
+                id=4,
+                timestamp=BASE + timedelta(milliseconds=2_000),
+                bid=101.0,
+                ask=101.2,
+            ),
+        )
+        events = (event(points, 0, "long"),)
+        config = settings(
+            maximum_intertick_gap_ms=100,
+            diagnostic_horizon_ms=1_000,
+            entry_slippage_per_unit=0.0,
+            exit_slippage_per_unit=0.0,
+            entry_commission_per_unit=0.0,
+            exit_commission_per_unit=0.0,
+        )
+
+        checked = evaluate_frozen_entries(points, events, config=config)
+        trusted = evaluate_frozen_entries(
+            points,
+            events,
+            config=config,
+            _trusted_validated_ticks=True,
+        )
+
+        self.assertEqual(trusted, checked)
+        self.assertEqual(trusted.diagnostics[0].fill_tick_id, 2)
+        self.assertEqual(trusted.diagnostics[0].observation_end_reason, "intertick_gap")
+        self.assertEqual(trusted.diagnostics[0].observed_quote_count, 2)
+
+    def test_default_tape_validation_remains_enabled_and_trust_requires_tuple(self):
+        malformed = (
+            Tick(id=2, timestamp=BASE, bid=100.0, ask=100.2),
+            Tick(id=1, timestamp=BASE, bid=100.0, ask=100.2),
+        )
+        with self.assertRaisesRegex(ValueError, r"\(timestamp, id\)"):
+            evaluate_frozen_entries(malformed, (), config=settings())
+        with self.assertRaisesRegex(TypeError, "validated tick tuple"):
+            evaluate_frozen_entries(
+                list(reversed(malformed)),
+                (),
+                config=settings(),
+                _trusted_validated_ticks=True,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

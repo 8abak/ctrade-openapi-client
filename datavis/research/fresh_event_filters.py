@@ -192,6 +192,26 @@ class FreshEventFilterResult:
 
 
 @dataclass(frozen=True, slots=True)
+class FreshEventFilterRequest:
+    """One ordered event group and its frozen filter for batched enrichment."""
+
+    events: tuple[FrozenSignalEvent, ...]
+    config: FreshEventFilterConfig
+
+    def __post_init__(self) -> None:
+        try:
+            selected = tuple(self.events)
+        except TypeError as exc:
+            raise TypeError("events must be an iterable of FrozenSignalEvent values") from exc
+        for position, event in enumerate(selected):
+            if not isinstance(event, FrozenSignalEvent):
+                raise TypeError(f"events[{position}] is not a FrozenSignalEvent")
+        if not isinstance(self.config, FreshEventFilterConfig):
+            raise TypeError("config must be FreshEventFilterConfig")
+        object.__setattr__(self, "events", selected)
+
+
+@dataclass(frozen=True, slots=True)
 class EventFilterVariantSource:
     """One already-registered entry eligible for bounded filter variants."""
 
@@ -569,38 +589,14 @@ def _activity_passes(activity: _Activity, policy: ActivityFilter) -> bool:
     return activity.opening_or_overlap
 
 
-def enrich_and_filter_frozen_events(
-    features: pd.DataFrame,
-    events: Sequence[FrozenSignalEvent],
+def _enrich_and_filter_prepared(
+    rows: _PreparedRows,
+    selected_events: tuple[FrozenSignalEvent, ...],
     *,
     config: FreshEventFilterConfig,
     quantile_bank: FreshQuantileBank,
+    config_sha: str,
 ) -> FreshEventFilterResult:
-    """Attach causal context and apply one frozen filter to exact signal rows.
-
-    Rejection counts use fixed precedence: activity, then spread, then
-    volatility.  This makes them mutually exclusive and exactly reconcilable
-    with the retained count.
-    """
-
-    if not isinstance(config, FreshEventFilterConfig):
-        raise TypeError("config must be FreshEventFilterConfig")
-    selected_events = tuple(events)
-    for position, event in enumerate(selected_events):
-        if not isinstance(event, FrozenSignalEvent):
-            raise TypeError(f"events[{position}] is not a FrozenSignalEvent")
-    row_limit = (
-        max(event.tick_index for event in selected_events) + 1
-        if selected_events
-        else 0
-    )
-    config_sha = fresh_event_filter_config_fingerprint(config, quantile_bank)
-    rows = _prepare_rows(
-        features,
-        config.regime_definition,
-        row_limit=row_limit,
-    )
-    _validate_event_bindings(rows, selected_events)
     specs = fresh_regime_quantile_measurements(config.regime_definition)
     specs_by_dimension = dict(
         zip(("volatility", "spread", "trend", "arrival"), specs)
@@ -689,9 +685,7 @@ def enrich_and_filter_frozen_events(
             "timestampNewYork": assignment.timestamp_new_york.isoformat(),
             "brokerStatus": assignment.status,
             "brokerSessionAnchorTimeZone": "America/New_York",
-            "brokerSessionStartNewYork": (
-                assignment.bounds.start_new_york.isoformat()
-            ),
+            "brokerSessionStartNewYork": assignment.bounds.start_new_york.isoformat(),
             "brokerSessionEndNewYork": assignment.bounds.end_new_york.isoformat(),
             "brokerSessionStartSydney": assignment.bounds.start_sydney.isoformat(),
             "brokerSessionEndSydney": assignment.bounds.end_sydney.isoformat(),
@@ -734,6 +728,115 @@ def enrich_and_filter_frozen_events(
         config_sha256=config_sha,
         quantile_bank_sha256=quantile_bank.bank_sha256.lower(),
     )
+
+
+def enrich_and_filter_frozen_events(
+    features: pd.DataFrame,
+    events: Sequence[FrozenSignalEvent],
+    *,
+    config: FreshEventFilterConfig,
+    quantile_bank: FreshQuantileBank,
+) -> FreshEventFilterResult:
+    """Attach causal context and apply one frozen filter to exact signal rows.
+
+    Rejection counts use fixed precedence: activity, then spread, then
+    volatility.  This makes them mutually exclusive and exactly reconcilable
+    with the retained count.
+    """
+
+    if not isinstance(config, FreshEventFilterConfig):
+        raise TypeError("config must be FreshEventFilterConfig")
+    selected_events = tuple(events)
+    for position, event in enumerate(selected_events):
+        if not isinstance(event, FrozenSignalEvent):
+            raise TypeError(f"events[{position}] is not a FrozenSignalEvent")
+    row_limit = (
+        max(event.tick_index for event in selected_events) + 1
+        if selected_events
+        else 0
+    )
+    config_sha = fresh_event_filter_config_fingerprint(config, quantile_bank)
+    rows = _prepare_rows(
+        features,
+        config.regime_definition,
+        row_limit=row_limit,
+    )
+    _validate_event_bindings(rows, selected_events)
+    return _enrich_and_filter_prepared(
+        rows,
+        selected_events,
+        config=config,
+        quantile_bank=quantile_bank,
+        config_sha=config_sha,
+    )
+
+
+def enrich_and_filter_frozen_event_batch(
+    features: pd.DataFrame,
+    requests: Sequence[FreshEventFilterRequest],
+    *,
+    quantile_bank: FreshQuantileBank,
+) -> tuple[FreshEventFilterResult, ...]:
+    """Enrich ordered request groups after preparing their shared rows once.
+
+    Every result is identical to an independent scalar call and occupies the
+    same position as its request.  Preparation stops immediately after the
+    latest event requested by the whole batch, so appended feature rows remain
+    causally invisible.  All requests must use one regime definition because
+    their prepared measurement arrays are shared.
+    """
+
+    try:
+        selected_requests = tuple(requests)
+    except TypeError as exc:
+        raise TypeError(
+            "requests must be an iterable of FreshEventFilterRequest values"
+        ) from exc
+    for position, request in enumerate(selected_requests):
+        if not isinstance(request, FreshEventFilterRequest):
+            raise TypeError(
+                f"requests[{position}] is not a FreshEventFilterRequest"
+            )
+    if not selected_requests:
+        return ()
+
+    definition = selected_requests[0].config.regime_definition
+    if any(
+        request.config.regime_definition != definition
+        for request in selected_requests[1:]
+    ):
+        raise ValueError("all batch requests must use the same regime definition")
+
+    config_hashes: dict[FreshEventFilterConfig, str] = {}
+    for request in selected_requests:
+        if request.config not in config_hashes:
+            config_hashes[request.config] = fresh_event_filter_config_fingerprint(
+                request.config, quantile_bank
+            )
+
+    last_index = max(
+        (
+            event.tick_index
+            for request in selected_requests
+            for event in request.events
+        ),
+        default=-1,
+    )
+    rows = _prepare_rows(features, definition, row_limit=last_index + 1)
+
+    results: list[FreshEventFilterResult] = []
+    for request in selected_requests:
+        _validate_event_bindings(rows, request.events)
+        results.append(
+            _enrich_and_filter_prepared(
+                rows,
+                request.events,
+                config=request.config,
+                quantile_bank=quantile_bank,
+                config_sha=config_hashes[request.config],
+            )
+        )
+    return tuple(results)
 
 
 def _filter_catalog(
@@ -934,11 +1037,13 @@ __all__ = [
     "MAXIMUM_DISCOVERY_CANDIDATES_PER_FAMILY",
     "EventFilterVariantSource",
     "FreshEventFilterConfig",
+    "FreshEventFilterRequest",
     "FreshEventFilterResult",
     "FreshEventFilterVariantBank",
     "FreshFilteredCandidateVariant",
     "FreshRegimeDefinition",
     "derive_bounded_post_discovery_variant_bank",
+    "enrich_and_filter_frozen_event_batch",
     "enrich_and_filter_frozen_events",
     "fresh_event_filter_config_fingerprint",
     "fresh_regime_quantile_measurements",

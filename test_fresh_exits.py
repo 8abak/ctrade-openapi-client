@@ -4,6 +4,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from datavis.research.fresh_exits import (
+    BoundVolatilityRows,
     ExitDistance,
     FreshExitPolicyConfig,
     FreshProtectiveExitPolicy,
@@ -403,6 +404,102 @@ class FreshProtectiveExitTests(unittest.TestCase):
         )
         self.assertEqual(values.on_tick(0, points[0]), 0.1)
         self.assertEqual(values.on_tick(1, points[1]), 0.1)
+
+    def test_bound_volatility_has_independent_cursors_and_exact_tuple_preflight(self):
+        points = (
+            Tick(id=10, timestamp=BASE, bid=100.0, ask=100.2),
+            Tick(id=11, timestamp=BASE, bid=100.0, ask=100.2),
+        )
+        rows = (
+            VolatilityRow(0, 10, BASE, 0.1),
+            VolatilityRow(1, 11, BASE, 0.2),
+        )
+        binding = BoundVolatilityRows(points, rows)
+        unvalidated = binding.cursor()
+        with self.assertRaisesRegex(RuntimeError, "must be validated"):
+            unvalidated.on_tick(0, points[0])
+
+        first = binding.cursor()
+        second = binding.cursor()
+        first.validate(points)
+        second.validate(points)
+        self.assertEqual(
+            [first.on_tick(index, point) for index, point in enumerate(points)],
+            [0.1, 0.2],
+        )
+        self.assertEqual(
+            [second.on_tick(index, point) for index, point in enumerate(points)],
+            [0.1, 0.2],
+        )
+
+        equal_but_distinct_tuple = tuple(list(points))
+        self.assertIsNot(equal_but_distinct_tuple, points)
+        with self.assertRaisesRegex(ValueError, "different tick tuple"):
+            binding.validate(equal_but_distinct_tuple)
+
+    def test_bound_volatility_replay_is_identical_with_repeated_quote_volume(self):
+        points = (
+            Tick(id=1, timestamp=BASE, bid=100.0, ask=100.2),
+            Tick(id=2, timestamp=BASE, bid=100.0, ask=100.2),
+            quote(3, 1, 100.8, 101.0),
+            quote(4, 2, 100.75, 100.95),
+            quote(5, 3, 100.69, 100.89),
+            quote(6, 4, 100.60, 100.80),
+        )
+        values = (0.4, 0.4, 0.4, 0.2, 0.2, 0.2)
+        rows = tuple(
+            VolatilityRow(index, point.id, point.timestamp, values[index])
+            for index, point in enumerate(points)
+        )
+        settings = execution()
+        policy_config = exit_config(
+            initial_stop=ExitDistance("volatility", 5.0),
+            trailing_activation=ExitDistance("volatility", 1.0),
+            trailing_distance=ExitDistance("volatility", 0.5),
+            trailing_volatility_basis="current",
+        )
+
+        legacy = run_fresh_replay(
+            points,
+            managed(
+                points,
+                "long",
+                policy_config=policy_config,
+                execution_config=settings,
+                volatility=VolatilityFrame(rows),
+            ),
+            config=settings,
+        )
+        binding = BoundVolatilityRows(points, rows)
+        bound = run_fresh_replay(
+            points,
+            managed(
+                points,
+                "long",
+                policy_config=policy_config,
+                execution_config=settings,
+                volatility=binding.cursor(),
+            ),
+            config=settings,
+        )
+
+        self.assertEqual(bound, legacy)
+        self.assertEqual(bound.trades[0].entry_fill_tick_id, 2)
+
+    def test_bound_volatility_rejects_incomplete_shifted_or_stale_rows(self):
+        points = (
+            quote(1, 0, 100.0, 100.2),
+            quote(2, 1, 100.1, 100.3),
+        )
+        first = VolatilityRow(0, 1, points[0].timestamp, 0.1)
+        with self.assertRaisesRegex(ValueError, "one row per tick"):
+            BoundVolatilityRows(points, (first,))
+        shifted = VolatilityRow(1, 1, points[0].timestamp, 0.2)
+        with self.assertRaisesRegex(ValueError, "exact tick"):
+            BoundVolatilityRows(points, (first, shifted))
+        wrong_index = VolatilityRow(2, 2, points[1].timestamp, 0.2)
+        with self.assertRaisesRegex(ValueError, "contiguous"):
+            BoundVolatilityRows(points, (first, wrong_index))
 
     def test_time_exit_and_configuration_remain_strictly_under_sixty_seconds(self):
         with self.assertRaisesRegex(ValueError, "strictly below 60 seconds"):

@@ -76,6 +76,8 @@ class FreshSessionTape:
     normalized_sha256: str
 
     def __post_init__(self) -> None:
+        if type(self.ticks) is not tuple:
+            raise TypeError("session tape ticks must be an exact immutable tuple")
         parsed = date.fromisoformat(self.anchor)
         if self.bounds.anchor != parsed:
             raise ValueError("session tape bounds do not match its anchor")

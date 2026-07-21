@@ -63,6 +63,14 @@ class FreshSessionEvaluationTests(unittest.TestCase):
         )
         self.assertEqual([tick.id for tick in tape.ticks], [1, 2])
 
+        with self.assertRaisesRegex(TypeError, "immutable tuple"):
+            FreshSessionTape(
+                anchor="2026-01-02",
+                bounds=bounds,
+                ticks=list(repeated_quotes),  # type: ignore[arg-type]
+                normalized_sha256="a" * 64,
+            )
+
         with self.assertRaisesRegex(ValueError, "duplicate tick id"):
             FreshSessionTape(
                 anchor="2026-01-02",

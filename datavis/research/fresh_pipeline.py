@@ -34,7 +34,10 @@ from datavis.research.fresh_candidate_grid import (
     build_fresh_candidate_grid,
     fresh_candidate_quantile_measurements,
 )
-from datavis.research.fresh_decisions import FrozenSignalDecisionSource
+from datavis.research.fresh_decisions import (
+    BoundDecisionFeatureRows,
+    FrozenSignalDecisionSource,
+)
 from datavis.research.fresh_entry_diagnostics import (
     DiagnosticBoundary,
     EntrySchedulingConfig,
@@ -46,9 +49,10 @@ from datavis.research.fresh_event_filters import (
     FRESH_REGIME_QUINTILE_RANKS,
     EventFilterVariantSource,
     FreshEventFilterConfig,
+    FreshEventFilterRequest,
     FreshRegimeDefinition,
     derive_bounded_post_discovery_variant_bank,
-    enrich_and_filter_frozen_events,
+    enrich_and_filter_frozen_event_batch,
     fresh_event_filter_config_fingerprint,
     fresh_regime_quantile_measurements,
 )
@@ -59,7 +63,10 @@ from datavis.research.fresh_exit_grid import (
     build_fresh_exit_grid,
     fresh_exit_quantile_measurements,
 )
-from datavis.research.fresh_exits import FreshProtectiveExitPolicy, VolatilityFrame
+from datavis.research.fresh_exits import (
+    BoundVolatilityRows,
+    FreshProtectiveExitPolicy,
+)
 from datavis.research.fresh_feature_bank import (
     FreshFeatureBankConfig,
     FreshFeatureBankOutputSelection,
@@ -77,7 +84,11 @@ from datavis.research.fresh_preregistration import (
     required_fresh_implementation_files,
 )
 from datavis.research.fresh_protocol import canonical_hash
-from datavis.research.fresh_replay import ReplayBoundary, run_fresh_replay
+from datavis.research.fresh_replay import (
+    ReplayBoundary,
+    _prepare_replay_tape,
+    run_fresh_replay,
+)
 from datavis.research.fresh_scoring import (
     EntryScoreReport,
     GateResult,
@@ -280,6 +291,8 @@ def _diagnose(
     *,
     config: Any,
 ) -> FreshEntryDiagnosticsResult:
+    if not isinstance(tape, FreshSessionTape):
+        raise TypeError("trusted diagnostics require a FreshSessionTape")
     return evaluate_frozen_entries(
         tape.ticks,
         events,
@@ -292,6 +305,31 @@ def _diagnose(
             input_complete_through_end=True,
         ),
         scheduling=EntrySchedulingConfig(mode="independent", cooldown_ms=0),
+        _trusted_validated_ticks=True,
+    )
+
+
+def _replay_session(
+    tape: FreshSessionTape,
+    decisions: Any,
+    *,
+    config: Any,
+    prepared_replay_tape: Any,
+) -> Any:
+    if not isinstance(tape, FreshSessionTape):
+        raise TypeError("trusted replay requires a FreshSessionTape")
+    return run_fresh_replay(
+        tape.ticks,
+        decisions,
+        config=config,
+        boundary=ReplayBoundary(
+            start=tape.bounds.start_utc,
+            end=tape.bounds.end_utc,
+            name=tape.anchor,
+            input_complete_through_end=True,
+        ),
+        _trusted_validated_ticks=True,
+        _prepared_replay_tape=prepared_replay_tape,
     )
 
 
@@ -858,32 +896,40 @@ class RegisteredFreshResearchPipeline:
             )
             grouped = _events_by_candidate(raw_events)
             raw_baseline = _baseline_events(frame, tape)
-            for fingerprint, event_filter in filters.items():
-                filtered = enrich_and_filter_frozen_events(
-                    frame,
-                    raw_baseline,
-                    config=event_filter,
-                    quantile_bank=self.quantile_bank,
-                ).events
+            filter_items = tuple(filters.items())
+            filter_requests = tuple(
+                FreshEventFilterRequest(raw_baseline, event_filter)
+                for _, event_filter in filter_items
+            )
+            runtime_requests = tuple(
+                FreshEventFilterRequest(
+                    grouped.get(runtime.source.config.candidate_id, ()),
+                    runtime.event_filter,
+                )
+                for runtime in runtimes
+            )
+            filtered_batch = enrich_and_filter_frozen_event_batch(
+                frame,
+                (*filter_requests, *runtime_requests),
+                quantile_bank=self.quantile_bank,
+            )
+            filter_results = filtered_batch[: len(filter_requests)]
+            runtime_results = filtered_batch[len(filter_requests) :]
+            for (fingerprint, _), filtered in zip(
+                filter_items, filter_results
+            ):
                 baseline_results[fingerprint].append(
                     _diagnose(
                         tape,
-                        _before_close(filtered, tape),
+                        _before_close(filtered.events, tape),
                         config=self.entry_diagnostic_config,
                     )
                 )
-            for runtime in runtimes:
-                source_events = grouped.get(runtime.source.config.candidate_id, ())
-                filtered = enrich_and_filter_frozen_events(
-                    frame,
-                    source_events,
-                    config=runtime.event_filter,
-                    quantile_bank=self.quantile_bank,
-                ).events
+            for runtime, filtered in zip(runtimes, runtime_results):
                 candidate_results[runtime.candidate_id].append(
                     _diagnose(
                         tape,
-                        _before_close(filtered, tape),
+                        _before_close(filtered.events, tape),
                         config=self.entry_diagnostic_config,
                     )
                 )
@@ -1102,14 +1148,37 @@ class RegisteredFreshResearchPipeline:
             raw_baseline = _baseline_events(frame, tape)
             events_by_entry: dict[str, tuple[FrozenSignalEvent, ...]] = {}
             baseline_by_filter: dict[str, FreshEntryDiagnosticsResult] = {}
-            for identifier, runtime in runtimes.items():
-                source_events = grouped.get(runtime.source.config.candidate_id, ())
-                events = enrich_and_filter_frozen_events(
-                    frame,
-                    source_events,
-                    config=runtime.event_filter,
-                    quantile_bank=self.quantile_bank,
-                ).events
+            runtime_items = tuple(runtimes.items())
+            filters_by_sha: dict[str, FreshEventFilterConfig] = {}
+            for _, runtime in runtime_items:
+                filter_sha = fresh_event_filter_config_fingerprint(
+                    runtime.event_filter, self.quantile_bank
+                )
+                filters_by_sha.setdefault(filter_sha, runtime.event_filter)
+            filter_items = tuple(filters_by_sha.items())
+            filtered_batch = enrich_and_filter_frozen_event_batch(
+                frame,
+                (
+                    *(
+                        FreshEventFilterRequest(
+                            grouped.get(runtime.source.config.candidate_id, ()),
+                            runtime.event_filter,
+                        )
+                        for _, runtime in runtime_items
+                    ),
+                    *(
+                        FreshEventFilterRequest(raw_baseline, event_filter)
+                        for _, event_filter in filter_items
+                    ),
+                ),
+                quantile_bank=self.quantile_bank,
+            )
+            runtime_results = filtered_batch[: len(runtime_items)]
+            filter_results = filtered_batch[len(runtime_items) :]
+            for (identifier, _), filtered in zip(
+                runtime_items, runtime_results
+            ):
+                events = filtered.events
                 events = _before_close(events, tape)
                 if len({event.tick_index for event in events}) != len(events):
                     raise ValueError("a frozen entry emitted both directions on one tick")
@@ -1119,31 +1188,44 @@ class RegisteredFreshResearchPipeline:
                         tape, events, config=self.entry_diagnostic_config
                     )
                 )
+            for (filter_sha, _), filtered in zip(
+                filter_items, filter_results
+            ):
+                baseline_by_filter[filter_sha] = _diagnose(
+                    tape,
+                    _before_close(filtered.events, tape),
+                    config=self.entry_diagnostic_config,
+                )
+            for identifier, runtime in runtime_items:
                 filter_sha = fresh_event_filter_config_fingerprint(
                     runtime.event_filter, self.quantile_bank
                 )
-                if filter_sha not in baseline_by_filter:
-                    baseline_events = enrich_and_filter_frozen_events(
-                        frame,
-                        raw_baseline,
-                        config=runtime.event_filter,
-                        quantile_bank=self.quantile_bank,
-                    ).events
-                    baseline_by_filter[filter_sha] = _diagnose(
-                        tape,
-                        _before_close(baseline_events, tape),
-                        config=self.entry_diagnostic_config,
-                    )
                 filter_baselines[identifier].append(baseline_by_filter[filter_sha])
 
-            feature_rows = decision_feature_rows(
-                frame,
-                velocity_column="1s_mid_speed",
-                acceleration_column="1s_mid_acceleration",
+            feature_rows = BoundDecisionFeatureRows(
+                tape.ticks,
+                decision_feature_rows(
+                    frame,
+                    velocity_column="1s_mid_speed",
+                    acceleration_column="1s_mid_acceleration",
+                ),
             )
-            volatility_feature_rows = volatility_rows(
-                frame, column=FRESH_EXIT_VOLATILITY_COLUMN
+            volatility_feature_rows = BoundVolatilityRows(
+                tape.ticks,
+                volatility_rows(frame, column=FRESH_EXIT_VOLATILITY_COLUMN),
             )
+            prepared_by_gap: dict[int, Any] = {}
+            prepared_by_scenario: dict[str, Any] = {}
+            for scenario_id in scenario_ids:
+                execution = self.executions[scenario_id]
+                gap_ms = execution.maximum_intertick_gap_ms
+                if gap_ms not in prepared_by_gap:
+                    prepared_by_gap[gap_ms] = _prepare_replay_tape(
+                        tape.ticks,
+                        maximum_intertick_gap_ms=gap_ms,
+                        _trusted_validated_ticks=True,
+                    )
+                prepared_by_scenario[scenario_id] = prepared_by_gap[gap_ms]
             for candidate in candidates:
                 variant = self.exit_runtime[candidate.strategy_id]
                 events = events_by_entry[candidate.entry.candidate_id]
@@ -1161,7 +1243,7 @@ class RegisteredFreshResearchPipeline:
                         },
                     )
                     volatility = (
-                        VolatilityFrame(volatility_feature_rows)
+                        volatility_feature_rows.cursor()
                         if variant.policy.requires_volatility
                         else None
                     )
@@ -1171,16 +1253,11 @@ class RegisteredFreshResearchPipeline:
                         execution=execution,
                         volatility=volatility,
                     )
-                    replay = run_fresh_replay(
-                        tape.ticks,
+                    replay = _replay_session(
+                        tape,
                         policy,
                         config=execution,
-                        boundary=ReplayBoundary(
-                            start=tape.bounds.start_utc,
-                            end=tape.bounds.end_utc,
-                            name=anchor,
-                            input_complete_through_end=True,
-                        ),
+                        prepared_replay_tape=prepared_by_scenario[scenario_id],
                     )
                     trades[candidate.strategy_id][scenario_id].extend(replay.trades)
                     censors[candidate.strategy_id][scenario_id] += len(replay.censors)
@@ -1197,10 +1274,17 @@ class RegisteredFreshResearchPipeline:
             )
             del frame, tape, raw_events, grouped, raw_baseline
 
-        provisional: dict[str, tuple[CandidateEvaluation, bool]] = {}
+        entry_summaries: dict[
+            tuple[str, str], tuple[EntryScoreReport, _EntryEdgeSummary]
+        ] = {}
         for candidate in candidates:
             entry_id = candidate.entry.candidate_id
-            combined_entry = combine_entry_diagnostics(tuple(entry_results[entry_id]))
+            summary_key = (entry_id, candidate.entry.entry_sha256)
+            if summary_key in entry_summaries:
+                continue
+            combined_entry = combine_entry_diagnostics(
+                tuple(entry_results[entry_id])
+            )
             entry_report = score_entry_diagnostics(
                 combined_entry,
                 config=self.scoring.entry_metrics,
@@ -1212,6 +1296,14 @@ class RegisteredFreshResearchPipeline:
                 filter_baselines[entry_id],
                 seed_text=f"{context.stage}:{candidate.entry.entry_sha256}",
             )
+            entry_summaries[summary_key] = (entry_report, entry_edge)
+
+        provisional: dict[str, tuple[CandidateEvaluation, bool]] = {}
+        for candidate in candidates:
+            entry_id = candidate.entry.candidate_id
+            entry_report, entry_edge = entry_summaries[
+                (entry_id, candidate.entry.entry_sha256)
+            ]
             reports: dict[str, TradeScoreReport] = {}
             for scenario_id in scenario_ids:
                 censor_count = int(censors[candidate.strategy_id][scenario_id])

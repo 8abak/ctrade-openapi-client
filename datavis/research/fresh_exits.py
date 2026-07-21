@@ -28,6 +28,8 @@ from datavis.research.fresh_replay import (
     ReplayDecision,
     ReplayPreflightSource,
     STRICT_SCALP_LIMIT_MS,
+    _FlatReplaySkipHint,
+    _SparseFlatReplaySource,
 )
 from datavis.research.ticks import Tick
 
@@ -161,6 +163,64 @@ class VolatilityRow:
             raise ValueError("volatility value must be None or finite and positive")
 
 
+class BoundVolatilityRows:
+    """Immutable full-tape volatility binding validated once per session.
+
+    A new :class:`VolatilityFrame` cursor must be created for every replay, but
+    all cursors may share this stateless binding.  Its exact tick-tuple identity
+    check prevents a precomputed value from being reused on another tape while
+    avoiding repeated full-row validation and dictionary construction.
+    """
+
+    __slots__ = ("_rows", "_ticks")
+
+    def __init__(
+        self,
+        ticks: tuple[Tick, ...],
+        rows: Iterable[VolatilityRow],
+    ) -> None:
+        if not isinstance(ticks, tuple):
+            raise TypeError("bound volatility rows require an exact tick tuple")
+        materialized = tuple(rows)
+        if len(materialized) != len(ticks):
+            raise ValueError("bound volatility requires exactly one row per tick")
+        for index, (tick, row) in enumerate(zip(ticks, materialized)):
+            if not isinstance(tick, Tick):
+                raise TypeError(f"ticks[{index}] must be Tick")
+            if not isinstance(row, VolatilityRow):
+                raise TypeError(f"volatility rows[{index}] must be VolatilityRow")
+            if row.tick_index != index:
+                raise ValueError(
+                    "bound volatility rows must be contiguous by tick_index"
+                )
+            if row.tick_id != tick.id or row.timestamp != tick.timestamp:
+                raise ValueError(
+                    "bound volatility row is not attached to its exact tick"
+                )
+        self._ticks = ticks
+        self._rows = materialized
+
+    @property
+    def rows(self) -> tuple[VolatilityRow, ...]:
+        return self._rows
+
+    def validate(self, ticks: Sequence[Tick]) -> None:
+        """Reject every sequence except the exact immutable bound tuple."""
+
+        if ticks is not self._ticks:
+            raise ValueError("bound volatility belongs to a different tick tuple")
+
+    def row_at(self, tick_index: int) -> VolatilityRow | None:
+        if tick_index < 0 or tick_index >= len(self._rows):
+            return None
+        return self._rows[tick_index]
+
+    def cursor(self) -> VolatilityFrame:
+        """Create independent sequential state for one replay."""
+
+        return VolatilityFrame(self)
+
+
 class VolatilityFrame:
     """Exact-row binding for values produced by a separately audited causal feature.
 
@@ -170,19 +230,34 @@ class VolatilityFrame:
     must still be causal upstream.
     """
 
-    def __init__(self, rows: Iterable[VolatilityRow]) -> None:
-        materialized = tuple(rows)
-        indexes = [row.tick_index for row in materialized]
-        if indexes != sorted(indexes):
-            raise ValueError("volatility rows must be sorted by tick_index")
-        if len(indexes) != len(set(indexes)):
-            raise ValueError("only one volatility value is allowed per tick")
+    def __init__(
+        self,
+        rows: Iterable[VolatilityRow] | BoundVolatilityRows,
+    ) -> None:
+        binding = rows if isinstance(rows, BoundVolatilityRows) else None
+        materialized = binding.rows if binding is not None else tuple(rows)
+        if binding is None:
+            indexes = [row.tick_index for row in materialized]
+            if indexes != sorted(indexes):
+                raise ValueError("volatility rows must be sorted by tick_index")
+            if len(indexes) != len(set(indexes)):
+                raise ValueError("only one volatility value is allowed per tick")
+        self._binding = binding
         self._rows = materialized
-        self._by_index = {row.tick_index: row for row in materialized}
+        self._by_index = (
+            None
+            if binding is not None
+            else {row.tick_index: row for row in materialized}
+        )
+        self._binding_validated = False
         self._last_index: int | None = None
         self._last_key: tuple[datetime, int] | None = None
 
     def validate(self, ticks: Sequence[Tick]) -> None:
+        if self._binding is not None:
+            self._binding.validate(ticks)
+            self._binding_validated = True
+            return
         for row in self._rows:
             if row.tick_index >= len(ticks):
                 raise ValueError(
@@ -207,18 +282,45 @@ class VolatilityFrame:
             raise ValueError("ticks must be strictly ordered by (timestamp, id)")
         self._last_index = tick_index
         self._last_key = key
-        row = self._by_index.get(tick_index)
+        if self._binding is not None:
+            if not self._binding_validated:
+                raise RuntimeError(
+                    "bound volatility must be validated before sequential use"
+                )
+            row = self._binding.row_at(tick_index)
+        else:
+            row = self._by_index.get(tick_index)  # type: ignore[union-attr]
         if row is None:
             return None
-        if row.tick_id != tick.id:
+        if self._binding is None and row.tick_id != tick.id:
             raise ValueError(
                 f"volatility at index {tick_index} has tick_id {row.tick_id}, expected {tick.id}"
             )
-        if row.timestamp != tick.timestamp:
+        if self._binding is None and row.timestamp != tick.timestamp:
             raise ValueError(
                 f"volatility at index {tick_index} has a mismatched timestamp"
             )
         return row.value
+
+    def _advance_flat_replay_no_observation(
+        self,
+        after_index: int,
+        through_index: int,
+        through_tick: Tick,
+    ) -> None:
+        """Advance a validated cursor while flat volatility values are unused."""
+
+        if self._last_index != after_index:
+            raise RuntimeError("volatility cursor does not match after_index")
+        if through_index <= after_index:
+            raise ValueError("through_index must be after after_index")
+        if self._binding is not None and not self._binding_validated:
+            raise RuntimeError("bound volatility must be validated before sparse use")
+        key = (through_tick.timestamp, through_tick.id)
+        if self._last_key is not None and key <= self._last_key:
+            raise ValueError("ticks must be strictly ordered by (timestamp, id)")
+        self._last_index = through_index
+        self._last_key = key
 
 
 @dataclass(slots=True)
@@ -305,7 +407,12 @@ class FreshProtectiveExitPolicy:
         self._execution = execution
         self._volatility = volatility
         self._state: _ExitState | None = None
+        self._last_index: int | None = None
         self._last_key: tuple[datetime, int] | None = None
+        self._sparse_flat_supported = bool(
+            isinstance(wrapped, _SparseFlatReplaySource)
+            and (volatility is None or isinstance(volatility, VolatilityFrame))
+        )
 
     @property
     def config(self) -> FreshExitPolicyConfig:
@@ -467,6 +574,50 @@ class FreshProtectiveExitPolicy:
             ),
         }
 
+    def _flat_replay_skip_hint(
+        self, after_index: int
+    ) -> _FlatReplaySkipHint | None:
+        """Delegate flat wakeups only for the audited exact-row stack."""
+
+        if not self._sparse_flat_supported or self._state is not None:
+            return None
+        assert isinstance(self._wrapped, _SparseFlatReplaySource)
+        return self._wrapped._flat_replay_skip_hint(after_index)
+
+    def _advance_flat_replay_no_decision(
+        self,
+        after_index: int,
+        through_index: int,
+        through_tick: Tick,
+    ) -> None:
+        """Advance policy, volatility, and wrapped cursors to one exact row."""
+
+        if not self._sparse_flat_supported:
+            raise RuntimeError("this protective-exit stack cannot replay sparsely")
+        if self._state is not None:
+            raise RuntimeError("an active exit state cannot be skipped")
+        if self._last_index != after_index:
+            raise RuntimeError("protective-exit cursor does not match after_index")
+        if through_index <= after_index:
+            raise ValueError("through_index must be after after_index")
+        key = (through_tick.timestamp, through_tick.id)
+        if self._last_key is not None and key <= self._last_key:
+            raise ValueError("ticks must be strictly ordered by (timestamp, id)")
+        if isinstance(self._volatility, VolatilityFrame):
+            self._volatility._advance_flat_replay_no_observation(
+                after_index,
+                through_index,
+                through_tick,
+            )
+        assert isinstance(self._wrapped, _SparseFlatReplaySource)
+        self._wrapped._advance_flat_replay_no_decision(
+            after_index,
+            through_index,
+            through_tick,
+        )
+        self._last_index = through_index
+        self._last_key = key
+
     def on_tick(
         self,
         tick_index: int,
@@ -476,6 +627,9 @@ class FreshProtectiveExitPolicy:
         key = (tick.timestamp, tick.id)
         if self._last_key is not None and key <= self._last_key:
             raise ValueError("ticks must be strictly ordered by (timestamp, id)")
+        if self._last_index is not None and tick_index <= self._last_index:
+            raise ValueError("tick indexes must be consumed in increasing order")
+        self._last_index = tick_index
         self._last_key = key
 
         current_volatility = (
@@ -544,6 +698,7 @@ class FreshProtectiveExitPolicy:
 
 
 __all__ = [
+    "BoundVolatilityRows",
     "CausalVolatilitySource",
     "DistanceMode",
     "ExitDistance",

@@ -460,6 +460,100 @@ class FreshReplayTests(unittest.TestCase):
         self.assertEqual(result.censors[0].reason, "boundary-open")
         self.assertEqual(result.censors[0].censor_timestamp, boundary.end)
 
+    def test_trusted_session_tuple_matches_default_with_repeat_and_gap(self):
+        points = (
+            Tick(id=1, timestamp=BASE, bid=100.0, ask=100.2),
+            Tick(id=2, timestamp=BASE, bid=100.0, ask=100.2),
+            Tick(
+                id=3,
+                timestamp=BASE + timedelta(milliseconds=1),
+                bid=100.4,
+                ask=100.6,
+            ),
+            Tick(
+                id=4,
+                timestamp=BASE + timedelta(milliseconds=2),
+                bid=100.5,
+                ask=100.7,
+            ),
+            Tick(
+                id=5,
+                timestamp=BASE + timedelta(milliseconds=1_000),
+                bid=100.5,
+                ask=100.7,
+            ),
+            Tick(
+                id=6,
+                timestamp=BASE + timedelta(milliseconds=1_500),
+                bid=100.5,
+                ask=100.7,
+            ),
+            Tick(
+                id=7,
+                timestamp=BASE + timedelta(milliseconds=2_000),
+                bid=100.5,
+                ask=100.7,
+            ),
+            Tick(
+                id=8,
+                timestamp=BASE + timedelta(milliseconds=2_001),
+                bid=100.5,
+                ask=100.7,
+            ),
+        )
+        decisions = frame(
+            points,
+            [
+                (0, "enter_long", "entry"),
+                (2, "exit", "exit"),
+                (4, "enter_long", "blocked-at-gap"),
+                (5, "enter_long", "blocked-during-rearm"),
+                (6, "enter_long", "eligible-after-rearm"),
+            ],
+        )
+        config = execution(
+            entry_latency_ms=0,
+            exit_latency_ms=0,
+            maximum_intertick_gap_ms=600,
+            post_gap_rearm_ms=1_000,
+        )
+
+        checked = run_fresh_replay(points, decisions, config=config)
+        trusted = run_fresh_replay(
+            points,
+            decisions,
+            config=config,
+            _trusted_validated_ticks=True,
+        )
+
+        self.assertEqual(trusted, checked)
+        self.assertEqual(trusted.trades[0].entry_fill_tick_id, 2)
+        self.assertEqual(
+            [item.disposition for item in trusted.decisions],
+            [
+                "scheduled-entry",
+                "scheduled-exit",
+                "ignored-gap-rearm",
+                "ignored-gap-rearm",
+                "scheduled-entry",
+            ],
+        )
+
+    def test_default_tape_validation_remains_enabled_and_trust_requires_tuple(self):
+        malformed = (
+            Tick(id=1, timestamp=BASE, bid=100.0, ask=100.2),
+            Tick(id=1, timestamp=BASE, bid=100.0, ask=100.2),
+        )
+        with self.assertRaisesRegex(ValueError, "duplicate tick id"):
+            run_fresh_replay(malformed, DecisionFrame(), config=execution())
+        with self.assertRaisesRegex(TypeError, "validated tick tuple"):
+            run_fresh_replay(
+                list(malformed),
+                DecisionFrame(),
+                config=execution(),
+                _trusted_validated_ticks=True,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

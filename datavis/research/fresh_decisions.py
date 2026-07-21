@@ -14,6 +14,7 @@ later row while deciding on the current row.
 from __future__ import annotations
 
 import math
+from bisect import bisect_right
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Iterable, Mapping, Sequence
@@ -24,6 +25,7 @@ from datavis.research.fresh_replay import (
     ReplayContext,
     ReplayDecision,
     STRICT_SCALP_LIMIT_MS,
+    _FlatReplaySkipHint,
 )
 from datavis.research.ticks import Tick
 
@@ -62,6 +64,76 @@ class CausalDecisionFeatureRow:
             value = getattr(self, name)
             if value is not None and not math.isfinite(value):
                 raise ValueError(f"{name} must be finite or None")
+
+
+class BoundDecisionFeatureRows:
+    """Immutable full-tape feature binding validated once per session.
+
+    The hot replay path constructs many stateful decision sources over the same
+    session features.  This binding proves once that there is exactly one
+    feature row for every tick and then permits direct positional lookup without
+    rebuilding or rescanning an ``N``-row dictionary for every replay.  The
+    exact validated tick tuple is retained strongly so later preflight checks
+    can reject a different tape in constant time by identity.
+
+    ``ticks`` must be the immutable tuple owned by ``FreshSessionTape``.  Tick
+    ordering and ID uniqueness remain the tape/replay validator's
+    responsibility; this class validates only the exact feature-to-tick bind.
+    """
+
+    __slots__ = ("_rows", "_ticks")
+
+    def __init__(
+        self,
+        ticks: tuple[Tick, ...],
+        rows: Iterable[CausalDecisionFeatureRow],
+    ) -> None:
+        if not isinstance(ticks, tuple):
+            raise TypeError("bound decision features require an exact tick tuple")
+        materialized = tuple(rows)
+        if len(materialized) != len(ticks):
+            raise ValueError(
+                "bound decision features require exactly one row per tick"
+            )
+        for index, (tick, row) in enumerate(zip(ticks, materialized)):
+            if not isinstance(tick, Tick):
+                raise TypeError(f"ticks[{index}] must be Tick")
+            if not isinstance(row, CausalDecisionFeatureRow):
+                raise TypeError(
+                    f"decision feature rows[{index}] must be CausalDecisionFeatureRow"
+                )
+            if row.tick_index != index:
+                raise ValueError(
+                    "bound decision feature rows must be contiguous by tick_index"
+                )
+            if (
+                row.tick_id != tick.id
+                or row.timestamp != tick.timestamp
+                or row.bid != tick.bid
+                or row.ask != tick.ask
+            ):
+                raise ValueError(
+                    "bound decision feature row is not attached to its exact tick"
+                )
+        self._ticks = ticks
+        self._rows = materialized
+
+    @property
+    def rows(self) -> tuple[CausalDecisionFeatureRow, ...]:
+        return self._rows
+
+    def validate(self, ticks: Sequence[Tick]) -> None:
+        """Reject every sequence except the exact immutable bound tuple."""
+
+        if ticks is not self._ticks:
+            raise ValueError(
+                "bound decision features belong to a different tick tuple"
+            )
+
+    def row_at(self, tick_index: int) -> CausalDecisionFeatureRow | None:
+        if tick_index < 0 or tick_index >= len(self._rows):
+            return None
+        return self._rows[tick_index]
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,7 +195,7 @@ class FrozenSignalDecisionSource:
         self,
         events: Iterable[FrozenSignalEvent],
         *,
-        feature_rows: Iterable[CausalDecisionFeatureRow],
+        feature_rows: Iterable[CausalDecisionFeatureRow] | BoundDecisionFeatureRows,
         weakening: MomentumWeakeningExitConfig | None,
         execution: FreshExecutionConfig,
         source_metadata: Mapping[str, object],
@@ -158,20 +230,37 @@ class FrozenSignalDecisionSource:
             prior_index = event.tick_index
             event_indexes.add(event.tick_index)
 
-        selected_features = tuple(feature_rows)
-        feature_indexes = [row.tick_index for row in selected_features]
-        if feature_indexes != sorted(feature_indexes):
-            raise ValueError("feature rows must be ordered by tick_index")
-        if len(feature_indexes) != len(set(feature_indexes)):
-            raise ValueError("only one decision-feature row is allowed per tick")
+        feature_binding = (
+            feature_rows
+            if isinstance(feature_rows, BoundDecisionFeatureRows)
+            else None
+        )
+        selected_features = (
+            feature_binding.rows
+            if feature_binding is not None
+            else tuple(feature_rows)
+        )
+        if feature_binding is None:
+            feature_indexes = [row.tick_index for row in selected_features]
+            if feature_indexes != sorted(feature_indexes):
+                raise ValueError("feature rows must be ordered by tick_index")
+            if len(feature_indexes) != len(set(feature_indexes)):
+                raise ValueError("only one decision-feature row is allowed per tick")
 
         self._events = selected_events
+        self._event_indexes = tuple(event.tick_index for event in selected_events)
         self._events_by_index = {event.tick_index: event for event in selected_events}
         self._features = selected_features
-        self._features_by_index = {row.tick_index: row for row in selected_features}
+        self._feature_binding = feature_binding
+        self._features_by_index = (
+            None
+            if feature_binding is not None
+            else {row.tick_index: row for row in selected_features}
+        )
         self._weakening = weakening
         self._execution = execution
         self._source_metadata = dict(source_metadata)
+        self._last_index: int | None = None
         self._last_key: tuple[datetime, int] | None = None
         self._active_entry_tick_id: int | None = None
         self._weakening_since: datetime | None = None
@@ -180,23 +269,26 @@ class FrozenSignalDecisionSource:
     def validate(self, ticks: Sequence[Tick]) -> None:
         """Reject stale signals or features before any replay state is mutated."""
 
+        if self._feature_binding is not None:
+            self._feature_binding.validate(ticks)
         for event in self._events:
             if event.tick_index >= len(ticks):
                 raise ValueError("event tick_index is outside the tick sequence")
             tick = ticks[event.tick_index]
             if event.tick_id != tick.id or event.timestamp != tick.timestamp:
                 raise ValueError("event row is not bound to its exact replay tick")
-        for row in self._features:
-            if row.tick_index >= len(ticks):
-                raise ValueError("feature tick_index is outside the tick sequence")
-            tick = ticks[row.tick_index]
-            if (
-                row.tick_id != tick.id
-                or row.timestamp != tick.timestamp
-                or row.bid != tick.bid
-                or row.ask != tick.ask
-            ):
-                raise ValueError("feature row is not bound to its exact replay tick")
+        if self._feature_binding is None:
+            for row in self._features:
+                if row.tick_index >= len(ticks):
+                    raise ValueError("feature tick_index is outside the tick sequence")
+                tick = ticks[row.tick_index]
+                if (
+                    row.tick_id != tick.id
+                    or row.timestamp != tick.timestamp
+                    or row.bid != tick.bid
+                    or row.ask != tick.ask
+                ):
+                    raise ValueError("feature row is not bound to its exact replay tick")
 
     def _entry(self, event: FrozenSignalEvent) -> ReplayDecision:
         metadata = {
@@ -230,6 +322,52 @@ class FrozenSignalDecisionSource:
         self._weakening_since = None
         self._best_net_progress_per_unit = -math.inf
 
+    def _flat_replay_skip_hint(
+        self, after_index: int
+    ) -> _FlatReplaySkipHint | None:
+        """Expose the next frozen entry row for private sparse replay."""
+
+        if (
+            not isinstance(after_index, int)
+            or isinstance(after_index, bool)
+            or after_index < 0
+        ):
+            raise ValueError("after_index must be a non-negative integer")
+        position = bisect_right(self._event_indexes, after_index)
+        next_index = (
+            self._event_indexes[position]
+            if position < len(self._event_indexes)
+            else None
+        )
+        return _FlatReplaySkipHint(next_index)
+
+    def _advance_flat_replay_no_decision(
+        self,
+        after_index: int,
+        through_index: int,
+        through_tick: Tick,
+    ) -> None:
+        """Collapse certified flat rows to their exact final cursor state."""
+
+        if self._last_index != after_index:
+            raise RuntimeError("flat replay source cursor does not match after_index")
+        if through_index <= after_index:
+            raise ValueError("through_index must be after after_index")
+        hint = self._flat_replay_skip_hint(after_index)
+        assert hint is not None
+        if (
+            hint.next_wakeup_index is not None
+            and hint.next_wakeup_index <= through_index
+        ):
+            raise RuntimeError("flat replay attempted to skip a frozen signal")
+        key = (through_tick.timestamp, through_tick.id)
+        if self._last_key is not None and key <= self._last_key:
+            raise ValueError("ticks must be consumed in strict (timestamp, id) order")
+        if self._active_entry_tick_id is not None:
+            self._reset_position_state(None)
+        self._last_index = through_index
+        self._last_key = key
+
     def on_tick(
         self,
         tick_index: int,
@@ -239,6 +377,9 @@ class FrozenSignalDecisionSource:
         key = (tick.timestamp, tick.id)
         if self._last_key is not None and key <= self._last_key:
             raise ValueError("ticks must be consumed in strict (timestamp, id) order")
+        if self._last_index is not None and tick_index <= self._last_index:
+            raise ValueError("tick indexes must be consumed in increasing order")
+        self._last_index = tick_index
         self._last_key = key
 
         if context.position is None:
@@ -281,7 +422,11 @@ class FrozenSignalDecisionSource:
         if holding_ms < config.minimum_holding_ms:
             self._weakening_since = None
             return None
-        row = self._features_by_index.get(tick_index)
+        row = (
+            self._feature_binding.row_at(tick_index)
+            if self._feature_binding is not None
+            else self._features_by_index.get(tick_index)  # type: ignore[union-attr]
+        )
         if row is None or row.velocity is None:
             self._weakening_since = None
             return None
@@ -324,6 +469,7 @@ class FrozenSignalDecisionSource:
             },
         )
 __all__ = [
+    "BoundDecisionFeatureRows",
     "CausalDecisionFeatureRow",
     "FrozenSignalDecisionSource",
     "MomentumWeakeningExitConfig",

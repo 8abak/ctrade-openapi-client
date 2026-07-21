@@ -4,6 +4,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from datavis.research.fresh_decisions import (
+    BoundDecisionFeatureRows,
     CausalDecisionFeatureRow,
     FrozenSignalDecisionSource,
     MomentumWeakeningExitConfig,
@@ -180,6 +181,93 @@ class FreshDecisionTests(unittest.TestCase):
         source.on_tick(0, points[0], flat_context())
         with self.assertRaisesRegex(ValueError, "strict"):
             source.on_tick(0, points[0], flat_context())
+
+    def test_bound_features_match_legacy_decisions_and_require_exact_tuple(self):
+        points = (
+            Tick(1, BASE, 99.9, 100.1),
+            Tick(2, BASE, 99.9, 100.1),
+        )
+        rows = (
+            CausalDecisionFeatureRow(0, 1, BASE, 99.9, 100.1, 1.0, -0.5),
+            CausalDecisionFeatureRow(1, 2, BASE, 99.9, 100.1, -0.1, -0.5),
+        )
+        event = FrozenSignalEvent(0, 1, BASE, "long", {"candidateId": "a"})
+        weakening = MomentumWeakeningExitConfig(0, 0, 0.0, 0.0, None, None)
+
+        def build(feature_rows):
+            return FrozenSignalDecisionSource(
+                (event,),
+                feature_rows=feature_rows,
+                weakening=weakening,
+                execution=execution(),
+                source_metadata={"family": "test"},
+            )
+
+        legacy = build(rows)
+        bound_rows = BoundDecisionFeatureRows(points, rows)
+        bound = build(bound_rows)
+        legacy.validate(points)
+        bound.validate(points)
+
+        self.assertEqual(
+            bound.on_tick(0, points[0], flat_context()),
+            legacy.on_tick(0, points[0], flat_context()),
+        )
+        context = position_context("long", points[0], 100.1)
+        self.assertEqual(
+            bound.on_tick(1, points[1], context),
+            legacy.on_tick(1, points[1], context),
+        )
+
+        equal_but_distinct_tuple = tuple(list(points))
+        self.assertIsNot(equal_but_distinct_tuple, points)
+        with self.assertRaisesRegex(ValueError, "different tick tuple"):
+            bound_rows.validate(equal_but_distinct_tuple)
+
+    def test_bound_features_reject_missing_shifted_or_stale_rows(self):
+        points = (tick(0, 0.0, 100.0), tick(1, 0.1, 100.1))
+        first = CausalDecisionFeatureRow(
+            0,
+            points[0].id,
+            points[0].timestamp,
+            points[0].bid,
+            points[0].ask,
+            None,
+            None,
+        )
+        second = CausalDecisionFeatureRow(
+            1,
+            points[1].id,
+            points[1].timestamp,
+            points[1].bid,
+            points[1].ask,
+            None,
+            None,
+        )
+        with self.assertRaisesRegex(ValueError, "one row per tick"):
+            BoundDecisionFeatureRows(points, (first,))
+        shifted = CausalDecisionFeatureRow(
+            1,
+            first.tick_id,
+            first.timestamp,
+            first.bid,
+            first.ask,
+            None,
+            None,
+        )
+        with self.assertRaisesRegex(ValueError, "exact tick"):
+            BoundDecisionFeatureRows(points, (first, shifted))
+        wrong_index = CausalDecisionFeatureRow(
+            2,
+            second.tick_id,
+            second.timestamp,
+            second.bid,
+            second.ask,
+            None,
+            None,
+        )
+        with self.assertRaisesRegex(ValueError, "contiguous"):
+            BoundDecisionFeatureRows(points, (first, wrong_index))
 
     def test_invalid_timing_and_stall_pairs_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "both"):

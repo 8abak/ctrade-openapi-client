@@ -1,1 +1,1 @@
-fresh-xauusd-run-2026-07-22-v10-frozen-115-session-split
+fresh-xauusd-run-2026-07-22-v11-exact-sparse-replay

@@ -3,16 +3,20 @@ from __future__ import annotations
 import unittest
 from dataclasses import replace
 from datetime import datetime, timezone
+from unittest.mock import patch
 
 import pandas as pd
 
+import datavis.research.fresh_event_filters as event_filter_module
 from datavis.research.fresh_entry_diagnostics import FrozenSignalEvent
 from datavis.research.fresh_event_filters import (
     FRESH_REGIME_QUINTILE_RANKS,
     EventFilterVariantSource,
     FreshEventFilterConfig,
+    FreshEventFilterRequest,
     FreshRegimeDefinition,
     derive_bounded_post_discovery_variant_bank,
+    enrich_and_filter_frozen_event_batch,
     enrich_and_filter_frozen_events,
     fresh_event_filter_config_fingerprint,
     fresh_regime_quantile_measurements,
@@ -184,6 +188,120 @@ class FreshEventFilterTests(unittest.TestCase):
             result.events[3].metadata["context"]["session"],
             "london+new-york-overlap|new-york-opening",
         )
+
+    def test_batch_matches_scalar_order_counts_and_prepares_rows_once(self):
+        frame = feature_frame()
+        events = events_for(frame)
+        bank = training_bank()
+        requests = (
+            FreshEventFilterRequest(events=events, config=config()),
+            FreshEventFilterRequest(
+                events=events,
+                config=config(
+                    variant_id="active",
+                    activity="any-major-active",
+                ),
+            ),
+            FreshEventFilterRequest(
+                events=events,
+                config=config(
+                    variant_id="regime-filter",
+                    spread_rank=0.8,
+                    volatility_rank=0.4,
+                ),
+            ),
+        )
+        expected = tuple(
+            enrich_and_filter_frozen_events(
+                frame,
+                request.events,
+                config=request.config,
+                quantile_bank=bank,
+            )
+            for request in requests
+        )
+
+        with patch.object(
+            event_filter_module,
+            "_prepare_rows",
+            wraps=event_filter_module._prepare_rows,
+        ) as prepare_rows:
+            actual = enrich_and_filter_frozen_event_batch(
+                frame,
+                requests,
+                quantile_bank=bank,
+            )
+
+        self.assertEqual(actual, expected)
+        self.assertEqual(prepare_rows.call_count, 1)
+        self.assertEqual([item.input_count for item in actual], [4, 4, 4])
+        self.assertEqual(
+            [[event.tick_id for event in item.events] for item in actual],
+            [[101, 102, 103, 104], [102, 103, 104], [101, 104]],
+        )
+
+    def test_batch_outputs_do_not_alias_metadata_between_requests(self):
+        frame = feature_frame()
+        original = events_for(frame)[:1]
+        shared_config = config()
+        requests = (
+            FreshEventFilterRequest(events=original, config=shared_config),
+            FreshEventFilterRequest(events=original, config=shared_config),
+        )
+
+        first, second = enrich_and_filter_frozen_event_batch(
+            frame,
+            requests,
+            quantile_bank=training_bank(),
+        )
+
+        self.assertEqual(first, second)
+        first_metadata = first.events[0].metadata
+        second_metadata = second.events[0].metadata
+        first_context = first_metadata["context"]
+        second_context = second_metadata["context"]
+        self.assertIsNot(first_metadata, second_metadata)
+        self.assertIsNot(first_context, second_context)
+        self.assertIsNot(first_context["regimes"], second_context["regimes"])
+        self.assertIsNot(
+            first_context["regimes"]["volatility"],
+            second_context["regimes"]["volatility"],
+        )
+        self.assertIsNot(
+            first_context["eventFilter"], second_context["eventFilter"]
+        )
+        self.assertNotIn("context", original[0].metadata)
+
+    def test_batch_ignores_rows_after_its_latest_requested_event(self):
+        frame = feature_frame()
+        events = events_for(frame)[:1]
+        requests = (
+            FreshEventFilterRequest(events=events, config=config()),
+            FreshEventFilterRequest(
+                events=events,
+                config=config(
+                    variant_id="spread",
+                    spread_rank=0.8,
+                ),
+            ),
+        )
+        bank = training_bank()
+        baseline = enrich_and_filter_frozen_event_batch(
+            frame,
+            requests,
+            quantile_bank=bank,
+        )
+
+        malformed_future = frame.copy()
+        for column in ("2s_noise", "spread", "10s_mid_speed", "1s_arrival_rate"):
+            malformed_future.loc[1:, column] = float("inf")
+        repeated = enrich_and_filter_frozen_event_batch(
+            malformed_future,
+            requests,
+            quantile_bank=bank,
+        )
+
+        self.assertEqual(repeated, baseline)
 
     def test_activity_filters_use_civil_opening_and_overlap(self):
         frame = feature_frame()

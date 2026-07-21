@@ -287,6 +287,22 @@ def _validate_ticks(ticks: Iterable[Tick]) -> tuple[Tick, ...]:
     return points
 
 
+def _trusted_tick_tuple(ticks: Iterable[Tick]) -> tuple[Tick, ...]:
+    """Accept a session-source tuple whose integrity was already validated.
+
+    This private path exists only for ``FreshSessionTape.ticks``.  Requiring an
+    existing tuple prevents a purported trusted call from silently consuming or
+    materializing a mutable/generator input, while avoiding another full tape
+    scan for the immutable tuple validated by ``FreshSessionTape``.
+    """
+
+    if not isinstance(ticks, tuple):
+        raise TypeError(
+            "_trusted_validated_ticks requires an already validated tick tuple"
+        )
+    return ticks
+
+
 def _validate_events(
     events: Iterable[FrozenSignalEvent], points: Sequence[Tick]
 ) -> tuple[FrozenSignalEvent, ...]:
@@ -747,8 +763,15 @@ def evaluate_frozen_entries(
     config: EntryDiagnosticConfig,
     boundary: DiagnosticBoundary | None = None,
     scheduling: EntrySchedulingConfig | None = None,
+    _trusted_validated_ticks: bool = False,
 ) -> FreshEntryDiagnosticsResult:
-    """Execute and diagnose frozen events without constructing entry signals."""
+    """Execute and diagnose frozen events without constructing entry signals.
+
+    ``_trusted_validated_ticks`` is an internal performance path exclusively for
+    an immutable ``FreshSessionTape.ticks`` tuple whose type, unique IDs, and
+    strict ``(timestamp, id)`` order were already checked at construction.  The
+    default path always performs the complete independent tape validation.
+    """
 
     if not isinstance(config, EntryDiagnosticConfig):
         raise TypeError("config must be an EntryDiagnosticConfig")
@@ -758,7 +781,13 @@ def evaluate_frozen_entries(
     schedule = scheduling or EntrySchedulingConfig()
     if not isinstance(schedule, EntrySchedulingConfig):
         raise TypeError("scheduling must be an EntrySchedulingConfig")
-    points = _validate_ticks(ticks)
+    if not isinstance(_trusted_validated_ticks, bool):
+        raise TypeError("_trusted_validated_ticks must be boolean")
+    points = (
+        _trusted_tick_tuple(ticks)
+        if _trusted_validated_ticks
+        else _validate_ticks(ticks)
+    )
     selected_events = _validate_events(events, points)
 
     diagnostics: list[FilledEntryDiagnostic] = []
