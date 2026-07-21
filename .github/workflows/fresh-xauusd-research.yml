@@ -106,6 +106,7 @@ jobs:
             psycopg2-binary==2.9.10 \
             python-dotenv==1.1.1
           "${research_python}" -c 'import numpy, pandas, psycopg2, dotenv'
+          "${research_python}" -m unittest discover -p 'test_fresh_*.py'
 
           set +e
           "${research_python}" -m datavis.research.fresh_pipeline_cli \

@@ -51,6 +51,7 @@ FRESH_V2_WINDOW_POLICY = FreshWindowPolicy(
 _REQUIRED_IMPLEMENTATION_FILES = frozenset(
     {
         "datavis/db.py",
+        "datavis/research/__init__.py",
         "datavis/research/fresh_bootstrap.py",
         "datavis/research/fresh_candidate_grid.py",
         "datavis/research/fresh_data.py",

@@ -22,7 +22,12 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from functools import lru_cache
 from numbers import Integral, Real
-from typing import Iterable, Literal, Sequence, TypeAlias
+from typing import Iterable, Literal, Sequence
+
+try:
+    from typing import TypeAlias
+except ImportError:  # pragma: no cover - exercised by the Python 3.9 server
+    TypeAlias = object
 
 import numpy as np
 import pandas as pd

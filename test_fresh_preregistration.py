@@ -37,6 +37,28 @@ REPOSITORY_ROOT = Path(__file__).resolve().parent
 IMPLEMENTATION_FILES = required_fresh_implementation_files()
 
 
+class Python39CompatibilityTests(unittest.TestCase):
+    def test_dataclass_compatibility_drops_only_slots(self) -> None:
+        from datavis.research import _without_dataclass_slots
+
+        calls: list[tuple[type[object], dict[str, object]]] = []
+
+        def recorder(
+            cls: type[object] | None = None, **kwargs: object
+        ) -> object:
+            if cls is None:
+                return lambda selected: recorder(selected, **kwargs)
+            calls.append((cls, dict(kwargs)))
+            return cls
+
+        compatible = _without_dataclass_slots(recorder)
+        self.assertIs(compatible(dict, slots=True, frozen=True), dict)
+        self.assertEqual(calls, [(dict, {"frozen": True})])
+
+    def test_package_init_is_bound_into_implementation_manifest(self) -> None:
+        self.assertIn("datavis/research/__init__.py", IMPLEMENTATION_FILES)
+
+
 def implementation_manifest() -> dict:
     return build_fresh_implementation_manifest(
         repository_root=REPOSITORY_ROOT,
