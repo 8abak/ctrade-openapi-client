@@ -359,11 +359,15 @@ def _session_and_data_specification() -> dict[str, Any]:
         },
         "sortKey": ["timestamp", "id"],
         "sortRequirement": "strictly-increasing",
-        "equalTimestampPolicy": "retain distinct quotes in ascending id order",
-        "duplicatePolicy": {
-            "key": ["symbol", "timestamp", "bid", "ask"],
-            "retention": "lowest-id observation",
-            "priceRoundingBeforeDedupe": False,
+        "equalTimestampPolicy": (
+            "retain every unique-id observation in ascending id order, including "
+            "repeated quote values"
+        ),
+        "repeatedQuotePolicy": {
+            "diagnosticKey": ["symbol", "timestamp", "bid", "ask"],
+            "retention": "every observation with a unique database id",
+            "interpretation": "one additional tick-volume event, never a defect",
+            "priceRoundingBeforeComparison": False,
         },
         "brokerSession": {
             "anchorDays": "Monday through Friday",

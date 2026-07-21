@@ -122,7 +122,7 @@ class FreshDbSourceTests(unittest.TestCase):
         self.assertEqual(inventory.raw_row_count, 5)
         self.assertEqual(inventory.normalized_quote_count, 5)
 
-    def test_exact_dedup_preserves_equal_time_quote_changes_and_offsets(self):
+    def test_repeated_quotes_are_retained_as_volume_events_across_chunks(self):
         bounds = broker_session_bounds(date(2026, 1, 15))
         moment = (bounds.start_utc + timedelta(seconds=1)).astimezone(SYDNEY)
         connection = FakeConnection(
@@ -144,10 +144,10 @@ class FreshDbSourceTests(unittest.TestCase):
             cursor_name="dedup_test",
         )
 
-        self.assertEqual([item.tick.id for item in emitted], [10, 12, 14])
+        self.assertEqual([item.tick.id for item in emitted], [10, 11, 12, 13, 14])
         self.assertEqual(inventory.raw_row_count, 5)
         self.assertEqual(inventory.valid_quote_count, 5)
-        self.assertEqual(inventory.normalized_quote_count, 3)
+        self.assertEqual(inventory.normalized_quote_count, 5)
         self.assertEqual(inventory.duplicate_quote_count, 2)
         self.assertEqual(inventory.duplicate_group_count, 1)
         self.assertEqual(inventory.locked_quote_count, 1)
@@ -317,6 +317,19 @@ class FreshDbSourceTests(unittest.TestCase):
             (
                 "unique",
                 [quote(1, moment), quote(1, moment + timedelta(seconds=1))],
+                "duplicate tick id",
+            ),
+            (
+                "unique_crossed",
+                [
+                    quote(1, moment),
+                    quote(
+                        1,
+                        moment + timedelta(seconds=1),
+                        bid=101.0,
+                        ask=100.0,
+                    ),
+                ],
                 "duplicate tick id",
             ),
         )

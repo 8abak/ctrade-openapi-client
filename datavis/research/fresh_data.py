@@ -6,7 +6,8 @@ are ignored.  Rows are never sorted.  Their canonical observation order must be
 strictly increasing by ``(timestamp in UTC, database id)``.
 
 The scanner keeps only one session's distribution samples and one equal-time
-deduplication group in memory.  Retained quotes may be consumed through a
+repeated-quote diagnostic group in memory.  Every valid record with a unique id
+is retained as a separate tick-volume event and may be consumed through a
 callback, so a multi-million-row corpus need not be materialized.  This module
 contains no labels, barriers, trades, or outcomes.
 """
@@ -598,9 +599,9 @@ def scan_fresh_csv(
 ) -> FreshCorpusInventory:
     """Scan ordered CSV exports with bounded memory and optional tick delivery.
 
-    ``on_tick`` is called exactly once for each retained executable quote,
-    including quotes assigned to maintenance or no-session time.  It is never
-    called for invalid rows or exact collector duplicates.
+    ``on_tick`` is called exactly once for every valid unique-id executable
+    quote, including repeated quote values and quotes assigned to maintenance
+    or no-session time.  It is never called for invalid rows.
     """
 
     settings = config
@@ -773,7 +774,6 @@ def scan_fresh_csv(
                             status_state.duplicate_groups += 1
                             if active_session is not None:
                                 active_session.duplicate_groups += 1
-                        continue
                     equal_time_keys.add(quote_key)
 
                     broker_tick = BrokerTick(

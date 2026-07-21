@@ -119,7 +119,7 @@ class FreshSessionTests(unittest.TestCase):
         )
         self.assertEqual(sunday_open.anchor, date(2026, 1, 19))
 
-    def test_exact_duplicate_collapse_preserves_quote_transitions_and_lowest_id(self):
+    def test_repeated_quotes_are_counted_but_all_unique_id_events_are_retained(self):
         moment = datetime(2026, 1, 14, 23, 0, tzinfo=UTC)
         raw = [
             tick(10, moment, 100.0, 100.2),
@@ -133,14 +133,24 @@ class FreshSessionTests(unittest.TestCase):
         ]
         result = normalize_broker_ticks(raw)
         self.assertEqual(result.input_count, 6)
-        self.assertEqual(result.retained_count, 4)
+        self.assertEqual(result.retained_count, 6)
         self.assertEqual(result.duplicate_count, 2)
         self.assertEqual(result.duplicate_group_count, 1)
-        self.assertEqual(result.dropped_ids, (11, 13))
-        self.assertEqual([item.id for item in result.ticks], [10, 12, 14, 1])
+        self.assertEqual(result.dropped_ids, ())
+        self.assertEqual([item.id for item in result.ticks], [10, 11, 12, 13, 14, 1])
         self.assertEqual(result.ticks[0].id, 10)
-        self.assertEqual(result.ticks[1].bid, 100.1)
-        self.assertEqual(result.ticks[2].symbol, "XAUAUD")
+        self.assertEqual(result.ticks[2].bid, 100.1)
+        self.assertEqual(result.ticks[4].symbol, "XAUAUD")
+
+    def test_duplicate_database_id_is_structural_even_at_a_later_timestamp(self):
+        moment = datetime(2026, 1, 14, 23, 0, tzinfo=UTC)
+        with self.assertRaisesRegex(ValueError, "duplicate tick id"):
+            normalize_broker_ticks(
+                [
+                    tick(10, moment, 100.0, 100.2),
+                    tick(10, moment + timedelta(milliseconds=1), 100.0, 100.2),
+                ]
+            )
 
     def test_disordered_input_is_rejected_without_sorting(self):
         first = datetime(2026, 1, 14, 23, 0, tzinfo=UTC)
@@ -150,7 +160,7 @@ class FreshSessionTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(ValueError, "disorder"):
             normalize_broker_ticks([tick(2, first), tick(1, first)])
-        with self.assertRaisesRegex(ValueError, "disorder"):
+        with self.assertRaisesRegex(ValueError, "duplicate tick id"):
             normalize_broker_ticks([tick(1, first), tick(1, first)])
 
     def test_partition_reports_session_maintenance_and_no_session_separately(self):

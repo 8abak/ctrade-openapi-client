@@ -70,14 +70,14 @@ class FreshDataTests(unittest.TestCase):
             writer.writerows(rows)
         return path
 
-    def test_cross_chunk_dedup_preserves_equal_time_quote_changes_and_timezone(self):
+    def test_cross_chunk_repeated_quotes_are_retained_as_volume_events(self):
         bounds = broker_session_bounds(date(2026, 1, 15))
         moment = (bounds.start_utc + timedelta(seconds=1)).astimezone(SYDNEY)
         path = self.write_csv(
             "equal.csv",
             [
                 row(10, moment, 100.0, 100.2),
-                # The same instant in another offset remains an exact duplicate.
+                # The same quote in another offset remains a separate event.
                 row(11, moment.astimezone(UTC), 100.0, 100.2),
                 row(12, moment, 100.1, 100.3),
                 row(13, moment + timedelta(seconds=1), 100.1, 100.3),
@@ -90,21 +90,21 @@ class FreshDataTests(unittest.TestCase):
             on_tick=emitted.append,
         )
 
-        self.assertEqual([item.tick.id for item in emitted], [10, 12, 13])
+        self.assertEqual([item.tick.id for item in emitted], [10, 11, 12, 13])
         self.assertEqual(emitted[0].tick.timestamp.utcoffset(), timedelta(hours=11))
         self.assertEqual(inventory.input_row_count, 4)
-        self.assertEqual(inventory.normalized_quote_count, 3)
+        self.assertEqual(inventory.normalized_quote_count, 4)
         self.assertEqual(inventory.duplicate_quote_count, 1)
         self.assertEqual(inventory.duplicate_group_count, 1)
         session = inventory.session_for_anchor(bounds.anchor)
         self.assertEqual(session.raw_row_count, 4)
-        self.assertEqual(session.normalized_quote_count, 3)
-        self.assertEqual(session.interarrival_seconds.count, 2)
+        self.assertEqual(session.normalized_quote_count, 4)
+        self.assertEqual(session.interarrival_seconds.count, 3)
         self.assertEqual(session.interarrival_seconds.minimum, 0.0)
-        self.assertEqual(session.interarrival_seconds.median, 0.5)
-        self.assertAlmostEqual(session.interarrival_seconds.p95, 0.95)
+        self.assertEqual(session.interarrival_seconds.median, 0.0)
+        self.assertAlmostEqual(session.interarrival_seconds.p95, 0.9)
 
-    def test_dedup_and_order_state_cross_file_boundaries(self):
+    def test_repeated_quote_and_order_state_cross_file_boundaries(self):
         bounds = broker_session_bounds(date(2026, 1, 15))
         moment = bounds.start_utc + timedelta(seconds=1)
         first = self.write_csv("one.csv", [row(1, moment, 100.0, 100.2)])
@@ -121,7 +121,7 @@ class FreshDataTests(unittest.TestCase):
             config=config(chunk_rows=1),
             on_tick=emitted.append,
         )
-        self.assertEqual([item.tick.id for item in emitted], [1, 3])
+        self.assertEqual([item.tick.id for item in emitted], [1, 2, 3])
         self.assertEqual(inventory.duplicate_quote_count, 1)
         self.assertEqual([item.row_count for item in inventory.sources], [1, 2])
 

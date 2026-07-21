@@ -332,6 +332,17 @@ class FreshFeatureTests(unittest.TestCase):
         self.assertTrue(
             math.isnan(float(same_time_frame.loc[1, "kalman_velocity_change"]))
         )
+        repeated_quote_events = [
+            quote(0, 0.0, 100.0),
+            quote(1, 0.25, 100.0),
+            quote(2, 0.25, 100.0),
+            quote(3, 0.5, 100.0),
+        ]
+        repeated_frame = compute_fresh_features(
+            repeated_quote_events, config=TEST_CONFIG
+        )
+        self.assertEqual(float(repeated_frame.loc[3, "500ms_tick_count"]), 4.0)
+        self.assertEqual(float(repeated_frame.loc[3, "500ms_arrival_rate"]), 6.0)
         decreasing_same_time = [quote(1, 0.0, 100.0), quote(0, 0.0, 100.1)]
         with self.assertRaisesRegex(ValueError, r"\(timestamp, id\)"):
             compute_fresh_features(decreasing_same_time, config=TEST_CONFIG)

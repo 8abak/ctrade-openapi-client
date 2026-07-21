@@ -382,6 +382,32 @@ class FreshReplayTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"\(timestamp, id\)"):
             run_fresh_replay(decreasing_id, DecisionFrame(), config=execution())
 
+    def test_exact_repeated_quote_is_a_separate_executable_tick(self):
+        same = BASE
+        points = [
+            Tick(id=1, timestamp=same, bid=100.0, ask=100.2),
+            Tick(id=2, timestamp=same, bid=100.0, ask=100.2),
+            Tick(
+                id=3,
+                timestamp=same + timedelta(milliseconds=1),
+                bid=100.3,
+                ask=100.5,
+            ),
+            Tick(
+                id=4,
+                timestamp=same + timedelta(milliseconds=2),
+                bid=100.4,
+                ask=100.6,
+            ),
+        ]
+        result = run_fresh_replay(
+            points,
+            frame(points, [(0, "enter_long", "entry"), (2, "exit", "exit")]),
+            config=execution(entry_latency_ms=0, exit_latency_ms=0),
+        )
+        self.assertEqual(result.trades[0].entry_fill_tick_id, 2)
+        self.assertEqual(result.trades[0].entry_fill_timestamp, same)
+
     def test_deadline_cannot_be_configured_past_one_minute(self):
         with self.assertRaisesRegex(ValueError, "60-second"):
             execution(actual_fill_deadline_ms=60_001)

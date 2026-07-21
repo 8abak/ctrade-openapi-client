@@ -1,11 +1,12 @@
 """Outcome-blind source inventory and normalized-corpus fingerprints.
 
 Inventory records contain data-integrity facts only: scheduled bounds, row and
-deduplication counts, quote validity, boundary coverage, and unexpected feed
-gaps.  They intentionally contain no return, movement, barrier, signal, or P&L
-measure.  A normalized tick digest is updated in streaming order so later
-research can prove it used the same executable quote corpus without exposing
-the quotes in the manifest.
+repeated-quote counts, quote validity, boundary coverage, and unexpected feed
+gaps.  Repeated quote values with distinct ids remain separate tick-volume
+events.  The records intentionally contain no return, movement, barrier,
+signal, or P&L measure.  A normalized tick digest is updated in streaming order
+so later research can prove it used the same executable quote corpus without
+exposing the quotes in the manifest.
 """
 
 from __future__ import annotations
@@ -26,8 +27,8 @@ from datavis.research.fresh_protocol import canonical_hash
 from datavis.research.fresh_sessions import AssignedBrokerTick, broker_session_bounds
 
 
-INVENTORY_SCHEMA = "fresh-xauusd-source-inventory/v2"
-CORPUS_SCHEMA = "fresh-xauusd-normalized-corpus/v1"
+INVENTORY_SCHEMA = "fresh-xauusd-source-inventory/v3"
+CORPUS_SCHEMA = "fresh-xauusd-normalized-corpus/v2"
 _UTC = timezone.utc
 
 
@@ -58,7 +59,7 @@ def scan_and_fingerprint_db_session(
     cursor_name: str,
     on_tick: Callable[[AssignedBrokerTick], None] | None = None,
 ) -> FreshScannedSession:
-    """Scan once, hash every retained quote, and optionally forward the quote."""
+    """Scan once, hash every valid unique-id quote, and optionally forward it."""
 
     digest = hashlib.sha256()
 
@@ -189,7 +190,11 @@ def build_fresh_inventory_manifests(
             "interval": "half-open",
         },
         "sortKey": ["timestamp UTC", "id"],
-        "exactDuplicateKey": ["symbol", "timestamp UTC", "bid", "ask"],
+        "repeatedQuoteDiagnosticKey": ["symbol", "timestamp UTC", "bid", "ask"],
+        "repeatedQuotePolicy": (
+            "retain every record with a unique id as a separate tick-volume unit; "
+            "counts are informational and never an exclusion reason"
+        ),
         "querySha256": query_sha,
         "dataConfig": {
             "sessionAudit": asdict(config.session_audit),
@@ -219,7 +224,10 @@ def build_fresh_inventory_manifests(
             "price": "IEEE-754 float.hex",
             "separator": "ASCII unit-separator with newline records",
             "order": ["timestamp UTC", "id"],
-            "deduplication": "exact quote key; retain lowest ordered id",
+            "repeatedQuoteHandling": (
+                "retain every record with a unique id as a separate event and "
+                "tick-volume unit"
+            ),
         },
         "sessions": [
             {

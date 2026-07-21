@@ -82,11 +82,15 @@ class FreshSessionTape:
         if not self.ticks:
             raise ValueError("an eligible session tape cannot be empty")
         previous: tuple[Any, int] | None = None
+        seen_ids: set[int] = set()
         for position, tick in enumerate(self.ticks):
             if not isinstance(tick, Tick):
                 raise TypeError(f"ticks[{position}] must be Tick")
             if not self.bounds.contains(tick.timestamp):
                 raise ValueError("session tape contains a tick outside its bounds")
+            if tick.id in seen_ids:
+                raise ValueError(f"duplicate tick id in session tape: {tick.id}")
+            seen_ids.add(tick.id)
             key = (tick.timestamp, tick.id)
             if previous is not None and key <= previous:
                 raise ValueError("session ticks must be strictly ordered")

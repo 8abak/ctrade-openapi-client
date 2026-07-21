@@ -11,11 +11,14 @@ from datavis.research.fresh_entry_diagnostics import (
     FrozenSignalEvent,
 )
 from datavis.research.fresh_session_eval import (
+    FreshSessionTape,
     combine_entry_diagnostics,
     corpus_bindings_from_manifest,
     decision_feature_rows,
     volatility_rows,
 )
+from datavis.research.fresh_sessions import broker_session_bounds
+from datavis.research.ticks import Tick
 
 
 UTC = timezone.utc
@@ -45,6 +48,37 @@ def rejection(position: int) -> EntryDiagnosticRejection:
 
 
 class FreshSessionEvaluationTests(unittest.TestCase):
+    def test_session_tape_retains_repeated_quotes_but_rejects_reused_ids(self):
+        bounds = broker_session_bounds("2026-01-02")
+        first_time = bounds.start_utc + timedelta(seconds=1)
+        repeated_quotes = (
+            Tick(id=1, timestamp=first_time, bid=100.0, ask=100.2),
+            Tick(id=2, timestamp=first_time, bid=100.0, ask=100.2),
+        )
+        tape = FreshSessionTape(
+            anchor="2026-01-02",
+            bounds=bounds,
+            ticks=repeated_quotes,
+            normalized_sha256="a" * 64,
+        )
+        self.assertEqual([tick.id for tick in tape.ticks], [1, 2])
+
+        with self.assertRaisesRegex(ValueError, "duplicate tick id"):
+            FreshSessionTape(
+                anchor="2026-01-02",
+                bounds=bounds,
+                ticks=(
+                    repeated_quotes[0],
+                    Tick(
+                        id=1,
+                        timestamp=first_time + timedelta(milliseconds=1),
+                        bid=100.0,
+                        ask=100.2,
+                    ),
+                ),
+                normalized_sha256="b" * 64,
+            )
+
     def test_corpus_bindings_require_unique_chronological_sessions(self):
         manifest = {
             "sessions": [

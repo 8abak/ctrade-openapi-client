@@ -11,13 +11,14 @@ The scanner validates the database stream before exposing each retained quote:
 * rows must be strictly ordered by ``(timestamp in UTC, id)``;
 * ids must be globally unique within the requested session;
 * symbol, bid, ask, and non-crossed spread invariants must hold; and
-* only exact ``(symbol, timestamp, bid, ask)`` collector duplicates collapse.
+* every record with a unique id remains a separate tick-volume event.
 
-Equal-timestamp price changes remain separate observations.  The callback API
-keeps quote delivery streaming; only compact id intervals, the current
-equal-time deduplication group, and detected gap records are retained in
-memory.  Transaction ownership remains with the caller and this module never
-commits, rolls back, or mutates the connection.
+Exact repeated quote values are counted for audit but are not defects and are
+never collapsed.  The callback API keeps quote delivery streaming; only compact
+id intervals, the current equal-time repeated-quote diagnostic group, and
+detected gap records are retained in memory.  Transaction ownership remains
+with the caller and this module never commits, rolls back, or mutates the
+connection.
 """
 
 from __future__ import annotations
@@ -446,6 +447,17 @@ def scan_fresh_db_session(
                         bounds=bounds,
                     )
                 except _InvalidExecutableQuote as exc:
+                    order_key = (exc.timestamp_utc, exc.tick_id)
+                    if previous_key is not None and order_key <= previous_key:
+                        raise FreshDbSourceError(
+                            f"database row {raw_count}: rows must be strictly ordered "
+                            "by (timestamp UTC, id)"
+                        ) from exc
+                    previous_key = order_key
+                    if not seen_ids.add(exc.tick_id):
+                        raise FreshDbSourceError(
+                            f"database row {raw_count}: duplicate tick id {exc.tick_id}"
+                        ) from exc
                     invalid_count += 1
                     if len(invalid_samples) < config.maximum_issue_samples:
                         invalid_samples.append(
@@ -482,7 +494,6 @@ def scan_fresh_db_session(
                     if quote_key not in equal_time_duplicate_groups:
                         equal_time_duplicate_groups.add(quote_key)
                         duplicate_group_count += 1
-                    continue
                 equal_time_quote_keys.add(quote_key)
 
                 normalized_count += 1

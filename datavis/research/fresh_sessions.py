@@ -30,7 +30,7 @@ BrokerTimestampStatus = Literal["session", "maintenance", "no_session"]
 
 @dataclass(frozen=True, slots=True)
 class BrokerTick:
-    """A raw executable quote with the symbol required for exact deduplication."""
+    """One raw executable quote event identified by its database id."""
 
     id: int
     symbol: str
@@ -64,7 +64,7 @@ class BrokerTick:
 
     @property
     def exact_quote_key(self) -> tuple[str, datetime, float, float]:
-        """Collector-duplicate key; intentionally excludes id and derived fields."""
+        """Repeated-quote diagnostic key; intentionally excludes the event id."""
 
         return (self.symbol, self.timestamp_utc, float(self.bid), float(self.ask))
 
@@ -100,6 +100,13 @@ class BrokerTimestampAssignment:
 
 @dataclass(frozen=True, slots=True)
 class DuplicateCollapseResult:
+    """Legacy-named normalization result that never collapses unique-id events.
+
+    ``duplicate_count`` and ``duplicate_group_count`` describe repeated quote
+    values for audit purposes.  They are not defects.  ``dropped_ids`` remains
+    for compatibility and is always empty.
+    """
+
     ticks: tuple[BrokerTick, ...]
     input_count: int
     duplicate_count: int
@@ -325,13 +332,17 @@ def assign_broker_timestamp(timestamp: datetime) -> BrokerTimestampAssignment:
 def validate_ordered_broker_ticks(
     ticks: Iterable[BrokerTick],
 ) -> tuple[BrokerTick, ...]:
-    """Materialize ticks and reject any non-increasing ``(timestamp, id)`` key."""
+    """Materialize ticks and enforce unique ids and causal observation order."""
 
     points = tuple(ticks)
     previous_key: tuple[datetime, int] | None = None
+    seen_ids: set[int] = set()
     for index, tick in enumerate(points):
         if not isinstance(tick, BrokerTick):
             raise TypeError(f"ticks[{index}] is not a BrokerTick")
+        if tick.id in seen_ids:
+            raise ValueError(f"duplicate tick id at index {index}: {tick.id}")
+        seen_ids.add(tick.id)
         key = (tick.timestamp_utc, tick.id)
         if previous_key is not None and key <= previous_key:
             raise ValueError(
@@ -343,32 +354,29 @@ def validate_ordered_broker_ticks(
 
 
 def normalize_broker_ticks(ticks: Iterable[BrokerTick]) -> DuplicateCollapseResult:
-    """Validate order and collapse only exact collector quote duplicates.
+    """Validate order and retain every quote event with a unique id.
 
-    For each ``(symbol, timestamp, bid, ask)`` key the lowest-id observation is
-    retained.  Equal-time observations with a different symbol, bid, or ask
-    remain independent quotes.  No sorting or price rounding is performed.
+    Repeated ``(symbol, timestamp, bid, ask)`` values are counted for audit but
+    remain independent tick-volume units.  No sorting, price rounding, or quote
+    collapse is performed.
     """
 
     points = validate_ordered_broker_ticks(ticks)
-    retained: list[BrokerTick] = []
     seen: set[tuple[str, datetime, float, float]] = set()
     duplicate_groups: set[tuple[str, datetime, float, float]] = set()
-    dropped_ids: list[int] = []
+    duplicate_count = 0
     for tick in points:
         key = tick.exact_quote_key
         if key in seen:
             duplicate_groups.add(key)
-            dropped_ids.append(tick.id)
-            continue
+            duplicate_count += 1
         seen.add(key)
-        retained.append(tick)
     return DuplicateCollapseResult(
-        ticks=tuple(retained),
+        ticks=points,
         input_count=len(points),
-        duplicate_count=len(dropped_ids),
+        duplicate_count=duplicate_count,
         duplicate_group_count=len(duplicate_groups),
-        dropped_ids=tuple(dropped_ids),
+        dropped_ids=(),
     )
 
 
