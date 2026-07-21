@@ -22,7 +22,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from functools import lru_cache
 from numbers import Integral, Real
-from typing import Iterable, Literal, Sequence
+from typing import Iterable, Literal, Sequence, Union
 
 try:
     from typing import TypeAlias
@@ -379,11 +379,13 @@ class QuoteTranslationPressureSignalConfig:
 
 
 FreshSignalConfig: TypeAlias = (
-    TrendAccelerationSignalConfig
-    | PullbackResumptionSignalConfig
-    | CountertrendPivotSignalConfig
-    | CompressionExpansionBreakoutSignalConfig
-    | QuoteTranslationPressureSignalConfig
+    Union[
+        TrendAccelerationSignalConfig,
+        PullbackResumptionSignalConfig,
+        CountertrendPivotSignalConfig,
+        CompressionExpansionBreakoutSignalConfig,
+        QuoteTranslationPressureSignalConfig,
+    ]
 )
 
 
