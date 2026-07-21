@@ -97,11 +97,18 @@ jobs:
           eval "$(sudo cat /etc/datavis.env)"
           set +a
 
-          python3 -c 'import numpy, pandas, psycopg2, dotenv' >/dev/null 2>&1 || \
-            python3 -m pip install --user numpy pandas psycopg2-binary python-dotenv
+          research_venv="${worktree}/.fresh-venv"
+          python3 -m venv "${research_venv}"
+          research_python="${research_venv}/bin/python"
+          "${research_python}" -m pip install --disable-pip-version-check \
+            numpy==2.1.3 \
+            pandas==2.2.3 \
+            psycopg2-binary==2.9.10 \
+            python-dotenv==1.1.1
+          "${research_python}" -c 'import numpy, pandas, psycopg2, dotenv'
 
           set +e
-          python3 -m datavis.research.fresh_pipeline_cli \
+          "${research_python}" -m datavis.research.fresh_pipeline_cli \
             --repository-root "${worktree}" \
             --output-dir "${output}" \
             --execute 2>&1 | tee "${log_path}"
