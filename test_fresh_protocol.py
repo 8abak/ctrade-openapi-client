@@ -8,7 +8,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from datavis.research.fresh_protocol import (
-    FreshWindowPolicy,
+    REGISTERED_FRESH_WINDOW_POLICY,
     append_fresh_record,
     authorize_evaluation,
     build_fresh_split_manifest,
@@ -19,12 +19,7 @@ from datavis.research.fresh_protocol import (
 
 
 INVENTORY_HASH = "a" * 64
-POLICY = FreshWindowPolicy(
-    discovery_sessions=46,
-    walk_forward_sessions=(12, 12, 12),
-    validation_sessions=21,
-    holdout_sessions=36,
-)
+POLICY = REGISTERED_FRESH_WINDOW_POLICY
 
 
 def weekday_anchors(count: int) -> list[str]:
@@ -39,25 +34,25 @@ def weekday_anchors(count: int) -> list[str]:
 
 class FreshProtocolTests(unittest.TestCase):
     def test_split_is_exact_chronological_and_holdout_is_newest(self):
-        days = weekday_anchors(139)
+        days = weekday_anchors(POLICY.required_sessions)
         manifest = build_fresh_split_manifest(
             days,
             inventory_sha256=INVENTORY_HASH,
             excluded_sessions=[{"sessionAnchor": "2026-01-01", "reason": "missing prefix"}],
             policy=POLICY,
         )
-        self.assertEqual(manifest["sessionCount"], 139)
-        self.assertEqual(manifest["windows"]["discovery"]["sessionCount"], 46)
-        self.assertEqual(manifest["windows"]["validation"]["sessionCount"], 21)
-        self.assertEqual(manifest["windows"]["holdout"]["sessionCount"], 36)
+        self.assertEqual(manifest["sessionCount"], 115)
+        self.assertEqual(manifest["windows"]["discovery"]["sessionCount"], 40)
+        self.assertEqual(manifest["windows"]["validation"]["sessionCount"], 15)
+        self.assertEqual(manifest["windows"]["holdout"]["sessionCount"], 30)
         self.assertEqual(
-            manifest["windows"]["holdout"]["firstSessionAnchor"], days[-36]
+            manifest["windows"]["holdout"]["firstSessionAnchor"], days[-30]
         )
         self.assertEqual(manifest["windows"]["holdout"]["lastSessionAnchor"], days[-1])
         json.dumps(manifest, allow_nan=False)
 
     def test_weekend_and_nonchronological_anchors_are_rejected(self):
-        days = weekday_anchors(139)
+        days = weekday_anchors(POLICY.required_sessions)
         saturday = "2026-01-03"
         with self.assertRaisesRegex(ValueError, "weekdays"):
             build_fresh_split_manifest(
@@ -75,16 +70,16 @@ class FreshProtocolTests(unittest.TestCase):
             )
 
     def test_wrong_session_count_and_missing_partial_evidence_are_rejected(self):
-        with self.assertRaisesRegex(ValueError, "requires 139"):
+        with self.assertRaisesRegex(ValueError, "requires 115"):
             build_fresh_split_manifest(
-                weekday_anchors(138),
+                weekday_anchors(POLICY.required_sessions - 1),
                 inventory_sha256=INVENTORY_HASH,
                 excluded_sessions=[{"reason": "partial"}],
                 policy=POLICY,
             )
         with self.assertRaisesRegex(ValueError, "excluded_sessions"):
             build_fresh_split_manifest(
-                weekday_anchors(139),
+                weekday_anchors(POLICY.required_sessions),
                 inventory_sha256=INVENTORY_HASH,
                 excluded_sessions=[],
                 policy=POLICY,
@@ -92,7 +87,7 @@ class FreshProtocolTests(unittest.TestCase):
 
     def test_holdout_requires_one_frozen_authorized_unconsumed_attempt(self):
         manifest = build_fresh_split_manifest(
-            weekday_anchors(139),
+            weekday_anchors(POLICY.required_sessions),
             inventory_sha256=INVENTORY_HASH,
             excluded_sessions=[{"reason": "partial"}],
             policy=POLICY,

@@ -159,7 +159,7 @@ class FreshPreregistrationTests(unittest.TestCase):
         )
         self.assertEqual(first, second)
         self.assertEqual(first["schema"], PREREGISTRATION_SCHEMA)
-        self.assertEqual(first["chronologicalWindowPolicy"]["totalEligibleSessions"], 139)
+        self.assertEqual(first["chronologicalWindowPolicy"]["totalEligibleSessions"], 115)
         self.assertEqual(first["sourceBindings"]["inventorySha256"], "a" * 64)
         self.assertEqual(first["sourceBindings"]["corpusManifestSha256"], "b" * 64)
         self.assertEqual(
@@ -176,7 +176,7 @@ class FreshPreregistrationTests(unittest.TestCase):
             first["preregistrationSha256"],
         )
 
-    def test_split_must_be_exact_hash_valid_dst_aware_and_139_sessions(self):
+    def test_split_must_be_exact_hash_valid_dst_aware_and_registered_sessions(self):
         split = split_manifest()
 
         tampered = copy.deepcopy(split)

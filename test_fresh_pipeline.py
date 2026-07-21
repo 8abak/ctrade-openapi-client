@@ -9,6 +9,7 @@ from datavis.research.fresh_pipeline import (
     BASELINE_MINIMUM_UPLIFT,
     SESSION_CLOSE_SAFETY_MS,
     _baseline_events,
+    _bound_discovery_session_count,
     _cluster_entry_edge,
 )
 from datavis.research.fresh_pipeline_cli import main
@@ -34,6 +35,16 @@ def result(*, successes_10: int, successes_30: int, count: int):
 
 
 class FreshPipelineTests(unittest.TestCase):
+    def test_discovery_count_comes_from_bound_preregistration_policy(self):
+        preregistration = {
+            "chronologicalWindowPolicy": {"discovery_sessions": 40}
+        }
+        self.assertEqual(_bound_discovery_session_count(preregistration), 40)
+        with self.assertRaisesRegex(ValueError, "discovery-session count"):
+            _bound_discovery_session_count(
+                {"chronologicalWindowPolicy": {"discovery_sessions": 0}}
+            )
+
     def test_direction_matched_cluster_uplift_is_deterministic(self):
         candidates = [result(successes_10=8, successes_30=9, count=10) for _ in range(12)]
         baselines = [result(successes_10=4, successes_30=5, count=10) for _ in range(12)]

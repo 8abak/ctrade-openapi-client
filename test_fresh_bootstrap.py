@@ -11,6 +11,7 @@ from typing import Any, Iterator
 from uuid import uuid4
 
 from datavis.research.fresh_bootstrap import (
+    FRESH_REGISTERED_ELIGIBLE_ANCHORS,
     FRESH_SOURCE_FIRST_ANCHOR,
     FreshBootstrapConfig,
     build_fresh_source_bootstrap,
@@ -92,13 +93,33 @@ class FreshBootstrapTests(unittest.TestCase):
         config = registered_fresh_bootstrap_config()
         self.assertEqual(config.first_anchor, FRESH_SOURCE_FIRST_ANCHOR)
         self.assertEqual(config.first_anchor, date(2025, 12, 31))
-        self.assertEqual(config.expected_eligible_sessions, 139)
-        self.assertEqual(config.window_policy.required_sessions, 139)
+        self.assertEqual(config.expected_eligible_sessions, 115)
+        self.assertEqual(config.window_policy.required_sessions, 115)
+        self.assertEqual(config.expected_eligible_anchors, FRESH_REGISTERED_ELIGIBLE_ANCHORS)
+        self.assertEqual(len(config.expected_eligible_anchors), 115)
+        self.assertEqual(config.expected_eligible_anchors[0], "2026-01-02")
+        self.assertEqual(config.expected_eligible_anchors[-1], "2026-07-17")
+        self.assertEqual(config.window_policy.discovery_sessions, 40)
+        self.assertEqual(config.window_policy.walk_forward_sessions, (10, 10, 10))
+        self.assertEqual(config.window_policy.validation_sessions, 15)
+        self.assertEqual(config.window_policy.holdout_sessions, 30)
 
     def test_config_rejects_policy_count_disagreement(self):
         config = small_config()
         with self.assertRaisesRegex(ValueError, "must agree"):
             replace(config, expected_eligible_sessions=5)
+        with self.assertRaisesRegex(ValueError, "chronological weekdays"):
+            replace(
+                config,
+                expected_eligible_anchors=(
+                    "2026-01-02",
+                    "2026-01-05",
+                    "2026-01-06",
+                    "2026-01-07",
+                    "2026-01-08",
+                    "2026-01-08",
+                ),
+            )
 
     def test_scan_aborts_before_split_when_qc_count_differs(self):
         config = small_config()
@@ -127,6 +148,9 @@ class FreshBootstrapTests(unittest.TestCase):
             small_config(),
             first_anchor=anchors[0],
             last_anchor=anchors[-1],
+            expected_eligible_anchors=tuple(
+                anchor.isoformat() for anchor in anchors[1:]
+            ),
         )
         factory_anchors = iter(anchors)
 

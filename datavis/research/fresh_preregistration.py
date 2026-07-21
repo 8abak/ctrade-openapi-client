@@ -23,7 +23,7 @@ from typing import Any, Mapping, Sequence
 from datavis.research.fresh_entry_diagnostics import EntryDiagnosticConfig
 from datavis.research.fresh_features import FreshFeatureConfig
 from datavis.research.fresh_protocol import (
-    FreshWindowPolicy,
+    REGISTERED_FRESH_WINDOW_POLICY,
     authorize_evaluation,
     canonical_hash,
 )
@@ -42,12 +42,7 @@ _ROLE_ORDER = (
     "validation",
     "holdout",
 )
-FRESH_V2_WINDOW_POLICY = FreshWindowPolicy(
-    discovery_sessions=46,
-    walk_forward_sessions=(12, 12, 12),
-    validation_sessions=21,
-    holdout_sessions=36,
-)
+FRESH_V2_WINDOW_POLICY = REGISTERED_FRESH_WINDOW_POLICY
 _REQUIRED_IMPLEMENTATION_FILES = frozenset(
     {
         "datavis/db.py",
@@ -216,7 +211,7 @@ def _manifest_body_and_hash(split_manifest: Mapping[str, Any]) -> tuple[dict[str
 
 
 def _validate_split(split_manifest: Mapping[str, Any]) -> str:
-    """Reject a split that differs from the outcome-blind 139-session policy."""
+    """Reject a split that differs from the registered outcome-blind policy."""
 
     body, digest = _manifest_body_and_hash(split_manifest)
     expected_top_level = {
@@ -239,7 +234,10 @@ def _validate_split(split_manifest: Mapping[str, Any]) -> str:
     if canonical_hash(body.get("policy")) != canonical_hash(expected_policy):
         raise ValueError("split manifest does not use the fresh v2 window policy")
     if body.get("sessionCount") != FRESH_V2_WINDOW_POLICY.required_sessions:
-        raise ValueError("split manifest must contain exactly 139 eligible sessions")
+        raise ValueError(
+            "split manifest must contain exactly "
+            f"{FRESH_V2_WINDOW_POLICY.required_sessions} eligible sessions"
+        )
 
     schedule = body.get("sessionSchedule")
     expected_schedule = {

@@ -58,6 +58,14 @@ class FreshWindowPolicy:
         )
 
 
+REGISTERED_FRESH_WINDOW_POLICY = FreshWindowPolicy(
+    discovery_sessions=40,
+    walk_forward_sessions=(10, 10, 10),
+    validation_sessions=15,
+    holdout_sessions=30,
+)
+
+
 def canonical_hash(payload: Any) -> str:
     """Return a stable SHA-256 for a JSON-compatible payload."""
 
@@ -327,6 +335,7 @@ def finite_metrics(payload: Mapping[str, Any]) -> bool:
 
 __all__ = [
     "FreshWindowPolicy",
+    "REGISTERED_FRESH_WINDOW_POLICY",
     "append_fresh_record",
     "authorize_evaluation",
     "build_fresh_split_manifest",

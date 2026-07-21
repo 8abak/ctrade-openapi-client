@@ -561,6 +561,16 @@ def _compact_trade_slices(report: TradeScoreReport) -> dict[str, Any]:
     }
 
 
+def _bound_discovery_session_count(preregistration: Mapping[str, Any]) -> int:
+    policy = preregistration.get("chronologicalWindowPolicy")
+    if not isinstance(policy, Mapping):
+        raise ValueError("preregistration has no chronological window policy")
+    count = policy.get("discovery_sessions")
+    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+        raise ValueError("preregistration has an invalid discovery-session count")
+    return count
+
+
 class RegisteredFreshResearchPipeline:
     """Compose the frozen study and expose callbacks to the protocol engine."""
 
@@ -645,7 +655,8 @@ class RegisteredFreshResearchPipeline:
 
     def fit_thresholds(self, context: EvaluationContext) -> Mapping[str, Any]:
         anchors = _context_anchors(context)
-        if context.stage != "discovery" or len(anchors) != 46:
+        expected_count = _bound_discovery_session_count(self.preregistration)
+        if context.stage != "discovery" or len(anchors) != expected_count:
             raise PermissionError("thresholds may be fitted only on discovery")
         measurements = _ordered_specs(
             (
