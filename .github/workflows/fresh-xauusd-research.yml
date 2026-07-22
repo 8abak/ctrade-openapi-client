@@ -31,7 +31,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           expected_ref="refs/heads/codex/xauusd-fresh-walkforward"
-          expected_marker="fresh-xauusd-run-2026-07-22-v14-portable-preflight"
+          expected_marker="fresh-xauusd-run-2026-07-22-v15-audited-oom-recovery"
           if [[ "${FRESH_GITHUB_REF}" != "${expected_ref}" ]]; then
             printf 'refusing research run from unexpected ref: %s\n' \
               "${FRESH_GITHUB_REF}" >&2
@@ -40,6 +40,27 @@ jobs:
           if ! cmp -s -- .github/research-launch.txt \
             <(printf '%s\n' "${expected_marker}"); then
             printf 'refusing research run with an unexpected launch marker\n' >&2
+            exit 1
+          fi
+
+      - name: Download the immutable run-14 recovery artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: fresh-xauusd-29881509856-1
+          path: ${{ runner.temp }}/fresh-xauusd-run14
+          github-token: ${{ github.token }}
+          run-id: 29881509856
+
+      - name: Verify the immutable run-14 archive
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          archive="${RUNNER_TEMP}/fresh-xauusd-run14/fresh-xauusd-29881509856-1.tgz"
+          expected="f3755595fca5f7b9978531824913c241ff69815d6e2cb06ee9bcfd35c4938687"
+          [[ -f "${archive}" && ! -L "${archive}" ]]
+          actual="$(sha256sum -- "${archive}" | awk '{print $1}')"
+          if [[ "${actual}" != "${expected}" ]]; then
+            printf 'run-14 recovery archive digest changed\n' >&2
             exit 1
           fi
 
@@ -55,11 +76,12 @@ jobs:
           FRESH_SHA: ${{ github.sha }}
           FRESH_RUN_ID: ${{ github.run_id }}
           FRESH_RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN14_ARCHIVE: ${{ runner.temp }}/fresh-xauusd-run14/fresh-xauusd-29881509856-1.tgz
         run: |
           set -uo pipefail
+          umask 077
           key_path="${RUNNER_TEMP}/fresh-research-key"
           archive_name="fresh-xauusd-${FRESH_RUN_ID}-${FRESH_RUN_ATTEMPT}.tgz"
-          archive_remote="/tmp/${archive_name}"
           printf '%s\n' "${EC2_SSH_KEY}" > "${key_path}"
           chmod 600 "${key_path}"
           ssh_options=(
@@ -77,26 +99,72 @@ jobs:
             -o StrictHostKeyChecking=accept-new
           )
 
+          transfer_directory="$({
+            ssh "${ssh_options[@]}" "${EC2_USER}@${EC2_HOST}" \
+              'umask 077; mktemp -d /tmp/fresh-xauusd-transfer.XXXXXX'
+          } | tr -d '\r')"
+          case "${transfer_directory}" in
+            /tmp/fresh-xauusd-transfer.*)
+              ;;
+            *)
+              printf 'refusing unexpected remote transfer directory: %s\n' \
+                "${transfer_directory}" >&2
+              rm -f "${key_path}"
+              exit 1
+              ;;
+          esac
+          archive_remote="${transfer_directory}/${archive_name}"
+          recovery_archive_remote="${transfer_directory}/run14-recovery.tgz"
+
+          if ! scp "${scp_options[@]}" \
+            "${RUN14_ARCHIVE}" \
+            "${EC2_USER}@${EC2_HOST}:${recovery_archive_remote}"; then
+            rm -f "${key_path}"
+            exit 1
+          fi
+
           set +e
           ssh "${ssh_options[@]}" "${EC2_USER}@${EC2_HOST}" \
             bash -s -- \
             "${FRESH_BRANCH}" \
             "${FRESH_SHA}" \
             "${FRESH_RUN_ID}" \
-            "${FRESH_RUN_ATTEMPT}" <<'REMOTE'
+            "${FRESH_RUN_ATTEMPT}" \
+            "${recovery_archive_remote}" \
+            "${archive_remote}" <<'REMOTE'
           set -Eeuo pipefail
+          umask 077
           branch="$1"
           sha="$2"
           run_id="$3"
           attempt="$4"
+          recovery_archive="$5"
+          archive="$6"
+          transfer_directory="$(dirname -- "${recovery_archive}")"
           production_repo="/home/ec2-user/cTrade"
+
+          if [[ "$(dirname -- "${archive}")" != "${transfer_directory}" ||
+            -L "${transfer_directory}" || ! -d "${transfer_directory}" ]]; then
+            printf 'remote transfer paths are not in one real directory\n' >&2
+            exit 1
+          fi
+          transfer_resolved="$(readlink -f -- "${transfer_directory}")"
+          case "${transfer_resolved}" in
+            /tmp/fresh-xauusd-transfer.*)
+              ;;
+            *)
+              printf 'refusing unexpected transfer directory: %s\n' \
+                "${transfer_resolved}" >&2
+              exit 1
+              ;;
+          esac
 
           remove_scoped_directory() {
             candidate="$1"
             [[ -d "${candidate}" ]] || return 0
             resolved="$(readlink -f -- "${candidate}")"
             case "${resolved}" in
-              /tmp/fresh-xauusd-worktree.*|/tmp/fresh-xauusd-output.*)
+              /tmp/fresh-xauusd-worktree.*|/tmp/fresh-xauusd-output.*|/tmp/fresh-xauusd-recovery.*|/tmp/fresh-xauusd-transfer.*)
                 rm -rf -- "${resolved}"
                 ;;
               *)
@@ -137,12 +205,16 @@ jobs:
           shopt -s nullglob
           for stale_directory in \
             /tmp/fresh-xauusd-worktree.* \
-            /tmp/fresh-xauusd-output.*; do
+            /tmp/fresh-xauusd-output.* \
+            /tmp/fresh-xauusd-recovery.*; do
             remove_scoped_directory "${stale_directory}"
           done
           for stale_file in \
             /tmp/fresh-xauusd-run.*.log \
             /tmp/fresh-xauusd-*.tgz; do
+            if [[ "${stale_file}" == "${recovery_archive}" ]]; then
+              continue
+            fi
             remove_scoped_file "${stale_file}"
           done
           shopt -u nullglob
@@ -150,8 +222,67 @@ jobs:
           worktree="$(mktemp -d /tmp/fresh-xauusd-worktree.XXXXXX)"
           output="$(mktemp -d /tmp/fresh-xauusd-output.XXXXXX)"
           log_path="$(mktemp /tmp/fresh-xauusd-run.XXXXXX.log)"
-          archive="/tmp/fresh-xauusd-${run_id}-${attempt}.tgz"
+          recovery_directory="$(mktemp -d /tmp/fresh-xauusd-recovery.XXXXXX)"
           durable_state_root="/home/ec2-user/.local/state/datavis/fresh-xauusd-research-v2"
+
+          python3 - "${recovery_archive}" "${recovery_directory}" <<'PY'
+          import hashlib
+          import os
+          import pathlib
+          import sys
+          import tarfile
+
+          archive = pathlib.Path(sys.argv[1]).resolve()
+          destination = pathlib.Path(sys.argv[2]).resolve()
+          expected_archive = "f3755595fca5f7b9978531824913c241ff69815d6e2cb06ee9bcfd35c4938687"
+          digest = hashlib.sha256()
+          with archive.open("rb") as handle:
+              for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                  digest.update(chunk)
+          if digest.hexdigest() != expected_archive:
+              raise SystemExit("remote run-14 archive digest changed")
+          allowed = {
+              "fresh_corpus_manifest_v1.json",
+              "fresh_entry_bank_v1.json",
+              "fresh_experiment_ledger_v1.jsonl",
+              "fresh_implementation_manifest_v1.json",
+              "fresh_preregistration_v2.json",
+              "fresh_quantile_bank_v1.json",
+              "fresh_research_state_binding_v1.json",
+              "fresh_source_inventory_v1.json",
+              "fresh_split_manifest_v2.json",
+              "fresh_threshold_domain_preflight_v1.json",
+              "remote-exit-status.txt",
+              "server-run.log",
+          }
+          with tarfile.open(archive, "r:gz") as bundle:
+              members = bundle.getmembers()
+              normalized = []
+              for member in members:
+                  name = member.name[2:] if member.name.startswith("./") else member.name
+                  if not name:
+                      continue
+                  if not member.isfile() or name != pathlib.PurePosixPath(name).name:
+                      raise SystemExit("unsafe run-14 archive member")
+                  normalized.append((name, member))
+              names = [name for name, _ in normalized]
+              if set(names) != allowed or len(names) != len(allowed):
+                  raise SystemExit("run-14 archive member set changed")
+              for name, member in normalized:
+                  source = bundle.extractfile(member)
+                  if source is None:
+                      raise SystemExit("run-14 archive member is unreadable")
+                  target = destination / name
+                  descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                  with os.fdopen(descriptor, "wb") as output:
+                      while True:
+                          chunk = source.read(1024 * 1024)
+                          if not chunk:
+                              break
+                          output.write(chunk)
+                      output.flush()
+                      os.fsync(output.fileno())
+          PY
           if [[ -L "${durable_state_root}" ]]; then
             printf 'refusing symlink durable research state root\n' >&2
             exit 1
@@ -268,6 +399,17 @@ jobs:
             status="$?"
             trap - EXIT
             set +e
+            binding_path="${output}/fresh_research_state_binding_v1.json"
+            if [[ "${status}" -ne 0 && -x "${research_python:-}" && -f "${binding_path}" ]]; then
+              ledger_source="$(
+                binding_value "${binding_path}" experimentLedgerPath
+              )"
+              if [[ -n "${ledger_source}" ]]; then
+                "${research_python}" -m datavis.research.fresh_recovery \
+                  --finalize-interrupted-ledger "${ledger_source}" \
+                  --exit-status "${status}" || status=1
+              fi
+            fi
             if [[ -f "${log_path}" ]]; then
               cp "${log_path}" "${output}/server-run.log"
             fi
@@ -282,18 +424,57 @@ jobs:
               fi
               rm -f -- "${snapshot_temporary}"
             done
+            output_resolved="$(readlink -f -- "${output}")"
+            for spool_directory in \
+              "${output}"/.fresh-entry-spool-*; do
+              if [[ -L "${spool_directory}" || ! -d "${spool_directory}" ]]; then
+                printf 'refusing unexpected spool path: %s\n' \
+                  "${spool_directory}" >&2
+                status=1
+                continue
+              fi
+              spool_resolved="$(readlink -f -- "${spool_directory}")"
+              case "${spool_resolved}" in
+                "${output_resolved}"/.fresh-entry-spool-*)
+                  rm -rf -- "${spool_resolved}"
+                  ;;
+                *)
+                  printf 'refusing unscoped spool cleanup: %s\n' \
+                    "${spool_resolved}" >&2
+                  status=1
+                  ;;
+              esac
+            done
             shopt -u nullglob
             if ! snapshot_durable_research_state; then
               printf 'failed to snapshot durable research state\n' >&2
               status=1
             fi
             printf '%s\n' "${status}" > "${output}/remote-exit-status.txt"
-            tar -czf "${archive}" -C "${output}" .
+            archive_temporary="${archive}.partial"
+            archive_ok=0
+            rm -f -- "${archive_temporary}"
+            if tar -czf "${archive_temporary}" -C "${output}" . &&
+              [[ -f "${archive_temporary}" && ! -L "${archive_temporary}" ]] &&
+              tar -tzf "${archive_temporary}" >/dev/null &&
+              sha256sum -- "${archive_temporary}" >/dev/null &&
+              mv -- "${archive_temporary}" "${archive}" &&
+              [[ -f "${archive}" && ! -L "${archive}" ]] &&
+              tar -tzf "${archive}" >/dev/null; then
+              archive_ok=1
+            fi
+            if [[ "${archive_ok}" -ne 1 ]]; then
+              printf '%s\n' \
+                'failed to create and verify research archive; preserving recovery state' \
+                >&2
+              exit 1
+            fi
             cd /tmp
             git -C "${production_repo}" worktree remove --force \
               "${worktree}" || remove_scoped_directory "${worktree}"
             git -C "${production_repo}" worktree prune
             remove_scoped_directory "${output}"
+            remove_scoped_directory "${recovery_directory}"
             remove_scoped_file "${log_path}"
             exit "${status}"
           }
@@ -329,6 +510,7 @@ jobs:
             --repository-root "${worktree}" \
             --output-dir "${output}" \
             --research-state-dir "${durable_state_root}" \
+            --resume-artifact-dir "${recovery_directory}" \
             --execute 2>&1 | tee "${log_path}"
           research_status="${PIPESTATUS[0]}"
           set -e
@@ -340,25 +522,9 @@ jobs:
             "${EC2_USER}@${EC2_HOST}:${archive_remote}" \
             "${archive_name}"
           scp_status=$?
-          if [[ "${scp_status}" -eq 0 ]]; then
-            ssh "${ssh_options[@]}" "${EC2_USER}@${EC2_HOST}" \
-              bash -s -- "${archive_remote}" <<'REMOTE_CLEANUP'
-          set -Eeuo pipefail
-          archive="$1"
-          resolved="$(readlink -f -- "${archive}")"
-          case "${resolved}" in
-            /tmp/fresh-xauusd-*.tgz)
-              rm -f -- "${resolved}"
-              ;;
-            *)
-              printf 'refusing unscoped archive cleanup: %s\n' "${resolved}" >&2
-              exit 1
-              ;;
-          esac
-          REMOTE_CLEANUP
-          fi
           rm -f "${key_path}"
           echo "archive=${archive_name}" >> "${GITHUB_OUTPUT}"
+          echo "remote_archive=${archive_remote}" >> "${GITHUB_OUTPUT}"
           if [[ "${scp_status}" -ne 0 ]]; then
             exit "${scp_status}"
           fi
@@ -370,5 +536,5 @@ jobs:
         with:
           name: fresh-xauusd-${{ github.run_id }}-${{ github.run_attempt }}
           path: fresh-xauusd-${{ github.run_id }}-${{ github.run_attempt }}.tgz
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 30

@@ -19,8 +19,10 @@ used by the stronger preregistered holdout authorisation workflow.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
+import os
 import re
 from dataclasses import dataclass
 from datetime import date
@@ -49,6 +51,7 @@ class FreshSearchStage(str, Enum):
     """One-way lifecycle of a single, fresh chronological study."""
 
     NEW = "new"
+    DISCOVERY_RESUME_AUTHORIZED = "discovery_resume_authorized"
     DISCOVERY_COMPLETE = "discovery_complete"
     WALK_FORWARD_1_COMPLETE = "walk_forward_1_complete"
     WALK_FORWARD_2_COMPLETE = "walk_forward_2_complete"
@@ -97,6 +100,63 @@ def _sha256(value: str, name: str) -> str:
     return value.lower()
 
 
+def _load_verified_records(path: Path) -> list[dict[str, Any]]:
+    """Load numbered ledger records while verifying every canonical digest."""
+
+    if path.is_symlink() or not path.is_file():
+        raise PermissionError("the recovery ledger is unavailable")
+    records: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                raise PermissionError("the recovery ledger contains a blank record")
+            try:
+                raw = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise PermissionError("the recovery ledger is not valid JSONL") from exc
+            if not isinstance(raw, dict):
+                raise PermissionError("recovery ledger records must be objects")
+            record = dict(raw)
+            claimed_number = record.pop("recordNumber", None)
+            claimed_sha = record.pop("recordSha256", None)
+            if claimed_number != line_number:
+                raise PermissionError("recovery ledger numbering is not contiguous")
+            if (
+                not isinstance(claimed_sha, str)
+                or _SHA256.fullmatch(claimed_sha.lower()) is None
+                or canonical_hash(record) != claimed_sha.lower()
+            ):
+                raise PermissionError("a recovery ledger record hash is invalid")
+            records.append(
+                {
+                    "recordNumber": claimed_number,
+                    "recordSha256": claimed_sha.lower(),
+                    **record,
+                }
+            )
+    return records
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _evaluation_payload(value: "CandidateEvaluation") -> dict[str, Any]:
+    return {
+        "identitySha256": value.identity_sha256,
+        "passed": value.passed,
+        "metrics": _json_clone(value.metrics, "recovery evaluation metrics"),
+        "leakageChecks": _json_clone(
+            value.leakage_checks, "recovery evaluation leakage checks"
+        ),
+        "score": value.score,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class FreshSearchBudgets:
     """Frozen maximum candidate counts at every selection boundary."""
@@ -112,16 +172,20 @@ class FreshSearchBudgets:
     exit_search_frozen_entries: int = 1
 
     def __post_init__(self) -> None:
-        values = tuple(self.__dict__.values()) if hasattr(self, "__dict__") else (
-            self.discovery_distinct_candidates,
-            self.discovery_per_family_maximum,
-            self.walk_forward_1_frozen_candidates,
-            self.walk_forward_2_frozen_candidates,
-            self.exit_variants_after_entry_gate,
-            self.walk_forward_3_full_strategies,
-            self.validation_full_strategies,
-            self.holdout_full_strategies,
-            self.exit_search_frozen_entries,
+        values = (
+            tuple(self.__dict__.values())
+            if hasattr(self, "__dict__")
+            else (
+                self.discovery_distinct_candidates,
+                self.discovery_per_family_maximum,
+                self.walk_forward_1_frozen_candidates,
+                self.walk_forward_2_frozen_candidates,
+                self.exit_variants_after_entry_gate,
+                self.walk_forward_3_full_strategies,
+                self.validation_full_strategies,
+                self.holdout_full_strategies,
+                self.exit_search_frozen_entries,
+            )
         )
         if any(
             not isinstance(value, int) or isinstance(value, bool) or value <= 0
@@ -134,7 +198,9 @@ class FreshSearchBudgets:
             self.walk_forward_2_frozen_candidates
             > self.walk_forward_1_frozen_candidates
         ):
-            raise ValueError("walk-forward 2 budget cannot exceed walk-forward 1 budget")
+            raise ValueError(
+                "walk-forward 2 budget cannot exceed walk-forward 1 budget"
+            )
         if self.exit_search_frozen_entries > self.walk_forward_2_frozen_candidates:
             raise ValueError(
                 "exit-search frozen-entry budget cannot exceed walk-forward 2 budget"
@@ -375,9 +441,7 @@ ExitBuilder = Callable[
     [tuple[FrozenEntryCandidate, ...], EvaluationContext],
     Iterable[StrategyCandidateSpec],
 ]
-ScenarioRunner = Callable[
-    [FrozenStrategyCandidate, EvaluationContext, Any], Any
-]
+ScenarioRunner = Callable[[FrozenStrategyCandidate, EvaluationContext, Any], Any]
 StrategyScorer = Callable[
     [FrozenStrategyCandidate, EvaluationContext, Any], CandidateEvaluation
 ]
@@ -422,9 +486,7 @@ class FreshSearchCallbacks:
         )
         if any(not callable(callback) for callback in required):
             raise ValueError("all required research callbacks must be callable")
-        if self.authorize_holdout is not None and not callable(
-            self.authorize_holdout
-        ):
+        if self.authorize_holdout is not None and not callable(self.authorize_holdout):
             raise ValueError("authorize_holdout must be callable or None")
         if self.score_entries_batch is not None and not callable(
             self.score_entries_batch
@@ -445,7 +507,9 @@ def _freeze_windows(
     claimed_manifest_sha = materialized.get("manifestSha256")
     if claimed_manifest_sha is not None:
         claimed = _sha256(claimed_manifest_sha, "manifestSha256")
-        body = {key: value for key, value in materialized.items() if key != "manifestSha256"}
+        body = {
+            key: value for key, value in materialized.items() if key != "manifestSha256"
+        }
         if canonical_hash(body) != claimed:
             raise ValueError("split manifest hash is invalid")
     windows = materialized.get("windows")
@@ -506,13 +570,21 @@ class FreshChronologicalSearch:
         budgets: FreshSearchBudgets,
         callbacks: FreshSearchCallbacks,
         preregistration_sha256: str | None = None,
+        _allow_existing_ledger_for_recovery: bool = False,
     ) -> None:
         if not isinstance(budgets, FreshSearchBudgets):
             raise ValueError("budgets must be FreshSearchBudgets")
         if not isinstance(callbacks, FreshSearchCallbacks):
             raise ValueError("callbacks must be FreshSearchCallbacks")
-        destination = Path(ledger_path).expanduser().resolve()
-        if destination.exists() and destination.stat().st_size:
+        selected_ledger = Path(ledger_path).expanduser()
+        if selected_ledger.is_symlink():
+            raise PermissionError("the experiment ledger cannot be a symbolic link")
+        destination = selected_ledger.resolve()
+        if (
+            destination.exists()
+            and destination.stat().st_size
+            and not _allow_existing_ledger_for_recovery
+        ):
             raise ValueError("a fresh search requires an empty experiment ledger")
         self._split_manifest = _json_clone(split_manifest, "split_manifest")
         self._windows = _freeze_windows(self._split_manifest)
@@ -534,6 +606,262 @@ class FreshChronologicalSearch:
         self._threshold_bank_sha256: str | None = None
         self._holdout_authorization: dict[str, Any] | None = None
         self._holdout_attempted = False
+        self._resume_discovery_candidates: tuple[FrozenEntryCandidate, ...] = ()
+        self._recovery_audit: dict[str, Any] | None = None
+        self._recovery_batch_result_path: Path | None = None
+
+    @classmethod
+    def resume_incomplete_discovery(
+        cls,
+        *,
+        split_manifest: Mapping[str, Any],
+        ledger_path: str | Path,
+        budgets: FreshSearchBudgets,
+        callbacks: FreshSearchCallbacks,
+        preregistration_sha256: str,
+        threshold_bank: Mapping[str, Any],
+        entry_specs: Sequence[EntryCandidateSpec],
+        recovery_audit: Mapping[str, Any],
+        recovery_batch_result_path: str | Path,
+    ) -> "FreshChronologicalSearch":
+        """Authorize one audited continuation of run 14's incomplete batch.
+
+        This is deliberately narrower than generic checkpointing.  It accepts
+        only the exact two-record terminal prefix produced when discovery was
+        OOM-killed before a single candidate result was recorded.
+        """
+
+        selected_ledger = Path(ledger_path).expanduser()
+        if selected_ledger.is_symlink():
+            raise PermissionError("the recovery ledger cannot be a symbolic link")
+        destination = selected_ledger.resolve()
+        records = _load_verified_records(destination)
+        if len(records) != 2:
+            raise PermissionError(
+                "recovery requires the exact two-record ledger prefix"
+            )
+        stage_access, batch_access = records
+        expected_stage = {
+            "recordNumber": 1,
+            "recordKind": "stage-window-access",
+            "candidateId": "protocol-stage-access::discovery",
+            "stage": "discovery",
+            "role": "discovery",
+            "status": "window_access_started",
+            "outcomesRevealed": True,
+        }
+        expected_batch = {
+            "recordNumber": 2,
+            "recordKind": "batch-window-access",
+            "candidateId": "protocol-batch-access::entry::discovery",
+            "stage": "discovery",
+            "role": "discovery",
+            "status": "batch_access_started",
+            "outcomesRevealed": True,
+        }
+        if any(stage_access.get(key) != value for key, value in expected_stage.items()):
+            raise PermissionError(
+                "the discovery stage-access record is not recoverable"
+            )
+        if any(batch_access.get(key) != value for key, value in expected_batch.items()):
+            raise PermissionError(
+                "the discovery batch-access record is not recoverable"
+            )
+        prereg_sha = _sha256(preregistration_sha256, "preregistration_sha256")
+        if any(record.get("preregistrationSha256") != prereg_sha for record in records):
+            raise PermissionError("recovery ledger preregistration identity changed")
+        if any(
+            record.get("recordKind")
+            not in ("stage-window-access", "batch-window-access")
+            for record in records
+        ):
+            raise PermissionError(
+                "candidate outcomes already exist in the recovery ledger"
+            )
+
+        audit = _json_clone(recovery_audit, "recovery audit")
+        required_audit = {
+            "schema",
+            "recoveryAttemptId",
+            "recoveryAttempt",
+            "maximumRecoveryAttempts",
+            "originalRunId",
+            "originalCommitSha",
+            "ledgerPrefixSha256",
+            "originalRecordSha256",
+            "candidateOutcomeRecordCount",
+            "laterRoleRecordCount",
+            "holdoutAuthorizationPresent",
+            "oomEvidence",
+            "identity",
+            "permittedProcedure",
+        }
+        if set(audit) != required_audit:
+            raise PermissionError("the recovery audit has an unexpected schema")
+        if (
+            audit["schema"] != "fresh-xauusd-infrastructure-recovery/v1"
+            or audit["recoveryAttempt"] != 1
+            or audit["maximumRecoveryAttempts"] != 1
+            or audit["candidateOutcomeRecordCount"] != 0
+            or audit["laterRoleRecordCount"] != 0
+            or audit["holdoutAuthorizationPresent"] is not False
+        ):
+            raise PermissionError(
+                "the recovery audit is not a one-time untouched continuation"
+            )
+        ledger_prefix_sha = _sha256(
+            str(audit["ledgerPrefixSha256"]), "ledgerPrefixSha256"
+        )
+        if _file_sha256(destination) != ledger_prefix_sha:
+            raise PermissionError("the durable ledger differs from the audited prefix")
+        claimed_record_sha = audit["originalRecordSha256"]
+        if claimed_record_sha != [
+            stage_access["recordSha256"],
+            batch_access["recordSha256"],
+        ]:
+            raise PermissionError(
+                "recovery audit record hashes do not match the ledger"
+            )
+
+        threshold_json = _canonical_json(threshold_bank, "threshold bank")
+        threshold_sha = canonical_hash(json.loads(threshold_json))
+        specs = tuple(entry_specs)
+        if not specs or len(specs) > budgets.discovery_distinct_candidates:
+            raise PermissionError(
+                "recovery entry candidate count violates the frozen budget"
+            )
+        candidates = tuple(
+            FrozenEntryCandidate.freeze(spec, threshold_bank_sha256=threshold_sha)
+            for spec in specs
+        )
+        candidate_ids = [candidate.candidate_id for candidate in candidates]
+        candidate_sha = [candidate.entry_sha256 for candidate in candidates]
+        parameters = batch_access.get("parameters")
+        if not isinstance(parameters, Mapping) or (
+            parameters.get("candidateIds") != candidate_ids
+            or parameters.get("candidateSha256") != candidate_sha
+        ):
+            raise PermissionError(
+                "reconstructed candidates differ from the started batch"
+            )
+        if len(candidate_ids) != len(set(candidate_ids)):
+            raise PermissionError("recovery candidates are not unique")
+        family_counts: dict[str, int] = {}
+        for candidate in candidates:
+            family_counts[candidate.family] = family_counts.get(candidate.family, 0) + 1
+        if any(
+            count > budgets.discovery_per_family_maximum
+            for count in family_counts.values()
+        ):
+            raise PermissionError("recovery candidate family budget changed")
+
+        identity = audit["identity"]
+        if not isinstance(identity, Mapping):
+            raise PermissionError("recovery identity must be a mapping")
+        expected_identity = {
+            "splitManifestSha256": split_manifest.get("manifestSha256"),
+            "preregistrationSha256": prereg_sha,
+            "thresholdBankSha256": threshold_sha,
+            "orderedCandidateSequenceSha256": canonical_hash(
+                [
+                    {
+                        "candidateId": candidate.candidate_id,
+                        "entrySha256": candidate.entry_sha256,
+                    }
+                    for candidate in candidates
+                ]
+            ),
+            "candidateCount": len(candidates),
+        }
+        if any(identity.get(key) != value for key, value in expected_identity.items()):
+            raise PermissionError("recovery identities differ from the frozen batch")
+
+        search = cls(
+            split_manifest=split_manifest,
+            ledger_path=destination,
+            budgets=budgets,
+            callbacks=callbacks,
+            preregistration_sha256=prereg_sha,
+            _allow_existing_ledger_for_recovery=True,
+        )
+        search._records = [
+            _json_clone(record, "recovery ledger record") for record in records
+        ]
+        search._consumed_roles = ["discovery"]
+        search._threshold_bank_json = threshold_json
+        search._threshold_bank_sha256 = threshold_sha
+        search._resume_discovery_candidates = candidates
+        search._recovery_audit = audit
+        selected_batch_destination = Path(recovery_batch_result_path).expanduser()
+        if (
+            selected_batch_destination.is_symlink()
+            or selected_batch_destination.parent.is_symlink()
+        ):
+            raise PermissionError("the recovery batch-result artifact is unsafe")
+        batch_destination = selected_batch_destination.resolve()
+        if batch_destination.exists() or batch_destination.is_symlink():
+            raise PermissionError("the recovery batch-result artifact already exists")
+        if batch_destination.parent.is_symlink():
+            raise PermissionError("the recovery batch-result directory is unsafe")
+        search._recovery_batch_result_path = batch_destination
+        context = search._context(
+            stage="discovery",
+            training_roles=("discovery",),
+            evaluation_roles=("discovery",),
+        )
+        search._append_resume_protocol_record(
+            status="resume_eligibility_audit",
+            context=context,
+            parameters={
+                "recoveryAttemptId": audit["recoveryAttemptId"],
+                "ledgerPrefixSha256": ledger_prefix_sha,
+                "originalRecordSha256": claimed_record_sha,
+                "oomEvidence": audit["oomEvidence"],
+                "candidateOutcomeRecordCount": 0,
+                "laterRoleRecordCount": 0,
+                "holdoutAuthorizationPresent": False,
+            },
+            leakage_checks={
+                "originalLedgerPreserved": True,
+                "zeroCandidateOutcomesBeforeResume": True,
+                "laterRolesUntouched": True,
+                "holdoutAuthorizationAbsent": True,
+            },
+        )
+        search._append_resume_protocol_record(
+            status="resume_authorized",
+            context=context,
+            parameters={
+                key: audit[key]
+                for key in (
+                    "recoveryAttemptId",
+                    "recoveryAttempt",
+                    "maximumRecoveryAttempts",
+                    "originalRunId",
+                    "originalCommitSha",
+                    "permittedProcedure",
+                )
+            },
+            leakage_checks={
+                "purelyMechanicalRecoveryOnly": True,
+                "candidateThresholdAndGateChangesForbidden": True,
+                "allOriginalCandidatesRequired": True,
+            },
+        )
+        search._append_resume_protocol_record(
+            status="resume_identity_verified",
+            context=context,
+            parameters=dict(identity),
+            metrics={"candidateCount": len(candidates)},
+            leakage_checks={
+                "splitIdentityVerified": True,
+                "thresholdIdentityVerified": True,
+                "orderedCandidateIdentityVerified": True,
+                "originalPreregistrationIdentityVerified": True,
+            },
+        )
+        search._stage = FreshSearchStage.DISCOVERY_RESUME_AUTHORIZED
+        return search
 
     @property
     def stage(self) -> FreshSearchStage:
@@ -761,6 +1089,128 @@ class FreshChronologicalSearch:
         self._records.append(enriched)
         return enriched
 
+    def _append_resume_protocol_record(
+        self,
+        *,
+        status: str,
+        context: EvaluationContext,
+        parameters: Mapping[str, Any],
+        leakage_checks: Mapping[str, Any],
+        metrics: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Append one durable, outcome-revealing infrastructure-recovery record."""
+
+        allowed = {
+            "resume_eligibility_audit",
+            "resume_authorized",
+            "resume_identity_verified",
+            "batch_resume_started",
+            "batch_resume_completed",
+            "batch_resume_error",
+            "resume_stage_completed",
+        }
+        if status not in allowed:
+            raise ValueError("unsupported infrastructure recovery status")
+        if self._recovery_audit is None:
+            raise FreshSearchProtocolError("no infrastructure recovery is authorized")
+        payload = {
+            "kind": "fresh-infrastructure-recovery",
+            "status": status,
+            "stage": context.stage,
+            "recoveryAttemptId": self._recovery_audit["recoveryAttemptId"],
+            "parameters": _json_clone(parameters, "recovery protocol parameters"),
+        }
+        record: dict[str, Any] = {
+            "recordKind": "infrastructure-resume",
+            "candidateId": f"protocol-infrastructure-resume::{status}",
+            "family": "protocol-infrastructure-recovery",
+            "stage": context.stage,
+            "trainingWindow": "+".join(context.training_roles),
+            "evaluationWindow": "+".join(context.evaluation_roles),
+            "parameters": payload,
+            "entryVariant": "infrastructure-resume",
+            "exitVariant": "infrastructure-resume",
+            "metrics": _json_clone(metrics or {}, "recovery protocol metrics"),
+            "status": status,
+            "leakageChecks": _json_clone(
+                leakage_checks, "recovery protocol leakage checks"
+            ),
+            "role": "discovery",
+            "outcomesRevealed": True,
+            "gatePassed": False,
+            "identitySha256": canonical_hash(payload),
+            "windowSha256": canonical_hash(
+                [window.window_sha256 for window in context.windows]
+            ),
+        }
+        if self._preregistration_sha256 is not None:
+            record["preregistrationSha256"] = self._preregistration_sha256
+        enriched = append_fresh_record(self._ledger_path, record)
+        self._records.append(enriched)
+        return enriched
+
+    def _seal_recovery_batch_result(
+        self,
+        *,
+        candidates: Sequence[FrozenEntryCandidate],
+        results: Mapping[str, CandidateEvaluation],
+    ) -> tuple[str, str]:
+        """Create the immutable, complete discovery result before ledger promotion."""
+
+        if self._recovery_audit is None or self._recovery_batch_result_path is None:
+            raise FreshSearchProtocolError("recovery batch sealing is unavailable")
+        ordered_results = [
+            {
+                "candidateId": candidate.candidate_id,
+                "entrySha256": candidate.entry_sha256,
+                "evaluation": _evaluation_payload(results[candidate.candidate_id]),
+            }
+            for candidate in candidates
+        ]
+        body = {
+            "schema": "fresh-xauusd-recovery-discovery-batch/v1",
+            "recoveryAttemptId": self._recovery_audit["recoveryAttemptId"],
+            "preregistrationSha256": self._preregistration_sha256,
+            "candidateCount": len(ordered_results),
+            "orderedResults": ordered_results,
+        }
+        batch_sha = canonical_hash(body)
+        document = {**body, "batchResultSha256": batch_sha}
+        encoded = (
+            json.dumps(
+                document,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+        destination = self._recovery_batch_result_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists() or destination.is_symlink():
+            raise PermissionError("the recovery batch-result artifact already exists")
+        temporary = destination.with_name(destination.name + ".tmp")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        descriptor = os.open(temporary, flags, 0o600)
+        try:
+            with os.fdopen(descriptor, "wb", closefd=True) as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, destination)
+        except BaseException:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+            temporary.unlink(missing_ok=True)
+            raise
+        file_sha = _file_sha256(destination)
+        if destination.read_bytes() != encoded:
+            raise FreshSearchProtocolError("the sealed recovery batch artifact changed")
+        return batch_sha, file_sha
+
     def _append_stage_window_access_record(
         self,
         *,
@@ -828,7 +1278,9 @@ class FreshChronologicalSearch:
                 context=context,
                 role=role,
                 candidate_ids=tuple(candidate.candidate_id for candidate in selected),
-                candidate_sha256=tuple(candidate.entry_sha256 for candidate in selected),
+                candidate_sha256=tuple(
+                    candidate.entry_sha256 for candidate in selected
+                ),
             )
             record_numbers.append(int(started["recordNumber"]))
             try:
@@ -866,7 +1318,9 @@ class FreshChronologicalSearch:
                 context=context,
                 role=role,
                 candidate_ids=tuple(candidate.candidate_id for candidate in selected),
-                candidate_sha256=tuple(candidate.entry_sha256 for candidate in selected),
+                candidate_sha256=tuple(
+                    candidate.entry_sha256 for candidate in selected
+                ),
             )
             record_numbers.append(int(completed["recordNumber"]))
         for candidate in selected:
@@ -877,9 +1331,7 @@ class FreshChronologicalSearch:
                 else:
                     result = batch_results[candidate.candidate_id]
                 if not isinstance(result, CandidateEvaluation):
-                    raise ValueError(
-                        "entry scorer must return CandidateEvaluation"
-                    )
+                    raise ValueError("entry scorer must return CandidateEvaluation")
                 if result.identity_sha256 != candidate.entry_sha256:
                     raise FrozenIdentityError(
                         f"entry result for {candidate.candidate_id!r} has a different "
@@ -1008,9 +1460,7 @@ class FreshChronologicalSearch:
                 else:
                     result = batch_results[candidate.strategy_id]
                 if not isinstance(result, CandidateEvaluation):
-                    raise ValueError(
-                        "strategy scorer must return CandidateEvaluation"
-                    )
+                    raise ValueError("strategy scorer must return CandidateEvaluation")
                 if result.identity_sha256 != candidate.strategy_sha256:
                     raise FrozenIdentityError(
                         f"strategy result for {candidate.strategy_id!r} has a "
@@ -1108,7 +1558,9 @@ class FreshChronologicalSearch:
                 raise ValueError("discovery candidate ids must be unique")
             family_counts: dict[str, int] = {}
             for candidate in candidates:
-                family_counts[candidate.family] = family_counts.get(candidate.family, 0) + 1
+                family_counts[candidate.family] = (
+                    family_counts.get(candidate.family, 0) + 1
+                )
             if any(
                 count > self._budgets.discovery_per_family_maximum
                 for count in family_counts.values()
@@ -1128,14 +1580,207 @@ class FreshChronologicalSearch:
         )
         failed = not self._entry_pool
         self._stage = (
-            FreshSearchStage.FAILED
-            if failed
-            else FreshSearchStage.DISCOVERY_COMPLETE
+            FreshSearchStage.FAILED if failed else FreshSearchStage.DISCOVERY_COMPLETE
         )
         return StageRunResult(
             stage="discovery",
             evaluated_ids=tuple(candidate.candidate_id for candidate, _ in evaluated),
-            promoted_ids=tuple(candidate.candidate_id for candidate in self._entry_pool),
+            promoted_ids=tuple(
+                candidate.candidate_id for candidate in self._entry_pool
+            ),
+            ledger_record_numbers=tuple(numbers),
+            study_failed=failed,
+        )
+
+    def resume_discovery(self) -> StageRunResult:
+        """Recompute and seal the exact incomplete discovery batch once.
+
+        The original run revealed no candidate result.  This method therefore
+        calls the registered batch scorer for every originally frozen candidate,
+        validates the complete mapping, seals one immutable result artifact, and
+        only then appends individual candidate outcomes in their original order.
+        """
+
+        self._require_stage(FreshSearchStage.DISCOVERY_RESUME_AUTHORIZED)
+        candidates = self._resume_discovery_candidates
+        audit = self._recovery_audit
+        batch_scorer = self._callbacks.score_entries_batch
+        if not candidates or audit is None or batch_scorer is None:
+            self._stage = FreshSearchStage.FAILED
+            raise FreshSearchProtocolError(
+                "recovery requires the exact frozen candidate batch scorer"
+            )
+        context = self._context(
+            stage="discovery",
+            training_roles=("discovery",),
+            evaluation_roles=("discovery",),
+        )
+        numbers = [
+            int(record["recordNumber"])
+            for record in self._records
+            if record.get("recordKind") == "infrastructure-resume"
+        ]
+        started = self._append_resume_protocol_record(
+            status="batch_resume_started",
+            context=context,
+            parameters={
+                "recoveryAttemptId": audit["recoveryAttemptId"],
+                "originalBatchAccessRecordNumber": 2,
+                "originalBatchAccessRecordSha256": self._records[1]["recordSha256"],
+                "candidateCount": len(candidates),
+                "orderedCandidateSequenceSha256": audit["identity"][
+                    "orderedCandidateSequenceSha256"
+                ],
+            },
+            leakage_checks={
+                "durableBeforeCallback": True,
+                "recomputedFromBatchStart": True,
+                "partialMetricsUnavailable": True,
+            },
+            metrics={"candidateCount": len(candidates)},
+        )
+        numbers.append(int(started["recordNumber"]))
+        try:
+            raw_results = batch_scorer(candidates, context)
+            if not isinstance(raw_results, Mapping):
+                raise ValueError(
+                    "recovery batch scorer must return a candidate-id mapping"
+                )
+            expected_ids = [candidate.candidate_id for candidate in candidates]
+            if set(raw_results) != set(expected_ids) or len(raw_results) != len(
+                expected_ids
+            ):
+                raise ValueError(
+                    "recovery batch scorer must return every original candidate "
+                    "exactly once"
+                )
+            results: dict[str, CandidateEvaluation] = {}
+            for candidate in candidates:
+                result = raw_results[candidate.candidate_id]
+                if not isinstance(result, CandidateEvaluation):
+                    raise ValueError(
+                        "recovery entry scorer must return CandidateEvaluation"
+                    )
+                if result.identity_sha256 != candidate.entry_sha256:
+                    raise FrozenIdentityError(
+                        f"recovery result for {candidate.candidate_id!r} changed "
+                        "the frozen identity"
+                    )
+                results[candidate.candidate_id] = result
+            batch_sha, batch_file_sha = self._seal_recovery_batch_result(
+                candidates=candidates,
+                results=results,
+            )
+        except Exception as exc:
+            failed = self._append_resume_protocol_record(
+                status="batch_resume_error",
+                context=context,
+                parameters={
+                    "recoveryAttemptId": audit["recoveryAttemptId"],
+                    "errorType": type(exc).__name__,
+                    "candidateOutcomesAppended": 0,
+                },
+                leakage_checks={
+                    "recoveryAttemptConsumed": True,
+                    "candidatePromotionForbidden": True,
+                },
+                metrics={"errorType": type(exc).__name__},
+            )
+            numbers.append(int(failed["recordNumber"]))
+            self._stage = FreshSearchStage.FAILED
+            raise
+
+        completed = self._append_resume_protocol_record(
+            status="batch_resume_completed",
+            context=context,
+            parameters={
+                "recoveryAttemptId": audit["recoveryAttemptId"],
+                "batchResultSha256": batch_sha,
+                "batchResultFileSha256": batch_file_sha,
+                "candidateCount": len(candidates),
+                "orderedCandidateSequenceSha256": audit["identity"][
+                    "orderedCandidateSequenceSha256"
+                ],
+            },
+            leakage_checks={
+                "completeBatchSealedBeforeCandidateRecords": True,
+                "allOriginalCandidatesPresent": True,
+                "originalOrderPreserved": True,
+            },
+            metrics={"candidateCount": len(candidates)},
+        )
+        numbers.append(int(completed["recordNumber"]))
+
+        evaluated: list[tuple[FrozenEntryCandidate, CandidateEvaluation]] = []
+        try:
+            for candidate in candidates:
+                result = results[candidate.candidate_id]
+                record = self._append_record(
+                    candidate_id=candidate.candidate_id,
+                    family=candidate.family,
+                    stage="discovery",
+                    role="discovery",
+                    context=context,
+                    parameters={
+                        "entryConfig": candidate.config,
+                        "thresholdBankSha256": candidate.threshold_bank_sha256,
+                        "recoveryAttemptId": audit["recoveryAttemptId"],
+                        "sealedBatchResultSha256": batch_sha,
+                    },
+                    entry_variant=candidate.entry_variant,
+                    exit_variant="entry-edge-only",
+                    identity_sha256=candidate.entry_sha256,
+                    evaluation=result,
+                    outcomes_revealed=True,
+                    status="passed" if result.passed else "rejected",
+                    frozen_entry_sha256=candidate.entry_sha256,
+                )
+                numbers.append(int(record["recordNumber"]))
+                evaluated.append((candidate, result))
+            self._entry_pool = self._rank_passed(
+                evaluated,
+                identifier=lambda candidate: candidate.candidate_id,
+                limit=self._budgets.walk_forward_1_frozen_candidates,
+            )
+            failed = not self._entry_pool
+            stage_record = self._append_resume_protocol_record(
+                status="resume_stage_completed",
+                context=context,
+                parameters={
+                    "recoveryAttemptId": audit["recoveryAttemptId"],
+                    "batchResultSha256": batch_sha,
+                    "candidateCount": len(candidates),
+                    "candidateOutcomeRecordCount": len(evaluated),
+                    "promotedCandidateIds": [
+                        candidate.candidate_id for candidate in self._entry_pool
+                    ],
+                },
+                leakage_checks={
+                    "candidateRecordCountExact": len(evaluated) == len(candidates),
+                    "promotionAfterCompleteBatchOnly": True,
+                    "recoveryAttemptConsumed": True,
+                },
+                metrics={
+                    "candidateCount": len(candidates),
+                    "promotedCandidateCount": len(self._entry_pool),
+                    "studyFailed": failed,
+                },
+            )
+            numbers.append(int(stage_record["recordNumber"]))
+        except Exception:
+            self._stage = FreshSearchStage.FAILED
+            raise
+
+        self._stage = (
+            FreshSearchStage.FAILED if failed else FreshSearchStage.DISCOVERY_COMPLETE
+        )
+        self._resume_discovery_candidates = ()
+        return StageRunResult(
+            stage="discovery",
+            evaluated_ids=tuple(candidate.candidate_id for candidate, _ in evaluated),
+            promoted_ids=tuple(
+                candidate.candidate_id for candidate in self._entry_pool
+            ),
             ledger_record_numbers=tuple(numbers),
             study_failed=failed,
         )
@@ -1168,7 +1813,9 @@ class FreshChronologicalSearch:
         return StageRunResult(
             stage=role,
             evaluated_ids=tuple(candidate.candidate_id for candidate, _ in evaluated),
-            promoted_ids=tuple(candidate.candidate_id for candidate in self._entry_pool),
+            promoted_ids=tuple(
+                candidate.candidate_id for candidate in self._entry_pool
+            ),
             ledger_record_numbers=tuple(numbers),
             study_failed=failed,
         )
@@ -1225,14 +1872,14 @@ class FreshChronologicalSearch:
         )
         failed = not self._strategy_pool
         self._stage = (
-            FreshSearchStage.FAILED
-            if failed
-            else FreshSearchStage.EXIT_SEARCH_COMPLETE
+            FreshSearchStage.FAILED if failed else FreshSearchStage.EXIT_SEARCH_COMPLETE
         )
         return StageRunResult(
             stage="exit_search",
             evaluated_ids=tuple(candidate.strategy_id for candidate, _ in evaluated),
-            promoted_ids=tuple(candidate.strategy_id for candidate in self._strategy_pool),
+            promoted_ids=tuple(
+                candidate.strategy_id for candidate in self._strategy_pool
+            ),
             ledger_record_numbers=tuple(numbers),
             study_failed=failed,
         )
@@ -1265,7 +1912,9 @@ class FreshChronologicalSearch:
         return StageRunResult(
             stage="walk_forward_3",
             evaluated_ids=tuple(candidate.strategy_id for candidate, _ in evaluated),
-            promoted_ids=tuple(candidate.strategy_id for candidate in self._strategy_pool),
+            promoted_ids=tuple(
+                candidate.strategy_id for candidate in self._strategy_pool
+            ),
             ledger_record_numbers=tuple(numbers),
             study_failed=failed,
         )
@@ -1351,12 +2000,19 @@ class FreshChronologicalSearch:
     def run_holdout(self) -> StageRunResult:
         self._require_stage(FreshSearchStage.HOLDOUT_AUTHORIZED)
         if self._holdout_attempted:
-            raise FreshSearchProtocolError("holdout evaluation has already been attempted")
+            raise FreshSearchProtocolError(
+                "holdout evaluation has already been attempted"
+            )
         if self._validation_winner is None or self._holdout_authorization is None:
             raise FreshSearchProtocolError("holdout is not bound and authorized")
         winner = self._validation_winner
-        if self._holdout_authorization.get("frozenStrategySha256") != winner.strategy_sha256:
-            raise FrozenIdentityError("holdout winner identity changed after authorization")
+        if (
+            self._holdout_authorization.get("frozenStrategySha256")
+            != winner.strategy_sha256
+        ):
+            raise FrozenIdentityError(
+                "holdout winner identity changed after authorization"
+            )
         self._holdout_attempted = True
         self._consume_role("holdout")
         context = self._context(

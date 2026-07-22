@@ -25,6 +25,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="required acknowledgement that the frozen chronological run may begin",
     )
+    parser.add_argument(
+        "--resume-artifact-dir",
+        help=(
+            "exact extracted run-14 artifact directory for the sole audited "
+            "discovery continuation"
+        ),
+    )
     return parser
 
 
@@ -43,15 +50,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not arguments.execute:
         raise SystemExit("refusing to open research outcomes without --execute")
     if not arguments.research_state_dir:
-        raise SystemExit(
-            "refusing to execute without a durable --research-state-dir"
-        )
+        raise SystemExit("refusing to execute without a durable --research-state-dir")
     summary = run_registered_fresh_research(
         _registered_connection_context,
         repository_root=arguments.repository_root,
         output_directory=arguments.output_dir,
         research_state_directory=arguments.research_state_dir,
         progress=_progress,
+        resume_artifact_directory=arguments.resume_artifact_dir,
     )
     print(
         json.dumps(

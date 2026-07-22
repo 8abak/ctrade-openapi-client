@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import unittest
 import uuid
+from dataclasses import replace
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -11,6 +13,7 @@ from datavis.research.fresh_protocol import (
     FreshWindowPolicy,
     authorize_evaluation,
     build_fresh_split_manifest,
+    canonical_hash,
 )
 from datavis.research.fresh_search import (
     CandidateEvaluation,
@@ -60,6 +63,90 @@ BUDGETS = FreshSearchBudgets(
     holdout_full_strategies=1,
     exit_search_frozen_entries=1,
 )
+
+
+def _entry_specs() -> tuple[EntryCandidateSpec, ...]:
+    return (
+        EntryCandidateSpec(
+            candidate_id="entry-a",
+            family="trend-acceleration",
+            config={"velocityQuantile": 0.8},
+            entry_variant="onset-a",
+        ),
+        EntryCandidateSpec(
+            candidate_id="entry-b",
+            family="trend-acceleration",
+            config={"velocityQuantile": 0.9},
+            entry_variant="onset-b",
+        ),
+    )
+
+
+def _successful_entry_batch(candidates, context):
+    if context.stage != "discovery":
+        raise AssertionError("the discovery batch used a later outcome window")
+    return {
+        candidate.candidate_id: CandidateEvaluation(
+            identity_sha256=candidate.entry_sha256,
+            passed=True,
+            metrics={
+                "entryEdge": (2.0 if candidate.candidate_id == "entry-b" else 1.0)
+            },
+            leakage_checks={"prefixInvariant": True},
+            score=2.0 if candidate.candidate_id == "entry-b" else 1.0,
+        )
+        for candidate in candidates
+    }
+
+
+def _file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _recovery_audit(
+    ledger: Path,
+    *,
+    split_manifest: dict[str, Any],
+    threshold_bank: dict[str, Any],
+    preregistration_sha256: str,
+) -> dict[str, Any]:
+    records = [json.loads(line) for line in ledger.read_text().splitlines()]
+    batch_parameters = records[1]["parameters"]
+    ordered_identity = [
+        {"candidateId": candidate_id, "entrySha256": entry_sha256}
+        for candidate_id, entry_sha256 in zip(
+            batch_parameters["candidateIds"],
+            batch_parameters["candidateSha256"],
+        )
+    ]
+    return {
+        "schema": "fresh-xauusd-infrastructure-recovery/v1",
+        "recoveryAttemptId": "run-14-oom-attempt-1",
+        "recoveryAttempt": 1,
+        "maximumRecoveryAttempts": 1,
+        "originalRunId": 14,
+        "originalCommitSha": "c" * 40,
+        "ledgerPrefixSha256": _file_sha256(ledger),
+        "originalRecordSha256": [
+            records[0]["recordSha256"],
+            records[1]["recordSha256"],
+        ],
+        "candidateOutcomeRecordCount": 0,
+        "laterRoleRecordCount": 0,
+        "holdoutAuthorizationPresent": False,
+        "oomEvidence": {"exitStatus": 137, "candidateOutcomesWritten": 0},
+        "identity": {
+            "splitManifestSha256": split_manifest["manifestSha256"],
+            "preregistrationSha256": preregistration_sha256,
+            "thresholdBankSha256": canonical_hash(threshold_bank),
+            "orderedCandidateSequenceSha256": canonical_hash(ordered_identity),
+            "candidateCount": len(ordered_identity),
+        },
+        "permittedProcedure": {
+            "kind": "recompute-complete-discovery-batch-from-start",
+            "candidateChangesAllowed": False,
+        },
+    }
 
 
 class _Harness:
@@ -198,7 +285,77 @@ class FreshSearchTests(unittest.TestCase):
             missing_ok=True,
         )
 
-    def engine(self, harness: _Harness | None = None) -> tuple[FreshChronologicalSearch, _Harness]:
+    def managed_path(self, suffix: str) -> Path:
+        destination = self.ledger.with_name(f"{uuid.uuid4().hex}-{suffix}")
+        self.addCleanup(destination.unlink, missing_ok=True)
+        self.addCleanup(
+            destination.with_name(destination.name + ".tmp").unlink,
+            missing_ok=True,
+        )
+        self.addCleanup(
+            destination.with_name(destination.name + ".lock").unlink,
+            missing_ok=True,
+        )
+        return destination
+
+    @staticmethod
+    def callbacks_with_entry_batch(harness: _Harness, scorer):
+        return replace(harness.callbacks(), score_entries_batch=scorer)
+
+    def create_abrupt_discovery_prefix(
+        self,
+        *,
+        ledger: Path | None = None,
+    ) -> tuple[
+        dict[str, Any],
+        dict[str, Any],
+        tuple[EntryCandidateSpec, ...],
+        dict[str, Any],
+        _Harness,
+        list[tuple[str, ...]],
+    ]:
+        destination = ledger or self.ledger
+        manifest = _split_manifest()
+        threshold_bank = {"velocity": {"q80": 1.25}}
+        preregistration_sha256 = "b" * 64
+        harness = _Harness()
+        abrupt_calls: list[tuple[str, ...]] = []
+
+        def abrupt_batch(candidates, context):
+            self.assertEqual(context.stage, "discovery")
+            abrupt_calls.append(
+                tuple(candidate.candidate_id for candidate in candidates)
+            )
+            raise SystemExit("simulated OOM termination")
+
+        engine = FreshChronologicalSearch(
+            split_manifest=manifest,
+            ledger_path=destination,
+            budgets=BUDGETS,
+            callbacks=self.callbacks_with_entry_batch(harness, abrupt_batch),
+            preregistration_sha256=preregistration_sha256,
+        )
+        with self.assertRaisesRegex(SystemExit, "OOM termination"):
+            engine.run_discovery()
+
+        records = [json.loads(line) for line in destination.read_text().splitlines()]
+        self.assertEqual(len(records), 2)
+        self.assertEqual(
+            [record["status"] for record in records],
+            ["window_access_started", "batch_access_started"],
+        )
+        specs = _entry_specs()
+        audit = _recovery_audit(
+            destination,
+            split_manifest=manifest,
+            threshold_bank=threshold_bank,
+            preregistration_sha256=preregistration_sha256,
+        )
+        return manifest, threshold_bank, specs, audit, harness, abrupt_calls
+
+    def engine(
+        self, harness: _Harness | None = None
+    ) -> tuple[FreshChronologicalSearch, _Harness]:
         selected = harness or _Harness()
         return (
             FreshChronologicalSearch(
@@ -236,9 +393,7 @@ class FreshSearchTests(unittest.TestCase):
         self.assertEqual(validation.promoted_ids, ("strategy-b",))
         winner_sha = engine.validation_winner.strategy_sha256
 
-        authorization = engine.authorize_holdout(
-            explicit_holdout_authorization=True
-        )
+        authorization = engine.authorize_holdout(explicit_holdout_authorization=True)
         self.assertEqual(authorization["frozenStrategySha256"], winner_sha)
         result = engine.run_holdout()
 
@@ -460,7 +615,9 @@ class FreshSearchTests(unittest.TestCase):
         strategy_calls: list[tuple[str, ...]] = []
 
         def batch_entries(candidates, context):
-            entry_calls.append(tuple(candidate.candidate_id for candidate in candidates))
+            entry_calls.append(
+                tuple(candidate.candidate_id for candidate in candidates)
+            )
             return {
                 candidate.candidate_id: CandidateEvaluation(
                     identity_sha256=candidate.entry_sha256,
@@ -473,7 +630,9 @@ class FreshSearchTests(unittest.TestCase):
             }
 
         def batch_strategies(candidates, context):
-            strategy_calls.append(tuple(candidate.strategy_id for candidate in candidates))
+            strategy_calls.append(
+                tuple(candidate.strategy_id for candidate in candidates)
+            )
             return {
                 candidate.strategy_id: CandidateEvaluation(
                     identity_sha256=candidate.strategy_sha256,
@@ -658,6 +817,413 @@ class FreshSearchTests(unittest.TestCase):
                 access_records=records,
             )
 
+    def test_audited_resume_matches_an_uninterrupted_discovery_batch(self):
+        normal_ledger = self.managed_path("normal-ledger.jsonl")
+        normal_harness = _Harness()
+        normal_calls: list[tuple[str, ...]] = []
+
+        def normal_batch(candidates, context):
+            normal_calls.append(
+                tuple(candidate.candidate_id for candidate in candidates)
+            )
+            return _successful_entry_batch(candidates, context)
+
+        normal = FreshChronologicalSearch(
+            split_manifest=_split_manifest(),
+            ledger_path=normal_ledger,
+            budgets=BUDGETS,
+            callbacks=self.callbacks_with_entry_batch(normal_harness, normal_batch),
+            preregistration_sha256="b" * 64,
+        )
+        uninterrupted = normal.run_discovery()
+
+        (
+            manifest,
+            threshold_bank,
+            specs,
+            audit,
+            recovery_harness,
+            abrupt_calls,
+        ) = self.create_abrupt_discovery_prefix()
+        resumed_calls: list[tuple[str, ...]] = []
+
+        def resumed_batch(candidates, context):
+            resumed_calls.append(
+                tuple(candidate.candidate_id for candidate in candidates)
+            )
+            return _successful_entry_batch(candidates, context)
+
+        batch_result = self.managed_path("recovery-batch.json")
+        resumed = FreshChronologicalSearch.resume_incomplete_discovery(
+            split_manifest=manifest,
+            ledger_path=self.ledger,
+            budgets=BUDGETS,
+            callbacks=self.callbacks_with_entry_batch(recovery_harness, resumed_batch),
+            preregistration_sha256="b" * 64,
+            threshold_bank=threshold_bank,
+            entry_specs=specs,
+            recovery_audit=audit,
+            recovery_batch_result_path=batch_result,
+        )
+
+        # Reconstruction is identity-only: it must not refit or rebuild using
+        # outcomes which the failed process had already opened.
+        self.assertEqual(recovery_harness.threshold_calls, 1)
+        self.assertEqual(recovery_harness.builder_calls, 1)
+        self.assertEqual(resumed.stage, FreshSearchStage.DISCOVERY_RESUME_AUTHORIZED)
+        recovered = resumed.resume_discovery()
+        self.assertEqual(recovery_harness.threshold_calls, 1)
+        self.assertEqual(recovery_harness.builder_calls, 1)
+
+        self.assertEqual(abrupt_calls, [("entry-a", "entry-b")])
+        self.assertEqual(resumed_calls, abrupt_calls)
+        self.assertEqual(normal_calls, abrupt_calls)
+        self.assertEqual(recovered.evaluated_ids, uninterrupted.evaluated_ids)
+        self.assertEqual(recovered.promoted_ids, uninterrupted.promoted_ids)
+        self.assertEqual(recovered.promoted_ids, ("entry-b", "entry-a"))
+        self.assertEqual(resumed.stage, FreshSearchStage.DISCOVERY_COMPLETE)
+        self.assertEqual(resumed.consumed_roles, ("discovery",))
+        self.assertEqual(
+            tuple(candidate.entry_sha256 for candidate in resumed.entry_candidates),
+            tuple(candidate.entry_sha256 for candidate in normal.entry_candidates),
+        )
+
+        records = [json.loads(line) for line in self.ledger.read_text().splitlines()]
+        self.assertEqual(
+            [record["status"] for record in records],
+            [
+                "window_access_started",
+                "batch_access_started",
+                "resume_eligibility_audit",
+                "resume_authorized",
+                "resume_identity_verified",
+                "batch_resume_started",
+                "batch_resume_completed",
+                "passed",
+                "passed",
+                "resume_stage_completed",
+            ],
+        )
+        recovery_records = [
+            record
+            for record in records
+            if record.get("recordKind") == "infrastructure-resume"
+        ]
+        self.assertEqual(
+            [record["status"] for record in recovery_records],
+            [
+                "resume_eligibility_audit",
+                "resume_authorized",
+                "resume_identity_verified",
+                "batch_resume_started",
+                "batch_resume_completed",
+                "resume_stage_completed",
+            ],
+        )
+        self.assertTrue(all(record["outcomesRevealed"] for record in recovery_records))
+        self.assertTrue(all(not record["gatePassed"] for record in recovery_records))
+
+        normal_records = [
+            record
+            for record in (
+                json.loads(line) for line in normal_ledger.read_text().splitlines()
+            )
+            if record["candidateId"] in {"entry-a", "entry-b"}
+        ]
+        recovered_records = [
+            record
+            for record in records
+            if record["candidateId"] in {"entry-a", "entry-b"}
+        ]
+        self.assertEqual(
+            [record["candidateId"] for record in recovered_records],
+            ["entry-a", "entry-b"],
+        )
+        ignored = {"recordNumber", "recordSha256", "parameters"}
+        self.assertEqual(
+            [
+                {key: value for key, value in record.items() if key not in ignored}
+                for record in recovered_records
+            ],
+            [
+                {key: value for key, value in record.items() if key not in ignored}
+                for record in normal_records
+            ],
+        )
+        for normal_record, recovered_record in zip(normal_records, recovered_records):
+            self.assertEqual(
+                recovered_record["parameters"]["entryConfig"],
+                normal_record["parameters"]["entryConfig"],
+            )
+            self.assertEqual(
+                recovered_record["parameters"]["thresholdBankSha256"],
+                normal_record["parameters"]["thresholdBankSha256"],
+            )
+
+        artifact_bytes = batch_result.read_bytes()
+        artifact = json.loads(artifact_bytes)
+        artifact_body = dict(artifact)
+        claimed_batch_sha = artifact_body.pop("batchResultSha256")
+        self.assertEqual(canonical_hash(artifact_body), claimed_batch_sha)
+        self.assertEqual(
+            [item["candidateId"] for item in artifact["orderedResults"]],
+            ["entry-a", "entry-b"],
+        )
+        completed = next(
+            record
+            for record in recovery_records
+            if record["status"] == "batch_resume_completed"
+        )
+        completed_parameters = completed["parameters"]["parameters"]
+        self.assertEqual(completed_parameters["batchResultSha256"], claimed_batch_sha)
+        self.assertEqual(
+            completed_parameters["batchResultFileSha256"],
+            hashlib.sha256(artifact_bytes).hexdigest(),
+        )
+
+        # Completion is one-way and cannot rewrite the sealed result.
+        with self.assertRaises(FreshSearchProtocolError):
+            resumed.resume_discovery()
+        self.assertEqual(batch_result.read_bytes(), artifact_bytes)
+
+    def test_resume_identity_changes_fail_without_appending_to_the_prefix(self):
+        (
+            manifest,
+            threshold_bank,
+            specs,
+            audit,
+            harness,
+            _,
+        ) = self.create_abrupt_discovery_prefix()
+        prefix = self.ledger.read_bytes()
+        changed_manifest = json.loads(json.dumps(manifest))
+        changed_manifest["inventorySha256"] = "d" * 64
+        manifest_body = {
+            key: value
+            for key, value in changed_manifest.items()
+            if key != "manifestSha256"
+        }
+        changed_manifest["manifestSha256"] = canonical_hash(manifest_body)
+        changed_audit = json.loads(json.dumps(audit))
+        changed_audit["identity"]["candidateCount"] = 3
+
+        cases = (
+            (
+                "split manifest",
+                {"split_manifest": changed_manifest},
+                "recovery identities",
+            ),
+            (
+                "preregistration",
+                {"preregistration_sha256": "e" * 64},
+                "preregistration identity",
+            ),
+            (
+                "threshold bank",
+                {"threshold_bank": {"velocity": {"q80": 1.250001}}},
+                "reconstructed candidates",
+            ),
+            (
+                "candidate order",
+                {"entry_specs": tuple(reversed(specs))},
+                "reconstructed candidates",
+            ),
+            (
+                "audited identity",
+                {"recovery_audit": changed_audit},
+                "recovery identities",
+            ),
+        )
+        for label, override, expected_error in cases:
+            with self.subTest(label=label):
+                arguments = {
+                    "split_manifest": manifest,
+                    "ledger_path": self.ledger,
+                    "budgets": BUDGETS,
+                    "callbacks": self.callbacks_with_entry_batch(
+                        harness, _successful_entry_batch
+                    ),
+                    "preregistration_sha256": "b" * 64,
+                    "threshold_bank": threshold_bank,
+                    "entry_specs": specs,
+                    "recovery_audit": audit,
+                    "recovery_batch_result_path": self.managed_path(
+                        f"{label.replace(' ', '-')}-batch.json"
+                    ),
+                }
+                arguments.update(override)
+                with self.assertRaisesRegex(PermissionError, expected_error):
+                    FreshChronologicalSearch.resume_incomplete_discovery(**arguments)
+                self.assertEqual(self.ledger.read_bytes(), prefix)
+        self.assertEqual(harness.threshold_calls, 1)
+        self.assertEqual(harness.builder_calls, 1)
+
+    def test_semantically_tampered_two_record_prefix_is_not_recoverable(self):
+        (
+            manifest,
+            threshold_bank,
+            specs,
+            _,
+            harness,
+            _,
+        ) = self.create_abrupt_discovery_prefix()
+        records = [json.loads(line) for line in self.ledger.read_text().splitlines()]
+        records[0]["status"] = "window_access_completed"
+        body = {
+            key: value
+            for key, value in records[0].items()
+            if key not in {"recordNumber", "recordSha256"}
+        }
+        records[0]["recordSha256"] = canonical_hash(body)
+        self.ledger.write_text(
+            "".join(
+                json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+                for record in records
+            ),
+            encoding="utf-8",
+        )
+        audit = _recovery_audit(
+            self.ledger,
+            split_manifest=manifest,
+            threshold_bank=threshold_bank,
+            preregistration_sha256="b" * 64,
+        )
+
+        with self.assertRaisesRegex(PermissionError, "stage-access record"):
+            FreshChronologicalSearch.resume_incomplete_discovery(
+                split_manifest=manifest,
+                ledger_path=self.ledger,
+                budgets=BUDGETS,
+                callbacks=self.callbacks_with_entry_batch(
+                    harness, _successful_entry_batch
+                ),
+                preregistration_sha256="b" * 64,
+                threshold_bank=threshold_bank,
+                entry_specs=specs,
+                recovery_audit=audit,
+                recovery_batch_result_path=self.managed_path(
+                    "tampered-prefix-batch.json"
+                ),
+            )
+
+    def test_existing_recovery_batch_artifact_fails_closed(self):
+        (
+            manifest,
+            threshold_bank,
+            specs,
+            audit,
+            harness,
+            _,
+        ) = self.create_abrupt_discovery_prefix()
+        prefix = self.ledger.read_bytes()
+        batch_result = self.managed_path("existing-recovery-batch.json")
+        sentinel = b"do-not-overwrite\n"
+        batch_result.write_bytes(sentinel)
+
+        with self.assertRaisesRegex(PermissionError, "already exists"):
+            FreshChronologicalSearch.resume_incomplete_discovery(
+                split_manifest=manifest,
+                ledger_path=self.ledger,
+                budgets=BUDGETS,
+                callbacks=self.callbacks_with_entry_batch(
+                    harness, _successful_entry_batch
+                ),
+                preregistration_sha256="b" * 64,
+                threshold_bank=threshold_bank,
+                entry_specs=specs,
+                recovery_audit=audit,
+                recovery_batch_result_path=batch_result,
+            )
+        self.assertEqual(self.ledger.read_bytes(), prefix)
+        self.assertEqual(batch_result.read_bytes(), sentinel)
+
+    def test_bad_recovery_batch_is_terminal_and_cannot_be_retried(self):
+        def missing_result(candidates, context):
+            results = _successful_entry_batch(candidates, context)
+            results.pop("entry-b")
+            return results
+
+        def changed_identity(candidates, context):
+            results = _successful_entry_batch(candidates, context)
+            original = results["entry-b"]
+            results["entry-b"] = CandidateEvaluation(
+                identity_sha256="f" * 64,
+                passed=original.passed,
+                metrics=original.metrics,
+                leakage_checks=original.leakage_checks,
+                score=original.score,
+            )
+            return results
+
+        for label, scorer, error_type in (
+            ("missing-result", missing_result, ValueError),
+            ("changed-identity", changed_identity, FrozenIdentityError),
+        ):
+            with self.subTest(label=label):
+                ledger = self.managed_path(f"{label}-ledger.jsonl")
+                (
+                    manifest,
+                    threshold_bank,
+                    specs,
+                    audit,
+                    harness,
+                    _,
+                ) = self.create_abrupt_discovery_prefix(ledger=ledger)
+                batch_result = self.managed_path(f"{label}-batch.json")
+                callbacks = self.callbacks_with_entry_batch(harness, scorer)
+                resumed = FreshChronologicalSearch.resume_incomplete_discovery(
+                    split_manifest=manifest,
+                    ledger_path=ledger,
+                    budgets=BUDGETS,
+                    callbacks=callbacks,
+                    preregistration_sha256="b" * 64,
+                    threshold_bank=threshold_bank,
+                    entry_specs=specs,
+                    recovery_audit=audit,
+                    recovery_batch_result_path=batch_result,
+                )
+
+                with self.assertRaises(error_type):
+                    resumed.resume_discovery()
+                self.assertEqual(resumed.stage, FreshSearchStage.FAILED)
+                self.assertFalse(batch_result.exists())
+                records = [json.loads(line) for line in ledger.read_text().splitlines()]
+                self.assertEqual(
+                    [record["status"] for record in records[-2:]],
+                    ["batch_resume_started", "batch_resume_error"],
+                )
+                self.assertEqual(
+                    [
+                        record["candidateId"]
+                        for record in records
+                        if record["candidateId"] in {"entry-a", "entry-b"}
+                    ],
+                    [],
+                )
+                self.assertEqual(
+                    records[-1]["parameters"]["parameters"][
+                        "candidateOutcomesAppended"
+                    ],
+                    0,
+                )
+
+                # Both the in-memory state and the durable ledger make the
+                # single audited attempt terminal.
+                with self.assertRaises(FreshSearchProtocolError):
+                    resumed.resume_discovery()
+                with self.assertRaisesRegex(PermissionError, "two-record ledger"):
+                    FreshChronologicalSearch.resume_incomplete_discovery(
+                        split_manifest=manifest,
+                        ledger_path=ledger,
+                        budgets=BUDGETS,
+                        callbacks=callbacks,
+                        preregistration_sha256="b" * 64,
+                        threshold_bank=threshold_bank,
+                        entry_specs=specs,
+                        recovery_audit=audit,
+                        recovery_batch_result_path=batch_result,
+                    )
+
     def test_threshold_fit_is_durably_consumed_before_the_callback(self):
         harness = _Harness()
         base = harness.callbacks()
@@ -698,14 +1264,17 @@ class FreshSearchTests(unittest.TestCase):
         engine.run_exit_search()
 
         records = [json.loads(line) for line in self.ledger.read_text().splitlines()]
-        exit_records = [record for record in records if record["stage"] == "exit_search"]
+        exit_records = [
+            record for record in records if record["stage"] == "exit_search"
+        ]
         self.assertEqual(len(exit_records), 2)
         self.assertTrue(all(record["outcomesRevealed"] for record in exit_records))
-        self.assertTrue(all(record["role"] == "walk_forward_2" for record in exit_records))
+        self.assertTrue(
+            all(record["role"] == "walk_forward_2" for record in exit_records)
+        )
         self.assertTrue(
             all(
-                record["evaluationWindow"]
-                == "discovery+walk_forward_1+walk_forward_2"
+                record["evaluationWindow"] == "discovery+walk_forward_1+walk_forward_2"
                 for record in exit_records
             )
         )

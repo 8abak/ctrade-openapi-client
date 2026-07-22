@@ -15,11 +15,12 @@ import math
 import os
 import tempfile
 from collections import Counter, defaultdict
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import timedelta
 from pathlib import Path
 from statistics import median
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -86,6 +87,14 @@ from datavis.research.fresh_preregistration import (
     replay_execution_configs_from_preregistration,
     required_fresh_implementation_files,
 )
+from datavis.research.fresh_recovery import (
+    RUN14_ENTRY_BANK_FILE_SHA256,
+    RUN14_LEDGER_SHA256,
+    RUN14_RUN_ID,
+    build_run14_recovery_contract,
+    load_run14_recovery_bundle,
+    run_run14_recovery_equivalence_preflight,
+)
 from datavis.research.fresh_protocol import canonical_hash
 from datavis.research.fresh_replay import (
     ReplayBoundary,
@@ -111,6 +120,7 @@ from datavis.research.fresh_search import (
     FreshSearchBudgets,
     FreshSearchCallbacks,
     FrozenEntryCandidate,
+    FrozenResearchWindow,
     FrozenStrategyCandidate,
     StageRunResult,
     StrategyCandidateSpec,
@@ -127,6 +137,7 @@ from datavis.research.fresh_signals import (
     generate_frozen_signal_events,
     signal_required_columns,
 )
+from datavis.research.fresh_spool import KeyedObjectSpool
 from datavis.research.fresh_thresholds import (
     FreshQuantileBank,
     FreshQuantileBankConfig,
@@ -144,9 +155,7 @@ BASELINE_MINIMUM_UPLIFT = 0.02
 BASELINE_CLUSTER_CONFIDENCE = 0.90
 BASELINE_BOOTSTRAP_REPLICATES = 2_000
 SESSION_CLOSE_SAFETY_MS = 62_000
-LATER_SENSITIVITY_STAGES = frozenset(
-    ("walk_forward_3", "validation", "holdout")
-)
+LATER_SENSITIVITY_STAGES = frozenset(("walk_forward_3", "validation", "holdout"))
 
 ProgressCallback = Callable[[Mapping[str, Any]], None]
 
@@ -180,9 +189,7 @@ class _EntryEdgeSummary:
 
 
 def _parameter_neighbourhood_audit(
-    members: Sequence[
-        tuple[str, float, bool, float | None, float | None, str]
-    ],
+    members: Sequence[tuple[str, float, bool, float | None, float | None, str]],
     *,
     minimum_valid_neighbor_fraction: float,
     minimum_positive_expectancy_neighbor_fraction: float,
@@ -214,14 +221,10 @@ def _parameter_neighbourhood_audit(
         and center_expectancy > 0.0
         else None
     )
-    neighbor_coverages = [
-        float(item[4]) for item in neighbors if item[4] is not None
-    ]
+    neighbor_coverages = [float(item[4]) for item in neighbors if item[4] is not None]
     center_coverage = center[4]
     parameter_signatures = tuple(item[5] for item in selected)
-    parameters_distinct = len(set(parameter_signatures)) == len(
-        parameter_signatures
-    )
+    parameters_distinct = len(set(parameter_signatures)) == len(parameter_signatures)
     coverage_required = maximum_absolute_coverage_30_drop is not None
     coverage_drop = (
         max(abs(value - center_coverage) for value in neighbor_coverages)
@@ -239,8 +242,7 @@ def _parameter_neighbourhood_audit(
             positive_fraction >= minimum_positive_expectancy_neighbor_fraction
         ),
         "minimumExpectancyRetentionPassed": (
-            retention is not None
-            and retention >= minimum_neighbor_expectancy_retention
+            retention is not None and retention >= minimum_neighbor_expectancy_retention
         ),
         "parametersDistinctAcrossRanks": parameters_distinct,
         "coverage30DropPassed": (
@@ -275,9 +277,7 @@ def _parameter_neighbourhood_audit(
         "centerCoverage30": center_coverage,
         "coverage30DropRequired": coverage_required,
         "maximumAbsoluteCoverage30Drop": coverage_drop,
-        "maximumAllowedAbsoluteCoverage30Drop": (
-            maximum_absolute_coverage_30_drop
-        ),
+        "maximumAllowedAbsoluteCoverage30Drop": (maximum_absolute_coverage_30_drop),
         "checks": checks,
         "passed": all(checks.values()),
     }
@@ -306,6 +306,14 @@ def _write_new_json(path: Path, payload: Mapping[str, Any]) -> None:
         handle.write(data)
         handle.flush()
         os.fsync(handle.fileno())
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _ordered_specs(
@@ -448,15 +456,10 @@ def _coverage_count(
 ) -> tuple[int, int]:
     attribute = f"cost_covered_by_{checkpoint}s"
     selected = [
-        item
-        for item in result.diagnostics
-        if side is None or item.event.side == side
+        item for item in result.diagnostics if side is None or item.event.side == side
     ]
     return (
-        sum(
-            not item.censored and bool(getattr(item, attribute))
-            for item in selected
-        ),
+        sum(not item.censored and bool(getattr(item, attribute)) for item in selected),
         len(selected),
     )
 
@@ -536,9 +539,7 @@ def _research_state_binding(
     if not isinstance(claimed_split_sha, str):
         raise ValueError("split manifest has no SHA-256 identity")
     split_body = {
-        key: value
-        for key, value in split_manifest.items()
-        if key != "manifestSha256"
+        key: value for key, value in split_manifest.items() if key != "manifestSha256"
     }
     if canonical_hash(split_body) != claimed_split_sha:
         raise ValueError("split manifest hash is invalid")
@@ -596,9 +597,10 @@ def _snapshot_new_file(source: Path, destination: Path) -> None:
     )
     temporary = Path(temporary_name)
     try:
-        with source.open("rb") as reader, os.fdopen(
-            descriptor, "wb", closefd=True
-        ) as writer:
+        with (
+            source.open("rb") as reader,
+            os.fdopen(descriptor, "wb", closefd=True) as writer,
+        ):
             descriptor = -1
             while True:
                 chunk = reader.read(1024 * 1024)
@@ -630,12 +632,8 @@ def _cluster_entry_edge(
             expected = 0.0
             expected_count = 0
             for side in ("long", "short"):
-                base_success, base_count = _coverage_count(
-                    baseline, checkpoint, side
-                )
-                _, candidate_side_count = _coverage_count(
-                    candidate, checkpoint, side
-                )
+                base_success, base_count = _coverage_count(baseline, checkpoint, side)
+                _, candidate_side_count = _coverage_count(candidate, checkpoint, side)
                 if candidate_side_count and base_count:
                     expected += candidate_side_count * base_success / base_count
                     expected_count += candidate_side_count
@@ -659,14 +657,10 @@ def _cluster_entry_edge(
             if count <= 0.0 or baseline_count <= 0.0:
                 continue
             coverage = (
-                sum(rows[index][f"success{checkpoint}"] for index in selected)
-                / count
+                sum(rows[index][f"success{checkpoint}"] for index in selected) / count
             )
             baseline = (
-                sum(
-                    rows[index][f"baselineExpected{checkpoint}"]
-                    for index in selected
-                )
+                sum(rows[index][f"baselineExpected{checkpoint}"] for index in selected)
                 / baseline_count
             )
             samples[checkpoint].append((coverage, coverage - baseline))
@@ -769,9 +763,7 @@ def _entry_edge_summary(
             if restricted
             else None
         ),
-        failure_to_cover_60s=(
-            1.0 - covered_60 / count_60 if count_60 else None
-        ),
+        failure_to_cover_60s=(1.0 - covered_60 / count_60 if count_60 else None),
         coverage_10_cluster_interval=ten["coverageInterval"],
         coverage_30_cluster_interval=thirty["coverageInterval"],
         baseline_coverage_10=ten["baseline"],
@@ -881,6 +873,7 @@ class RegisteredFreshResearchPipeline:
         split_manifest: Mapping[str, Any],
         preregistration: Mapping[str, Any],
         progress: ProgressCallback | None = None,
+        verify_preregistration_implementation_files: bool = True,
     ) -> None:
         self.repository_root = Path(repository_root).resolve()
         self.output = Path(output_directory).resolve()
@@ -888,6 +881,9 @@ class RegisteredFreshResearchPipeline:
         self.split_manifest = dict(split_manifest)
         self.preregistration = dict(preregistration)
         self.progress = progress
+        self.verify_preregistration_implementation_files = (
+            verify_preregistration_implementation_files
+        )
         self.regime_definition = FreshRegimeDefinition(
             volatility_column="1s_bollinger_std",
             spread_column="spread",
@@ -900,30 +896,43 @@ class RegisteredFreshResearchPipeline:
             data_config=bootstrap.data_config,
             corpus_manifest=self.corpus_manifest,
         )
-        feature_configs = feature_configs_from_preregistration(self.preregistration)
+        feature_configs = feature_configs_from_preregistration(
+            self.preregistration,
+            verify_current_implementation_files=(
+                self.verify_preregistration_implementation_files
+            ),
+        )
         models = self.preregistration["features"]["kalmanModelBank"]
         if len(feature_configs) != len(models):
             raise ValueError("registered Kalman model bank is inconsistent")
         self.members = tuple(
-            FreshKalmanBankMember(
-                model_id=str(model["id"]), feature_config=config
-            )
+            FreshKalmanBankMember(model_id=str(model["id"]), feature_config=config)
             for model, config in zip(models, feature_configs)
         )
         self.model_ids = tuple(member.model_id for member in self.members)
-        self.scoring = scoring_config_from_preregistration(self.preregistration)
+        self.scoring = scoring_config_from_preregistration(
+            self.preregistration,
+            verify_current_implementation_files=(
+                self.verify_preregistration_implementation_files
+            ),
+        )
         barrier_configs = entry_barrier_diagnostic_configs_from_preregistration(
-            self.preregistration, scenario_id=REFERENCE_SCENARIO_ID
+            self.preregistration,
+            scenario_id=REFERENCE_SCENARIO_ID,
+            verify_current_implementation_files=(
+                self.verify_preregistration_implementation_files
+            ),
         )
         self.entry_diagnostic_config = barrier_configs[
             f"{REFERENCE_SCENARIO_ID}:profit-0.25:loss-0.25"
         ]
         self.executions = replay_execution_configs_from_preregistration(
-            self.preregistration
+            self.preregistration,
+            verify_current_implementation_files=(
+                self.verify_preregistration_implementation_files
+            ),
         )
-        scenario_policy = self.preregistration["execution"][
-            "scenarioEvaluationPolicy"
-        ]
+        scenario_policy = self.preregistration["execution"]["scenarioEvaluationPolicy"]
         self.exit_search_scenario_ids = tuple(
             str(item) for item in scenario_policy["exitSearchScenarioIds"]
         )
@@ -974,14 +983,15 @@ class RegisteredFreshResearchPipeline:
         self.entry_runtime: dict[str, _EntryRuntime] = {}
         self.exit_runtime: dict[str, FreshExitVariant] = {}
         self.stage_results: list[StageRunResult] = []
+        self.recovery_contract: Mapping[str, Any] | None = None
+        self.recovery_implementation_manifest: Mapping[str, Any] | None = None
+        self.recovery_batch_result_path: Path | None = None
 
     def _emit(self, **payload: Any) -> None:
         if self.progress is not None:
             self.progress(payload)
 
-    def _features(
-        self, tape: FreshSessionTape, columns: Iterable[str]
-    ) -> pd.DataFrame:
+    def _features(self, tape: FreshSessionTape, columns: Iterable[str]) -> pd.DataFrame:
         selected = tuple(dict.fromkeys(str(column) for column in columns))
         family = NamedFeatureFamily("pipeline", selected)
         config = FreshFeatureBankConfig(
@@ -1001,9 +1011,7 @@ class RegisteredFreshResearchPipeline:
             raise PermissionError("thresholds may be fitted only on discovery")
         measurements = _ordered_specs(
             (
-                fresh_candidate_quantile_measurements(
-                    kalman_model_ids=self.model_ids
-                ),
+                fresh_candidate_quantile_measurements(kalman_model_ids=self.model_ids),
                 fresh_exit_quantile_measurements(),
                 fresh_regime_quantile_measurements(self.regime_definition),
             )
@@ -1039,15 +1047,11 @@ class RegisteredFreshResearchPipeline:
         self.quantile_bank = bank
         payload = fresh_quantile_bank_payload(bank)
         _write_new_json(self.output / "fresh_quantile_bank_v1.json", payload)
-        entry_grid = build_fresh_candidate_grid(
-            bank, kalman_model_ids=self.model_ids
-        )
+        entry_grid = build_fresh_candidate_grid(bank, kalman_model_ids=self.model_ids)
         filter_bank = _derive_event_filter_bank(
             bank, entry_grid, self.regime_definition
         )
-        exit_grid = build_fresh_exit_grid(
-            bank, execution_configs=self.executions
-        )
+        exit_grid = build_fresh_exit_grid(bank, execution_configs=self.executions)
         preflight = {
             "schema": "fresh-xauusd-threshold-domain-preflight/v1",
             "quantileBankSha256": bank.bank_sha256,
@@ -1085,9 +1089,7 @@ class RegisteredFreshResearchPipeline:
             spread_ceiling_rank=None,
             volatility_floor_rank=None,
         )
-        variants = _derive_event_filter_bank(
-            bank, grid, self.regime_definition
-        )
+        variants = _derive_event_filter_bank(bank, grid, self.regime_definition)
         preflight = self.threshold_preflight
         if preflight is None or any(
             (
@@ -1095,8 +1097,7 @@ class RegisteredFreshResearchPipeline:
                 preflight["candidateGridSha256"] != grid.grid_sha256,
                 preflight["eventFilterVariantBankSha256"]
                 != variants.variant_bank_sha256,
-                preflight["totalRuntimeEntryCount"]
-                != variants.total_candidate_count,
+                preflight["totalRuntimeEntryCount"] != variants.total_candidate_count,
             )
         ):
             raise RuntimeError("runtime entry bank differs from threshold preflight")
@@ -1123,8 +1124,7 @@ class RegisteredFreshResearchPipeline:
                     event_filter=variant.filter_config,
                     entry_variant=f"event-filter:{variant.filter_config.variant_id}",
                     robustness_group=(
-                        f"{source.neighbourhood_id}::"
-                        f"{variant.filter_config.variant_id}"
+                        f"{source.neighbourhood_id}::{variant.filter_config.variant_id}"
                     ),
                 )
             )
@@ -1183,7 +1183,7 @@ class RegisteredFreshResearchPipeline:
                 entry_variant=item.entry_variant,
             )
 
-    def _entry_session_batch(
+    def _entry_session_batch_materialized(
         self,
         runtimes: Sequence[_EntryRuntime],
         anchors: Sequence[str],
@@ -1193,6 +1193,8 @@ class RegisteredFreshResearchPipeline:
         dict[str, list[FreshEntryDiagnosticsResult]],
         dict[str, list[FreshEntryDiagnosticsResult]],
     ]:
+        """Materialized reference implementation retained for equivalence tests."""
+
         if self.quantile_bank is None:
             raise RuntimeError("quantile bank has not been frozen")
         source_configs: dict[str, FreshSignalConfig] = {}
@@ -1248,9 +1250,7 @@ class RegisteredFreshResearchPipeline:
             )
             filter_results = filtered_batch[: len(filter_requests)]
             runtime_results = filtered_batch[len(filter_requests) :]
-            for (fingerprint, _), filtered in zip(
-                filter_items, filter_results
-            ):
+            for (fingerprint, _), filtered in zip(filter_items, filter_results):
                 baseline_results[fingerprint].append(
                     _diagnose(
                         tape,
@@ -1281,6 +1281,173 @@ class RegisteredFreshResearchPipeline:
             expanded_baselines[runtime.candidate_id] = baseline_results[fingerprint]
         return candidate_results, expanded_baselines
 
+    @staticmethod
+    def _candidate_spool_key(candidate_id: str) -> str:
+        return f"candidate\x00{candidate_id}"
+
+    @staticmethod
+    def _baseline_spool_key(filter_sha256: str) -> str:
+        return f"baseline\x00{filter_sha256}"
+
+    def _append_entry_session_to_spool(
+        self,
+        *,
+        spool: KeyedObjectSpool[FreshEntryDiagnosticsResult],
+        anchor: str,
+        ordinal: int,
+        session_count: int,
+        stage: str,
+        columns: Sequence[str],
+        source_configs: Sequence[FreshSignalConfig],
+        filter_items: Sequence[tuple[str, FreshEventFilterConfig]],
+        runtimes: Sequence[_EntryRuntime],
+    ) -> None:
+        """Process one complete session without returning a live session object."""
+
+        if self.quantile_bank is None:
+            raise RuntimeError("quantile bank has not been frozen")
+        tape = self.source.load_session(anchor)
+        frame = self._features(tape, columns)
+        raw_events = generate_frozen_signal_events(
+            frame, configs=tuple(source_configs), engine="batch"
+        )
+        grouped = _events_by_candidate(raw_events)
+        raw_baseline = _baseline_events(frame, tape)
+        filter_requests = tuple(
+            FreshEventFilterRequest(raw_baseline, event_filter)
+            for _, event_filter in filter_items
+        )
+        runtime_requests = tuple(
+            FreshEventFilterRequest(
+                grouped.get(runtime.source.config.candidate_id, ()),
+                runtime.event_filter,
+            )
+            for runtime in runtimes
+        )
+        filtered_batch = enrich_and_filter_frozen_event_batch(
+            frame,
+            (*filter_requests, *runtime_requests),
+            quantile_bank=self.quantile_bank,
+        )
+        filter_results = filtered_batch[: len(filter_requests)]
+        runtime_results = filtered_batch[len(filter_requests) :]
+        for (fingerprint, _), filtered in zip(filter_items, filter_results):
+            spool.append(
+                self._baseline_spool_key(fingerprint),
+                _diagnose(
+                    tape,
+                    _before_close(filtered.events, tape),
+                    config=self.entry_diagnostic_config,
+                ),
+            )
+        for runtime, filtered in zip(runtimes, runtime_results):
+            spool.append(
+                self._candidate_spool_key(runtime.candidate_id),
+                _diagnose(
+                    tape,
+                    _before_close(filtered.events, tape),
+                    config=self.entry_diagnostic_config,
+                ),
+            )
+        self._emit(
+            stage=stage,
+            sessionOrdinal=ordinal,
+            sessionCount=session_count,
+            sessionAnchor=anchor,
+        )
+
+    @contextmanager
+    def _entry_session_spool(
+        self,
+        runtimes: Sequence[_EntryRuntime],
+        anchors: Sequence[str],
+        *,
+        stage: str,
+    ) -> Iterator[
+        tuple[
+            KeyedObjectSpool[FreshEntryDiagnosticsResult],
+            Mapping[str, str],
+        ]
+    ]:
+        """Spill every session result, retaining no cross-session event graph."""
+
+        if self.quantile_bank is None:
+            raise RuntimeError("quantile bank has not been frozen")
+        source_configs: dict[str, FreshSignalConfig] = {}
+        filters: dict[str, FreshEventFilterConfig] = {}
+        baseline_by_candidate: dict[str, str] = {}
+        for runtime in runtimes:
+            source_configs[runtime.source.config.candidate_id] = runtime.source.config
+            fingerprint = fresh_event_filter_config_fingerprint(
+                runtime.event_filter, self.quantile_bank
+            )
+            filters[fingerprint] = runtime.event_filter
+            baseline_by_candidate[runtime.candidate_id] = fingerprint
+        columns = list(
+            dict.fromkeys(
+                column
+                for config in source_configs.values()
+                for column in signal_required_columns(config)
+            )
+        )
+        columns.extend(
+            spec.column
+            for spec in fresh_regime_quantile_measurements(self.regime_definition)
+        )
+        filter_items = tuple(filters.items())
+        with KeyedObjectSpool[FreshEntryDiagnosticsResult](self.output) as spool:
+            for runtime in runtimes:
+                spool.register_key(self._candidate_spool_key(runtime.candidate_id))
+            for fingerprint, _ in filter_items:
+                spool.register_key(self._baseline_spool_key(fingerprint))
+            for ordinal, anchor in enumerate(anchors, start=1):
+                self._append_entry_session_to_spool(
+                    spool=spool,
+                    anchor=anchor,
+                    ordinal=ordinal,
+                    session_count=len(anchors),
+                    stage=stage,
+                    columns=columns,
+                    source_configs=tuple(source_configs.values()),
+                    filter_items=filter_items,
+                    runtimes=runtimes,
+                )
+            expected_count = len(anchors)
+            if any(count != expected_count for _, count in spool.inventory):
+                raise RuntimeError("entry spool session inventory is incomplete")
+            yield spool, baseline_by_candidate
+
+    def _entry_provisional_evaluation(
+        self,
+        *,
+        candidate: FrozenEntryCandidate,
+        context: EvaluationContext,
+        anchors: Sequence[str],
+        session_results: Sequence[FreshEntryDiagnosticsResult],
+        baseline_results: Sequence[FreshEntryDiagnosticsResult],
+    ) -> tuple[EntryScoreReport, GateResult, _EntryEdgeSummary]:
+        combined = combine_entry_diagnostics(tuple(session_results))
+        report = score_entry_diagnostics(
+            combined,
+            config=self.scoring.entry_metrics,
+            dimensions=self.dimensions,
+            evaluated_sessions=anchors,
+        )
+        gate = evaluate_entry_gate(
+            report.overall,
+            minimum_sample=self.scoring.minimum_sample,
+            thresholds=self.scoring.entry_gate,
+        )
+        edge = _entry_edge_summary(
+            session_results,
+            baseline_results,
+            seed_text=(
+                f"{context.stage}:{candidate.entry_sha256}:"
+                f"{canonical_hash(list(anchors))}"
+            ),
+        )
+        return report, gate, edge
+
     def score_entries_batch(
         self,
         candidates: tuple[FrozenEntryCandidate, ...],
@@ -1288,35 +1455,81 @@ class RegisteredFreshResearchPipeline:
     ) -> Mapping[str, CandidateEvaluation]:
         anchors = _context_anchors(context)
         runtimes = tuple(self.entry_runtime[item.candidate_id] for item in candidates)
-        session_results, baselines = self._entry_session_batch(
+        provisional: dict[
+            str, tuple[EntryScoreReport, GateResult, _EntryEdgeSummary]
+        ] = {}
+        with self._entry_session_spool(runtimes, anchors, stage=context.stage) as (
+            spool,
+            baseline_by_candidate,
+        ):
+            for candidate in candidates:
+                with spool.load(
+                    self._candidate_spool_key(candidate.candidate_id)
+                ) as loaded:
+                    session_results = tuple(loaded)
+                if len(session_results) != len(anchors):
+                    raise RuntimeError("candidate spool session count changed")
+                baseline_fingerprint = baseline_by_candidate[candidate.candidate_id]
+                with spool.load(
+                    self._baseline_spool_key(baseline_fingerprint)
+                ) as loaded:
+                    baseline_results = tuple(loaded)
+                if len(baseline_results) != len(anchors):
+                    raise RuntimeError("baseline spool session count changed")
+                provisional[candidate.candidate_id] = (
+                    self._entry_provisional_evaluation(
+                        candidate=candidate,
+                        context=context,
+                        anchors=anchors,
+                        session_results=session_results,
+                        baseline_results=baseline_results,
+                    )
+                )
+                del session_results, baseline_results
+
+        return self._finalize_entry_evaluations(
+            candidates=candidates,
+            context=context,
+            provisional=provisional,
+        )
+
+    def score_entries_batch_materialized_reference(
+        self,
+        candidates: tuple[FrozenEntryCandidate, ...],
+        context: EvaluationContext,
+    ) -> Mapping[str, CandidateEvaluation]:
+        """Test oracle for proving the disk-spooled scorer is outcome-equivalent."""
+
+        anchors = _context_anchors(context)
+        runtimes = tuple(self.entry_runtime[item.candidate_id] for item in candidates)
+        session_results, baselines = self._entry_session_batch_materialized(
             runtimes, anchors, stage=context.stage
         )
-        provisional: dict[str, tuple[EntryScoreReport, GateResult, _EntryEdgeSummary]] = {}
-        for candidate in candidates:
-            combined = combine_entry_diagnostics(
-                tuple(session_results[candidate.candidate_id])
+        provisional = {
+            candidate.candidate_id: self._entry_provisional_evaluation(
+                candidate=candidate,
+                context=context,
+                anchors=anchors,
+                session_results=session_results[candidate.candidate_id],
+                baseline_results=baselines[candidate.candidate_id],
             )
-            report = score_entry_diagnostics(
-                combined,
-                config=self.scoring.entry_metrics,
-                dimensions=self.dimensions,
-                evaluated_sessions=anchors,
-            )
-            gate = evaluate_entry_gate(
-                report.overall,
-                minimum_sample=self.scoring.minimum_sample,
-                thresholds=self.scoring.entry_gate,
-            )
-            edge = _entry_edge_summary(
-                session_results[candidate.candidate_id],
-                baselines[candidate.candidate_id],
-                seed_text=(
-                    f"{context.stage}:{candidate.entry_sha256}:"
-                    f"{canonical_hash(list(anchors))}"
-                ),
-            )
-            provisional[candidate.candidate_id] = (report, gate, edge)
+            for candidate in candidates
+        }
+        return self._finalize_entry_evaluations(
+            candidates=candidates,
+            context=context,
+            provisional=provisional,
+        )
 
+    def _finalize_entry_evaluations(
+        self,
+        *,
+        candidates: Sequence[FrozenEntryCandidate],
+        context: EvaluationContext,
+        provisional: Mapping[
+            str, tuple[EntryScoreReport, GateResult, _EntryEdgeSummary]
+        ],
+    ) -> Mapping[str, CandidateEvaluation]:
         grouped_candidates: dict[str, list[FrozenEntryCandidate]] = defaultdict(list)
         for candidate in candidates:
             runtime = self.entry_runtime[candidate.candidate_id]
@@ -1331,13 +1544,21 @@ class RegisteredFreshResearchPipeline:
                     tuple(
                         (
                             candidate.candidate_id,
-                            self.entry_runtime[candidate.candidate_id].source.rank_offset,
+                            self.entry_runtime[
+                                candidate.candidate_id
+                            ].source.rank_offset,
                             bool(
                                 provisional[candidate.candidate_id][1].passed
-                                and provisional[candidate.candidate_id][2].baseline_gate_passed
+                                and provisional[candidate.candidate_id][
+                                    2
+                                ].baseline_gate_passed
                             ),
-                            provisional[candidate.candidate_id][2].expected_barrier_pnl_per_fill,
-                            provisional[candidate.candidate_id][0].overall.coverage_probability(30),
+                            provisional[candidate.candidate_id][
+                                2
+                            ].expected_barrier_pnl_per_fill,
+                            provisional[candidate.candidate_id][
+                                0
+                            ].overall.coverage_probability(30),
                             canonical_hash(
                                 [
                                     (
@@ -1356,9 +1577,7 @@ class RegisteredFreshResearchPipeline:
                         neighbourhood_spec["minimumValidNeighborFraction"]
                     ),
                     minimum_positive_expectancy_neighbor_fraction=float(
-                        neighbourhood_spec[
-                            "minimumPositiveExpectancyNeighborFraction"
-                        ]
+                        neighbourhood_spec["minimumPositiveExpectancyNeighborFraction"]
                     ),
                     minimum_neighbor_expectancy_retention=float(
                         neighbourhood_spec["minimumNeighborExpectancyRetention"]
@@ -1386,10 +1605,7 @@ class RegisteredFreshResearchPipeline:
             passed = bool(
                 gate.passed
                 and edge.baseline_gate_passed
-                and (
-                    not neighbourhood_required
-                    or (is_center and neighbourhood_passed)
-                )
+                and (not neighbourhood_required or (is_center and neighbourhood_passed))
             )
             output[candidate.candidate_id] = CandidateEvaluation(
                 identity_sha256=candidate.entry_sha256,
@@ -1434,8 +1650,7 @@ class RegisteredFreshResearchPipeline:
         preflight = self.threshold_preflight
         if preflight is None or any(
             (
-                preflight["quantileBankSha256"]
-                != self.quantile_bank.bank_sha256,
+                preflight["quantileBankSha256"] != self.quantile_bank.bank_sha256,
                 preflight["exitGridSha256"] != grid.grid_sha256,
                 preflight["executionScenariosSha256"]
                 != grid.execution_scenarios_sha256,
@@ -1467,7 +1682,9 @@ class RegisteredFreshResearchPipeline:
                 },
                 execution_config={
                     "schema": "fresh-xauusd-execution-scenarios/v1",
-                    "scenarioIds": [item.scenario_id for item in grid.execution_scenarios],
+                    "scenarioIds": [
+                        item.scenario_id for item in grid.execution_scenarios
+                    ],
                     "scenarioConfigSha256": {
                         item.scenario_id: item.config_sha256
                         for item in grid.execution_scenarios
@@ -1477,9 +1694,7 @@ class RegisteredFreshResearchPipeline:
                         self.scoring.required_stress_scenario_ids
                     ),
                     "scenarioEvaluationPolicy": dict(
-                        self.preregistration["execution"][
-                            "scenarioEvaluationPolicy"
-                        ]
+                        self.preregistration["execution"]["scenarioEvaluationPolicy"]
                     ),
                 },
                 exit_variant=variant.variant_id,
@@ -1490,11 +1705,28 @@ class RegisteredFreshResearchPipeline:
         candidates: tuple[FrozenStrategyCandidate, ...],
         context: EvaluationContext,
     ) -> Mapping[str, CandidateEvaluation]:
+        with KeyedObjectSpool[tuple[Any, ...]](self.output) as trade_spool:
+            return self._score_strategies_batch_spooled(
+                candidates, context, trade_spool
+            )
+
+    @staticmethod
+    def _strategy_trade_spool_key(strategy_id: str, scenario_id: str) -> str:
+        return f"strategy-trades\x00{strategy_id}\x00{scenario_id}"
+
+    def _score_strategies_batch_spooled(
+        self,
+        candidates: tuple[FrozenStrategyCandidate, ...],
+        context: EvaluationContext,
+        trade_spool: KeyedObjectSpool[tuple[Any, ...]],
+    ) -> Mapping[str, CandidateEvaluation]:
         if self.quantile_bank is None:
             raise RuntimeError("quantile bank has not been frozen")
         anchors = _context_anchors(context)
         runtimes = {
-            candidate.entry.candidate_id: self.entry_runtime[candidate.entry.candidate_id]
+            candidate.entry.candidate_id: self.entry_runtime[
+                candidate.entry.candidate_id
+            ]
             for candidate in candidates
         }
         source_configs = {
@@ -1513,7 +1745,12 @@ class RegisteredFreshResearchPipeline:
                 "1s_mid_speed",
                 "1s_mid_acceleration",
                 FRESH_EXIT_VOLATILITY_COLUMN,
-                *(spec.column for spec in fresh_regime_quantile_measurements(self.regime_definition)),
+                *(
+                    spec.column
+                    for spec in fresh_regime_quantile_measurements(
+                        self.regime_definition
+                    )
+                ),
             )
         )
         scenario_ids = (
@@ -1521,10 +1758,11 @@ class RegisteredFreshResearchPipeline:
             if context.stage in LATER_SENSITIVITY_STAGES
             else self.exit_search_scenario_ids
         )
-        trades: dict[str, dict[str, list[Any]]] = {
-            candidate.strategy_id: {scenario: [] for scenario in scenario_ids}
-            for candidate in candidates
-        }
+        for candidate in candidates:
+            for scenario_id in scenario_ids:
+                trade_spool.register_key(
+                    self._strategy_trade_spool_key(candidate.strategy_id, scenario_id)
+                )
         censors: dict[str, Counter[str]] = {
             candidate.strategy_id: Counter() for candidate in candidates
         }
@@ -1576,22 +1814,18 @@ class RegisteredFreshResearchPipeline:
             )
             runtime_results = filtered_batch[: len(runtime_items)]
             filter_results = filtered_batch[len(runtime_items) :]
-            for (identifier, _), filtered in zip(
-                runtime_items, runtime_results
-            ):
+            for (identifier, _), filtered in zip(runtime_items, runtime_results):
                 events = filtered.events
                 events = _before_close(events, tape)
                 if len({event.tick_index for event in events}) != len(events):
-                    raise ValueError("a frozen entry emitted both directions on one tick")
+                    raise ValueError(
+                        "a frozen entry emitted both directions on one tick"
+                    )
                 events_by_entry[identifier] = events
                 entry_results[identifier].append(
-                    _diagnose(
-                        tape, events, config=self.entry_diagnostic_config
-                    )
+                    _diagnose(tape, events, config=self.entry_diagnostic_config)
                 )
-            for (filter_sha, _), filtered in zip(
-                filter_items, filter_results
-            ):
+            for (filter_sha, _), filtered in zip(filter_items, filter_results):
                 baseline_by_filter[filter_sha] = _diagnose(
                     tape,
                     _before_close(filtered.events, tape),
@@ -1660,7 +1894,12 @@ class RegisteredFreshResearchPipeline:
                         config=execution,
                         prepared_replay_tape=prepared_by_scenario[scenario_id],
                     )
-                    trades[candidate.strategy_id][scenario_id].extend(replay.trades)
+                    trade_spool.append(
+                        self._strategy_trade_spool_key(
+                            candidate.strategy_id, scenario_id
+                        ),
+                        tuple(replay.trades),
+                    )
                     censors[candidate.strategy_id][scenario_id] += len(replay.censors)
                     complete[candidate.strategy_id][scenario_id] &= bool(
                         replay.boundary_reached
@@ -1675,6 +1914,8 @@ class RegisteredFreshResearchPipeline:
             )
             del frame, tape, raw_events, grouped, raw_baseline
 
+        if any(count != len(anchors) for _, count in trade_spool.inventory):
+            raise RuntimeError("strategy trade spool session inventory is incomplete")
         entry_summaries: dict[
             tuple[str, str], tuple[EntryScoreReport, _EntryEdgeSummary]
         ] = {}
@@ -1683,9 +1924,7 @@ class RegisteredFreshResearchPipeline:
             summary_key = (entry_id, candidate.entry.entry_sha256)
             if summary_key in entry_summaries:
                 continue
-            combined_entry = combine_entry_diagnostics(
-                tuple(entry_results[entry_id])
-            )
+            combined_entry = combine_entry_diagnostics(tuple(entry_results[entry_id]))
             entry_report = score_entry_diagnostics(
                 combined_entry,
                 config=self.scoring.entry_metrics,
@@ -1711,17 +1950,24 @@ class RegisteredFreshResearchPipeline:
             reports: dict[str, TradeScoreReport] = {}
             for scenario_id in scenario_ids:
                 censor_count = int(censors[candidate.strategy_id][scenario_id])
-                reports[scenario_id] = score_trade_records(
-                    trades[candidate.strategy_id][scenario_id],
-                    config=self.scoring.trade_metrics,
-                    dimensions=self.dimensions,
-                    evaluated_sessions=anchors,
-                    replay_censor_count=censor_count,
-                    profitability_valid=bool(
-                        complete[candidate.strategy_id][scenario_id]
-                        and censor_count == 0
-                    ),
-                )
+                with trade_spool.load(
+                    self._strategy_trade_spool_key(candidate.strategy_id, scenario_id)
+                ) as trade_batches:
+                    reports[scenario_id] = score_trade_records(
+                        (
+                            trade
+                            for session_trades in trade_batches
+                            for trade in session_trades
+                        ),
+                        config=self.scoring.trade_metrics,
+                        dimensions=self.dimensions,
+                        evaluated_sessions=anchors,
+                        replay_censor_count=censor_count,
+                        profitability_valid=bool(
+                            complete[candidate.strategy_id][scenario_id]
+                            and censor_count == 0
+                        ),
+                    )
             reference = reports.pop(REFERENCE_SCENARIO_ID)
             required_reports = {
                 scenario_id: reports[scenario_id]
@@ -1805,9 +2051,7 @@ class RegisteredFreshResearchPipeline:
                             canonical_hash(
                                 {
                                     "policy": asdict(
-                                        self.exit_runtime[
-                                            candidate.strategy_id
-                                        ].policy
+                                        self.exit_runtime[candidate.strategy_id].policy
                                     ),
                                     "weakening": (
                                         asdict(
@@ -1830,9 +2074,7 @@ class RegisteredFreshResearchPipeline:
                         neighbourhood_spec["minimumValidNeighborFraction"]
                     ),
                     minimum_positive_expectancy_neighbor_fraction=float(
-                        neighbourhood_spec[
-                            "minimumPositiveExpectancyNeighborFraction"
-                        ]
+                        neighbourhood_spec["minimumPositiveExpectancyNeighborFraction"]
                     ),
                     minimum_neighbor_expectancy_retention=float(
                         neighbourhood_spec["minimumNeighborExpectancyRetention"]
@@ -1873,10 +2115,7 @@ class RegisteredFreshResearchPipeline:
                 identity_sha256=evaluation.identity_sha256,
                 passed=bool(
                     base_passed
-                    and (
-                        not required
-                        or (is_center and neighbourhood_passed)
-                    )
+                    and (not required or (is_center and neighbourhood_passed))
                 ),
                 metrics=metrics,
                 leakage_checks=evaluation.leakage_checks,
@@ -1907,7 +2146,9 @@ class RegisteredFreshResearchPipeline:
             and item.get("gatePassed") is True
         ]
         if len(matching_wf3) != 1 or len(matching_validation) != 1:
-            raise PermissionError("holdout requires exact passed WF3 and validation records")
+            raise PermissionError(
+                "holdout requires exact passed WF3 and validation records"
+            )
         frozen = {
             "schema": "fresh-xauusd-final-strategy/v1",
             "strategyId": winner.strategy_id,
@@ -1927,6 +2168,12 @@ class RegisteredFreshResearchPipeline:
             walk_forward_3_record_number=int(matching_wf3[0]["recordNumber"]),
             validation_record_number=int(matching_validation[0]["recordNumber"]),
             explicit_holdout_authorization=True,
+            verify_current_implementation_files=(
+                self.verify_preregistration_implementation_files
+            ),
+            infrastructure_recovery_contract=self.recovery_contract,
+            recovery_implementation_manifest=self.recovery_implementation_manifest,
+            recovery_batch_result_path=self.recovery_batch_result_path,
         )
 
     @staticmethod
@@ -1959,9 +2206,26 @@ class RegisteredFreshResearchPipeline:
     ) -> CandidateEvaluation:
         raise RuntimeError("batched strategy scorer is required")
 
-    def build_search(self) -> FreshChronologicalSearch:
+    def _search_budgets(self) -> FreshSearchBudgets:
         budgets = self.preregistration["candidateSearch"]["budgets"]
-        callbacks = FreshSearchCallbacks(
+        return FreshSearchBudgets(
+            discovery_distinct_candidates=int(budgets["discoveryDistinctCandidates"]),
+            discovery_per_family_maximum=int(budgets["discoveryPerFamilyMaximum"]),
+            walk_forward_1_frozen_candidates=int(
+                budgets["walkForward1FrozenCandidates"]
+            ),
+            walk_forward_2_frozen_candidates=int(
+                budgets["walkForward2FrozenCandidates"]
+            ),
+            exit_variants_after_entry_gate=int(budgets["exitVariantsAfterEntryGate"]),
+            walk_forward_3_full_strategies=int(budgets["walkForward3FullStrategies"]),
+            validation_full_strategies=int(budgets["validationFullStrategies"]),
+            holdout_full_strategies=int(budgets["holdoutFullStrategies"]),
+            exit_search_frozen_entries=int(budgets["exitSearchFrozenEntries"]),
+        )
+
+    def _search_callbacks(self) -> FreshSearchCallbacks:
+        return FreshSearchCallbacks(
             fit_thresholds=self.fit_thresholds,
             build_entry_candidates=self.build_entry_candidates,
             generate_signals=self._unused_signal_generator,
@@ -1973,42 +2237,35 @@ class RegisteredFreshResearchPipeline:
             score_entries_batch=self.score_entries_batch,
             score_strategies_batch=self.score_strategies_batch,
         )
+
+    def build_search(self) -> FreshChronologicalSearch:
         return FreshChronologicalSearch(
             split_manifest=self.split_manifest,
-            ledger_path=self.preregistration["sourceBindings"][
-                "experimentLedgerPath"
-            ],
-            budgets=FreshSearchBudgets(
-                discovery_distinct_candidates=int(
-                    budgets["discoveryDistinctCandidates"]
-                ),
-                discovery_per_family_maximum=int(
-                    budgets["discoveryPerFamilyMaximum"]
-                ),
-                walk_forward_1_frozen_candidates=int(
-                    budgets["walkForward1FrozenCandidates"]
-                ),
-                walk_forward_2_frozen_candidates=int(
-                    budgets["walkForward2FrozenCandidates"]
-                ),
-                exit_variants_after_entry_gate=int(
-                    budgets["exitVariantsAfterEntryGate"]
-                ),
-                walk_forward_3_full_strategies=int(
-                    budgets["walkForward3FullStrategies"]
-                ),
-                validation_full_strategies=int(
-                    budgets["validationFullStrategies"]
-                ),
-                holdout_full_strategies=int(budgets["holdoutFullStrategies"]),
-                exit_search_frozen_entries=int(
-                    budgets["exitSearchFrozenEntries"]
-                ),
-            ),
-            callbacks=callbacks,
-            preregistration_sha256=str(
-                self.preregistration["preregistrationSha256"]
-            ),
+            ledger_path=self.preregistration["sourceBindings"]["experimentLedgerPath"],
+            budgets=self._search_budgets(),
+            callbacks=self._search_callbacks(),
+            preregistration_sha256=str(self.preregistration["preregistrationSha256"]),
+        )
+
+    def resume_incomplete_discovery_search(
+        self,
+        *,
+        entry_specs: Sequence[EntryCandidateSpec],
+        recovery_audit: Mapping[str, Any],
+        recovery_batch_result_path: str | Path,
+    ) -> FreshChronologicalSearch:
+        if self.quantile_bank is None:
+            raise RuntimeError("recovery quantile bank has not been restored")
+        return FreshChronologicalSearch.resume_incomplete_discovery(
+            split_manifest=self.split_manifest,
+            ledger_path=self.preregistration["sourceBindings"]["experimentLedgerPath"],
+            budgets=self._search_budgets(),
+            callbacks=self._search_callbacks(),
+            preregistration_sha256=str(self.preregistration["preregistrationSha256"]),
+            threshold_bank=fresh_quantile_bank_payload(self.quantile_bank),
+            entry_specs=entry_specs,
+            recovery_audit=recovery_audit,
+            recovery_batch_result_path=recovery_batch_result_path,
         )
 
 
@@ -2048,8 +2305,9 @@ def run_registered_fresh_research(
     output_directory: str | Path,
     research_state_directory: str | Path,
     progress: ProgressCallback | None = None,
+    resume_artifact_directory: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Run source QC, preregistration, chronological search, and one holdout."""
+    """Run the frozen study or the sole audited continuation of run 14."""
 
     root = Path(repository_root).resolve()
     output = Path(output_directory).resolve()
@@ -2061,49 +2319,128 @@ def run_registered_fresh_research(
     output.mkdir(parents=True, exist_ok=True)
     state_root.mkdir(parents=True, exist_ok=True)
 
-    bootstrap = build_fresh_source_bootstrap(
-        connection_context_factory,
-        config=registered_fresh_bootstrap_config(),
-        on_progress=progress,
-    )
-    write_fresh_source_bootstrap(output, bootstrap)
+    recovery_used = resume_artifact_directory is not None
+    recovery_manifest: Mapping[str, Any] | None = None
+    recovery_equivalence_evidence: Mapping[str, Any] | None = None
+    recovery_bundle = None
+    if recovery_used:
+        recovery_bundle = load_run14_recovery_bundle(resume_artifact_directory)
+        bootstrap = {
+            "inventory": recovery_bundle.inventory,
+            "corpus": recovery_bundle.corpus,
+            "split": recovery_bundle.split,
+        }
+    else:
+        bootstrap = build_fresh_source_bootstrap(
+            connection_context_factory,
+            config=registered_fresh_bootstrap_config(),
+            on_progress=progress,
+        )
+        write_fresh_source_bootstrap(output, bootstrap)
+
     state_binding = _research_state_binding(state_root, bootstrap["split"])
     ledger = Path(state_binding["experimentLedgerPath"])
-    holdout_registry = Path(
-        state_binding["holdoutAuthorizationRegistryPath"]
-    )
+    holdout_registry = Path(state_binding["holdoutAuthorizationRegistryPath"])
     for durable_path in (ledger, holdout_registry):
         if durable_path.is_symlink():
             raise PermissionError("durable research state cannot be a symbolic link")
-    if ledger.exists() and ledger.stat().st_size:
-        raise PermissionError(
-            "this frozen split already has a durable experiment ledger"
-        )
     if holdout_registry.exists():
         raise PermissionError("this frozen holdout window has already been consumed")
     ledger.parent.mkdir(parents=True, exist_ok=True)
     holdout_registry.parent.mkdir(parents=True, exist_ok=True)
-    _write_new_json(
-        output / "fresh_research_state_binding_v1.json", state_binding
-    )
-    implementation = build_fresh_implementation_manifest(
-        repository_root=root,
-        relative_paths=required_fresh_implementation_files(),
-    )
-    _write_new_json(output / "fresh_implementation_manifest_v1.json", implementation)
-    preregistration = build_fresh_preregistration_v2(
-        split_manifest=bootstrap["split"],
-        corpus_manifest_sha256=str(
-            bootstrap["corpus"]["corpusManifestSha256"]
-        ),
-        protocol_code_identifier=(
-            "fresh-pipeline-v1:" + implementation["manifestSha256"]
-        ),
-        implementation_manifest=implementation,
-        experiment_ledger_path=ledger,
-        holdout_authorization_registry_path=holdout_registry,
-    )
-    _write_new_json(output / "fresh_preregistration_v2.json", preregistration)
+
+    if recovery_used:
+        if recovery_bundle is None:
+            raise RuntimeError("run-14 recovery bundle was not loaded")
+        if state_binding != recovery_bundle.state_binding:
+            raise PermissionError("durable run-14 state binding changed")
+        if not ledger.is_file() or _file_sha256(ledger) != RUN14_LEDGER_SHA256:
+            raise PermissionError(
+                "the original durable run-14 ledger was not preserved byte-for-byte"
+            )
+        for source_name, destination_name in (
+            ("fresh_source_inventory_v1.json", "fresh_source_inventory_v1.json"),
+            ("fresh_corpus_manifest_v1.json", "fresh_corpus_manifest_v1.json"),
+            ("fresh_split_manifest_v2.json", "fresh_split_manifest_v2.json"),
+            (
+                "fresh_research_state_binding_v1.json",
+                "fresh_research_state_binding_v1.json",
+            ),
+            (
+                "fresh_implementation_manifest_v1.json",
+                "fresh_implementation_manifest_v1.json",
+            ),
+            ("fresh_preregistration_v2.json", "fresh_preregistration_v2.json"),
+            ("fresh_quantile_bank_v1.json", "fresh_quantile_bank_v1.json"),
+            (
+                "fresh_threshold_domain_preflight_v1.json",
+                "fresh_threshold_domain_preflight_v1.json",
+            ),
+            ("server-run.log", "run14_server-run.log"),
+            ("remote-exit-status.txt", "run14_remote-exit-status.txt"),
+        ):
+            _snapshot_new_file(
+                recovery_bundle.paths[source_name], output / destination_name
+            )
+        implementation = recovery_bundle.implementation
+        preregistration = recovery_bundle.preregistration
+        recovery_manifest = build_fresh_implementation_manifest(
+            repository_root=root,
+            relative_paths=(
+                *required_fresh_implementation_files(),
+                "datavis/research/fresh_recovery.py",
+                "datavis/research/fresh_spool.py",
+                "test_fresh_pipeline.py",
+                "test_fresh_preregistration.py",
+                "test_fresh_recovery.py",
+                "test_fresh_search.py",
+                "test_fresh_spool.py",
+            ),
+        )
+        _write_new_json(
+            output / "fresh_recovery_implementation_manifest_v1.json",
+            recovery_manifest,
+        )
+        recovery_equivalence_evidence = run_run14_recovery_equivalence_preflight(
+            root,
+            resume_artifact_directory,
+            recovery_implementation_manifest=recovery_manifest,
+        )
+        if progress is not None:
+            progress(
+                {
+                    "stage": "recovery_equivalence_preflight",
+                    "status": "passed",
+                    "testModuleCount": len(
+                        recovery_equivalence_evidence["testModules"]
+                    ),
+                    "evidenceSha256": canonical_hash(recovery_equivalence_evidence),
+                }
+            )
+    else:
+        if ledger.exists() and ledger.stat().st_size:
+            raise PermissionError(
+                "this frozen split already has a durable experiment ledger"
+            )
+        _write_new_json(output / "fresh_research_state_binding_v1.json", state_binding)
+        implementation = build_fresh_implementation_manifest(
+            repository_root=root,
+            relative_paths=required_fresh_implementation_files(),
+        )
+        _write_new_json(
+            output / "fresh_implementation_manifest_v1.json", implementation
+        )
+        preregistration = build_fresh_preregistration_v2(
+            split_manifest=bootstrap["split"],
+            corpus_manifest_sha256=str(bootstrap["corpus"]["corpusManifestSha256"]),
+            protocol_code_identifier=(
+                "fresh-pipeline-v1:" + implementation["manifestSha256"]
+            ),
+            implementation_manifest=implementation,
+            experiment_ledger_path=ledger,
+            holdout_authorization_registry_path=holdout_registry,
+        )
+        _write_new_json(output / "fresh_preregistration_v2.json", preregistration)
 
     pipeline = RegisteredFreshResearchPipeline(
         repository_root=root,
@@ -2113,16 +2450,76 @@ def run_registered_fresh_research(
         split_manifest=bootstrap["split"],
         preregistration=preregistration,
         progress=progress,
+        verify_preregistration_implementation_files=not recovery_used,
     )
-    search = pipeline.build_search()
-    operations = (
-        search.run_discovery,
-        search.run_walk_forward_1,
-        search.run_walk_forward_2,
-        search.run_exit_search,
-        search.run_walk_forward_3,
-        search.run_validation,
-    )
+    if recovery_used:
+        if (
+            recovery_bundle is None
+            or recovery_manifest is None
+            or recovery_equivalence_evidence is None
+        ):
+            raise RuntimeError("run-14 recovery identities were not frozen")
+        pipeline.quantile_bank = fresh_quantile_bank_from_payload(
+            recovery_bundle.quantile_bank
+        )
+        pipeline.threshold_preflight = dict(recovery_bundle.threshold_preflight)
+        discovery_window = bootstrap["split"]["windows"]["discovery"]
+        recovery_context = EvaluationContext(
+            stage="discovery",
+            training_roles=("discovery",),
+            evaluation_roles=("discovery",),
+            windows=(
+                FrozenResearchWindow(
+                    role="discovery",
+                    session_anchors=tuple(discovery_window["sessionAnchors"]),
+                    window_sha256=canonical_hash(discovery_window),
+                ),
+            ),
+        )
+        entry_specs = tuple(
+            pipeline.build_entry_candidates(
+                recovery_bundle.quantile_bank, recovery_context
+            )
+        )
+        entry_bank_path = output / "fresh_entry_bank_v1.json"
+        if _file_sha256(entry_bank_path) != RUN14_ENTRY_BANK_FILE_SHA256:
+            raise PermissionError("reconstructed run-14 entry-bank bytes changed")
+        recovery_audit, recovery_contract = build_run14_recovery_contract(
+            recovery_bundle,
+            entry_specs=entry_specs,
+            recovery_implementation_manifest=recovery_manifest,
+            generated_entry_bank_path=entry_bank_path,
+            equivalence_evidence=recovery_equivalence_evidence,
+        )
+        _write_new_json(output / "fresh_recovery_contract_v1.json", recovery_contract)
+        pipeline.recovery_contract = recovery_contract
+        pipeline.recovery_implementation_manifest = recovery_manifest
+        pipeline.recovery_batch_result_path = (
+            output / "fresh_recovery_discovery_batch_v1.json"
+        )
+        search = pipeline.resume_incomplete_discovery_search(
+            entry_specs=entry_specs,
+            recovery_audit=recovery_audit,
+            recovery_batch_result_path=(pipeline.recovery_batch_result_path),
+        )
+        operations = (
+            search.resume_discovery,
+            search.run_walk_forward_1,
+            search.run_walk_forward_2,
+            search.run_exit_search,
+            search.run_walk_forward_3,
+            search.run_validation,
+        )
+    else:
+        search = pipeline.build_search()
+        operations = (
+            search.run_discovery,
+            search.run_walk_forward_1,
+            search.run_walk_forward_2,
+            search.run_exit_search,
+            search.run_walk_forward_3,
+            search.run_validation,
+        )
     for operation in operations:
         result = operation()
         pipeline.stage_results.append(result)
@@ -2152,9 +2549,7 @@ def run_registered_fresh_research(
                     }
                 )
 
-    _snapshot_new_file(
-        ledger, output / "fresh_experiment_ledger_v1.jsonl"
-    )
+    _snapshot_new_file(ledger, output / "fresh_experiment_ledger_v1.jsonl")
     if holdout_registry.is_file():
         _snapshot_new_file(
             holdout_registry,
@@ -2177,9 +2572,18 @@ def run_registered_fresh_research(
         ),
         "preregistrationSha256": preregistration["preregistrationSha256"],
         "implementationManifestSha256": implementation["manifestSha256"],
+        "recoveryUsed": recovery_used,
+        "recoveryOriginalRunId": RUN14_RUN_ID if recovery_used else None,
+        "recoveryImplementationManifestSha256": (
+            recovery_manifest["manifestSha256"]
+            if recovery_manifest is not None
+            else None
+        ),
         "splitManifestSha256": bootstrap["split"]["manifestSha256"],
         "corpusManifestSha256": bootstrap["corpus"]["corpusManifestSha256"],
-        "holdoutOpened": any(item.stage == "holdout" for item in pipeline.stage_results),
+        "holdoutOpened": any(
+            item.stage == "holdout" for item in pipeline.stage_results
+        ),
         "stageResults": [asdict(item) for item in pipeline.stage_results],
         "strongestRecord": dict(strongest) if strongest is not None else None,
         "artifactFiles": sorted(

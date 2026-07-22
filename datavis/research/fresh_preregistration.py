@@ -17,7 +17,7 @@ import os
 import re
 from dataclasses import asdict
 from datetime import date
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Mapping, Sequence
 
 from datavis.research.fresh_entry_diagnostics import EntryDiagnosticConfig
@@ -98,6 +98,25 @@ def _registered_file_path(value: str | Path, name: str) -> str:
     return str(selected)
 
 
+def _registered_frozen_file_path(value: str | Path, name: str) -> str:
+    """Validate, but do not host-normalize, a path from a frozen artifact."""
+
+    if not isinstance(value, (str, Path)):
+        raise ValueError(f"{name} must be a non-empty file path")
+    selected = str(value)
+    if (
+        not selected
+        or selected.strip() != selected
+        or any(character in selected for character in "\x00\r\n")
+        or not (
+            PurePosixPath(selected).is_absolute()
+            or PureWindowsPath(selected).is_absolute()
+        )
+    ):
+        raise ValueError(f"{name} must be an absolute frozen file path")
+    return selected
+
+
 def _file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -127,7 +146,9 @@ def build_fresh_implementation_manifest(
         try:
             resolved_relative = full.relative_to(root).as_posix()
         except ValueError as exc:
-            raise ValueError("implementation paths must stay inside repository_root") from exc
+            raise ValueError(
+                "implementation paths must stay inside repository_root"
+            ) from exc
         if not full.is_file() or full.is_symlink():
             raise ValueError(f"implementation file is unavailable: {resolved_relative}")
         normalized.append(resolved_relative)
@@ -135,7 +156,9 @@ def build_fresh_implementation_manifest(
         raise ValueError("implementation paths must be non-empty and unique")
     if not _REQUIRED_IMPLEMENTATION_FILES.issubset(normalized):
         missing = sorted(_REQUIRED_IMPLEMENTATION_FILES.difference(normalized))
-        raise ValueError(f"implementation manifest is missing required files: {missing}")
+        raise ValueError(
+            f"implementation manifest is missing required files: {missing}"
+        )
     files = [
         {
             "path": relative,
@@ -162,14 +185,15 @@ def validate_fresh_implementation_manifest(
         raise ValueError("implementation_manifest must be a mapping")
     body = copy.deepcopy(dict(manifest))
     claimed = _sha256(str(body.pop("manifestSha256", "")), "manifestSha256")
-    if set(body) != {"schema", "repositoryRoot", "files"} or body.get(
-        "schema"
-    ) != IMPLEMENTATION_MANIFEST_SCHEMA:
+    if (
+        set(body) != {"schema", "repositoryRoot", "files"}
+        or body.get("schema") != IMPLEMENTATION_MANIFEST_SCHEMA
+    ):
         raise ValueError("implementation manifest has an invalid schema")
     if canonical_hash(body) != claimed:
         raise ValueError("implementation manifest hash does not match")
     root = Path(str(body["repositoryRoot"])).expanduser().resolve()
-    if not root.is_dir() or root.is_symlink():
+    if verify_current_files and (not root.is_dir() or root.is_symlink()):
         raise ValueError("implementation repository root is unavailable")
     files = body.get("files")
     if not isinstance(files, list) or not files:
@@ -182,7 +206,11 @@ def validate_fresh_implementation_manifest(
         if not isinstance(path, str):
             raise ValueError("implementation paths must be strings")
         relative = Path(path)
-        if relative.is_absolute() or ".." in relative.parts or relative.as_posix() != path:
+        if (
+            relative.is_absolute()
+            or ".." in relative.parts
+            or relative.as_posix() != path
+        ):
             raise ValueError("implementation paths must be canonical and relative")
         expected_sha = _sha256(str(record.get("sha256", "")), "file sha256")
         full = (root / relative).resolve()
@@ -191,7 +219,9 @@ def validate_fresh_implementation_manifest(
         except ValueError as exc:
             raise ValueError("implementation path escapes repository root") from exc
         if verify_current_files and (
-            not full.is_file() or full.is_symlink() or _file_sha256(full) != expected_sha
+            not full.is_file()
+            or full.is_symlink()
+            or _file_sha256(full) != expected_sha
         ):
             raise ValueError(f"implementation bytes changed: {path}")
         paths.append(path)
@@ -202,7 +232,9 @@ def validate_fresh_implementation_manifest(
     return claimed
 
 
-def _manifest_body_and_hash(split_manifest: Mapping[str, Any]) -> tuple[dict[str, Any], str]:
+def _manifest_body_and_hash(
+    split_manifest: Mapping[str, Any],
+) -> tuple[dict[str, Any], str]:
     if not isinstance(split_manifest, Mapping):
         raise ValueError("split_manifest must be a mapping")
     body = copy.deepcopy(dict(split_manifest))
@@ -268,7 +300,9 @@ def _validate_split(split_manifest: Mapping[str, Any]) -> str:
             for record in exclusions
         )
     ):
-        raise ValueError("split exclusions must contain explicit pre-outcome QC reasons")
+        raise ValueError(
+            "split exclusions must contain explicit pre-outcome QC reasons"
+        )
     excluded_anchors: list[date] = []
     for record in exclusions:
         raw_anchor = record.get("sessionAnchor")
@@ -277,11 +311,15 @@ def _validate_split(split_manifest: Mapping[str, Any]) -> str:
         try:
             excluded_anchor = date.fromisoformat(raw_anchor)
         except ValueError as exc:
-            raise ValueError("every split exclusion must identify an ISO sessionAnchor") from exc
+            raise ValueError(
+                "every split exclusion must identify an ISO sessionAnchor"
+            ) from exc
         if excluded_anchor.weekday() >= 5:
             raise ValueError("excluded session anchors must be Monday through Friday")
         if excluded_anchors and excluded_anchor <= excluded_anchors[-1]:
-            raise ValueError("excluded session anchors must be unique and chronological")
+            raise ValueError(
+                "excluded session anchors must be unique and chronological"
+            )
         excluded_anchors.append(excluded_anchor)
 
     windows = body.get("windows")
@@ -310,9 +348,10 @@ def _validate_split(split_manifest: Mapping[str, Any]) -> str:
             or len(anchors) != expected_count
         ):
             raise ValueError(f"split manifest has an invalid {role} window")
-        if window.get("firstSessionAnchor") != anchors[0] or window.get(
-            "lastSessionAnchor"
-        ) != anchors[-1]:
+        if (
+            window.get("firstSessionAnchor") != anchors[0]
+            or window.get("lastSessionAnchor") != anchors[-1]
+        ):
             raise ValueError(f"split manifest has inconsistent {role} bounds")
         for anchor in anchors:
             if not isinstance(anchor, str):
@@ -324,7 +363,9 @@ def _validate_split(split_manifest: Mapping[str, Any]) -> str:
             if parsed_anchor.weekday() >= 5:
                 raise ValueError("split anchors must be Monday through Friday")
             if prior_anchor is not None and parsed_anchor <= prior_anchor:
-                raise ValueError("split anchors must be unique and strictly chronological")
+                raise ValueError(
+                    "split anchors must be unique and strictly chronological"
+                )
             prior_anchor = parsed_anchor
             flattened.append((anchor, role))
 
@@ -1114,7 +1155,10 @@ def build_fresh_preregistration_v2(
         implementation_manifest,
         verify_current_files=True,
     )
-    if not isinstance(protocol_code_identifier, str) or not protocol_code_identifier.strip():
+    if (
+        not isinstance(protocol_code_identifier, str)
+        or not protocol_code_identifier.strip()
+    ):
         raise ValueError("protocol_code_identifier must be non-empty")
     inventory_sha = _sha256(
         str(split_manifest.get("inventorySha256", "")), "inventorySha256"
@@ -1128,14 +1172,18 @@ def build_fresh_preregistration_v2(
         "holdout_authorization_registry_path",
     )
     if ledger_path == authorization_path:
-        raise ValueError("experiment ledger and holdout registry must be different files")
+        raise ValueError(
+            "experiment ledger and holdout registry must be different files"
+        )
     body = _preregistration_body(
         {
             "splitManifestSha256": split_sha,
             "inventorySha256": inventory_sha,
             "corpusManifestSha256": corpus_sha,
             "protocolCodeIdentifier": code_id,
-            "protocolCodeIdentifierSha256": hashlib.sha256(code_id.encode("utf-8")).hexdigest(),
+            "protocolCodeIdentifierSha256": hashlib.sha256(
+                code_id.encode("utf-8")
+            ).hexdigest(),
             "implementationManifestSha256": implementation_sha,
             "implementationManifest": copy.deepcopy(dict(implementation_manifest)),
             "experimentLedgerPath": ledger_path,
@@ -1145,7 +1193,11 @@ def build_fresh_preregistration_v2(
     return {**body, "preregistrationSha256": canonical_hash(body)}
 
 
-def validate_fresh_preregistration_v2(preregistration: Mapping[str, Any]) -> str:
+def validate_fresh_preregistration_v2(
+    preregistration: Mapping[str, Any],
+    *,
+    verify_current_implementation_files: bool = True,
+) -> str:
     """Return the registered digest or reject a modified/non-v2 document."""
 
     if not isinstance(preregistration, Mapping):
@@ -1176,9 +1228,7 @@ def validate_fresh_preregistration_v2(preregistration: Mapping[str, Any]) -> str
         "splitManifestSha256": _sha256(
             str(source["splitManifestSha256"]), "splitManifestSha256"
         ),
-        "inventorySha256": _sha256(
-            str(source["inventorySha256"]), "inventorySha256"
-        ),
+        "inventorySha256": _sha256(str(source["inventorySha256"]), "inventorySha256"),
         "corpusManifestSha256": _sha256(
             str(source["corpusManifestSha256"]), "corpusManifestSha256"
         ),
@@ -1192,20 +1242,34 @@ def validate_fresh_preregistration_v2(preregistration: Mapping[str, Any]) -> str
             "implementationManifestSha256",
         ),
         "implementationManifest": copy.deepcopy(source["implementationManifest"]),
-        "experimentLedgerPath": _registered_file_path(
-            source["experimentLedgerPath"], "experimentLedgerPath"
+        "experimentLedgerPath": (
+            _registered_file_path(
+                source["experimentLedgerPath"], "experimentLedgerPath"
+            )
+            if verify_current_implementation_files
+            else _registered_frozen_file_path(
+                source["experimentLedgerPath"], "experimentLedgerPath"
+            )
         ),
-        "holdoutAuthorizationRegistryPath": _registered_file_path(
-            source["holdoutAuthorizationRegistryPath"],
-            "holdoutAuthorizationRegistryPath",
+        "holdoutAuthorizationRegistryPath": (
+            _registered_file_path(
+                source["holdoutAuthorizationRegistryPath"],
+                "holdoutAuthorizationRegistryPath",
+            )
+            if verify_current_implementation_files
+            else _registered_frozen_file_path(
+                source["holdoutAuthorizationRegistryPath"],
+                "holdoutAuthorizationRegistryPath",
+            )
         ),
     }
     code_id = normalized_source["protocolCodeIdentifier"]
     if not code_id or code_id.strip() != code_id:
         raise ValueError("protocolCodeIdentifier must be non-empty and trimmed")
-    if hashlib.sha256(code_id.encode("utf-8")).hexdigest() != normalized_source[
-        "protocolCodeIdentifierSha256"
-    ]:
+    if (
+        hashlib.sha256(code_id.encode("utf-8")).hexdigest()
+        != normalized_source["protocolCodeIdentifierSha256"]
+    ):
         raise ValueError("protocol code identifier hash does not match")
     if (
         normalized_source["experimentLedgerPath"]
@@ -1214,7 +1278,7 @@ def validate_fresh_preregistration_v2(preregistration: Mapping[str, Any]) -> str
         raise ValueError("experiment ledger and holdout registry must differ")
     actual_implementation_sha = validate_fresh_implementation_manifest(
         normalized_source["implementationManifest"],
-        verify_current_files=True,
+        verify_current_files=verify_current_implementation_files,
     )
     if actual_implementation_sha != normalized_source["implementationManifestSha256"]:
         raise ValueError("implementation manifest binding does not match")
@@ -1228,10 +1292,15 @@ def validate_fresh_preregistration_v2(preregistration: Mapping[str, Any]) -> str
 
 def session_audit_config_from_preregistration(
     preregistration: Mapping[str, Any],
+    *,
+    verify_current_implementation_files: bool = True,
 ) -> SessionAuditConfig:
     """Materialize every session-QC field explicitly; use no class defaults."""
 
-    validate_fresh_preregistration_v2(preregistration)
+    validate_fresh_preregistration_v2(
+        preregistration,
+        verify_current_implementation_files=verify_current_implementation_files,
+    )
     spec = preregistration["sessionAndData"]["completenessAudit"]
     return SessionAuditConfig(
         open_tolerance_seconds=float(spec["openToleranceSeconds"]),
@@ -1243,14 +1312,21 @@ def session_audit_config_from_preregistration(
 
 def feature_configs_from_preregistration(
     preregistration: Mapping[str, Any],
+    *,
+    verify_current_implementation_files: bool = True,
 ) -> tuple[FreshFeatureConfig, ...]:
     """Materialize the registered measurement bank with all fields explicit."""
 
-    validate_fresh_preregistration_v2(preregistration)
+    validate_fresh_preregistration_v2(
+        preregistration,
+        verify_current_implementation_files=verify_current_implementation_files,
+    )
     spec = preregistration["features"]
     return tuple(
         FreshFeatureConfig(
-            horizons_seconds=tuple(float(value) for value in spec["rawTimeHorizonsSeconds"]),
+            horizons_seconds=tuple(
+                float(value) for value in spec["rawTimeHorizonsSeconds"]
+            ),
             maximum_intertick_gap_ms=int(spec["maximumIntertickGapMilliseconds"]),
             ewma_half_lives_seconds=tuple(
                 float(value) for value in spec["ewmaHalfLivesSeconds"]
@@ -1265,10 +1341,15 @@ def feature_configs_from_preregistration(
 
 def entry_diagnostic_configs_from_preregistration(
     preregistration: Mapping[str, Any],
+    *,
+    verify_current_implementation_files: bool = True,
 ) -> dict[str, EntryDiagnosticConfig]:
     """Materialize registered execution scenarios with no inherited values."""
 
-    validate_fresh_preregistration_v2(preregistration)
+    validate_fresh_preregistration_v2(
+        preregistration,
+        verify_current_implementation_files=verify_current_implementation_files,
+    )
     configs: dict[str, EntryDiagnosticConfig] = {}
     for scenario in preregistration["execution"]["scenarios"]:
         identifier = str(scenario["id"])
@@ -1292,10 +1373,15 @@ def entry_diagnostic_configs_from_preregistration(
 
 def replay_execution_configs_from_preregistration(
     preregistration: Mapping[str, Any],
+    *,
+    verify_current_implementation_files: bool = True,
 ) -> dict[str, FreshExecutionConfig]:
     """Materialize full-replay execution scenarios with all fields explicit."""
 
-    validate_fresh_preregistration_v2(preregistration)
+    validate_fresh_preregistration_v2(
+        preregistration,
+        verify_current_implementation_files=verify_current_implementation_files,
+    )
     configs: dict[str, FreshExecutionConfig] = {}
     for scenario in preregistration["execution"]["scenarios"]:
         identifier = str(scenario["id"])
@@ -1319,9 +1405,7 @@ def replay_execution_configs_from_preregistration(
             quantity=float(scenario["quantity"]),
             slippage_per_side=entry_slippage,
             commission_per_unit_per_side=entry_commission,
-            pnl_classification_tolerance=float(
-                scenario["pnlClassificationTolerance"]
-            ),
+            pnl_classification_tolerance=float(scenario["pnlClassificationTolerance"]),
         )
     return configs
 
@@ -1330,10 +1414,14 @@ def entry_barrier_diagnostic_configs_from_preregistration(
     preregistration: Mapping[str, Any],
     *,
     scenario_id: str,
+    verify_current_implementation_files: bool = True,
 ) -> dict[str, EntryDiagnosticConfig]:
     """Materialize the sole explicitly registered barrier pair for one scenario."""
 
-    base_configs = entry_diagnostic_configs_from_preregistration(preregistration)
+    base_configs = entry_diagnostic_configs_from_preregistration(
+        preregistration,
+        verify_current_implementation_files=verify_current_implementation_files,
+    )
     if scenario_id not in base_configs:
         raise ValueError(f"unknown execution scenario: {scenario_id!r}")
     base = base_configs[scenario_id]
@@ -1365,10 +1453,14 @@ def replay_execution_config_for_candidate(
     *,
     scenario_id: str,
     cooldown_ms: int,
+    verify_current_implementation_files: bool = True,
 ) -> FreshExecutionConfig:
     """Return one registered scenario with the sole fixed deployable cooldown."""
 
-    configs = replay_execution_configs_from_preregistration(preregistration)
+    configs = replay_execution_configs_from_preregistration(
+        preregistration,
+        verify_current_implementation_files=verify_current_implementation_files,
+    )
     if scenario_id not in configs:
         raise ValueError(f"unknown execution scenario: {scenario_id!r}")
     registered = preregistration["entryDiagnostics"]["deployableSchedule"][
@@ -1398,8 +1490,11 @@ def replay_execution_config_for_candidate(
 
 
 def _load_verified_ledger(path: str | Path) -> list[dict[str, Any]]:
-    source = Path(path).expanduser().resolve()
-    if source.is_symlink() or not source.is_file():
+    selected_source = Path(path).expanduser()
+    if selected_source.is_symlink():
+        raise PermissionError("the preregistered experiment ledger is unavailable")
+    source = selected_source.resolve()
+    if not source.is_file():
         raise PermissionError("the preregistered experiment ledger is unavailable")
     records: list[dict[str, Any]] = []
     with source.open("r", encoding="utf-8") as handle:
@@ -1459,6 +1554,10 @@ def authorize_registered_holdout(
     walk_forward_3_record_number: int,
     validation_record_number: int,
     explicit_holdout_authorization: bool = False,
+    verify_current_implementation_files: bool = True,
+    infrastructure_recovery_contract: Mapping[str, Any] | None = None,
+    recovery_implementation_manifest: Mapping[str, Any] | None = None,
+    recovery_batch_result_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Atomically reserve the sole holdout after verified identical validation.
 
@@ -1467,11 +1566,15 @@ def authorize_registered_holdout(
     authorization and requires human audit rather than silently trying again.
     """
 
-    prereg_sha = validate_fresh_preregistration_v2(preregistration)
+    prereg_sha = validate_fresh_preregistration_v2(
+        preregistration,
+        verify_current_implementation_files=verify_current_implementation_files,
+    )
     strategy_sha = _sha256(frozen_strategy_sha256, "frozen_strategy_sha256")
-    if _validate_split(split_manifest) != preregistration["sourceBindings"][
-        "splitManifestSha256"
-    ]:
+    if (
+        _validate_split(split_manifest)
+        != preregistration["sourceBindings"]["splitManifestSha256"]
+    ):
         raise PermissionError("split manifest differs from the preregistered split")
     if any(
         not isinstance(number, int) or isinstance(number, bool) or number <= 0
@@ -1486,7 +1589,9 @@ def authorize_registered_holdout(
     ]
     research_role_order = {role: index for index, role in enumerate(_ROLE_ORDER[:-1])}
     if any(record.get("role") not in research_role_order for record in outcome_records):
-        raise PermissionError("outcome-revealing ledger records contain an unknown role")
+        raise PermissionError(
+            "outcome-revealing ledger records contain an unknown role"
+        )
     outcome_role_indexes = [
         research_role_order[str(record["role"])] for record in outcome_records
     ]
@@ -1496,8 +1601,50 @@ def authorize_registered_holdout(
         record
         for record in outcome_records
         if record.get("recordKind")
-        not in ("batch-window-access", "stage-window-access")
+        not in (
+            "batch-window-access",
+            "stage-window-access",
+            "infrastructure-resume",
+        )
     ]
+    recovery_records = [
+        record
+        for record in outcome_records
+        if record.get("recordKind") == "infrastructure-resume"
+    ]
+    recovery_proof: dict[str, Any] | None = None
+    if recovery_records:
+        if (
+            infrastructure_recovery_contract is None
+            or recovery_implementation_manifest is None
+            or recovery_batch_result_path is None
+        ):
+            raise PermissionError("holdout requires the complete sealed recovery proof")
+        from datavis.research.fresh_recovery import (
+            validate_run14_recovery_for_holdout,
+        )
+
+        recovery_proof = validate_run14_recovery_for_holdout(
+            records=records,
+            preregistration=preregistration,
+            preregistration_sha256=prereg_sha,
+            split_manifest=split_manifest,
+            split_manifest_sha256=preregistration["sourceBindings"][
+                "splitManifestSha256"
+            ],
+            recovery_contract=infrastructure_recovery_contract,
+            recovery_implementation_manifest=recovery_implementation_manifest,
+            sealed_batch_result_path=recovery_batch_result_path,
+        )
+    elif any(
+        item is not None
+        for item in (
+            infrastructure_recovery_contract,
+            recovery_implementation_manifest,
+            recovery_batch_result_path,
+        )
+    ):
+        raise PermissionError("recovery proof was supplied without a recovery chain")
     validation_records = [
         record
         for record in candidate_outcome_records
@@ -1511,7 +1658,9 @@ def authorize_registered_holdout(
         if record.get("role") == "walk_forward_3"
     ]
     if not walk_forward_3_records or len(walk_forward_3_records) > 3:
-        raise PermissionError("walk_forward_3 outcome count violates the registered budget")
+        raise PermissionError(
+            "walk_forward_3 outcome count violates the registered budget"
+        )
     if validation_records[0]["recordNumber"] != validation_record_number:
         raise PermissionError("the nominated record is not the sole validation outcome")
     if validation_record_number != len(records):
@@ -1519,32 +1668,28 @@ def authorize_registered_holdout(
     by_number = {record["recordNumber"]: record for record in records}
     walk_forward_3_evidence = by_number.get(walk_forward_3_record_number)
     validation_evidence = by_number.get(validation_record_number)
-    if (
-        walk_forward_3_evidence is None
-        or not _passed_same_strategy_record(
-            walk_forward_3_evidence,
-            role="walk_forward_3",
-            strategy_sha=strategy_sha,
-            prereg_sha=prereg_sha,
-        )
+    if walk_forward_3_evidence is None or not _passed_same_strategy_record(
+        walk_forward_3_evidence,
+        role="walk_forward_3",
+        strategy_sha=strategy_sha,
+        prereg_sha=prereg_sha,
     ):
         raise PermissionError(
             "holdout requires a passed walk_forward_3 record for the identical strategy"
         )
-    if (
-        validation_evidence is None
-        or not _passed_same_strategy_record(
-            validation_evidence,
-            role="validation",
-            strategy_sha=strategy_sha,
-            prereg_sha=prereg_sha,
-        )
+    if validation_evidence is None or not _passed_same_strategy_record(
+        validation_evidence,
+        role="validation",
+        strategy_sha=strategy_sha,
+        prereg_sha=prereg_sha,
     ):
         raise PermissionError(
             "holdout requires a passed validation record for the identical strategy"
         )
     if walk_forward_3_record_number >= validation_record_number:
-        raise PermissionError("walk_forward_3 evidence must precede validation evidence")
+        raise PermissionError(
+            "walk_forward_3 evidence must precede validation evidence"
+        )
     base = authorize_evaluation(
         "holdout",
         split_manifest=split_manifest,
@@ -1556,16 +1701,19 @@ def authorize_registered_holdout(
         key: value for key, value in base.items() if key != "authorizationSha256"
     }
     payload["preregistrationSha256"] = prereg_sha
-    payload["walkForward3EvidenceSha256"] = canonical_hash(
-        walk_forward_3_evidence
-    )
+    payload["walkForward3EvidenceSha256"] = canonical_hash(walk_forward_3_evidence)
     payload["validationEvidenceSha256"] = canonical_hash(validation_evidence)
+    if recovery_proof is not None:
+        payload["infrastructureRecoveryProof"] = recovery_proof
     authorization = {**payload, "authorizationSha256": canonical_hash(payload)}
 
-    destination = Path(
+    selected_destination = Path(
         preregistration["sourceBindings"]["holdoutAuthorizationRegistryPath"]
-    ).expanduser().resolve()
-    if destination.exists() or destination.is_symlink():
+    ).expanduser()
+    if selected_destination.is_symlink():
+        raise PermissionError("holdout authorization has already been reserved")
+    destination = selected_destination.resolve()
+    if destination.exists():
         raise PermissionError("holdout authorization has already been reserved")
     destination.parent.mkdir(parents=True, exist_ok=True)
     encoded = (
@@ -1578,12 +1726,7 @@ def authorize_registered_holdout(
         )
         + "\n"
     ).encode("utf-8")
-    flags = (
-        os.O_WRONLY
-        | os.O_CREAT
-        | os.O_EXCL
-        | getattr(os, "O_BINARY", 0)
-    )
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
     try:
         descriptor = os.open(destination, flags, 0o600)
     except FileExistsError as exc:

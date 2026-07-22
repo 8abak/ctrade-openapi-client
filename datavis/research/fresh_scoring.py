@@ -124,7 +124,9 @@ def _label(value: Any) -> str:
     try:
         return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
     except (TypeError, ValueError) as exc:
-        raise ValueError("slice metadata must have a deterministic representation") from exc
+        raise ValueError(
+            "slice metadata must have a deterministic representation"
+        ) from exc
 
 
 def _metadata_path(metadata: Mapping[str, Any], path: str) -> Any:
@@ -177,7 +179,11 @@ class SliceDimensions:
             "regime_metadata_path",
         ):
             value = getattr(self, name)
-            if not isinstance(value, str) or not value.strip() or value != value.strip():
+            if (
+                not isinstance(value, str)
+                or not value.strip()
+                or value != value.strip()
+            ):
                 raise ValueError(f"{name} must be non-empty and trimmed")
             if any(not part for part in value.split(".")):
                 raise ValueError(f"{name} must be a valid dotted metadata path")
@@ -193,7 +199,10 @@ class EntryMetricConfig:
     def __post_init__(self) -> None:
         if not isinstance(self.coverage_checkpoints_seconds, tuple):
             raise ValueError("coverage_checkpoints_seconds must be a tuple")
-        if tuple(self.coverage_checkpoints_seconds) != REQUIRED_COVERAGE_CHECKPOINTS_SECONDS:
+        if (
+            tuple(self.coverage_checkpoints_seconds)
+            != REQUIRED_COVERAGE_CHECKPOINTS_SECONDS
+        ):
             raise ValueError(
                 "coverage checkpoints must be exactly 1,2,5,10,20,30,60 seconds"
             )
@@ -279,10 +288,13 @@ class EntryPromotionThresholds:
             self.restricted_median_coverage_milliseconds_maximum,
             "restricted_median_coverage_milliseconds_maximum",
         )
-        if _finite(
-            self.equal_barrier_distance_per_unit,
-            "equal_barrier_distance_per_unit",
-        ) <= 0.0:
+        if (
+            _finite(
+                self.equal_barrier_distance_per_unit,
+                "equal_barrier_distance_per_unit",
+            )
+            <= 0.0
+        ):
             raise ValueError("equal_barrier_distance_per_unit must be positive")
 
 
@@ -354,7 +366,9 @@ class BalancedScoreSpecification:
         )
         if not math.isclose(sum(component_values), 1.0, abs_tol=1e-12):
             raise ValueError("balanced component weights must sum to one")
-        checkpoint_names = tuple(checkpoint for checkpoint, _ in self.coverage_probability_weights)
+        checkpoint_names = tuple(
+            checkpoint for checkpoint, _ in self.coverage_probability_weights
+        )
         if checkpoint_names != (2, 5, 10, 30, 60):
             raise ValueError("coverage score checkpoints must be exactly 2,5,10,30,60")
         probability_values = tuple(
@@ -409,7 +423,9 @@ class RegisteredScoringConfig:
             not isinstance(value, str) or not value.strip() or value != value.strip()
             for value in self.required_stress_scenario_ids
         ):
-            raise ValueError("required stress scenario ids must be non-empty and trimmed")
+            raise ValueError(
+                "required stress scenario ids must be non-empty and trimmed"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -616,7 +632,9 @@ class _TradeObservation:
     exit_key: tuple[datetime, int]
 
 
-def _event_dimensions(event: Any, dimensions: SliceDimensions) -> tuple[str, str, str, str]:
+def _event_dimensions(
+    event: Any, dimensions: SliceDimensions
+) -> tuple[str, str, str, str]:
     metadata = _as_mapping(_get(event, "metadata"), "event metadata")
     side = _get(event, "side")
     if side not in ("long", "short"):
@@ -678,10 +696,7 @@ def _entry_observations(
     reported_reasons = _as_mapping(
         _get(result, "rejected_reason_counts"), "rejected_reason_counts"
     )
-    calculated = Counter(
-        str(_get(item, "reason"))
-        for item in rejections
-    )
+    calculated = Counter(str(_get(item, "reason")) for item in rejections)
     normalized_reported: dict[str, int] = {}
     for reason, count in reported_reasons.items():
         if not isinstance(reason, str) or not reason:
@@ -711,7 +726,9 @@ def _coverage_successes(
     else:
         coverage_ms = _non_negative(raw_coverage, "time_to_cost_coverage_ms")
         if coverage_ms >= config.restricted_uncovered_milliseconds:
-            raise ValueError("first cost coverage must occur strictly before 60 seconds")
+            raise ValueError(
+                "first cost coverage must occur strictly before 60 seconds"
+            )
 
     successes: dict[int, bool] = {}
     for checkpoint in config.coverage_checkpoints_seconds:
@@ -737,7 +754,9 @@ def _coverage_successes(
     if barrier not in (None, "profit", "loss"):
         raise ValueError("first_barrier_hit must be profit, loss, or None")
     barrier_success = barrier == "profit" and not censored
-    censor_reason = str(_get(diagnostic, "observation_end_reason")) if censored else None
+    censor_reason = (
+        str(_get(diagnostic, "observation_end_reason")) if censored else None
+    )
     if censor_reason == "":
         raise ValueError("censored diagnostic must have a non-empty reason")
     return successes, coverage_ms, barrier_success, censor_reason
@@ -750,9 +769,13 @@ def _compute_entry_metrics(
 ) -> EntryMetrics:
     signals = len(observations)
     fills = [observation for observation in observations if observation.is_fill]
-    rejections = [observation for observation in observations if not observation.is_fill]
+    rejections = [
+        observation for observation in observations if not observation.is_fill
+    ]
     fill_count = len(fills)
-    coverage_counts = {checkpoint: 0 for checkpoint in config.coverage_checkpoints_seconds}
+    coverage_counts = {
+        checkpoint: 0 for checkpoint in config.coverage_checkpoints_seconds
+    }
     restricted_times: list[float] = []
     covered_times: list[float] = []
     censored_count = 0
@@ -826,7 +849,9 @@ def _compute_entry_metrics(
         censor_reason_counts=_sorted_counts(censor_reasons),
         evaluated_session_count=evaluated_count,
         active_session_count=len(active),
-        active_session_fraction=(len(active) / evaluated_count if evaluated_count else None),
+        active_session_fraction=(
+            len(active) / evaluated_count if evaluated_count else None
+        ),
         profit_barrier_net_per_unit=float(config.profit_barrier_net_per_unit),
         loss_barrier_net_per_unit=float(config.loss_barrier_net_per_unit),
     )
@@ -909,7 +934,9 @@ def _trade_observations(
         entry_timestamp = _get(trade, "entry_fill_timestamp")
         exit_timestamp = _get(trade, "exit_fill_timestamp")
         if not isinstance(entry_timestamp, datetime) or entry_timestamp.tzinfo is None:
-            raise ValueError(f"trade[{position}] entry timestamp must be timezone-aware")
+            raise ValueError(
+                f"trade[{position}] entry timestamp must be timezone-aware"
+            )
         if entry_timestamp.utcoffset() is None:
             raise ValueError(f"trade[{position}] entry timestamp offset is unusable")
         if not isinstance(exit_timestamp, datetime) or exit_timestamp.tzinfo is None:
@@ -994,20 +1021,14 @@ def _compute_trade_metrics(
     session_pnl = {session: 0.0 for session in evaluated_sessions}
     for observation in observations:
         if observation.day not in session_pnl:
-            raise ValueError(
-                f"trade refers to unevaluated session {observation.day!r}"
-            )
+            raise ValueError(f"trade refers to unevaluated session {observation.day!r}")
         session_pnl[observation.day] += observation.net_pnl
     active = {observation.day for observation in observations}
-    positive_sessions = [
-        value for value in session_pnl.values() if value > tolerance
-    ]
+    positive_sessions = [value for value in session_pnl.values() if value > tolerance]
     evaluated_count = len(evaluated_sessions)
 
     absolute_losses = [-value for value in losers]
-    loss_95 = _quantile_linear(
-        absolute_losses, config.loss_tail_quantile_probability
-    )
+    loss_95 = _quantile_linear(absolute_losses, config.loss_tail_quantile_probability)
     median_loss = float(median(absolute_losses)) if absolute_losses else None
     loss_tail_ratio = (
         loss_95 / median_loss
@@ -1062,7 +1083,9 @@ def _compute_trade_metrics(
         ),
         evaluated_session_count=evaluated_count,
         active_session_count=len(active),
-        active_session_fraction=(len(active) / evaluated_count if evaluated_count else None),
+        active_session_fraction=(
+            len(active) / evaluated_count if evaluated_count else None
+        ),
         positive_session_count=len(positive_sessions),
         positive_session_fraction=(
             len(positive_sessions) / evaluated_count if evaluated_count else None
@@ -1225,9 +1248,7 @@ def _at_most(value: float | int | None, threshold: float | int) -> bool:
     return value is not None and value <= threshold
 
 
-def _profit_factor_at_least(
-    value: float | str | None, threshold: float
-) -> bool:
+def _profit_factor_at_least(value: float | str | None, threshold: float) -> bool:
     if value == "Infinity":
         return True
     return value is not None and not isinstance(value, str) and value >= threshold
@@ -1377,7 +1398,9 @@ def evaluate_full_strategy_gate(
     if not required_stresses or len(required_stresses) != len(set(required_stresses)):
         raise ValueError("required stress scenario ids must be non-empty and unique")
     if any(identifier not in stresses for identifier in required_stresses):
-        missing = [identifier for identifier in required_stresses if identifier not in stresses]
+        missing = [
+            identifier for identifier in required_stresses if identifier not in stresses
+        ]
         raise ValueError(f"missing required stress metrics: {missing}")
     for identifier, metrics in stresses.items():
         if not isinstance(identifier, str) or not identifier:
@@ -1391,7 +1414,9 @@ def evaluate_full_strategy_gate(
             "entry_promotion_gate",
             entry_gate.passed or not thresholds.entry_promotion_gates_still_required,
             entry_gate.passed,
-            "is true" if thresholds.entry_promotion_gates_still_required else "not required",
+            "is true"
+            if thresholds.entry_promotion_gates_still_required
+            else "not required",
             thresholds.entry_promotion_gates_still_required,
         ),
         _gate_check(
@@ -1502,7 +1527,8 @@ def evaluate_full_strategy_gate(
         ),
         _gate_check(
             "profitability_valid",
-            reference.profitability_valid or not thresholds.profitability_valid_required,
+            reference.profitability_valid
+            or not thresholds.profitability_valid_required,
             reference.profitability_valid,
             "is true" if thresholds.profitability_valid_required else "not required",
             thresholds.profitability_valid_required,
@@ -1616,9 +1642,7 @@ def compute_balanced_score(
         components["coverageProbabilityAndSpeed"] = None
     else:
         probability_component = math.fsum(probability_terms)
-        speed_component = 1.0 - 2.0 * _clip(
-            restricted_median / 60_000.0, 0.0, 1.0
-        )
+        speed_component = 1.0 - 2.0 * _clip(restricted_median / 60_000.0, 0.0, 1.0)
         components["coverageProbabilityAndSpeed"] = (
             specification.coverage_probability_share * probability_component
             + specification.restricted_median_speed_share * speed_component
@@ -1635,9 +1659,7 @@ def compute_balanced_score(
         )
 
     components["inverseDrawdownToGrossProfit"] = (
-        1.0
-        - 2.0
-        * _clip(reference.maximum_drawdown / reference.gross_profit, 0.0, 1.0)
+        1.0 - 2.0 * _clip(reference.maximum_drawdown / reference.gross_profit, 0.0, 1.0)
         if reference.gross_profit > 0.0
         else None
     )
@@ -1667,9 +1689,7 @@ def compute_balanced_score(
         else None
     )
     components["inverseLargestSessionProfitConcentration"] = (
-        1.0
-        - 2.0
-        * _clip(reference.largest_session_share_of_gross_profit, 0.0, 1.0)
+        1.0 - 2.0 * _clip(reference.largest_session_share_of_gross_profit, 0.0, 1.0)
         if reference.largest_session_share_of_gross_profit is not None
         else None
     )
@@ -1688,8 +1708,7 @@ def compute_balanced_score(
         weights = dict(specification.component_weights)
         score = _clip(
             math.fsum(
-                weights[name] * float(value)
-                for name, value in ordered_components
+                weights[name] * float(value) for name, value in ordered_components
             ),
             -1.0,
             1.0,
@@ -1754,6 +1773,8 @@ def build_candidate_scorecard(
 
 def scoring_config_from_preregistration(
     preregistration: Mapping[str, Any],
+    *,
+    verify_current_implementation_files: bool = True,
 ) -> RegisteredScoringConfig:
     """Parse scoring assumptions only after the canonical v2 document validates."""
 
@@ -1764,36 +1785,31 @@ def scoring_config_from_preregistration(
         validate_fresh_preregistration_v2,
     )
 
-    validate_fresh_preregistration_v2(preregistration)
-    entry_spec = _as_mapping(
-        preregistration["entryDiagnostics"], "entryDiagnostics"
+    validate_fresh_preregistration_v2(
+        preregistration,
+        verify_current_implementation_files=verify_current_implementation_files,
     )
+    entry_spec = _as_mapping(preregistration["entryDiagnostics"], "entryDiagnostics")
     execution = _as_mapping(preregistration["execution"], "execution")
     robustness = _as_mapping(
         preregistration["robustnessAndGates"], "robustnessAndGates"
     )
     minimum = _as_mapping(robustness["minimumSample"], "minimumSample")
-    entry_gate = _as_mapping(
-        robustness["entryPromotionGates"], "entryPromotionGates"
-    )
-    full_gate = _as_mapping(
-        robustness["fullStrategyGates"], "fullStrategyGates"
-    )
+    entry_gate = _as_mapping(robustness["entryPromotionGates"], "entryPromotionGates")
+    full_gate = _as_mapping(robustness["fullStrategyGates"], "fullStrategyGates")
     balanced = _as_mapping(robustness["balancedScore"], "balancedScore")
-    coverage_subscore = _as_mapping(
-        balanced["coverageSubscore"], "coverageSubscore"
-    )
+    coverage_subscore = _as_mapping(balanced["coverageSubscore"], "coverageSubscore")
 
     scenario_id = str(entry_gate["scenario"])
     scenarios = _as_sequence(execution["scenarios"], "execution scenarios")
-    matching = [scenario for scenario in scenarios if _get(scenario, "id") == scenario_id]
+    matching = [
+        scenario for scenario in scenarios if _get(scenario, "id") == scenario_id
+    ]
     if len(matching) != 1:
         raise ValueError("entry gate execution scenario must resolve exactly once")
     reference_scenario = matching[0]
 
-    component_weights_map = _as_mapping(
-        balanced["weights"], "balanced score weights"
-    )
+    component_weights_map = _as_mapping(balanced["weights"], "balanced score weights")
     probability_weights_map = _as_mapping(
         coverage_subscore["probabilityWeights"], "coverage probability weights"
     )
@@ -1869,9 +1885,7 @@ def scoring_config_from_preregistration(
             required_stress_net_pnl_strictly_positive=bool(
                 full_gate["requiredStressNetPnlStrictlyPositive"]
             ),
-            profitability_valid_required=bool(
-                full_gate["profitabilityValidRequired"]
-            ),
+            profitability_valid_required=bool(full_gate["profitabilityValidRequired"]),
             entry_promotion_gates_still_required=bool(
                 full_gate["entryPromotionGatesStillRequired"]
             ),
@@ -1885,9 +1899,7 @@ def scoring_config_from_preregistration(
                 (checkpoint, float(probability_weights_map[f"{checkpoint}s"]))
                 for checkpoint in (2, 5, 10, 30, 60)
             ),
-            coverage_probability_share=float(
-                coverage_subscore["probabilityShare"]
-            ),
+            coverage_probability_share=float(coverage_subscore["probabilityShare"]),
             restricted_median_speed_share=float(
                 coverage_subscore["restrictedMedianSpeedShare"]
             ),
