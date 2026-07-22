@@ -4,6 +4,9 @@ import dataclasses
 import re
 import unittest
 
+import numpy as np
+import pandas as pd
+
 from datavis.research.fresh_exit_grid import (
     FRESH_EXIT_GRID_SCHEMA,
     FRESH_EXIT_QUANTILE_RANKS,
@@ -18,6 +21,7 @@ from datavis.research.fresh_thresholds import (
     FreshQuantileBank,
     FreshQuantileBankConfig,
     QuantileThreshold,
+    SessionBalancedQuantileFitter,
 )
 
 
@@ -27,9 +31,9 @@ SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 def threshold_value(measurement: str, rank: float) -> float:
     if measurement == "identity::spread":
         return 0.10 + rank / 10.0
-    if measurement == "absolute::1s_mid_speed":
+    if measurement == "nonzero_absolute::1s_mid_speed":
         return 0.50 + rank
-    if measurement == "absolute::1s_mid_acceleration":
+    if measurement == "nonzero_absolute::1s_mid_acceleration":
         return 1.00 + 2.0 * rank
     raise AssertionError(measurement)
 
@@ -60,6 +64,31 @@ def bank() -> FreshQuantileBank:
         thresholds=thresholds,
         bank_sha256="a" * 64,
     )
+
+
+def zero_heavy_bank() -> FreshQuantileBank:
+    specs = fresh_exit_quantile_measurements()
+    rows = 2_001
+    data: dict[str, np.ndarray] = {
+        "feature_ready": np.ones(rows, dtype=bool),
+        "gap_detected": np.zeros(rows, dtype=bool),
+        "spread": np.full(rows, 0.1, dtype=float),
+    }
+    for spec in specs:
+        if spec.transform == "nonzero_absolute":
+            values = np.zeros(rows, dtype=float)
+            values[-1_000:] = np.resize(np.array([-0.5, 0.5]), 1_000)
+            data[spec.column] = values
+    frame = pd.DataFrame(data)
+    config = FreshQuantileBankConfig(
+        ranks=FRESH_EXIT_QUANTILE_RANKS,
+        minimum_finite_values_per_session=1_000,
+        minimum_eligible_sessions=40,
+    )
+    fitter = SessionBalancedQuantileFitter(measurements=specs, config=config)
+    for anchor in pd.bdate_range("2026-01-02", periods=40):
+        fitter.add_session(anchor.date().isoformat(), frame)
+    return fitter.freeze()
 
 
 def execution(
@@ -110,6 +139,42 @@ def executions() -> dict[str, FreshExecutionConfig]:
 
 
 class FreshExitGridTests(unittest.TestCase):
+    def test_signed_exit_magnitudes_exclude_zero_before_quantiles(self):
+        measurements = {
+            item.column: item.transform for item in fresh_exit_quantile_measurements()
+        }
+        self.assertEqual(measurements["spread"], "identity")
+        self.assertEqual(measurements["1s_mid_speed"], "nonzero_absolute")
+        self.assertEqual(
+            measurements["1s_mid_acceleration"],
+            "nonzero_absolute",
+        )
+
+    def test_zero_heavy_production_bank_resolves_the_full_grid(self):
+        selected_bank = zero_heavy_bank()
+        grid = build_fresh_exit_grid(
+            selected_bank,
+            execution_configs=executions(),
+        )
+
+        self.assertEqual(len(grid.variants), 72)
+        self.assertEqual(
+            selected_bank.config.minimum_finite_values_per_session,
+            1_000,
+        )
+        self.assertEqual(selected_bank.config.minimum_eligible_sessions, 40)
+        nonzero_measurements = {
+            spec.name
+            for spec in selected_bank.measurements
+            if spec.transform == "nonzero_absolute"
+        }
+        self.assertEqual(len(nonzero_measurements), 2)
+        for threshold in selected_bank.thresholds:
+            if threshold.measurement in nonzero_measurements:
+                self.assertGreater(threshold.value, 0.0)
+                self.assertEqual(threshold.eligible_session_count, 40)
+                self.assertEqual(threshold.finite_value_count, 40_000)
+
     def test_grid_is_deterministic_unique_and_within_registered_budget(self):
         first = build_fresh_exit_grid(bank(), execution_configs=executions())
         second = build_fresh_exit_grid(

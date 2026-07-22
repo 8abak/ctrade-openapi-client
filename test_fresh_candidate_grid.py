@@ -4,6 +4,9 @@ import dataclasses
 import unittest
 from collections import Counter, defaultdict
 
+import numpy as np
+import pandas as pd
+
 from datavis.research.fresh_candidate_grid import (
     FRESH_CANDIDATE_GRID_SCHEMA,
     FRESH_CANDIDATE_QUANTILE_RANKS,
@@ -31,6 +34,7 @@ from datavis.research.fresh_thresholds import (
     FreshQuantileBank,
     FreshQuantileBankConfig,
     QuantileThreshold,
+    SessionBalancedQuantileFitter,
 )
 
 
@@ -84,6 +88,41 @@ def bank(model_ids: tuple[str, ...] = MODELS) -> FreshQuantileBank:
     )
 
 
+def zero_heavy_bank(
+    model_ids: tuple[str, ...] = MODELS,
+) -> FreshQuantileBank:
+    specs = fresh_candidate_quantile_measurements(kalman_model_ids=model_ids)
+    rows = 2_001
+    data: dict[str, np.ndarray] = {
+        "feature_ready": np.ones(rows, dtype=bool),
+        "gap_detected": np.zeros(rows, dtype=bool),
+    }
+    for spec in specs:
+        if spec.transform == "nonzero_absolute":
+            values = np.zeros(rows, dtype=float)
+            values[-1_000:] = np.resize(np.array([-0.25, 0.25]), 1_000)
+        elif spec.transform == "positive":
+            values = np.zeros(rows, dtype=float)
+            values[-1_000:] = 0.5
+        elif spec.transform == "absolute":
+            values = np.zeros(rows, dtype=float)
+        elif spec.column == "spread":
+            values = np.full(rows, 0.1, dtype=float)
+        else:
+            values = np.zeros(rows, dtype=float)
+        data[spec.column] = values
+    frame = pd.DataFrame(data)
+    config = FreshQuantileBankConfig(
+        ranks=FRESH_CANDIDATE_QUANTILE_RANKS,
+        minimum_finite_values_per_session=1_000,
+        minimum_eligible_sessions=40,
+    )
+    fitter = SessionBalancedQuantileFitter(measurements=specs, config=config)
+    for anchor in pd.bdate_range("2026-01-02", periods=40):
+        fitter.add_session(anchor.date().isoformat(), frame)
+    return fitter.freeze()
+
+
 EXPECTED_THRESHOLD_PARAMETERS = {
     TrendAccelerationSignalConfig: {
         "minimum_trend",
@@ -122,6 +161,31 @@ EXPECTED_THRESHOLD_PARAMETERS = {
 
 
 class FreshCandidateGridTests(unittest.TestCase):
+    def test_zero_heavy_production_bank_resolves_the_full_grid(self):
+        selected_bank = zero_heavy_bank()
+        grid = build_fresh_candidate_grid(
+            selected_bank,
+            kalman_model_ids=MODELS,
+        )
+
+        self.assertEqual(len(grid.candidates), 93)
+        self.assertEqual(
+            selected_bank.config.minimum_finite_values_per_session,
+            1_000,
+        )
+        self.assertEqual(selected_bank.config.minimum_eligible_sessions, 40)
+        nonzero_measurements = {
+            spec.name
+            for spec in selected_bank.measurements
+            if spec.transform == "nonzero_absolute"
+        }
+        self.assertTrue(nonzero_measurements)
+        for threshold in selected_bank.thresholds:
+            if threshold.measurement in nonzero_measurements:
+                self.assertGreater(threshold.value, 0.0)
+                self.assertEqual(threshold.eligible_session_count, 40)
+                self.assertEqual(threshold.finite_value_count, 40_000)
+
     def test_registered_nine_model_grid_is_balanced_and_within_budgets(self):
         grid = build_fresh_candidate_grid(bank(), kalman_model_ids=MODELS)
         self.assertEqual(grid.schema, FRESH_CANDIDATE_GRID_SCHEMA)
@@ -228,18 +292,23 @@ class FreshCandidateGridTests(unittest.TestCase):
         specs = fresh_candidate_quantile_measurements(
             kalman_model_ids=tuple(reversed(MODELS))
         )
+        transforms = {item.column: item.transform for item in specs}
         self.assertEqual(len(specs), len({item.name for item in specs}))
         self.assertTrue(any(item.column == "250ms_mid_speed" for item in specs))
         self.assertFalse(
             any(item.column == "250ms_mid_acceleration" for item in specs)
         )
         self.assertTrue(any(item.column == "30s_mid_speed" for item in specs))
+        self.assertEqual(transforms["1s_mid_speed"], "nonzero_absolute")
+        self.assertEqual(transforms["1s_mid_acceleration"], "absolute")
         for model_id in MODELS:
-            self.assertTrue(
-                any(item.column == f"{model_id}__velocity" for item in specs)
+            self.assertEqual(
+                transforms[f"{model_id}__velocity"],
+                "nonzero_absolute",
             )
-            self.assertTrue(
-                any(item.column == f"{model_id}__velocity_change" for item in specs)
+            self.assertEqual(
+                transforms[f"{model_id}__velocity_change"],
+                "absolute",
             )
         forbidden = ("future", "label", "target", "outcome", "profit", "mfe", "mae")
         self.assertFalse(

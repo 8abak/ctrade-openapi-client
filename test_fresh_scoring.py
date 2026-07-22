@@ -492,6 +492,40 @@ class GateAndScoreTests(unittest.TestCase):
         self.assertIn("stress.friction.net_pnl_positive", scorecard.full_gate.failed_check_names)
         self.assertIsNotNone(scorecard.balanced_score.score)
 
+    def test_profitable_but_sparse_required_stress_fails_sample_support(self):
+        sample = minimum_sample()
+        entry_gate = evaluate_entry_gate(
+            self.entry_report.overall,
+            minimum_sample=sample,
+            thresholds=entry_thresholds(),
+        )
+        sparse = score_trade_records(
+            [trade(0, 1.0, "d1")],
+            config=trade_metric_config(),
+            dimensions=DIMENSIONS,
+            evaluated_sessions=self.days,
+            replay_censor_count=0,
+            profitability_valid=True,
+        ).overall
+
+        gate = evaluate_full_strategy_gate(
+            self.reference.overall,
+            {"latency": sparse, "friction": self.reference.overall},
+            entry_gate,
+            minimum_sample=sample,
+            thresholds=full_thresholds(),
+            required_stress_scenario_ids=("latency", "friction"),
+        )
+
+        self.assertFalse(gate.passed)
+        self.assertIn(
+            "stress.latency.minimum_trade_count", gate.failed_check_names
+        )
+        self.assertIn(
+            "stress.latency.minimum_active_session_fraction",
+            gate.failed_check_names,
+        )
+
     def test_undefined_zero_trade_components_produce_no_balanced_score(self):
         empty = score_trade_records(
             (),

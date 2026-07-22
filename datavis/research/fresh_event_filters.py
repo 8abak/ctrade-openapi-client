@@ -217,10 +217,18 @@ class EventFilterVariantSource:
 
     candidate_id: str
     family: str
+    robustness_group: str | None = None
 
     def __post_init__(self) -> None:
         _non_empty(self.candidate_id, "candidate_id")
         _non_empty(self.family, "family")
+        group = (
+            self.candidate_id
+            if self.robustness_group is None
+            else self.robustness_group
+        )
+        _non_empty(group, "robustness_group")
+        object.__setattr__(self, "robustness_group", group)
 
 
 @dataclass(frozen=True, slots=True)
@@ -892,10 +900,10 @@ def derive_bounded_post_discovery_variant_bank(
     """Expand selected entries without exceeding total or family budgets.
 
     The function accepts candidate identities and counts, but deliberately has
-    no parameter for scores or outcomes.  Catalogue rounds are applied evenly
-    across sources in sorted identity order; a family at its cap is skipped.
-    Each returned record consumes exactly one additional discovery-candidate
-    slot.
+    no parameter for scores or outcomes.  Catalogue rounds rotate across
+    complete robustness groups in stable order; a family at its cap is skipped.
+    This prevents a total-budget boundary from truncating a three-point
+    parameter neighbourhood and makes every registered filter type reachable.
     """
 
     _validate_bank(quantile_bank, regime_definition, FRESH_REGIME_QUINTILE_RANKS)
@@ -951,42 +959,63 @@ def derive_bounded_post_discovery_variant_bank(
             raise ValueError(
                 "every source family must have an already-registered candidate"
             )
-    ordered_sources = tuple(sorted(sources, key=lambda item: (item.family, item.candidate_id)))
+    groups: dict[tuple[str, str], list[EventFilterVariantSource]] = {}
+    for source in sources:
+        assert source.robustness_group is not None
+        groups.setdefault((source.family, source.robustness_group), []).append(source)
+    ordered_groups = tuple(
+        tuple(sorted(group, key=lambda item: item.candidate_id))
+        for _, group in sorted(groups.items())
+    )
 
     total_room = maximum_total_candidates - already_registered_candidate_count
     additional_limit = min(requested_additional_candidates, total_room)
     variants: list[FreshFilteredCandidateVariant] = []
-    for config in _filter_catalog(regime_definition):
-        config_sha = fresh_event_filter_config_fingerprint(config, quantile_bank)
-        for source in ordered_sources:
-            if len(variants) >= additional_limit:
-                break
-            if family_counts[source.family] >= maximum_candidates_per_family:
+    catalog = _filter_catalog(regime_definition)
+    config_hashes = {
+        config: fresh_event_filter_config_fingerprint(config, quantile_bank)
+        for config in catalog
+    }
+    for round_index in range(len(catalog)):
+        added_this_round = False
+        for group_index, group in enumerate(ordered_groups):
+            group_size = len(group)
+            family = group[0].family
+            if any(source.family != family for source in group):
+                raise AssertionError("a robustness group crossed candidate families")
+            if len(variants) + group_size > additional_limit:
                 continue
-            candidate_id = (
-                f"{source.candidate_id}::event-filter::{config.variant_id}"
-            )
-            candidate_sha = canonical_hash(
-                {
-                    "kind": "fresh-filtered-entry-candidate",
-                    "sourceCandidateId": source.candidate_id,
-                    "family": source.family,
-                    "candidateId": candidate_id,
-                    "eventFilterSha256": config_sha,
-                }
-            )
-            variants.append(
-                FreshFilteredCandidateVariant(
-                    candidate_id=candidate_id,
-                    source_candidate_id=source.candidate_id,
-                    family=source.family,
-                    filter_config=config,
-                    filter_config_sha256=config_sha,
-                    candidate_sha256=candidate_sha,
+            if family_counts[family] + group_size > maximum_candidates_per_family:
+                continue
+            config = catalog[(round_index + group_index) % len(catalog)]
+            config_sha = config_hashes[config]
+            for source in group:
+                candidate_id = (
+                    f"{source.candidate_id}::event-filter::{config.variant_id}"
                 )
-            )
-            family_counts[source.family] += 1
-        if len(variants) >= additional_limit:
+                candidate_sha = canonical_hash(
+                    {
+                        "kind": "fresh-filtered-entry-candidate",
+                        "sourceCandidateId": source.candidate_id,
+                        "sourceRobustnessGroup": source.robustness_group,
+                        "family": source.family,
+                        "candidateId": candidate_id,
+                        "eventFilterSha256": config_sha,
+                    }
+                )
+                variants.append(
+                    FreshFilteredCandidateVariant(
+                        candidate_id=candidate_id,
+                        source_candidate_id=source.candidate_id,
+                        family=source.family,
+                        filter_config=config,
+                        filter_config_sha256=config_sha,
+                        candidate_sha256=candidate_sha,
+                    )
+                )
+                family_counts[source.family] += 1
+            added_this_round = True
+        if len(variants) >= additional_limit or not added_this_round:
             break
 
     registered_counts = tuple(sorted(registered_family_counts.items()))

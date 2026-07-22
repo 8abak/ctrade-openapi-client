@@ -1511,8 +1511,28 @@ def evaluate_full_strategy_gate(
 
     for identifier in required_stresses:
         metrics = stresses[identifier]
+        stress_required_count = minimum_sample.required_count(
+            metrics.evaluated_session_count
+        )
         checks.extend(
             (
+                _gate_check(
+                    f"stress.{identifier}.minimum_trade_count",
+                    metrics.trade_count >= stress_required_count,
+                    metrics.trade_count,
+                    ">=",
+                    stress_required_count,
+                ),
+                _gate_check(
+                    f"stress.{identifier}.minimum_active_session_fraction",
+                    _at_least(
+                        metrics.active_session_fraction,
+                        minimum_sample.active_session_fraction_minimum,
+                    ),
+                    metrics.active_session_fraction,
+                    ">=",
+                    minimum_sample.active_session_fraction_minimum,
+                ),
                 _gate_check(
                     f"stress.{identifier}.net_pnl_positive",
                     metrics.net_pnl > 0.0

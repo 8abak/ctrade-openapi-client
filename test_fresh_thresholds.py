@@ -84,6 +84,32 @@ class FreshThresholdTests(unittest.TestCase):
         self.assertGreater(bank.threshold("absolute", 0.5), 0)
         self.assertGreater(bank.threshold("positive", 0.25), 0)
 
+    def test_nonzero_absolute_excludes_only_zeros_and_preserves_multiplicity(self):
+        repeated = [0.0, -0.0, -2.0, 2.0, 2.0, -4.0]
+        bank = fit_session_balanced_quantiles(
+            {
+                "2026-01-02": frame(repeated),
+                "2026-01-05": frame(repeated),
+            },
+            measurements=[
+                QuantileMeasurementSpec(
+                    "nonzero",
+                    "speed",
+                    "nonzero_absolute",
+                )
+            ],
+            config=CONFIG,
+        )
+
+        self.assertEqual(bank.threshold("nonzero", 0.25), 2.0)
+        self.assertEqual(bank.threshold("nonzero", 0.5), 2.0)
+        self.assertEqual(bank.threshold("nonzero", 0.75), 2.5)
+        records = [
+            item for item in bank.thresholds if item.measurement == "nonzero"
+        ]
+        self.assertEqual({item.finite_value_count for item in records}, {8})
+        self.assertEqual({item.eligible_session_count for item in records}, {2})
+
     def test_future_or_outcome_columns_and_insufficient_data_fail(self):
         with self.assertRaisesRegex(ValueError, "outcome"):
             QuantileMeasurementSpec("bad", "future_profit", "identity")

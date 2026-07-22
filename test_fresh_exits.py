@@ -18,6 +18,7 @@ from datavis.research.fresh_replay import (
     FreshExecutionConfig,
     PositionView,
     ReplayDecision,
+    _prepare_replay_tape,
     run_fresh_replay,
 )
 from datavis.research.ticks import Tick
@@ -371,6 +372,213 @@ class FreshProtectiveExitTests(unittest.TestCase):
         self.assertAlmostEqual(trade.exit_metadata["activeStopQuote"], 100.70)
         self.assertEqual(trade.exit_metadata["triggerTickId"], 5)
         self.assertEqual(trade.exit_fill_tick_id, 6)
+
+    def test_missing_decision_volatility_suppresses_only_dependent_entry(self):
+        points = [
+            quote(1, 0, 100.0, 100.2),
+            quote(2, 1, 100.0, 100.2),
+            quote(3, 2, 99.6, 99.8),
+            quote(4, 3, 99.5, 99.7),
+        ]
+        rows = tuple(
+            VolatilityRow(index, point.id, point.timestamp, None)
+            for index, point in enumerate(points)
+        )
+        settings = execution()
+        dependent = run_fresh_replay(
+            points,
+            managed(
+                points,
+                "long",
+                policy_config=exit_config(
+                    initial_stop=ExitDistance("volatility", 2.0)
+                ),
+                execution_config=settings,
+                volatility=VolatilityFrame(rows),
+            ),
+            config=settings,
+        )
+        fixed = run_fresh_replay(
+            points,
+            managed(
+                points,
+                "long",
+                policy_config=exit_config(
+                    initial_stop=ExitDistance("fixed", 0.5)
+                ),
+                execution_config=settings,
+                volatility=VolatilityFrame(rows),
+            ),
+            config=settings,
+        )
+
+        self.assertEqual(dependent.decisions, ())
+        self.assertEqual(dependent.trades, ())
+        self.assertEqual(dependent.censors, ())
+        self.assertEqual(len(fixed.trades), 1)
+        self.assertEqual(fixed.trades[0].exit_reason, "fresh-exit:initial-stop")
+
+    def test_decision_volatility_is_causal_fallback_for_delayed_fill(self):
+        points = [
+            quote(1, 0, 100.0, 100.2),
+            quote(2, 200, 100.0, 100.2),
+            quote(3, 201, 99.3, 99.5),
+            quote(4, 202, 99.2, 99.4),
+        ]
+        values = (0.4, None, None, None)
+        volatility = VolatilityFrame(
+            VolatilityRow(index, point.id, point.timestamp, values[index])
+            for index, point in enumerate(points)
+        )
+        settings = execution(entry_latency_ms=100)
+        result = run_fresh_replay(
+            points,
+            managed(
+                points,
+                "long",
+                policy_config=exit_config(
+                    initial_stop=ExitDistance("volatility", 2.0)
+                ),
+                execution_config=settings,
+                volatility=volatility,
+            ),
+            config=settings,
+        )
+
+        trade = result.trades[0]
+        self.assertEqual(trade.entry_fill_tick_id, 2)
+        self.assertEqual(trade.exit_metadata["triggerTickId"], 3)
+        self.assertAlmostEqual(trade.exit_metadata["activeStopQuote"], 99.4)
+        self.assertEqual(trade.exit_fill_tick_id, 4)
+
+    def test_unavailable_current_volatility_keeps_existing_trailing_stop(self):
+        points = [
+            quote(1, 0, 100.0, 100.2),
+            quote(2, 1, 100.0, 100.2),
+            quote(3, 200, 100.8, 101.0),
+            quote(4, 1_200, 101.0, 101.2),
+            quote(5, 1_201, 100.69, 100.89),
+            quote(6, 1_202, 100.60, 100.80),
+        ]
+        values = (0.4, 0.4, 0.2, None, None, None)
+        volatility = VolatilityFrame(
+            VolatilityRow(index, point.id, point.timestamp, values[index])
+            for index, point in enumerate(points)
+        )
+        settings = execution()
+        result = run_fresh_replay(
+            points,
+            managed(
+                points,
+                "long",
+                policy_config=exit_config(
+                    initial_stop=ExitDistance("volatility", 5.0),
+                    trailing_activation=ExitDistance("volatility", 1.0),
+                    trailing_distance=ExitDistance("volatility", 0.5),
+                    trailing_volatility_basis="current",
+                ),
+                execution_config=settings,
+                volatility=volatility,
+            ),
+            config=settings,
+        )
+
+        trade = result.trades[0]
+        self.assertEqual(trade.exit_reason, "fresh-exit:trailing-stop")
+        self.assertAlmostEqual(trade.exit_metadata["bestExecutableQuote"], 101.0)
+        self.assertAlmostEqual(trade.exit_metadata["activeStopQuote"], 100.70)
+        self.assertEqual(trade.exit_metadata["triggerTickId"], 5)
+
+    def test_equal_time_delayed_fill_uses_decision_volatility_and_id_order(self):
+        points = [
+            Tick(id=10, timestamp=BASE, bid=100.0, ask=100.2),
+            Tick(id=11, timestamp=BASE, bid=100.0, ask=100.2),
+            Tick(id=12, timestamp=BASE, bid=99.3, ask=99.5),
+            Tick(id=13, timestamp=BASE, bid=99.2, ask=99.4),
+        ]
+        values = (0.4, None, None, None)
+        volatility = VolatilityFrame(
+            VolatilityRow(index, point.id, point.timestamp, values[index])
+            for index, point in enumerate(points)
+        )
+        settings = execution()
+        result = run_fresh_replay(
+            points,
+            managed(
+                points,
+                "long",
+                policy_config=exit_config(
+                    initial_stop=ExitDistance("volatility", 2.0)
+                ),
+                execution_config=settings,
+                volatility=volatility,
+            ),
+            config=settings,
+        )
+
+        trade = result.trades[0]
+        self.assertEqual(trade.entry_fill_tick_id, 11)
+        self.assertEqual(trade.exit_metadata["triggerTickId"], 12)
+        self.assertEqual(trade.exit_fill_tick_id, 13)
+        self.assertEqual(trade.holding_ms, 0.0)
+
+    def test_missing_fill_volatility_is_identical_in_dense_and_sparse_replay(self):
+        points = tuple(
+            quote(tick_id, milliseconds, bid, ask)
+            for tick_id, milliseconds, bid, ask in (
+                (1, 0, 100.0, 100.2),
+                (2, 10, 100.0, 100.2),
+                (3, 20, 100.0, 100.2),
+                (4, 30, 100.0, 100.2),
+                (5, 31, 100.0, 100.2),
+                (6, 32, 99.3, 99.5),
+                (7, 33, 99.2, 99.4),
+            )
+        )
+        values = (None, None, None, 0.4, None, None, None)
+        settings = execution()
+        policy_config = exit_config(
+            initial_stop=ExitDistance("volatility", 2.0)
+        )
+
+        def policy() -> FreshProtectiveExitPolicy:
+            decision = DecisionFrame(
+                [
+                    DecisionRow(
+                        tick_index=3,
+                        tick_id=points[3].id,
+                        timestamp=points[3].timestamp,
+                        decision=ReplayDecision("enter_long", "frozen-entry"),
+                    )
+                ]
+            )
+            volatility = VolatilityFrame(
+                VolatilityRow(index, point.id, point.timestamp, values[index])
+                for index, point in enumerate(points)
+            )
+            return FreshProtectiveExitPolicy(
+                decision,
+                config=policy_config,
+                execution=settings,
+                volatility=volatility,
+            )
+
+        dense = run_fresh_replay(points, policy(), config=settings)
+        prepared = _prepare_replay_tape(
+            points,
+            maximum_intertick_gap_ms=settings.maximum_intertick_gap_ms,
+        )
+        sparse = run_fresh_replay(
+            points,
+            policy(),
+            config=settings,
+            _prepared_replay_tape=prepared,
+        )
+
+        self.assertEqual(sparse, dense)
+        self.assertEqual(len(sparse.trades), 1)
+        self.assertEqual(sparse.trades[0].entry_fill_tick_id, 5)
+        self.assertEqual(sparse.trades[0].exit_metadata["triggerTickId"], 6)
 
     def test_equal_timestamps_use_increasing_ids_for_trigger_then_fill(self):
         points = [

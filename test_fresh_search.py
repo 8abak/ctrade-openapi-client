@@ -9,6 +9,7 @@ from typing import Any
 
 from datavis.research.fresh_protocol import (
     FreshWindowPolicy,
+    authorize_evaluation,
     build_fresh_split_manifest,
 )
 from datavis.research.fresh_search import (
@@ -52,11 +53,12 @@ BUDGETS = FreshSearchBudgets(
     discovery_distinct_candidates=2,
     discovery_per_family_maximum=2,
     walk_forward_1_frozen_candidates=2,
-    walk_forward_2_frozen_candidates=1,
+    walk_forward_2_frozen_candidates=2,
     exit_variants_after_entry_gate=2,
     walk_forward_3_full_strategies=2,
     validation_full_strategies=1,
     holdout_full_strategies=1,
+    exit_search_frozen_entries=1,
 )
 
 
@@ -225,7 +227,7 @@ class FreshSearchTests(unittest.TestCase):
         engine.run_walk_forward_1()
         self.assertEqual(
             tuple(candidate.candidate_id for candidate in engine.entry_candidates),
-            ("entry-b",),
+            ("entry-b", "entry-a"),
         )
         engine.run_walk_forward_2()
         engine.run_exit_search()
@@ -256,10 +258,47 @@ class FreshSearchTests(unittest.TestCase):
         self.assertEqual(harness.threshold_calls, 1)
         self.assertEqual(harness.builder_calls, 1)
         records = [json.loads(line) for line in self.ledger.read_text().splitlines()]
-        self.assertEqual([record["recordNumber"] for record in records], list(range(1, 12)))
+        self.assertEqual(len(records), 13)
+        self.assertEqual(
+            [record["recordNumber"] for record in records],
+            list(range(1, len(records) + 1)),
+        )
         self.assertEqual(records[-1]["role"], "holdout")
         self.assertEqual(records[-1]["frozenStrategySha256"], winner_sha)
         self.assertTrue(records[-1]["outcomesRevealed"])
+
+    def test_walk_forward_2_freezes_exact_explicit_exit_search_entry_count(self):
+        engine, _ = self.engine()
+        engine.run_discovery()
+        engine.run_walk_forward_1()
+        self.assertEqual(
+            tuple(candidate.candidate_id for candidate in engine.entry_candidates),
+            ("entry-b", "entry-a"),
+        )
+
+        result = engine.run_walk_forward_2()
+
+        self.assertEqual(result.evaluated_ids, ("entry-b", "entry-a"))
+        self.assertEqual(result.promoted_ids, ("entry-b",))
+        self.assertEqual(
+            tuple(candidate.candidate_id for candidate in engine.entry_candidates),
+            ("entry-b",),
+        )
+        engine.run_exit_search()
+
+    def test_current_protocol_rejects_multiple_exit_search_entries(self):
+        with self.assertRaisesRegex(ValueError, "exactly one frozen entry"):
+            FreshSearchBudgets(
+                discovery_distinct_candidates=2,
+                discovery_per_family_maximum=2,
+                walk_forward_1_frozen_candidates=2,
+                walk_forward_2_frozen_candidates=2,
+                exit_variants_after_entry_gate=2,
+                walk_forward_3_full_strategies=2,
+                validation_full_strategies=1,
+                holdout_full_strategies=1,
+                exit_search_frozen_entries=2,
+            )
 
     def test_stage_skipping_and_reusing_unseen_window_are_rejected(self):
         engine, _ = self.engine()
@@ -472,6 +511,204 @@ class FreshSearchTests(unittest.TestCase):
         self.assertEqual(len(entry_calls), 3)
         self.assertEqual(len(strategy_calls), 3)
         self.assertEqual(entry_calls[0], ("entry-a", "entry-b"))
+
+    def test_batch_entry_failure_is_durably_marked_before_and_after_callback(self):
+        harness = _Harness()
+        base = harness.callbacks()
+
+        def fail_batch(candidates, context):
+            self.assertEqual(context.stage, "discovery")
+            self.assertEqual(
+                tuple(candidate.candidate_id for candidate in candidates),
+                ("entry-a", "entry-b"),
+            )
+            raise RuntimeError("deliberate batch entry failure")
+
+        callbacks = FreshSearchCallbacks(
+            fit_thresholds=base.fit_thresholds,
+            build_entry_candidates=base.build_entry_candidates,
+            generate_signals=base.generate_signals,
+            score_entry=base.score_entry,
+            build_exit_variants=base.build_exit_variants,
+            run_execution_scenarios=base.run_execution_scenarios,
+            score_strategy=base.score_strategy,
+            score_entries_batch=fail_batch,
+        )
+        engine = FreshChronologicalSearch(
+            split_manifest=_split_manifest(),
+            ledger_path=self.ledger,
+            budgets=BUDGETS,
+            callbacks=callbacks,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "batch entry failure"):
+            engine.run_discovery()
+
+        records = [json.loads(line) for line in self.ledger.read_text().splitlines()]
+        self.assertEqual(
+            [record["status"] for record in records],
+            [
+                "window_access_started",
+                "batch_access_started",
+                "batch_access_error",
+            ],
+        )
+        self.assertTrue(all(record["outcomesRevealed"] for record in records))
+        self.assertEqual(records[0]["recordKind"], "stage-window-access")
+        self.assertEqual(records[1]["recordKind"], "batch-window-access")
+        self.assertEqual(records[2]["role"], "discovery")
+        self.assertEqual(records[2]["metrics"]["errorType"], "RuntimeError")
+        self.assertEqual(engine.stage, FreshSearchStage.FAILED)
+        self.assertEqual(engine.consumed_roles, ("discovery",))
+
+    def test_batch_strategy_failure_durably_consumes_unseen_window(self):
+        harness = _Harness()
+        base = harness.callbacks()
+
+        def batch_strategies(candidates, context):
+            if context.stage == "walk_forward_3":
+                raise RuntimeError("deliberate batch strategy failure")
+            return {
+                candidate.strategy_id: CandidateEvaluation(
+                    identity_sha256=candidate.strategy_sha256,
+                    passed=True,
+                    metrics={"stage": context.stage},
+                    leakage_checks={"batched": True},
+                    score=2.0 if candidate.strategy_id == "strategy-b" else 1.0,
+                )
+                for candidate in candidates
+            }
+
+        callbacks = FreshSearchCallbacks(
+            fit_thresholds=base.fit_thresholds,
+            build_entry_candidates=base.build_entry_candidates,
+            generate_signals=base.generate_signals,
+            score_entry=base.score_entry,
+            build_exit_variants=base.build_exit_variants,
+            run_execution_scenarios=base.run_execution_scenarios,
+            score_strategy=base.score_strategy,
+            score_strategies_batch=batch_strategies,
+        )
+        engine = FreshChronologicalSearch(
+            split_manifest=_split_manifest(),
+            ledger_path=self.ledger,
+            budgets=BUDGETS,
+            callbacks=callbacks,
+        )
+        engine.run_discovery()
+        engine.run_walk_forward_1()
+        engine.run_walk_forward_2()
+        engine.run_exit_search()
+
+        with self.assertRaisesRegex(RuntimeError, "batch strategy failure"):
+            engine.run_walk_forward_3()
+
+        records = [json.loads(line) for line in self.ledger.read_text().splitlines()]
+        self.assertEqual(
+            [record["status"] for record in records[-2:]],
+            ["batch_access_started", "batch_access_error"],
+        )
+        self.assertTrue(records[-2]["outcomesRevealed"])
+        self.assertTrue(records[-1]["outcomesRevealed"])
+        self.assertEqual(records[-1]["role"], "walk_forward_3")
+        self.assertEqual(records[-1]["metrics"]["errorType"], "RuntimeError")
+        self.assertEqual(engine.stage, FreshSearchStage.FAILED)
+        self.assertEqual(engine.consumed_roles[-1], "walk_forward_3")
+        with self.assertRaises(FreshSearchProtocolError):
+            engine.run_walk_forward_3()
+
+    def test_abrupt_batch_stop_durably_consumes_the_window(self):
+        harness = _Harness()
+        base = harness.callbacks()
+
+        def abrupt_stop(_candidates, _context):
+            raise SystemExit("simulated abrupt stop")
+
+        callbacks = FreshSearchCallbacks(
+            fit_thresholds=base.fit_thresholds,
+            build_entry_candidates=base.build_entry_candidates,
+            generate_signals=base.generate_signals,
+            score_entry=base.score_entry,
+            build_exit_variants=base.build_exit_variants,
+            run_execution_scenarios=base.run_execution_scenarios,
+            score_strategy=base.score_strategy,
+            score_entries_batch=abrupt_stop,
+        )
+        engine = FreshChronologicalSearch(
+            split_manifest=_split_manifest(),
+            ledger_path=self.ledger,
+            budgets=BUDGETS,
+            callbacks=callbacks,
+        )
+
+        with self.assertRaisesRegex(SystemExit, "abrupt stop"):
+            engine.run_discovery()
+
+        records = [json.loads(line) for line in self.ledger.read_text().splitlines()]
+        self.assertEqual(len(records), 2)
+        self.assertEqual(
+            [record["status"] for record in records],
+            ["window_access_started", "batch_access_started"],
+        )
+        self.assertTrue(all(record["outcomesRevealed"] for record in records))
+        with self.assertRaisesRegex(PermissionError, "already been consumed"):
+            authorize_evaluation(
+                "discovery",
+                split_manifest=_split_manifest(),
+                access_records=records,
+            )
+
+    def test_threshold_fit_is_durably_consumed_before_the_callback(self):
+        harness = _Harness()
+        base = harness.callbacks()
+
+        def abrupt_fit(_context):
+            raise SystemExit("simulated threshold-fit stop")
+
+        callbacks = FreshSearchCallbacks(
+            fit_thresholds=abrupt_fit,
+            build_entry_candidates=base.build_entry_candidates,
+            generate_signals=base.generate_signals,
+            score_entry=base.score_entry,
+            build_exit_variants=base.build_exit_variants,
+            run_execution_scenarios=base.run_execution_scenarios,
+            score_strategy=base.score_strategy,
+        )
+        engine = FreshChronologicalSearch(
+            split_manifest=_split_manifest(),
+            ledger_path=self.ledger,
+            budgets=BUDGETS,
+            callbacks=callbacks,
+        )
+
+        with self.assertRaisesRegex(SystemExit, "threshold-fit stop"):
+            engine.run_discovery()
+
+        records = [json.loads(line) for line in self.ledger.read_text().splitlines()]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["recordKind"], "stage-window-access")
+        self.assertEqual(records[0]["status"], "window_access_started")
+        self.assertTrue(records[0]["outcomesRevealed"])
+
+    def test_exit_search_truthfully_records_reused_consumed_outcomes(self):
+        engine, _ = self.engine()
+        engine.run_discovery()
+        engine.run_walk_forward_1()
+        engine.run_walk_forward_2()
+        engine.run_exit_search()
+
+        records = [json.loads(line) for line in self.ledger.read_text().splitlines()]
+        exit_records = [record for record in records if record["stage"] == "exit_search"]
+        self.assertEqual(len(exit_records), 2)
+        self.assertTrue(all(record["outcomesRevealed"] for record in exit_records))
+        self.assertTrue(all(record["role"] == "walk_forward_2" for record in exit_records))
+        self.assertTrue(
+            all(
+                record["evaluationWindow"]
+                == "discovery+walk_forward_1+walk_forward_2"
+                for record in exit_records
+            )
+        )
 
     def test_batch_result_must_cover_every_requested_identity(self):
         harness = _Harness()

@@ -50,8 +50,8 @@ REGISTERED_MAXIMUM_HOLDING_MS = 58_000
 
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _SPREAD_MEASUREMENT = "identity::spread"
-_VELOCITY_MEASUREMENT = "absolute::1s_mid_speed"
-_ACCELERATION_MEASUREMENT = "absolute::1s_mid_acceleration"
+_VELOCITY_MEASUREMENT = "nonzero_absolute::1s_mid_speed"
+_ACCELERATION_MEASUREMENT = "nonzero_absolute::1s_mid_acceleration"
 
 
 def fresh_exit_quantile_measurements() -> tuple[QuantileMeasurementSpec, ...]:
@@ -62,12 +62,12 @@ def fresh_exit_quantile_measurements() -> tuple[QuantileMeasurementSpec, ...]:
         QuantileMeasurementSpec(
             _VELOCITY_MEASUREMENT,
             "1s_mid_speed",
-            "absolute",
+            "nonzero_absolute",
         ),
         QuantileMeasurementSpec(
             _ACCELERATION_MEASUREMENT,
             "1s_mid_acceleration",
-            "absolute",
+            "nonzero_absolute",
         ),
     )
 

@@ -13,6 +13,7 @@ import hashlib
 import json
 import math
 import os
+import tempfile
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from datetime import timedelta
@@ -31,6 +32,7 @@ from datavis.research.fresh_bootstrap import (
 from datavis.research.fresh_candidate_grid import (
     FRESH_CANDIDATE_QUANTILE_RANKS,
     FreshCandidate,
+    FreshCandidateGrid,
     build_fresh_candidate_grid,
     fresh_candidate_quantile_measurements,
 )
@@ -50,6 +52,7 @@ from datavis.research.fresh_event_filters import (
     EventFilterVariantSource,
     FreshEventFilterConfig,
     FreshEventFilterRequest,
+    FreshEventFilterVariantBank,
     FreshRegimeDefinition,
     derive_bounded_post_discovery_variant_bank,
     enrich_and_filter_frozen_event_batch,
@@ -141,6 +144,9 @@ BASELINE_MINIMUM_UPLIFT = 0.02
 BASELINE_CLUSTER_CONFIDENCE = 0.90
 BASELINE_BOOTSTRAP_REPLICATES = 2_000
 SESSION_CLOSE_SAFETY_MS = 62_000
+LATER_SENSITIVITY_STAGES = frozenset(
+    ("walk_forward_3", "validation", "holdout")
+)
 
 ProgressCallback = Callable[[Mapping[str, Any]], None]
 
@@ -171,6 +177,110 @@ class _EntryEdgeSummary:
     uplift_10_cluster_interval: tuple[float, float] | None
     uplift_30_cluster_interval: tuple[float, float] | None
     baseline_gate_passed: bool
+
+
+def _parameter_neighbourhood_audit(
+    members: Sequence[
+        tuple[str, float, bool, float | None, float | None, str]
+    ],
+    *,
+    minimum_valid_neighbor_fraction: float,
+    minimum_positive_expectancy_neighbor_fraction: float,
+    minimum_neighbor_expectancy_retention: float,
+    maximum_absolute_coverage_30_drop: float | None,
+) -> dict[str, Any]:
+    """Evaluate one center plus its two registered adjacent rank variants."""
+
+    selected = tuple(members)
+    offsets = tuple(sorted(item[1] for item in selected))
+    if offsets != (-0.05, 0.0, 0.05):
+        raise ValueError(
+            "a parameter neighbourhood must contain rank offsets -0.05, 0, 0.05"
+        )
+    center = next(item for item in selected if item[1] == 0.0)
+    neighbors = tuple(item for item in selected if item[1] != 0.0)
+    valid_fraction = sum(item[2] for item in neighbors) / len(neighbors)
+    positive_fraction = sum(
+        item[3] is not None and item[3] > 0.0 for item in neighbors
+    ) / len(neighbors)
+    neighbor_expectancies = [
+        float(item[3]) for item in neighbors if item[3] is not None
+    ]
+    center_expectancy = center[3]
+    retention = (
+        float(min(neighbor_expectancies) / center_expectancy)
+        if len(neighbor_expectancies) == len(neighbors)
+        and center_expectancy is not None
+        and center_expectancy > 0.0
+        else None
+    )
+    neighbor_coverages = [
+        float(item[4]) for item in neighbors if item[4] is not None
+    ]
+    center_coverage = center[4]
+    parameter_signatures = tuple(item[5] for item in selected)
+    parameters_distinct = len(set(parameter_signatures)) == len(
+        parameter_signatures
+    )
+    coverage_required = maximum_absolute_coverage_30_drop is not None
+    coverage_drop = (
+        max(abs(value - center_coverage) for value in neighbor_coverages)
+        if coverage_required
+        and len(neighbor_coverages) == len(neighbors)
+        and center_coverage is not None
+        else None
+    )
+    checks = {
+        "centerHardGatePassed": center[2],
+        "validNeighborFractionPassed": (
+            valid_fraction >= minimum_valid_neighbor_fraction
+        ),
+        "positiveExpectancyNeighborFractionPassed": (
+            positive_fraction >= minimum_positive_expectancy_neighbor_fraction
+        ),
+        "minimumExpectancyRetentionPassed": (
+            retention is not None
+            and retention >= minimum_neighbor_expectancy_retention
+        ),
+        "parametersDistinctAcrossRanks": parameters_distinct,
+        "coverage30DropPassed": (
+            not coverage_required
+            or (
+                coverage_drop is not None
+                and maximum_absolute_coverage_30_drop is not None
+                and coverage_drop <= maximum_absolute_coverage_30_drop
+            )
+        ),
+    }
+    return {
+        "centerCandidateId": center[0],
+        "evaluatedCount": len(selected),
+        "adjacentNeighborCount": len(neighbors),
+        "validNeighborFraction": valid_fraction,
+        "minimumValidNeighborFraction": minimum_valid_neighbor_fraction,
+        "positiveExpectancyNeighborFraction": positive_fraction,
+        "minimumPositiveExpectancyNeighborFraction": (
+            minimum_positive_expectancy_neighbor_fraction
+        ),
+        "centerExpectancy": center_expectancy,
+        "minimumNeighborExpectancy": (
+            float(min(neighbor_expectancies))
+            if len(neighbor_expectancies) == len(neighbors)
+            else None
+        ),
+        "minimumNeighborExpectancyRetention": retention,
+        "requiredMinimumNeighborExpectancyRetention": (
+            minimum_neighbor_expectancy_retention
+        ),
+        "centerCoverage30": center_coverage,
+        "coverage30DropRequired": coverage_required,
+        "maximumAbsoluteCoverage30Drop": coverage_drop,
+        "maximumAllowedAbsoluteCoverage30Drop": (
+            maximum_absolute_coverage_30_drop
+        ),
+        "checks": checks,
+        "passed": all(checks.values()),
+    }
 
 
 def _write_new_json(path: Path, payload: Mapping[str, Any]) -> None:
@@ -342,7 +452,166 @@ def _coverage_count(
         for item in result.diagnostics
         if side is None or item.event.side == side
     ]
-    return sum(bool(getattr(item, attribute)) for item in selected), len(selected)
+    return (
+        sum(
+            not item.censored and bool(getattr(item, attribute))
+            for item in selected
+        ),
+        len(selected),
+    )
+
+
+def _entry_barrier_value(item: Any) -> float:
+    """Return the registered equal-barrier outcome with censors as failures."""
+
+    if item.censored:
+        return 0.0
+    if item.first_barrier_hit == "profit":
+        return 0.25
+    if item.first_barrier_hit == "loss":
+        return -0.25
+    return 0.0
+
+
+def _restricted_coverage_ms(item: Any) -> float:
+    """Assign the full diagnostic horizon to censors and uncovered fills."""
+
+    if item.censored or item.time_to_cost_coverage_ms is None:
+        return 60_000.0
+    return float(item.time_to_cost_coverage_ms)
+
+
+def _scenario_ids_for_stage(
+    execution_ids: Sequence[str],
+    required_stress_ids: Sequence[str],
+    *,
+    stage: str,
+) -> tuple[str, ...]:
+    """Use selection scenarios in research and report all sensitivities later."""
+
+    registered = tuple(execution_ids)
+    if len(registered) != len(set(registered)):
+        raise ValueError("execution scenario ids must be unique")
+    core = (REFERENCE_SCENARIO_ID, *tuple(required_stress_ids))
+    if len(core) != len(set(core)) or any(item not in registered for item in core):
+        raise ValueError("reference and required stress scenarios must be registered")
+    if stage in LATER_SENSITIVITY_STAGES:
+        return registered
+    return core
+
+
+def _derive_event_filter_bank(
+    bank: FreshQuantileBank,
+    grid: FreshCandidateGrid,
+    regime_definition: FreshRegimeDefinition,
+) -> FreshEventFilterVariantBank:
+    """Build the complete outcome-blind filter expansion used by preflight and search."""
+
+    family_counts = Counter(item.family for item in grid.candidates)
+    return derive_bounded_post_discovery_variant_bank(
+        bank,
+        regime_definition=regime_definition,
+        source_candidates=tuple(
+            EventFilterVariantSource(
+                candidate_id=item.config.candidate_id,
+                family=item.family,
+                robustness_group=item.neighbourhood_id,
+            )
+            for item in grid.candidates
+        ),
+        already_registered_candidate_count=len(grid.candidates),
+        registered_family_counts=family_counts,
+        requested_additional_candidates=240 - len(grid.candidates),
+    )
+
+
+def _research_state_binding(
+    state_directory: str | Path,
+    split_manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Derive durable ledger and holdout-lock paths from frozen window identity."""
+
+    state_root = Path(state_directory).expanduser().resolve()
+    claimed_split_sha = split_manifest.get("manifestSha256")
+    if not isinstance(claimed_split_sha, str):
+        raise ValueError("split manifest has no SHA-256 identity")
+    split_body = {
+        key: value
+        for key, value in split_manifest.items()
+        if key != "manifestSha256"
+    }
+    if canonical_hash(split_body) != claimed_split_sha:
+        raise ValueError("split manifest hash is invalid")
+    windows = split_manifest.get("windows")
+    if not isinstance(windows, Mapping) or not isinstance(
+        windows.get("holdout"), Mapping
+    ):
+        raise ValueError("split manifest has no holdout window")
+    role_order = (
+        "discovery",
+        "walk_forward_1",
+        "walk_forward_2",
+        "walk_forward_3",
+        "validation",
+        "holdout",
+    )
+    if set(windows) != set(role_order) or any(
+        not isinstance(windows[role], Mapping) for role in role_order
+    ):
+        raise ValueError("split manifest does not contain every research window")
+    research_window_set_sha = canonical_hash(
+        [canonical_hash(windows[role]) for role in role_order]
+    )
+    holdout_window_sha = canonical_hash(windows["holdout"])
+    study_directory = state_root / "studies" / research_window_set_sha
+    ledger_path = study_directory / "fresh_experiment_ledger_v1.jsonl"
+    holdout_path = (
+        state_root
+        / "holdouts"
+        / holdout_window_sha
+        / "fresh_holdout_authorization_v1.json"
+    )
+    return {
+        "schema": "fresh-xauusd-durable-research-state/v1",
+        "studyId": "xauusd-fresh-causal-acceleration-v2",
+        "splitManifestSha256": claimed_split_sha,
+        "researchWindowSetSha256": research_window_set_sha,
+        "holdoutWindowSha256": holdout_window_sha,
+        "stateDirectory": str(state_root),
+        "experimentLedgerPath": str(ledger_path),
+        "holdoutAuthorizationRegistryPath": str(holdout_path),
+    }
+
+
+def _snapshot_new_file(source: Path, destination: Path) -> None:
+    """Copy one durable audit file into the artifact set without overwriting."""
+
+    if not source.is_file():
+        raise FileNotFoundError(source)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".fresh-snapshot-",
+        suffix=".tmp",
+        dir=destination.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        with source.open("rb") as reader, os.fdopen(
+            descriptor, "wb", closefd=True
+        ) as writer:
+            descriptor = -1
+            while True:
+                chunk = reader.read(1024 * 1024)
+                if not chunk:
+                    break
+                writer.write(chunk)
+            writer.flush()
+            os.fsync(writer.fileno())
+        os.link(temporary, destination)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
 
 
 def _cluster_entry_edge(
@@ -459,18 +728,8 @@ def _entry_edge_summary(
 ) -> _EntryEdgeSummary:
     combined = combine_entry_diagnostics(tuple(candidate_results))
     fills = combined.diagnostics
-    barrier_values = [
-        0.25 if item.first_barrier_hit == "profit" else -0.25
-        if item.first_barrier_hit == "loss"
-        else 0.0
-        for item in fills
-    ]
-    restricted = [
-        float(item.time_to_cost_coverage_ms)
-        if item.time_to_cost_coverage_ms is not None
-        else 60_000.0
-        for item in fills
-    ]
+    barrier_values = [_entry_barrier_value(item) for item in fills]
+    restricted = [_restricted_coverage_ms(item) for item in fills]
     clustered = _cluster_entry_edge(
         candidate_results, baseline_results, seed_text=seed_text
     )
@@ -662,12 +921,56 @@ class RegisteredFreshResearchPipeline:
         self.executions = replay_execution_configs_from_preregistration(
             self.preregistration
         )
+        scenario_policy = self.preregistration["execution"][
+            "scenarioEvaluationPolicy"
+        ]
+        self.exit_search_scenario_ids = tuple(
+            str(item) for item in scenario_policy["exitSearchScenarioIds"]
+        )
+        self.later_full_scenario_ids = tuple(
+            str(item) for item in scenario_policy["laterFullStrategyScenarioIds"]
+        )
+        registered_scenarios = tuple(self.executions)
+        expected_exit_search = _scenario_ids_for_stage(
+            registered_scenarios,
+            self.scoring.required_stress_scenario_ids,
+            stage="exit_search",
+        )
+        expected_later = _scenario_ids_for_stage(
+            registered_scenarios,
+            self.scoring.required_stress_scenario_ids,
+            stage="validation",
+        )
+        hard_gate_ids = tuple(
+            str(item) for item in scenario_policy["hardGateScenarioIds"]
+        )
+        sensitivity_ids = tuple(
+            str(item) for item in scenario_policy["sensitivityOnlyScenarioIds"]
+        )
+        diagnostic_ids = tuple(
+            str(item) for item in scenario_policy["diagnosticOnlyScenarioIds"]
+        )
+        extras = tuple(
+            item for item in expected_later if item not in expected_exit_search
+        )
+        if (
+            self.exit_search_scenario_ids != expected_exit_search
+            or self.later_full_scenario_ids != expected_later
+            or hard_gate_ids != expected_exit_search
+            or len((*sensitivity_ids, *diagnostic_ids))
+            != len(set((*sensitivity_ids, *diagnostic_ids)))
+            or set((*sensitivity_ids, *diagnostic_ids)) != set(extras)
+        ):
+            raise ValueError(
+                "registered execution scenario evaluation policy is inconsistent"
+            )
         self.dimensions = SliceDimensions(
             day_metadata_path="context.day",
             market_session_metadata_path="context.marketSession",
             regime_metadata_path="context.regime",
         )
         self.quantile_bank: FreshQuantileBank | None = None
+        self.threshold_preflight: dict[str, Any] | None = None
         self.entry_runtime: dict[str, _EntryRuntime] = {}
         self.exit_runtime: dict[str, FreshExitVariant] = {}
         self.stage_results: list[StageRunResult] = []
@@ -736,6 +1039,35 @@ class RegisteredFreshResearchPipeline:
         self.quantile_bank = bank
         payload = fresh_quantile_bank_payload(bank)
         _write_new_json(self.output / "fresh_quantile_bank_v1.json", payload)
+        entry_grid = build_fresh_candidate_grid(
+            bank, kalman_model_ids=self.model_ids
+        )
+        filter_bank = _derive_event_filter_bank(
+            bank, entry_grid, self.regime_definition
+        )
+        exit_grid = build_fresh_exit_grid(
+            bank, execution_configs=self.executions
+        )
+        preflight = {
+            "schema": "fresh-xauusd-threshold-domain-preflight/v1",
+            "quantileBankSha256": bank.bank_sha256,
+            "candidateGridSha256": entry_grid.grid_sha256,
+            "baseCandidateCount": len(entry_grid.candidates),
+            "eventFilterVariantBankSha256": filter_bank.variant_bank_sha256,
+            "eventFilterVariantCount": len(filter_bank.variants),
+            "totalRuntimeEntryCount": filter_bank.total_candidate_count,
+            "exitGridSha256": exit_grid.grid_sha256,
+            "exitVariantCount": len(exit_grid.variants),
+            "executionScenariosSha256": exit_grid.execution_scenarios_sha256,
+            "allRegisteredThresholdDomainsResolved": True,
+        }
+        if preflight["totalRuntimeEntryCount"] != 240:
+            raise ValueError("threshold preflight did not resolve 240 entry candidates")
+        self.threshold_preflight = preflight
+        _write_new_json(
+            self.output / "fresh_threshold_domain_preflight_v1.json",
+            preflight,
+        )
         return payload
 
     def build_entry_candidates(
@@ -753,20 +1085,21 @@ class RegisteredFreshResearchPipeline:
             spread_ceiling_rank=None,
             volatility_floor_rank=None,
         )
-        family_counts = Counter(item.family for item in grid.candidates)
-        variants = derive_bounded_post_discovery_variant_bank(
-            bank,
-            regime_definition=self.regime_definition,
-            source_candidates=tuple(
-                EventFilterVariantSource(
-                    candidate_id=item.config.candidate_id, family=item.family
-                )
-                for item in grid.candidates
-            ),
-            already_registered_candidate_count=len(grid.candidates),
-            registered_family_counts=family_counts,
-            requested_additional_candidates=240 - len(grid.candidates),
+        variants = _derive_event_filter_bank(
+            bank, grid, self.regime_definition
         )
+        preflight = self.threshold_preflight
+        if preflight is None or any(
+            (
+                preflight["quantileBankSha256"] != bank.bank_sha256,
+                preflight["candidateGridSha256"] != grid.grid_sha256,
+                preflight["eventFilterVariantBankSha256"]
+                != variants.variant_bank_sha256,
+                preflight["totalRuntimeEntryCount"]
+                != variants.total_candidate_count,
+            )
+        ):
+            raise RuntimeError("runtime entry bank differs from threshold preflight")
         by_source = {item.config.candidate_id: item for item in grid.candidates}
         runtimes: list[_EntryRuntime] = []
         for item in grid.candidates:
@@ -984,29 +1317,79 @@ class RegisteredFreshResearchPipeline:
             )
             provisional[candidate.candidate_id] = (report, gate, edge)
 
-        passed_by_group: Counter[str] = Counter()
-        group_sizes: Counter[str] = Counter()
+        grouped_candidates: dict[str, list[FrozenEntryCandidate]] = defaultdict(list)
         for candidate in candidates:
             runtime = self.entry_runtime[candidate.candidate_id]
-            _, gate, edge = provisional[candidate.candidate_id]
-            group_sizes[runtime.robustness_group] += 1
-            passed_by_group[runtime.robustness_group] += int(
-                gate.passed and edge.baseline_gate_passed
-            )
+            grouped_candidates[runtime.robustness_group].append(candidate)
+        neighbourhood_spec = self.preregistration["robustnessAndGates"][
+            "parameterNeighborhood"
+        ]
+        neighbourhood_audits: dict[str, dict[str, Any]] = {}
+        if context.stage == "discovery":
+            for group, members in grouped_candidates.items():
+                neighbourhood_audits[group] = _parameter_neighbourhood_audit(
+                    tuple(
+                        (
+                            candidate.candidate_id,
+                            self.entry_runtime[candidate.candidate_id].source.rank_offset,
+                            bool(
+                                provisional[candidate.candidate_id][1].passed
+                                and provisional[candidate.candidate_id][2].baseline_gate_passed
+                            ),
+                            provisional[candidate.candidate_id][2].expected_barrier_pnl_per_fill,
+                            provisional[candidate.candidate_id][0].overall.coverage_probability(30),
+                            canonical_hash(
+                                [
+                                    (
+                                        item.parameter,
+                                        item.final_value,
+                                    )
+                                    for item in self.entry_runtime[
+                                        candidate.candidate_id
+                                    ].source.threshold_provenance
+                                ]
+                            ),
+                        )
+                        for candidate in members
+                    ),
+                    minimum_valid_neighbor_fraction=float(
+                        neighbourhood_spec["minimumValidNeighborFraction"]
+                    ),
+                    minimum_positive_expectancy_neighbor_fraction=float(
+                        neighbourhood_spec[
+                            "minimumPositiveExpectancyNeighborFraction"
+                        ]
+                    ),
+                    minimum_neighbor_expectancy_retention=float(
+                        neighbourhood_spec["minimumNeighborExpectancyRetention"]
+                    ),
+                    maximum_absolute_coverage_30_drop=float(
+                        neighbourhood_spec["maximumAbsoluteCoverage30SecondDrop"]
+                    ),
+                )
 
         output: dict[str, CandidateEvaluation] = {}
         for candidate in candidates:
             runtime = self.entry_runtime[candidate.candidate_id]
             report, gate, edge = provisional[candidate.candidate_id]
             neighbourhood_required = context.stage == "discovery"
-            neighbourhood_passed = (
-                group_sizes[runtime.robustness_group] >= 2
-                and passed_by_group[runtime.robustness_group] >= 2
+            neighbourhood = neighbourhood_audits.get(
+                runtime.robustness_group,
+                {
+                    "centerCandidateId": candidate.candidate_id,
+                    "evaluatedCount": 1,
+                    "passed": True,
+                },
             )
+            neighbourhood_passed = bool(neighbourhood["passed"])
+            is_center = runtime.source.rank_offset == 0.0
             passed = bool(
                 gate.passed
                 and edge.baseline_gate_passed
-                and (neighbourhood_passed or not neighbourhood_required)
+                and (
+                    not neighbourhood_required
+                    or (is_center and neighbourhood_passed)
+                )
             )
             output[candidate.candidate_id] = CandidateEvaluation(
                 identity_sha256=candidate.entry_sha256,
@@ -1016,11 +1399,10 @@ class RegisteredFreshResearchPipeline:
                     "registeredGate": asdict(gate),
                     "entryEdge": asdict(edge),
                     "parameterNeighbourhood": {
+                        **neighbourhood,
                         "group": runtime.robustness_group,
-                        "evaluatedCount": group_sizes[runtime.robustness_group],
-                        "passingCount": passed_by_group[runtime.robustness_group],
                         "requiredDuringStage": neighbourhood_required,
-                        "passed": neighbourhood_passed,
+                        "candidateIsCenter": is_center,
                     },
                 },
                 leakage_checks={
@@ -1039,14 +1421,27 @@ class RegisteredFreshResearchPipeline:
         entries: tuple[FrozenEntryCandidate, ...],
         context: EvaluationContext,
     ) -> Iterable[StrategyCandidateSpec]:
-        if context.stage != "exit_search" or not entries:
-            raise PermissionError("exit variants require promoted frozen entries")
+        if context.stage != "exit_search" or len(entries) != 1:
+            raise PermissionError(
+                "exit variants require exactly one promoted frozen entry"
+            )
         if self.quantile_bank is None:
             raise RuntimeError("quantile bank has not been frozen")
         selected_entry = entries[0]
         grid = build_fresh_exit_grid(
             self.quantile_bank, execution_configs=self.executions
         )
+        preflight = self.threshold_preflight
+        if preflight is None or any(
+            (
+                preflight["quantileBankSha256"]
+                != self.quantile_bank.bank_sha256,
+                preflight["exitGridSha256"] != grid.grid_sha256,
+                preflight["executionScenariosSha256"]
+                != grid.execution_scenarios_sha256,
+            )
+        ):
+            raise RuntimeError("runtime exit bank differs from threshold preflight")
         self.exit_runtime = {}
         artifact = {
             "schema": "fresh-xauusd-runtime-exit-bank/v1",
@@ -1080,6 +1475,11 @@ class RegisteredFreshResearchPipeline:
                     "selectionScenario": REFERENCE_SCENARIO_ID,
                     "requiredStressScenarioIds": list(
                         self.scoring.required_stress_scenario_ids
+                    ),
+                    "scenarioEvaluationPolicy": dict(
+                        self.preregistration["execution"][
+                            "scenarioEvaluationPolicy"
+                        ]
                     ),
                 },
                 exit_variant=variant.variant_id,
@@ -1117,8 +1517,9 @@ class RegisteredFreshResearchPipeline:
             )
         )
         scenario_ids = (
-            REFERENCE_SCENARIO_ID,
-            *self.scoring.required_stress_scenario_ids,
+            self.later_full_scenario_ids
+            if context.stage in LATER_SENSITIVITY_STAGES
+            else self.exit_search_scenario_ids
         )
         trades: dict[str, dict[str, list[Any]]] = {
             candidate.strategy_id: {scenario: [] for scenario in scenario_ids}
@@ -1298,7 +1699,10 @@ class RegisteredFreshResearchPipeline:
             )
             entry_summaries[summary_key] = (entry_report, entry_edge)
 
-        provisional: dict[str, tuple[CandidateEvaluation, bool]] = {}
+        provisional: dict[
+            str,
+            tuple[CandidateEvaluation, bool, TradeScoreReport, EntryScoreReport],
+        ] = {}
         for candidate in candidates:
             entry_id = candidate.entry.candidate_id
             entry_report, entry_edge = entry_summaries[
@@ -1319,8 +1723,20 @@ class RegisteredFreshResearchPipeline:
                     ),
                 )
             reference = reports.pop(REFERENCE_SCENARIO_ID)
+            required_reports = {
+                scenario_id: reports[scenario_id]
+                for scenario_id in self.scoring.required_stress_scenario_ids
+            }
+            sensitivity_reports = {
+                scenario_id: report
+                for scenario_id, report in reports.items()
+                if scenario_id not in required_reports
+            }
             scorecard = build_candidate_scorecard(
-                entry_report, reference, reports, config=self.scoring
+                entry_report,
+                reference,
+                required_reports,
+                config=self.scoring,
             )
             passed = bool(
                 scorecard.full_gate.passed and entry_edge.baseline_gate_passed
@@ -1334,7 +1750,11 @@ class RegisteredFreshResearchPipeline:
                     "reference": _compact_trade_slices(reference),
                     "stresses": {
                         key: _compact_trade_slices(value)
-                        for key, value in sorted(reports.items())
+                        for key, value in sorted(required_reports.items())
+                    },
+                    "sensitivities": {
+                        key: _compact_trade_slices(value)
+                        for key, value in sorted(sensitivity_reports.items())
                     },
                     "registeredEntryGate": asdict(scorecard.entry_gate),
                     "registeredFullGate": asdict(scorecard.full_gate),
@@ -1349,10 +1769,14 @@ class RegisteredFreshResearchPipeline:
                 },
                 score=scorecard.balanced_score.score,
             )
-            provisional[candidate.strategy_id] = (evaluation, passed)
+            provisional[candidate.strategy_id] = (
+                evaluation,
+                passed,
+                reference,
+                entry_report,
+            )
 
-        group_sizes: Counter[str] = Counter()
-        group_passes: Counter[str] = Counter()
+        grouped_strategies: dict[str, list[FrozenStrategyCandidate]] = defaultdict(list)
         for candidate in candidates:
             variant = self.exit_runtime[candidate.strategy_id]
             group = "::".join(
@@ -1362,12 +1786,63 @@ class RegisteredFreshResearchPipeline:
                     variant.invalidation_structure_id,
                 )
             )
-            group_sizes[group] += 1
-            group_passes[group] += int(provisional[candidate.strategy_id][1])
+            grouped_strategies[group].append(candidate)
+
+        neighbourhood_spec = self.preregistration["robustnessAndGates"][
+            "parameterNeighborhood"
+        ]
+        neighbourhood_audits: dict[str, dict[str, Any]] = {}
+        if context.stage == "exit_search":
+            for group, members in grouped_strategies.items():
+                neighbourhood_audits[group] = _parameter_neighbourhood_audit(
+                    tuple(
+                        (
+                            candidate.strategy_id,
+                            self.exit_runtime[candidate.strategy_id].rank_offset,
+                            provisional[candidate.strategy_id][1],
+                            provisional[candidate.strategy_id][2].overall.expectancy,
+                            None,
+                            canonical_hash(
+                                {
+                                    "policy": asdict(
+                                        self.exit_runtime[
+                                            candidate.strategy_id
+                                        ].policy
+                                    ),
+                                    "weakening": (
+                                        asdict(
+                                            self.exit_runtime[
+                                                candidate.strategy_id
+                                            ].weakening
+                                        )
+                                        if self.exit_runtime[
+                                            candidate.strategy_id
+                                        ].weakening
+                                        is not None
+                                        else None
+                                    ),
+                                }
+                            ),
+                        )
+                        for candidate in members
+                    ),
+                    minimum_valid_neighbor_fraction=float(
+                        neighbourhood_spec["minimumValidNeighborFraction"]
+                    ),
+                    minimum_positive_expectancy_neighbor_fraction=float(
+                        neighbourhood_spec[
+                            "minimumPositiveExpectancyNeighborFraction"
+                        ]
+                    ),
+                    minimum_neighbor_expectancy_retention=float(
+                        neighbourhood_spec["minimumNeighborExpectancyRetention"]
+                    ),
+                    maximum_absolute_coverage_30_drop=None,
+                )
 
         output: dict[str, CandidateEvaluation] = {}
         for candidate in candidates:
-            evaluation, base_passed = provisional[candidate.strategy_id]
+            evaluation, base_passed, _, _ = provisional[candidate.strategy_id]
             variant = self.exit_runtime[candidate.strategy_id]
             group = "::".join(
                 (
@@ -1377,19 +1852,31 @@ class RegisteredFreshResearchPipeline:
                 )
             )
             required = context.stage == "exit_search"
-            neighbourhood_passed = group_sizes[group] >= 2 and group_passes[group] >= 2
+            neighbourhood = neighbourhood_audits.get(
+                group,
+                {
+                    "centerCandidateId": candidate.strategy_id,
+                    "evaluatedCount": 1,
+                    "passed": True,
+                },
+            )
+            neighbourhood_passed = bool(neighbourhood["passed"])
+            is_center = variant.rank_offset == 0.0
             metrics = dict(evaluation.metrics)
             metrics["exitParameterNeighbourhood"] = {
+                **neighbourhood,
                 "group": group,
-                "evaluatedCount": group_sizes[group],
-                "passingCount": group_passes[group],
                 "requiredDuringStage": required,
-                "passed": neighbourhood_passed,
+                "candidateIsCenter": is_center,
             }
             output[candidate.strategy_id] = CandidateEvaluation(
                 identity_sha256=evaluation.identity_sha256,
                 passed=bool(
-                    base_passed and (neighbourhood_passed or not required)
+                    base_passed
+                    and (
+                        not required
+                        or (is_center and neighbourhood_passed)
+                    )
                 ),
                 metrics=metrics,
                 leakage_checks=evaluation.leakage_checks,
@@ -1514,6 +2001,9 @@ class RegisteredFreshResearchPipeline:
                     budgets["validationFullStrategies"]
                 ),
                 holdout_full_strategies=int(budgets["holdoutFullStrategies"]),
+                exit_search_frozen_entries=int(
+                    budgets["exitSearchFrozenEntries"]
+                ),
             ),
             callbacks=callbacks,
             preregistration_sha256=str(
@@ -1545,9 +2035,9 @@ def _strongest_record(records: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]
     selected = [
         item for item in eligible if stage_order[str(item["stage"])] == furthest
     ]
-    return max(
+    return min(
         selected,
-        key=lambda item: (float(item["balancedScore"]), str(item["candidateId"])),
+        key=lambda item: (-float(item["balancedScore"]), str(item["candidateId"])),
     )
 
 
@@ -1556,15 +2046,20 @@ def run_registered_fresh_research(
     *,
     repository_root: str | Path,
     output_directory: str | Path,
+    research_state_directory: str | Path,
     progress: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     """Run source QC, preregistration, chronological search, and one holdout."""
 
     root = Path(repository_root).resolve()
     output = Path(output_directory).resolve()
+    state_root = Path(research_state_directory).expanduser().resolve()
     if output.exists() and any(output.iterdir()):
         raise FileExistsError("fresh research output directory must be empty")
+    if state_root == output or output in state_root.parents:
+        raise ValueError("durable research state cannot be inside temporary output")
     output.mkdir(parents=True, exist_ok=True)
+    state_root.mkdir(parents=True, exist_ok=True)
 
     bootstrap = build_fresh_source_bootstrap(
         connection_context_factory,
@@ -1572,13 +2067,30 @@ def run_registered_fresh_research(
         on_progress=progress,
     )
     write_fresh_source_bootstrap(output, bootstrap)
+    state_binding = _research_state_binding(state_root, bootstrap["split"])
+    ledger = Path(state_binding["experimentLedgerPath"])
+    holdout_registry = Path(
+        state_binding["holdoutAuthorizationRegistryPath"]
+    )
+    for durable_path in (ledger, holdout_registry):
+        if durable_path.is_symlink():
+            raise PermissionError("durable research state cannot be a symbolic link")
+    if ledger.exists() and ledger.stat().st_size:
+        raise PermissionError(
+            "this frozen split already has a durable experiment ledger"
+        )
+    if holdout_registry.exists():
+        raise PermissionError("this frozen holdout window has already been consumed")
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    holdout_registry.parent.mkdir(parents=True, exist_ok=True)
+    _write_new_json(
+        output / "fresh_research_state_binding_v1.json", state_binding
+    )
     implementation = build_fresh_implementation_manifest(
         repository_root=root,
         relative_paths=required_fresh_implementation_files(),
     )
     _write_new_json(output / "fresh_implementation_manifest_v1.json", implementation)
-    ledger = output / "fresh_experiment_ledger_v1.jsonl"
-    holdout_registry = output / "fresh_holdout_authorization_v1.json"
     preregistration = build_fresh_preregistration_v2(
         split_manifest=bootstrap["split"],
         corpus_manifest_sha256=str(
@@ -1640,6 +2152,14 @@ def run_registered_fresh_research(
                     }
                 )
 
+    _snapshot_new_file(
+        ledger, output / "fresh_experiment_ledger_v1.jsonl"
+    )
+    if holdout_registry.is_file():
+        _snapshot_new_file(
+            holdout_registry,
+            output / "fresh_holdout_authorization_v1.json",
+        )
     records = search.audit_records
     strongest = _strongest_record(records)
     terminal_stage = pipeline.stage_results[-1] if pipeline.stage_results else None

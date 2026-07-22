@@ -24,6 +24,25 @@ jobs:
       - name: Check out frozen research code
         uses: actions/checkout@v4
 
+      - name: Verify frozen research launch identity
+        shell: bash
+        env:
+          FRESH_GITHUB_REF: ${{ github.ref }}
+        run: |
+          set -Eeuo pipefail
+          expected_ref="refs/heads/codex/xauusd-fresh-walkforward"
+          expected_marker="fresh-xauusd-run-2026-07-22-v13-durable-protocol-locks"
+          if [[ "${FRESH_GITHUB_REF}" != "${expected_ref}" ]]; then
+            printf 'refusing research run from unexpected ref: %s\n' \
+              "${FRESH_GITHUB_REF}" >&2
+            exit 1
+          fi
+          if ! cmp -s -- .github/research-launch.txt \
+            <(printf '%s\n' "${expected_marker}"); then
+            printf 'refusing research run with an unexpected launch marker\n' >&2
+            exit 1
+          fi
+
       - name: Run the frozen study on the data host
         id: remote
         shell: bash
@@ -132,15 +151,143 @@ jobs:
           output="$(mktemp -d /tmp/fresh-xauusd-output.XXXXXX)"
           log_path="$(mktemp /tmp/fresh-xauusd-run.XXXXXX.log)"
           archive="/tmp/fresh-xauusd-${run_id}-${attempt}.tgz"
+          durable_state_root="/home/ec2-user/.local/state/datavis/fresh-xauusd-research-v2"
+          if [[ -L "${durable_state_root}" ]]; then
+            printf 'refusing symlink durable research state root\n' >&2
+            exit 1
+          fi
+          mkdir -p -- "${durable_state_root}"
+          if [[ ! -d "${durable_state_root}" || -L "${durable_state_root}" ]]; then
+            printf 'durable research state root is not a directory\n' >&2
+            exit 1
+          fi
+          chmod 700 -- "${durable_state_root}"
+          durable_state_root_resolved="$(readlink -f -- "${durable_state_root}")"
+          if [[ -z "${durable_state_root_resolved}" ]]; then
+            printf 'could not resolve durable research state root\n' >&2
+            exit 1
+          fi
+          case "${durable_state_root_resolved}" in
+            /tmp|/tmp/*)
+              printf 'durable research state root resolved under /tmp\n' >&2
+              exit 1
+              ;;
+          esac
+
+          binding_value() {
+            binding_path="$1"
+            binding_key="$2"
+            python3 - "${binding_path}" "${binding_key}" <<'PY'
+          import json
+          import os
+          import sys
+
+          binding_path, binding_key = sys.argv[1:]
+          with open(binding_path, "r", encoding="utf-8") as handle:
+              payload = json.load(handle)
+          value = payload.get(binding_key)
+          if (
+              not isinstance(value, str)
+              or not value
+              or not os.path.isabs(value)
+              or any(character in value for character in "\x00\r\n")
+          ):
+              raise SystemExit(f"invalid {binding_key} in research state binding")
+          sys.stdout.write(value)
+          PY
+          }
+
+          snapshot_state_file() {
+            source_path="$1"
+            destination_name="$2"
+            destination_path="${output}/${destination_name}"
+            resolved_source="$(readlink -f -- "${source_path}")" || {
+              printf 'could not resolve durable state source: %s\n' \
+                "${source_path}" >&2
+              return 1
+            }
+            case "${resolved_source}" in
+              "${durable_state_root_resolved}"/*)
+                ;;
+              *)
+                printf 'refusing state source outside durable root: %s\n' \
+                  "${resolved_source}" >&2
+                return 1
+                ;;
+            esac
+            if [[ ! -e "${source_path}" && ! -L "${source_path}" ]]; then
+              return 0
+            fi
+            if [[ ! -f "${resolved_source}" ]]; then
+              printf 'durable state source is not a regular file: %s\n' \
+                "${resolved_source}" >&2
+              return 1
+            fi
+            if [[ -L "${destination_path}" ]]; then
+              printf 'refusing symlink snapshot destination: %s\n' \
+                "${destination_path}" >&2
+              return 1
+            fi
+            if [[ -e "${destination_path}" ]]; then
+              if [[ ! -f "${destination_path}" ]]; then
+                printf 'snapshot destination is not a regular file: %s\n' \
+                  "${destination_path}" >&2
+                return 1
+              fi
+              return 0
+            fi
+            cp --no-clobber -- "${resolved_source}" "${destination_path}"
+          }
+
+          snapshot_durable_research_state() {
+            binding_path="${output}/fresh_research_state_binding_v1.json"
+            if [[ -L "${binding_path}" ]]; then
+              printf 'refusing symlink research state binding: %s\n' \
+                "${binding_path}" >&2
+              return 1
+            fi
+            if [[ -e "${binding_path}" && ! -f "${binding_path}" ]]; then
+              printf 'research state binding is not a regular file: %s\n' \
+                "${binding_path}" >&2
+              return 1
+            fi
+            [[ -f "${binding_path}" ]] || return 0
+            ledger_source="$(
+              binding_value "${binding_path}" experimentLedgerPath
+            )" || return 1
+            holdout_source="$(
+              binding_value "${binding_path}" holdoutAuthorizationRegistryPath
+            )" || return 1
+            snapshot_state_file \
+              "${ledger_source}" fresh_experiment_ledger_v1.jsonl || return 1
+            snapshot_state_file \
+              "${holdout_source}" fresh_holdout_authorization_v1.json || return 1
+          }
 
           finalize() {
             status="$?"
             trap - EXIT
             set +e
-            printf '%s\n' "${status}" > "${output}/remote-exit-status.txt"
             if [[ -f "${log_path}" ]]; then
               cp "${log_path}" "${output}/server-run.log"
             fi
+            shopt -s nullglob
+            for snapshot_temporary in \
+              "${output}"/.fresh-snapshot-*.tmp; do
+              if [[ ! -f "${snapshot_temporary}" || -L "${snapshot_temporary}" ]]; then
+                printf 'refusing unexpected snapshot temporary: %s\n' \
+                  "${snapshot_temporary}" >&2
+                status=1
+                continue
+              fi
+              rm -f -- "${snapshot_temporary}"
+            done
+            shopt -u nullglob
+            if ! snapshot_durable_research_state; then
+              printf 'failed to snapshot durable research state\n' >&2
+              status=1
+            fi
+            printf '%s\n' "${status}" > "${output}/remote-exit-status.txt"
             tar -czf "${archive}" -C "${output}" .
             cd /tmp
             git -C "${production_repo}" worktree remove --force \
@@ -181,6 +328,7 @@ jobs:
           "${research_python}" -m datavis.research.fresh_pipeline_cli \
             --repository-root "${worktree}" \
             --output-dir "${output}" \
+            --research-state-dir "${durable_state_root}" \
             --execute 2>&1 | tee "${log_path}"
           research_status="${PIPESTATUS[0]}"
           set -e

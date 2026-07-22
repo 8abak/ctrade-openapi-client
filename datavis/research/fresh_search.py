@@ -109,6 +109,7 @@ class FreshSearchBudgets:
     walk_forward_3_full_strategies: int
     validation_full_strategies: int
     holdout_full_strategies: int
+    exit_search_frozen_entries: int = 1
 
     def __post_init__(self) -> None:
         values = tuple(self.__dict__.values()) if hasattr(self, "__dict__") else (
@@ -120,6 +121,7 @@ class FreshSearchBudgets:
             self.walk_forward_3_full_strategies,
             self.validation_full_strategies,
             self.holdout_full_strategies,
+            self.exit_search_frozen_entries,
         )
         if any(
             not isinstance(value, int) or isinstance(value, bool) or value <= 0
@@ -133,6 +135,14 @@ class FreshSearchBudgets:
             > self.walk_forward_1_frozen_candidates
         ):
             raise ValueError("walk-forward 2 budget cannot exceed walk-forward 1 budget")
+        if self.exit_search_frozen_entries > self.walk_forward_2_frozen_candidates:
+            raise ValueError(
+                "exit-search frozen-entry budget cannot exceed walk-forward 2 budget"
+            )
+        if self.exit_search_frozen_entries != 1:
+            raise ValueError(
+                "the current protocol requires exactly one frozen entry for exit search"
+            )
         if self.walk_forward_3_full_strategies > self.exit_variants_after_entry_gate:
             raise ValueError("walk-forward 3 budget cannot exceed exit-search budget")
         if self.validation_full_strategies != 1:
@@ -663,6 +673,143 @@ class FreshChronologicalSearch:
         self._records.append(enriched)
         return enriched
 
+    def _append_batch_access_record(
+        self,
+        *,
+        kind: str,
+        status: str,
+        context: EvaluationContext,
+        role: str | None,
+        candidate_ids: Sequence[str],
+        candidate_sha256: Sequence[str],
+        error_type: str | None = None,
+    ) -> dict[str, Any]:
+        """Durably record batch-window access around an outcome callback.
+
+        Every marker is outcome-revealing.  In particular, the start marker is
+        fsynced before callback invocation so abrupt termination cannot make the
+        window reusable.  Candidate records remain the authoritative promotion
+        and holdout evidence; these protocol records only consume access.
+        """
+
+        ids = tuple(candidate_ids)
+        digests = tuple(candidate_sha256)
+        if kind not in ("entry", "strategy"):
+            raise ValueError("batch access kind must be entry or strategy")
+        if status not in (
+            "batch_access_started",
+            "batch_access_completed",
+            "batch_access_error",
+        ):
+            raise ValueError("unsupported batch access status")
+        if len(ids) != len(digests) or not ids:
+            raise ValueError("batch access candidates must be non-empty and aligned")
+        if len(ids) != len(set(ids)):
+            raise ValueError("batch access candidate ids must be unique")
+        normalized_digests = tuple(
+            _sha256(value, f"batch candidate digest {index}")
+            for index, value in enumerate(digests)
+        )
+        if error_type is not None:
+            _non_empty(error_type, "error_type")
+        if (status == "batch_access_error") != (error_type is not None):
+            raise ValueError("only batch access errors may identify an error type")
+
+        identity_payload = {
+            "kind": "fresh-batch-window-access",
+            "batchKind": kind,
+            "status": status,
+            "stage": context.stage,
+            "trainingRoles": list(context.training_roles),
+            "evaluationRoles": list(context.evaluation_roles),
+            "candidateIds": list(ids),
+            "candidateSha256": list(normalized_digests),
+            "errorType": error_type,
+        }
+        identity_sha256 = canonical_hash(identity_payload)
+        record: dict[str, Any] = {
+            "recordKind": "batch-window-access",
+            "candidateId": f"protocol-batch-access::{kind}::{context.stage}",
+            "family": "protocol-window-access",
+            "stage": context.stage,
+            "trainingWindow": "+".join(context.training_roles),
+            "evaluationWindow": "+".join(context.evaluation_roles),
+            "parameters": identity_payload,
+            "entryVariant": "batch-window-access",
+            "exitVariant": "batch-window-access",
+            "metrics": {
+                "candidateCount": len(ids),
+                "errorType": error_type,
+            },
+            "status": status,
+            "leakageChecks": {
+                "durableBeforeCallback": status == "batch_access_started",
+                "callbackCompleted": status == "batch_access_completed",
+                "callbackErrored": status == "batch_access_error",
+            },
+            "role": role,
+            "outcomesRevealed": True,
+            "gatePassed": False,
+            "identitySha256": identity_sha256,
+            "windowSha256": canonical_hash(
+                [window.window_sha256 for window in context.windows]
+            ),
+        }
+        if self._preregistration_sha256 is not None:
+            record["preregistrationSha256"] = self._preregistration_sha256
+        enriched = append_fresh_record(self._ledger_path, record)
+        self._records.append(enriched)
+        return enriched
+
+    def _append_stage_window_access_record(
+        self,
+        *,
+        context: EvaluationContext,
+        role: str,
+        purpose: str,
+    ) -> dict[str, Any]:
+        """Fsync a role-consumption marker before any stage-level data callback."""
+
+        _non_empty(purpose, "stage access purpose")
+        identity_payload = {
+            "kind": "fresh-stage-window-access",
+            "status": "window_access_started",
+            "stage": context.stage,
+            "role": role,
+            "purpose": purpose,
+            "trainingRoles": list(context.training_roles),
+            "evaluationRoles": list(context.evaluation_roles),
+        }
+        record: dict[str, Any] = {
+            "recordKind": "stage-window-access",
+            "candidateId": f"protocol-stage-access::{context.stage}",
+            "family": "protocol-window-access",
+            "stage": context.stage,
+            "trainingWindow": "+".join(context.training_roles),
+            "evaluationWindow": "+".join(context.evaluation_roles),
+            "parameters": identity_payload,
+            "entryVariant": "stage-window-access",
+            "exitVariant": "stage-window-access",
+            "metrics": {"purpose": purpose},
+            "status": "window_access_started",
+            "leakageChecks": {
+                "durableBeforeCallback": True,
+                "windowConsumedBeforeCallback": True,
+            },
+            "role": role,
+            "outcomesRevealed": True,
+            "gatePassed": False,
+            "identitySha256": canonical_hash(identity_payload),
+            "windowSha256": canonical_hash(
+                [window.window_sha256 for window in context.windows]
+            ),
+        }
+        if self._preregistration_sha256 is not None:
+            record["preregistrationSha256"] = self._preregistration_sha256
+        enriched = append_fresh_record(self._ledger_path, record)
+        self._records.append(enriched)
+        return enriched
+
     def _evaluate_entries(
         self,
         *,
@@ -675,6 +822,15 @@ class FreshChronologicalSearch:
         record_numbers: list[int] = []
         batch_results: Mapping[str, CandidateEvaluation] | None = None
         if self._callbacks.score_entries_batch is not None:
+            started = self._append_batch_access_record(
+                kind="entry",
+                status="batch_access_started",
+                context=context,
+                role=role,
+                candidate_ids=tuple(candidate.candidate_id for candidate in selected),
+                candidate_sha256=tuple(candidate.entry_sha256 for candidate in selected),
+            )
+            record_numbers.append(int(started["recordNumber"]))
             try:
                 batch_results = self._callbacks.score_entries_batch(selected, context)
                 if not isinstance(batch_results, Mapping):
@@ -687,9 +843,32 @@ class FreshChronologicalSearch:
                         "score_entries_batch must return every requested candidate "
                         "exactly once"
                     )
-            except Exception:
+            except Exception as exc:
+                failed = self._append_batch_access_record(
+                    kind="entry",
+                    status="batch_access_error",
+                    context=context,
+                    role=role,
+                    candidate_ids=tuple(
+                        candidate.candidate_id for candidate in selected
+                    ),
+                    candidate_sha256=tuple(
+                        candidate.entry_sha256 for candidate in selected
+                    ),
+                    error_type=type(exc).__name__,
+                )
+                record_numbers.append(int(failed["recordNumber"]))
                 self._stage = FreshSearchStage.FAILED
                 raise
+            completed = self._append_batch_access_record(
+                kind="entry",
+                status="batch_access_completed",
+                context=context,
+                role=role,
+                candidate_ids=tuple(candidate.candidate_id for candidate in selected),
+                candidate_sha256=tuple(candidate.entry_sha256 for candidate in selected),
+            )
+            record_numbers.append(int(completed["recordNumber"]))
         for candidate in selected:
             try:
                 if batch_results is None:
@@ -763,6 +942,17 @@ class FreshChronologicalSearch:
         record_numbers: list[int] = []
         batch_results: Mapping[str, CandidateEvaluation] | None = None
         if self._callbacks.score_strategies_batch is not None:
+            started = self._append_batch_access_record(
+                kind="strategy",
+                status="batch_access_started",
+                context=context,
+                role=role,
+                candidate_ids=tuple(candidate.strategy_id for candidate in selected),
+                candidate_sha256=tuple(
+                    candidate.strategy_sha256 for candidate in selected
+                ),
+            )
+            record_numbers.append(int(started["recordNumber"]))
             try:
                 batch_results = self._callbacks.score_strategies_batch(
                     selected, context
@@ -777,9 +967,34 @@ class FreshChronologicalSearch:
                         "score_strategies_batch must return every requested strategy "
                         "exactly once"
                     )
-            except Exception:
+            except Exception as exc:
+                failed = self._append_batch_access_record(
+                    kind="strategy",
+                    status="batch_access_error",
+                    context=context,
+                    role=role,
+                    candidate_ids=tuple(
+                        candidate.strategy_id for candidate in selected
+                    ),
+                    candidate_sha256=tuple(
+                        candidate.strategy_sha256 for candidate in selected
+                    ),
+                    error_type=type(exc).__name__,
+                )
+                record_numbers.append(int(failed["recordNumber"]))
                 self._stage = FreshSearchStage.FAILED
                 raise
+            completed = self._append_batch_access_record(
+                kind="strategy",
+                status="batch_access_completed",
+                context=context,
+                role=role,
+                candidate_ids=tuple(candidate.strategy_id for candidate in selected),
+                candidate_sha256=tuple(
+                    candidate.strategy_sha256 for candidate in selected
+                ),
+            )
+            record_numbers.append(int(completed["recordNumber"]))
         for candidate in selected:
             try:
                 if batch_results is None:
@@ -859,6 +1074,12 @@ class FreshChronologicalSearch:
             training_roles=("discovery",),
             evaluation_roles=("discovery",),
         )
+        access = self._append_stage_window_access_record(
+            context=context,
+            role="discovery",
+            purpose="fit thresholds and construct the frozen entry bank",
+        )
+        numbers = [int(access["recordNumber"])]
         try:
             thresholds = self._callbacks.fit_thresholds(context)
             if not isinstance(thresholds, Mapping):
@@ -893,9 +1114,10 @@ class FreshChronologicalSearch:
                 for count in family_counts.values()
             ):
                 raise ValueError("discovery per-family candidate budget exceeded")
-            evaluated, numbers = self._evaluate_entries(
+            evaluated, evaluation_numbers = self._evaluate_entries(
                 candidates=candidates, context=context, role="discovery"
             )
+            numbers.extend(evaluation_numbers)
         except Exception:
             self._stage = FreshSearchStage.FAILED
             raise
@@ -964,7 +1186,7 @@ class FreshChronologicalSearch:
             required_stage=FreshSearchStage.WALK_FORWARD_1_COMPLETE,
             role="walk_forward_2",
             next_stage=FreshSearchStage.WALK_FORWARD_2_COMPLETE,
-            promotion_limit=self._budgets.walk_forward_2_frozen_candidates,
+            promotion_limit=self._budgets.exit_search_frozen_entries,
         )
 
     def run_exit_search(self) -> StageRunResult:
@@ -990,8 +1212,11 @@ class FreshChronologicalSearch:
         evaluated, numbers = self._evaluate_strategies(
             candidates=candidates,
             context=context,
-            role=None,
-            outcomes_revealed=False,
+            # Exit search reuses already-consumed discovery through WF2.  Bind
+            # the single ledger role to the latest consumed role while the
+            # evaluationWindow records the complete reused prefix.
+            role="walk_forward_2",
+            outcomes_revealed=True,
         )
         self._strategy_pool = self._rank_passed(
             evaluated,

@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 
 
-Transform = Literal["identity", "absolute", "positive"]
+Transform = Literal["identity", "absolute", "nonzero_absolute", "positive"]
 _FORBIDDEN = (
     "future",
     "label",
@@ -48,7 +48,12 @@ class QuantileMeasurementSpec:
         lowered = self.column.casefold()
         if any(token in lowered for token in _FORBIDDEN):
             raise ValueError("measurement columns cannot contain outcome-like names")
-        if self.transform not in ("identity", "absolute", "positive"):
+        if self.transform not in (
+            "identity",
+            "absolute",
+            "nonzero_absolute",
+            "positive",
+        ):
             raise ValueError("unsupported measurement transform")
 
 
@@ -127,6 +132,9 @@ def _transformed(values: np.ndarray, transform: Transform) -> np.ndarray:
     finite = values[np.isfinite(values)]
     if transform == "absolute":
         finite = np.abs(finite)
+    elif transform == "nonzero_absolute":
+        finite = np.abs(finite)
+        finite = finite[finite > 0.0]
     elif transform == "positive":
         finite = finite[finite > 0.0]
     return finite

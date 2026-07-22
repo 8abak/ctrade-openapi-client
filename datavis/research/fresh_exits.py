@@ -68,10 +68,12 @@ class FreshExitPolicyConfig:
     Distances are measured in quote-price units.  Initial stops are anchored to
     the actual entry fill.  Break-even and trailing activation are measured from
     the entry fill to the currently executable close quote.  If volatility is
-    used, activation distances are frozen from entry-time volatility.  A
-    volatility trailing distance can either remain frozen at entry or be
-    recalculated causally on every tick; in both cases an existing stop is never
-    loosened.
+    used, activation distances are frozen from fill-row volatility, with the
+    causal decision-row value retained as a fallback for a delayed fill whose
+    row has no usable value.  A volatility trailing distance can either remain
+    frozen at entry or be recalculated causally on every tick; an unavailable
+    current value produces no new volatility ratchet and an existing stop is
+    never loosened.
     """
 
     initial_stop: ExitDistance
@@ -407,6 +409,7 @@ class FreshProtectiveExitPolicy:
         self._execution = execution
         self._volatility = volatility
         self._state: _ExitState | None = None
+        self._entry_decision_volatility: float | None = None
         self._last_index: int | None = None
         self._last_key: tuple[datetime, int] | None = None
         self._sparse_flat_supported = bool(
@@ -516,18 +519,21 @@ class FreshProtectiveExitPolicy:
                 self._config.trailing_distance.mode == "volatility"
                 and self._config.trailing_volatility_basis == "current"
             ):
-                trailing_distance = self._config.trailing_distance.resolve(
-                    current_volatility
+                trailing_distance = (
+                    self._config.trailing_distance.resolve(current_volatility)
+                    if current_volatility is not None
+                    else None
                 )
             else:
                 assert state.entry_trailing_distance is not None
                 trailing_distance = state.entry_trailing_distance
-            trailing_stop = (
-                state.best_executable_quote - trailing_distance
-                if state.side == "long"
-                else state.best_executable_quote + trailing_distance
-            )
-            candidates.append((trailing_stop, "trailing-stop"))
+            if trailing_distance is not None:
+                trailing_stop = (
+                    state.best_executable_quote - trailing_distance
+                    if state.side == "long"
+                    else state.best_executable_quote + trailing_distance
+                )
+                candidates.append((trailing_stop, "trailing-stop"))
 
         if state.side == "long":
             new_stop, new_origin = max(candidates, key=lambda item: item[0])
@@ -615,6 +621,7 @@ class FreshProtectiveExitPolicy:
             through_index,
             through_tick,
         )
+        self._entry_decision_volatility = None
         self._last_index = through_index
         self._last_key = key
 
@@ -642,15 +649,29 @@ class FreshProtectiveExitPolicy:
             self._state = None
             if context.pending is not None:
                 return None
-            return _validate_policy_decision(
+            self._entry_decision_volatility = None
+            decision = _validate_policy_decision(
                 self._wrapped.on_tick(tick_index, tick, context)
             )
+            if decision is not None and decision.action in (
+                "enter_long",
+                "enter_short",
+            ):
+                if self._config.requires_volatility:
+                    if current_volatility is None:
+                        return None
+                    self._entry_decision_volatility = current_volatility
+            return decision
 
         position = context.position
         if self._state is None or self._state.entry_tick_id != position.entry_tick_id:
+            entry_volatility = current_volatility
+            if entry_volatility is None:
+                entry_volatility = self._entry_decision_volatility
             self._state = self._resolve_entry_state(
-                position, tick, current_volatility
+                position, tick, entry_volatility
             )
+            self._entry_decision_volatility = None
         state = self._state
         executable_quote = tick.bid if position.side == "long" else tick.ask
         self._ratchet_stop(state, position, executable_quote, current_volatility)

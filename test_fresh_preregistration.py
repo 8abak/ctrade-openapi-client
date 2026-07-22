@@ -57,6 +57,11 @@ class Python39CompatibilityTests(unittest.TestCase):
 
     def test_package_init_is_bound_into_implementation_manifest(self) -> None:
         self.assertIn("datavis/research/__init__.py", IMPLEMENTATION_FILES)
+        self.assertIn(
+            ".github/workflows/fresh-xauusd-research.yml",
+            IMPLEMENTATION_FILES,
+        )
+        self.assertIn(".github/research-launch.txt", IMPLEMENTATION_FILES)
 
 
 def implementation_manifest() -> dict:
@@ -142,6 +147,27 @@ def passed_evidence(prereg: dict, strategy_sha: str, role: str) -> dict:
         "outcomesRevealed": True,
         "gatePassed": True,
         "frozenStrategySha256": strategy_sha,
+        "preregistrationSha256": prereg["preregistrationSha256"],
+    }
+
+
+def batch_access_evidence(prereg: dict, role: str) -> dict:
+    return {
+        "recordKind": "batch-window-access",
+        "candidateId": f"protocol-batch-access::strategy::{role}",
+        "family": "protocol-window-access",
+        "stage": role,
+        "trainingWindow": "consumed-research",
+        "evaluationWindow": role,
+        "parameters": {"status": "batch_access_started"},
+        "entryVariant": "batch-window-access",
+        "exitVariant": "batch-window-access",
+        "metrics": {"candidateCount": 1},
+        "status": "batch_access_started",
+        "leakageChecks": {"durableBeforeCallback": True},
+        "role": role,
+        "outcomesRevealed": True,
+        "gatePassed": False,
         "preregistrationSha256": prereg["preregistrationSha256"],
     }
 
@@ -291,20 +317,29 @@ class FreshPreregistrationTests(unittest.TestCase):
         barriers = entry_barrier_diagnostic_configs_from_preregistration(
             prereg, scenario_id="reference-provisional"
         )
-        self.assertEqual(len(barriers), 16)
+        self.assertEqual(len(barriers), 1)
         equal_quarter = barriers[
             "reference-provisional:profit-0.25:loss-0.25"
         ]
         self.assertEqual(equal_quarter.profit_barrier_net_per_unit, 0.25)
         self.assertEqual(equal_quarter.loss_barrier_net_per_unit, 0.25)
         candidate_execution = replay_execution_config_for_candidate(
-            prereg, scenario_id="reference-provisional", cooldown_ms=10_000
+            prereg, scenario_id="reference-provisional", cooldown_ms=0
         )
-        self.assertEqual(candidate_execution.cooldown_ms, 10_000)
-        with self.assertRaisesRegex(ValueError, "candidate bank"):
+        self.assertEqual(candidate_execution.cooldown_ms, 0)
+        with self.assertRaisesRegex(ValueError, "fixed registered cooldown"):
             replay_execution_config_for_candidate(
-                prereg, scenario_id="reference-provisional", cooldown_ms=180_000
+                prereg, scenario_id="reference-provisional", cooldown_ms=1_000
             )
+        policy = prereg["execution"]["scenarioEvaluationPolicy"]
+        self.assertEqual(
+            policy["exitSearchScenarioIds"],
+            ["reference-provisional", "latency-stress", "friction-stress"],
+        )
+        self.assertEqual(policy["sensitivityOnlyScenarioIds"], ["low-friction"])
+        self.assertEqual(
+            policy["diagnosticOnlyScenarioIds"], ["mechanics-zero-friction"]
+        )
 
     def test_search_exit_robustness_and_holdout_rules_are_frozen(self):
         _, prereg = preregistration()
@@ -316,6 +351,7 @@ class FreshPreregistrationTests(unittest.TestCase):
                 "discoveryPerFamilyMaximum": 60,
                 "walkForward1FrozenCandidates": 24,
                 "walkForward2FrozenCandidates": 8,
+                "exitSearchFrozenEntries": 1,
                 "exitVariantsAfterEntryGate": 96,
                 "walkForward3FullStrategies": 3,
                 "validationFullStrategies": 1,
@@ -333,10 +369,46 @@ class FreshPreregistrationTests(unittest.TestCase):
             [1, 2, 5, 10, 20, 30, 60],
         )
         neighborhood = prereg["robustnessAndGates"]["parameterNeighborhood"]
-        self.assertEqual(neighborhood["continuousThresholdRankPerturbation"], [-0.05, 0.05])
+        self.assertEqual(neighborhood["rankOffsets"], [-0.05, 0.0, 0.05])
+        self.assertEqual(neighborhood["centerRankOffset"], 0.0)
+        self.assertEqual(neighborhood["adjacentRankOffsets"], [-0.05, 0.05])
+        self.assertEqual(neighborhood["exitMultiplierFactors"], [0.85, 1.0, 1.15])
+        self.assertEqual(neighborhood["minimumNeighborExpectancyRetention"], 0.75)
+        self.assertIn("distinct", neighborhood["distinctResolvedParametersRequired"])
+        self.assertIn("entry neighborhoods only", neighborhood["coverage30DropAppliesTo"])
+        self.assertIn("not clipped", neighborhood["rankBoundaryRule"])
+        self.assertIn("not registered", neighborhood["perturbedParameters"])
         self.assertEqual(neighborhood["minimumPositiveExpectancyNeighborFraction"], 0.70)
+        self.assertEqual(
+            prereg["robustnessAndGates"]["balancedScore"]["tieBreakOrder"],
+            ["higher balanced score", "lexicographically smaller candidate id"],
+        )
+        allocation = prereg["candidateSearch"]["discoveryEventFilterAllocation"]
+        self.assertTrue(allocation["outcomeBlind"])
+        self.assertFalse(allocation["scoresOrOutcomesUsed"])
+        self.assertIn("never truncate", allocation["budgetBoundary"])
+        transform = prereg["candidateSearch"]["thresholdLearning"][
+            "magnitudeTransform"
+        ]
+        self.assertEqual(transform["id"], "nonzero_absolute")
+        self.assertIn("multiplicity", transform["fitDomain"])
+        volatility = prereg["exitResearch"]["volatilityAvailabilityPolicy"]
+        self.assertIn("suppress", volatility["decision"])
+        self.assertIn("fill-row", volatility["delayedFill"])
+        self.assertIn("no new ratchet", volatility["currentBasisTrailing"])
+        entry_rank = prereg["candidateSearch"]["entryRankingScore"]
+        self.assertEqual(sum(entry_rank["weights"].values()), 1.0)
+        self.assertIn("median MAE", entry_rank["definitions"]["inverseMedianMaeBeforeCoverage"])
         self.assertTrue(prereg["holdout"]["singleEvaluation"])
         self.assertEqual(prereg["holdout"]["maximumCandidates"], 1)
+        self.assertTrue(
+            prereg["holdout"]["durableAuthorizationRegistry"]["required"]
+        )
+        self.assertTrue(
+            prereg["auditRequirements"][
+                "batchWindowAccessConsumedBeforeCallback"
+            ]
+        )
         self.assertEqual(
             prereg["robustnessAndGates"]["fullStrategyGates"][
                 "fullReplayCensorCountMaximum"
@@ -373,8 +445,14 @@ class FreshPreregistrationTests(unittest.TestCase):
             registry_path=registry_path,
         )
         strategy_sha = "c" * 64
+        append_fresh_record(
+            ledger_path, batch_access_evidence(prereg, "walk_forward_3")
+        )
         walk_forward_3 = append_fresh_record(
             ledger_path, passed_evidence(prereg, strategy_sha, "walk_forward_3")
+        )
+        append_fresh_record(
+            ledger_path, batch_access_evidence(prereg, "validation")
         )
         validation = append_fresh_record(
             ledger_path, passed_evidence(prereg, strategy_sha, "validation")

@@ -542,6 +542,62 @@ class FreshEventFilterTests(unittest.TestCase):
         )
         self.assertEqual(reordered, variants)
 
+    def test_production_shape_allocates_complete_groups_across_full_catalog(self):
+        family_group_counts = {
+            "trend": 13,
+            "pullback": 5,
+            "pivot": 5,
+            "compression": 4,
+            "pressure": 4,
+        }
+        family_counts = {
+            family: group_count * 3
+            for family, group_count in family_group_counts.items()
+        }
+        sources = tuple(
+            EventFilterVariantSource(
+                candidate_id=f"{family}-{group_index:02d}-rank-{rank_index}",
+                family=family,
+                robustness_group=f"{family}-{group_index:02d}",
+            )
+            for family, group_count in family_group_counts.items()
+            for group_index in range(group_count)
+            for rank_index in range(3)
+        )
+        bank = derive_bounded_post_discovery_variant_bank(
+            training_bank(),
+            regime_definition=DEFINITION,
+            source_candidates=sources,
+            already_registered_candidate_count=93,
+            registered_family_counts=family_counts,
+            requested_additional_candidates=147,
+            maximum_total_candidates=240,
+            maximum_candidates_per_family=60,
+        )
+
+        self.assertEqual(bank.total_candidate_count, 240)
+        self.assertEqual(len(bank.variants), 147)
+        self.assertEqual(
+            len({item.filter_config.variant_id for item in bank.variants}),
+            18,
+        )
+        selected = {
+            (
+                item.source_candidate_id.rsplit("-rank-", 1)[0],
+                item.filter_config.variant_id,
+            )
+            for item in bank.variants
+        }
+        for group, filter_id in selected:
+            matching = [
+                item
+                for item in bank.variants
+                if item.source_candidate_id.rsplit("-rank-", 1)[0] == group
+                and item.filter_config.variant_id == filter_id
+            ]
+            self.assertEqual(len(matching), 3)
+        self.assertTrue(all(count <= 60 for _, count in bank.final_family_counts))
+
     def test_variant_budget_inputs_are_audited(self):
         with self.assertRaisesRegex(ValueError, "sum to the registered total"):
             derive_bounded_post_discovery_variant_bank(

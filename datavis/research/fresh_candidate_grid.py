@@ -124,21 +124,21 @@ def fresh_candidate_quantile_measurements(
     models = _normalized_kalman_model_ids(kalman_model_ids)
     specifications: list[QuantileMeasurementSpec] = []
 
-    absolute_columns = (
-        "10s_mid_speed",
-        "30s_mid_speed",
-        "ewma_10s_slope",
-        "ewma_30s_slope",
-        "250ms_mid_speed",
-        "500ms_mid_speed",
-        "1s_mid_speed",
-        "2s_mid_speed",
-        "500ms_mid_acceleration",
-        "1s_mid_acceleration",
-        "2s_mid_acceleration",
-        "250ms_translation_pressure",
-        "500ms_translation_pressure",
-        "1s_translation_pressure",
+    magnitude_columns = (
+        ("10s_mid_speed", "nonzero_absolute"),
+        ("30s_mid_speed", "nonzero_absolute"),
+        ("ewma_10s_slope", "nonzero_absolute"),
+        ("ewma_30s_slope", "nonzero_absolute"),
+        ("250ms_mid_speed", "nonzero_absolute"),
+        ("500ms_mid_speed", "nonzero_absolute"),
+        ("1s_mid_speed", "nonzero_absolute"),
+        ("2s_mid_speed", "nonzero_absolute"),
+        ("500ms_mid_acceleration", "absolute"),
+        ("1s_mid_acceleration", "absolute"),
+        ("2s_mid_acceleration", "absolute"),
+        ("250ms_translation_pressure", "nonzero_absolute"),
+        ("500ms_translation_pressure", "nonzero_absolute"),
+        ("1s_translation_pressure", "nonzero_absolute"),
     )
     positive_columns = (
         "250ms_translation_coherence",
@@ -152,12 +152,12 @@ def fresh_candidate_quantile_measurements(
         "spread",
     )
 
-    for column in absolute_columns:
+    for column, transform in magnitude_columns:
         specifications.append(
             QuantileMeasurementSpec(
-                name=_measurement_name(column, "absolute"),
+                name=_measurement_name(column, transform),
                 column=column,
-                transform="absolute",
+                transform=transform,
             )
         )
     for column in positive_columns:
@@ -179,11 +179,16 @@ def fresh_candidate_quantile_measurements(
     for model_id in models:
         for measurement in ("kalman_velocity", "kalman_velocity_change"):
             column = kalman_bank_column(model_id, measurement)
+            transform = (
+                "nonzero_absolute"
+                if measurement == "kalman_velocity"
+                else "absolute"
+            )
             specifications.append(
                 QuantileMeasurementSpec(
-                    name=_measurement_name(column, "absolute"),
+                    name=_measurement_name(column, transform),
                     column=column,
-                    transform="absolute",
+                    transform=transform,
                 )
             )
     names = tuple(spec.name for spec in specifications)
@@ -521,19 +526,19 @@ def _trend_candidates(
             minimum_trend = resolver.value(
                 "minimum_trend",
                 column=structure.trend_column,
-                transform="absolute",
+                transform="nonzero_absolute",
                 base_rank=0.70,
             )
             minimum_velocity = resolver.value(
                 "minimum_velocity",
                 column=structure.velocity_column,
-                transform="absolute",
+                transform="nonzero_absolute",
                 base_rank=0.75,
             )
             reset_velocity = resolver.value(
                 "reset_velocity",
                 column=structure.velocity_column,
-                transform="absolute",
+                transform="nonzero_absolute",
                 base_rank=0.75,
                 multiplier=structure.reset_fraction,
             )
@@ -595,26 +600,26 @@ def _pullback_candidates(bank: FreshQuantileBank) -> list[FreshCandidate]:
             established = resolver.value(
                 "minimum_established_trend",
                 column=structure.trend_column,
-                transform="absolute",
+                transform="nonzero_absolute",
                 base_rank=0.70,
             )
             residual = resolver.value(
                 "minimum_residual_trend",
                 column=structure.trend_column,
-                transform="absolute",
+                transform="nonzero_absolute",
                 base_rank=0.70,
                 multiplier=structure.residual_trend_fraction,
             )
             pullback_speed = resolver.value(
                 "minimum_pullback_speed",
                 column=structure.movement_column,
-                transform="absolute",
+                transform="nonzero_absolute",
                 base_rank=0.65,
             )
             resumption_speed = resolver.value(
                 "minimum_resumption_speed",
                 column=structure.movement_column,
-                transform="absolute",
+                transform="nonzero_absolute",
                 base_rank=0.65,
             )
             resumption_acceleration = resolver.value(
@@ -672,33 +677,33 @@ def _pivot_candidates(bank: FreshQuantileBank) -> list[FreshCandidate]:
             established = resolver.value(
                 "minimum_established_trend",
                 column=structure.trend_column,
-                transform="absolute",
+                transform="nonzero_absolute",
                 base_rank=0.70,
             )
             residual = resolver.value(
                 "minimum_residual_trend",
                 column=structure.trend_column,
-                transform="absolute",
+                transform="nonzero_absolute",
                 base_rank=0.70,
                 multiplier=structure.residual_trend_fraction,
             )
             pullback_speed = resolver.value(
                 "minimum_pullback_speed",
                 column=structure.movement_column,
-                transform="absolute",
+                transform="nonzero_absolute",
                 base_rank=0.65,
             )
             pivot_speed = resolver.value(
                 "minimum_pivot_speed",
                 column=structure.movement_column,
-                transform="absolute",
+                transform="nonzero_absolute",
                 base_rank=0.65,
                 multiplier=-structure.pivot_speed_fraction,
             )
             improvement = resolver.value(
                 "minimum_velocity_improvement",
                 column=structure.movement_column,
-                transform="absolute",
+                transform="nonzero_absolute",
                 base_rank=0.60,
                 multiplier=structure.improvement_fraction,
             )
@@ -762,7 +767,7 @@ def _compression_candidates(bank: FreshQuantileBank) -> list[FreshCandidate]:
             breakout_speed = resolver.value(
                 "minimum_breakout_speed",
                 column=structure.movement_column,
-                transform="absolute",
+                transform="nonzero_absolute",
                 base_rank=0.70,
             )
             breakout_buffer = resolver.value(
@@ -821,13 +826,13 @@ def _pressure_candidates(bank: FreshQuantileBank) -> list[FreshCandidate]:
             pressure = resolver.value(
                 "minimum_translation_pressure",
                 column=structure.pressure_column,
-                transform="absolute",
+                transform="nonzero_absolute",
                 base_rank=0.70,
             )
             reset_pressure = resolver.value(
                 "reset_translation_pressure",
                 column=structure.pressure_column,
-                transform="absolute",
+                transform="nonzero_absolute",
                 base_rank=0.70,
                 multiplier=structure.reset_pressure_fraction,
             )
@@ -840,7 +845,7 @@ def _pressure_candidates(bank: FreshQuantileBank) -> list[FreshCandidate]:
             movement = resolver.value(
                 "minimum_movement_speed",
                 column=structure.movement_column,
-                transform="absolute",
+                transform="nonzero_absolute",
                 base_rank=0.70,
             )
             persistence = resolver.value(

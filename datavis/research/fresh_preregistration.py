@@ -45,6 +45,8 @@ _ROLE_ORDER = (
 FRESH_V2_WINDOW_POLICY = REGISTERED_FRESH_WINDOW_POLICY
 _REQUIRED_IMPLEMENTATION_FILES = frozenset(
     {
+        ".github/research-launch.txt",
+        ".github/workflows/fresh-xauusd-research.yml",
         "datavis/db.py",
         "datavis/research/__init__.py",
         "datavis/research/fresh_bootstrap.py",
@@ -617,6 +619,32 @@ def _execution_specification() -> dict[str, Any]:
         "scenarios": scenarios,
         "profitabilityClaimScenario": "reference-provisional",
         "requiredStressScenarioIds": ["latency-stress", "friction-stress"],
+        "scenarioEvaluationPolicy": {
+            "exitSearchScenarioIds": [
+                "reference-provisional",
+                "latency-stress",
+                "friction-stress",
+            ],
+            "laterFullStrategyScenarioIds": [
+                "mechanics-zero-friction",
+                "low-friction",
+                "reference-provisional",
+                "latency-stress",
+                "friction-stress",
+            ],
+            "hardGateScenarioIds": [
+                "reference-provisional",
+                "latency-stress",
+                "friction-stress",
+            ],
+            "sensitivityOnlyScenarioIds": ["low-friction"],
+            "diagnosticOnlyScenarioIds": ["mechanics-zero-friction"],
+            "rule": (
+                "sensitivity-only and diagnostic-only results are reported in "
+                "walk_forward_3, validation, and holdout but never enter candidate "
+                "selection or a profitability gate"
+            ),
+        },
         "calibrationLimitation": {
             "status": "broker latency, slippage distribution, and commission schedule were unavailable at preregistration",
             "rule": "documented broker terms may replace provisional costs only before any price outcome evaluation; replacement changes the preregistration hash",
@@ -641,8 +669,11 @@ def _entry_diagnostics_specification() -> dict[str, Any]:
             "decision spread and fill spread",
             "censor and rejection reason counts",
         ],
-        "netBarrierDistancesPerUnit": [0.1, 0.25, 0.5, 1.0],
-        "barrierPairing": "all equal and asymmetric profit/loss pairs; first hit only; quote at deadline excluded",
+        "netBarrierPairsPerUnit": [{"profit": 0.25, "loss": 0.25}],
+        "barrierPairing": (
+            "only the explicitly declared equal 0.25/0.25 profit/loss pair; "
+            "first hit only; quote at deadline excluded"
+        ),
         "reportSlices": [
             "session anchor/day",
             "side",
@@ -666,8 +697,10 @@ def _entry_diagnostics_specification() -> dict[str, Any]:
         },
         "deployableSchedule": {
             "mode": "one position or pending order at a time",
-            "cooldownBankMilliseconds": [0, 1_000, 3_000, 5_000, 10_000, 30_000, 60_000],
-            "cooldownSelection": "candidate parameter learned only in consumed research windows; no inherited three-minute value",
+            "fixedCooldownMilliseconds": 0,
+            "cooldownSelection": (
+                "none; zero milliseconds is fixed outcome-blind for every candidate"
+            ),
         },
     }
 
@@ -705,20 +738,80 @@ def _candidate_and_search_specification() -> dict[str, Any]:
         },
         "thresholdLearning": {
             "source": "empirical ranks or finite values from the currently permitted training window only",
+            "magnitudeTransform": {
+                "id": "nonzero_absolute",
+                "fitDomain": (
+                    "finite absolute values strictly greater than zero; retain every "
+                    "observation and its multiplicity, including repeated-quote volume"
+                ),
+                "zeroRows": (
+                    "remain in the causal event, feature, signal, and replay streams but "
+                    "do not contribute to a fitted magnitude-quantile distribution"
+                ),
+                "scope": (
+                    "measurements that feed strictly-positive magnitude parameters; "
+                    "magnitudes whose downstream threshold permits zero retain the "
+                    "ordinary absolute transform, and signed, identity, and positive-"
+                    "only measurements retain their explicit transforms"
+                ),
+            },
             "manualOutcomeLabelInspectionForbidden": True,
             "sameWindowRetuningAfterEvaluationForbidden": True,
             "frozenRuleRequiredBeforeNextWindow": True,
             "fullSampleScalingForbidden": True,
+        },
+        "entryRankingScore": {
+            "use": (
+                "rank only candidates that already pass every registered entry and "
+                "baseline-uplift hard gate"
+            ),
+            "weights": {
+                "coverage10Seconds": 0.25,
+                "coverage30Seconds": 0.25,
+                "coverage60Seconds": 0.10,
+                "equalBarrierProfitFirstRate": 0.15,
+                "restrictedCoverageSpeed": 0.10,
+                "fillRate": 0.05,
+                "activeSessionFraction": 0.05,
+                "inverseMedianMaeBeforeCoverage": 0.05,
+            },
+            "definitions": {
+                "restrictedCoverageSpeed": (
+                    "1 - min(restricted median coverage milliseconds / 60000, 1)"
+                ),
+                "inverseMedianMaeBeforeCoverage": (
+                    "1 / (1 + abs(median MAE before coverage per unit))"
+                ),
+            },
+            "tieBreak": "lexicographically smaller candidate id",
         },
         "budgets": {
             "discoveryDistinctCandidates": 240,
             "discoveryPerFamilyMaximum": 60,
             "walkForward1FrozenCandidates": 24,
             "walkForward2FrozenCandidates": 8,
+            "exitSearchFrozenEntries": 1,
             "exitVariantsAfterEntryGate": 96,
             "walkForward3FullStrategies": 3,
             "validationFullStrategies": 1,
             "holdoutFullStrategies": 1,
+        },
+        "discoveryEventFilterAllocation": {
+            "outcomeBlind": True,
+            "robustnessGroup": (
+                "all center and adjacent-rank candidates sharing one family and "
+                "structural source definition"
+            ),
+            "catalogueTraversal": (
+                "rotate the full registered filter catalogue across complete "
+                "robustness groups in stable order"
+            ),
+            "budgetBoundary": (
+                "never truncate a robustness group; skip a group when the remaining "
+                "total or family budget cannot contain it"
+            ),
+            "familyCap": "skip a complete group when its family is at the registered cap",
+            "scoresOrOutcomesUsed": False,
         },
         "stageSequence": [
             {
@@ -783,6 +876,20 @@ def _exit_specification() -> dict[str, Any]:
         "allExitDecisionsUseLaterQuoteFills": True,
         "selectionData": "only discovery, walk_forward_1, and walk_forward_2 after their entry outcomes have been consumed",
         "walkForward3OutcomeCannotTuneExit": True,
+        "volatilityAvailabilityPolicy": {
+            "decision": (
+                "suppress a volatility-dependent entry when the causal decision-row "
+                "volatility is unavailable or non-positive"
+            ),
+            "delayedFill": (
+                "use positive fill-row volatility when available; otherwise use the "
+                "cached positive decision-row value"
+            ),
+            "currentBasisTrailing": (
+                "an unavailable current-row volatility creates no new ratchet and "
+                "never loosens or removes an existing stop"
+            ),
+        },
     }
 
 
@@ -817,6 +924,10 @@ def _robustness_and_gates_specification() -> dict[str, Any]:
             "loss95ToMedianAbsoluteLossMaximum": 3.0,
             "requiredStressNetPnlStrictlyPositive": True,
             "requiredStressProfitFactorMinimum": 1.0,
+            "requiredStressMinimumSampleGate": (
+                "each required stress independently meets the same minimum trade-count "
+                "and active-session-fraction thresholds as the reference scenario"
+            ),
             "fullReplayCensorCountMaximum": 0,
             "profitabilityValidRequired": True,
             "entryPromotionGatesStillRequired": True,
@@ -858,22 +969,49 @@ def _robustness_and_gates_specification() -> dict[str, Any]:
             },
             "hardGatesOverrideScore": True,
             "tieBreakOrder": [
-                "higher minimum per-window expectancy",
-                "higher minimum stress expectancy",
-                "lower maximum drawdown",
-                "simpler rule",
+                "higher balanced score",
                 "lexicographically smaller candidate id",
             ],
         },
         "parameterNeighborhood": {
-            "continuousThresholdRankPerturbation": [-0.05, 0.05],
-            "rankBoundaryRule": "add each perturbation, clip to [0,1], then deduplicate",
-            "timeAndKalmanParameters": "each immediately adjacent registered bank value",
-            "structuralAblation": "remove each optional condition one at a time",
+            "rankOffsets": [-0.05, 0.0, 0.05],
+            "centerRankOffset": 0.0,
+            "adjacentRankOffsets": [-0.05, 0.05],
+            "rankBoundaryRule": (
+                "add the offset to each base rank; a resolved rank outside [0,1] "
+                "is invalid and is not clipped"
+            ),
+            "perturbedParameters": (
+                "entry neighborhoods perturb only empirical-rank thresholds; exit "
+                "neighborhoods perturb the empirical ranks and multiply their bound "
+                "distance/fraction factors by 0.85, 1.0, or 1.15; time, Kalman, "
+                "structure, and optional-condition ablations are not registered"
+            ),
+            "exitMultiplierFactors": [0.85, 1.0, 1.15],
+            "groupRequirement": (
+                "evaluate the center and both adjacent ranks as one complete group; "
+                "only the center candidate can be promoted"
+            ),
+            "distinctResolvedParametersRequired": (
+                "all three configurations must contain distinct resolved numeric "
+                "decision or exit-policy values; rank labels alone do not qualify"
+            ),
+            "expectancyMetricByStage": {
+                "entryDiscovery": (
+                    "mean per-fill outcome of the sole equal 0.25/0.25 net barrier, "
+                    "with no hit or censor assigned zero"
+                ),
+                "exitSearch": "reference-scenario realized net trade expectancy",
+            },
             "minimumValidNeighborFraction": 0.70,
             "minimumPositiveExpectancyNeighborFraction": 0.70,
-            "medianNeighborExpectancyRetention": 0.75,
+            "minimumNeighborExpectancyRetention": 0.75,
             "maximumAbsoluteCoverage30SecondDrop": 0.07,
+            "coverage30DropAppliesTo": (
+                "entry neighborhoods only; exit neighborhoods retain the identical "
+                "frozen entry and are tested by hard-gate validity, positive trade "
+                "expectancy, and median trade-expectancy retention"
+            ),
             "evaluatedOnlyOnConsumedResearchWindows": True,
             "validationOrHoldoutNeighborhoodTuningForbidden": True,
         },
@@ -898,6 +1036,15 @@ def _holdout_specification() -> dict[str, Any]:
         ],
         "singleEvaluation": True,
         "repeatAfterFailureForbidden": True,
+        "durableAuthorizationRegistry": {
+            "required": True,
+            "storage": "persistent host state outside temporary worktrees and outputs",
+            "identity": "canonical SHA-256 of the frozen holdout window",
+            "reservation": (
+                "atomic O_EXCL authorization before any holdout outcome callback; "
+                "the reservation survives run cleanup, failure, and later code revisions"
+            ),
+        },
         "parameterOrCodeChangeAfterAuthorization": "new research study; current holdout remains consumed",
         "failureReport": "No robust profitable setup has yet survived unseen validation.",
     }
@@ -932,6 +1079,13 @@ def _preregistration_body(source_bindings: Mapping[str, Any]) -> dict[str, Any]:
         "holdout": _holdout_specification(),
         "auditRequirements": {
             "appendOnlyExperimentLedger": True,
+            "durableConsumedWindowLedger": (
+                "persist outside temporary run storage and bind its path to the frozen "
+                "ordered chronological window-set identity, independent of later source-"
+                "inventory growth; a non-empty ledger forbids silently restarting the "
+                "same exact windows"
+            ),
+            "batchWindowAccessConsumedBeforeCallback": True,
             "frozenCandidateHashBeforeEveryUnseenWindow": True,
             "prefixInvarianceAndBidAskExecutionTestsRequired": True,
             "rejectionCensorAndLeakageReasonsRequired": True,
@@ -1177,35 +1331,32 @@ def entry_barrier_diagnostic_configs_from_preregistration(
     *,
     scenario_id: str,
 ) -> dict[str, EntryDiagnosticConfig]:
-    """Materialize all 16 registered profit/loss barrier pairs for one scenario."""
+    """Materialize the sole explicitly registered barrier pair for one scenario."""
 
     base_configs = entry_diagnostic_configs_from_preregistration(preregistration)
     if scenario_id not in base_configs:
         raise ValueError(f"unknown execution scenario: {scenario_id!r}")
     base = base_configs[scenario_id]
-    distances = tuple(
-        float(value)
-        for value in preregistration["entryDiagnostics"][
-            "netBarrierDistancesPerUnit"
-        ]
+    pairs = tuple(
+        (float(item["profit"]), float(item["loss"]))
+        for item in preregistration["entryDiagnostics"]["netBarrierPairsPerUnit"]
     )
     configs: dict[str, EntryDiagnosticConfig] = {}
-    for profit in distances:
-        for loss in distances:
-            identifier = f"{scenario_id}:profit-{profit:g}:loss-{loss:g}"
-            configs[identifier] = EntryDiagnosticConfig(
-                entry_latency_ms=base.entry_latency_ms,
-                maximum_entry_lag_ms=base.maximum_entry_lag_ms,
-                maximum_intertick_gap_ms=base.maximum_intertick_gap_ms,
-                diagnostic_horizon_ms=base.diagnostic_horizon_ms,
-                quantity=base.quantity,
-                entry_slippage_per_unit=base.entry_slippage_per_unit,
-                exit_slippage_per_unit=base.exit_slippage_per_unit,
-                entry_commission_per_unit=base.entry_commission_per_unit,
-                exit_commission_per_unit=base.exit_commission_per_unit,
-                profit_barrier_net_per_unit=profit,
-                loss_barrier_net_per_unit=loss,
-            )
+    for profit, loss in pairs:
+        identifier = f"{scenario_id}:profit-{profit:g}:loss-{loss:g}"
+        configs[identifier] = EntryDiagnosticConfig(
+            entry_latency_ms=base.entry_latency_ms,
+            maximum_entry_lag_ms=base.maximum_entry_lag_ms,
+            maximum_intertick_gap_ms=base.maximum_intertick_gap_ms,
+            diagnostic_horizon_ms=base.diagnostic_horizon_ms,
+            quantity=base.quantity,
+            entry_slippage_per_unit=base.entry_slippage_per_unit,
+            exit_slippage_per_unit=base.exit_slippage_per_unit,
+            entry_commission_per_unit=base.entry_commission_per_unit,
+            exit_commission_per_unit=base.exit_commission_per_unit,
+            profit_barrier_net_per_unit=profit,
+            loss_barrier_net_per_unit=loss,
+        )
     return configs
 
 
@@ -1215,20 +1366,20 @@ def replay_execution_config_for_candidate(
     scenario_id: str,
     cooldown_ms: int,
 ) -> FreshExecutionConfig:
-    """Return one registered scenario with a registered deployable cooldown."""
+    """Return one registered scenario with the sole fixed deployable cooldown."""
 
     configs = replay_execution_configs_from_preregistration(preregistration)
     if scenario_id not in configs:
         raise ValueError(f"unknown execution scenario: {scenario_id!r}")
     registered = preregistration["entryDiagnostics"]["deployableSchedule"][
-        "cooldownBankMilliseconds"
+        "fixedCooldownMilliseconds"
     ]
     if (
         not isinstance(cooldown_ms, int)
         or isinstance(cooldown_ms, bool)
-        or cooldown_ms not in registered
+        or cooldown_ms != registered
     ):
-        raise ValueError("cooldown_ms is not in the registered candidate bank")
+        raise ValueError("cooldown_ms must equal the fixed registered cooldown")
     base = configs[scenario_id]
     return FreshExecutionConfig(
         entry_latency_ms=base.entry_latency_ms,
@@ -1341,16 +1492,22 @@ def authorize_registered_holdout(
     ]
     if outcome_role_indexes != sorted(outcome_role_indexes):
         raise PermissionError("outcome-revealing ledger roles are not chronological")
-    validation_records = [
+    candidate_outcome_records = [
         record
         for record in outcome_records
+        if record.get("recordKind")
+        not in ("batch-window-access", "stage-window-access")
+    ]
+    validation_records = [
+        record
+        for record in candidate_outcome_records
         if record.get("role") == "validation"
     ]
     if len(validation_records) != 1:
         raise PermissionError("the ledger must contain exactly one validation outcome")
     walk_forward_3_records = [
         record
-        for record in outcome_records
+        for record in candidate_outcome_records
         if record.get("role") == "walk_forward_3"
     ]
     if not walk_forward_3_records or len(walk_forward_3_records) > 3:
