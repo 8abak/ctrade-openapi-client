@@ -31,7 +31,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           expected_ref="refs/heads/codex/xauusd-fresh-walkforward"
-          expected_marker="fresh-xauusd-run-2026-07-22-v15-audited-oom-recovery"
+          expected_marker="fresh-xauusd-run-2026-07-22-v16-run14-root-member-fix"
           if [[ "${FRESH_GITHUB_REF}" != "${expected_ref}" ]]; then
             printf 'refusing research run from unexpected ref: %s\n' \
               "${FRESH_GITHUB_REF}" >&2
@@ -258,14 +258,25 @@ jobs:
           with tarfile.open(archive, "r:gz") as bundle:
               members = bundle.getmembers()
               normalized = []
+              root_directory_seen = False
               for member in members:
-                  name = member.name[2:] if member.name.startswith("./") else member.name
-                  if not name:
+                  if member.name == ".":
+                      if root_directory_seen or not member.isdir():
+                          raise SystemExit("unsafe run-14 archive root member")
+                      root_directory_seen = True
                       continue
-                  if not member.isfile() or name != pathlib.PurePosixPath(name).name:
+                  name = member.name[2:] if member.name.startswith("./") else member.name
+                  if (
+                      not name
+                      or name in {".", ".."}
+                      or not member.isfile()
+                      or name != pathlib.PurePosixPath(name).name
+                  ):
                       raise SystemExit("unsafe run-14 archive member")
                   normalized.append((name, member))
               names = [name for name, _ in normalized]
+              if not root_directory_seen:
+                  raise SystemExit("run-14 archive root member changed")
               if set(names) != allowed or len(names) != len(allowed):
                   raise SystemExit("run-14 archive member set changed")
               for name, member in normalized:

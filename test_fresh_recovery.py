@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import copy
+import gzip
 import hashlib
+import io
 import json
 import os
 import shutil
+import subprocess
+import sys
+import tarfile
+import textwrap
 import unittest
 import uuid
 from pathlib import Path
@@ -277,6 +283,184 @@ class FreshRun14RecoveryTests(unittest.TestCase):
         status.write_bytes(b"0\n")
         with self.assertRaisesRegex(PermissionError, "digest changed"):
             load_run14_recovery_bundle(destination)
+
+    def test_workflow_extractor_accepts_only_the_tar_root_directory_marker(self):
+        assert self.repository_root is not None
+        workflow = (
+            self.repository_root / ".github/workflows/fresh-xauusd-research.yml"
+        ).read_text(encoding="utf-8")
+        invocation = 'python3 - "${recovery_archive}" "${recovery_directory}" <<\'PY\''
+        invocation_offset = workflow.index(invocation)
+        script_start = workflow.index("          import hashlib\n", invocation_offset)
+        script_end = workflow.index("\n          PY", script_start)
+        extractor = textwrap.dedent(workflow[script_start:script_end])
+
+        allowed = {
+            "fresh_corpus_manifest_v1.json",
+            "fresh_entry_bank_v1.json",
+            "fresh_experiment_ledger_v1.jsonl",
+            "fresh_implementation_manifest_v1.json",
+            "fresh_preregistration_v2.json",
+            "fresh_quantile_bank_v1.json",
+            "fresh_research_state_binding_v1.json",
+            "fresh_source_inventory_v1.json",
+            "fresh_split_manifest_v2.json",
+            "fresh_threshold_domain_preflight_v1.json",
+            "remote-exit-status.txt",
+            "server-run.log",
+        }
+        scratch = self.scratch_directory()
+        expected_payloads = {
+            name: f"fixture:{name}\n".encode() for name in sorted(allowed)
+        }
+
+        def directory_header(name: str) -> bytes:
+            member = tarfile.TarInfo(name)
+            member.mode = 0o700
+            header = bytearray(member.tobuf(format=tarfile.USTAR_FORMAT))
+            header[156] = tarfile.DIRTYPE[0]
+            header[148:156] = b"        "
+            checksum = sum(header)
+            header[148:156] = f"{checksum:06o}\0 ".encode("ascii")
+            return bytes(header)
+
+        def special_header(name: str, member_type: bytes) -> bytes:
+            member = tarfile.TarInfo(name)
+            member.mode = 0o600
+            member.type = member_type
+            if member_type == tarfile.SYMTYPE:
+                member.linkname = "outside"
+            return member.tobuf(format=tarfile.USTAR_FORMAT)
+
+        def write_archive(
+            path: Path,
+            *,
+            leading_headers: tuple[bytes, ...],
+            file_names: tuple[str, ...],
+        ) -> None:
+            payload_stream = io.BytesIO()
+            with tarfile.open(fileobj=payload_stream, mode="w") as bundle:
+                for name in file_names:
+                    payload = expected_payloads.get(name, f"fixture:{name}\n".encode())
+                    member = tarfile.TarInfo(f"./{name}")
+                    member.mode = 0o600
+                    member.size = len(payload)
+                    bundle.addfile(member, io.BytesIO(payload))
+            uncompressed = b"".join(leading_headers) + payload_stream.getvalue()
+            path.write_bytes(gzip.compress(uncompressed, mtime=0))
+
+        ordered_names = tuple(sorted(allowed))
+        archive = scratch / "run14-shape.tgz"
+        write_archive(
+            archive,
+            leading_headers=(directory_header("."),),
+            file_names=ordered_names,
+        )
+        with tarfile.open(archive, "r:gz") as bundle:
+            root = bundle.getmembers()[0]
+        self.assertEqual(root.name, ".")
+        self.assertTrue(root.isdir())
+
+        self.assertEqual(extractor.count(RUN14_TGZ_SHA256), 1)
+
+        def run_extractor(selected_archive: Path, label: str):
+            selected_script = extractor.replace(
+                RUN14_TGZ_SHA256,
+                hashlib.sha256(selected_archive.read_bytes()).hexdigest(),
+            )
+            destination = scratch / label
+            destination.mkdir(mode=0o777)
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    selected_script,
+                    str(selected_archive),
+                    str(destination),
+                ],
+                cwd=self.repository_root,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            return completed, destination
+
+        completed, destination = run_extractor(archive, "extracted")
+        self.assertEqual(
+            completed.returncode,
+            0,
+            msg=f"stdout={completed.stdout!r}\nstderr={completed.stderr!r}",
+        )
+        self.assertEqual(
+            {path.name for path in destination.iterdir()},
+            allowed,
+        )
+        for name, payload in expected_payloads.items():
+            self.assertEqual((destination / name).read_bytes(), payload)
+
+        first_name = ordered_names[0]
+        negative_cases = {
+            "duplicate-root": (
+                (directory_header("."), directory_header(".")),
+                ordered_names,
+                "unsafe run-14 archive root member",
+            ),
+            "slash-file-member": (
+                (directory_header("."), special_header("./", tarfile.REGTYPE)),
+                ordered_names,
+                "unsafe run-14 archive member",
+            ),
+            "unexpected-directory": (
+                (directory_header("."), directory_header("unexpected")),
+                ordered_names,
+                "unsafe run-14 archive member",
+            ),
+            "root-symlink": (
+                (special_header(".", tarfile.SYMTYPE),),
+                ordered_names,
+                "unsafe run-14 archive root member",
+            ),
+            "nested-file": (
+                (
+                    directory_header("."),
+                    special_header("./nested/file", tarfile.REGTYPE),
+                ),
+                ordered_names,
+                "unsafe run-14 archive member",
+            ),
+            "duplicate-file": (
+                (directory_header("."),),
+                (*ordered_names, first_name),
+                "run-14 archive member set changed",
+            ),
+            "missing-file": (
+                (directory_header("."),),
+                ordered_names[1:],
+                "run-14 archive member set changed",
+            ),
+            "extra-file": (
+                (directory_header("."),),
+                (*ordered_names, "unexpected.json"),
+                "run-14 archive member set changed",
+            ),
+            "missing-root": (
+                (),
+                ordered_names,
+                "run-14 archive root member changed",
+            ),
+        }
+        for label, (headers, names, expected_error) in negative_cases.items():
+            with self.subTest(label=label):
+                unsafe_archive = scratch / f"{label}.tgz"
+                write_archive(
+                    unsafe_archive,
+                    leading_headers=headers,
+                    file_names=names,
+                )
+                rejected, _ = run_extractor(unsafe_archive, f"{label}-extracted")
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertIn(expected_error, rejected.stderr)
 
     def test_reconstructed_240_candidate_contract_matches_original_batch(self):
         assert self.recovery_audit is not None
