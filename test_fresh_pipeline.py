@@ -51,6 +51,7 @@ def result(*, successes_10: int, successes_30: int, count: int):
 class FreshPipelineTests(unittest.TestCase):
     def test_durable_snapshot_is_complete_and_never_overwritten(self):
         root = Path(__file__).resolve().parent / "artifacts" / "test-fresh-protocol"
+        root.mkdir(parents=True, exist_ok=True)
         token = uuid.uuid4().hex
         source = root / f"{token}-durable.jsonl"
         destination = root / f"{token}-artifact.jsonl"

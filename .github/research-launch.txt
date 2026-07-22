@@ -1,1 +1,1 @@
-fresh-xauusd-run-2026-07-22-v13-durable-protocol-locks
+fresh-xauusd-run-2026-07-22-v14-portable-preflight
