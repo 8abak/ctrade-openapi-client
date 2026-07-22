@@ -1,0 +1,458 @@
+name: Fresh XAUUSD read-only runtime monitor
+
+on:
+  push:
+    branches:
+      - codex/xauusd-fresh-walkforward
+    paths:
+      - .github/research-monitor-launch.txt
+
+concurrency:
+  group: fresh-xauusd-read-only-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    name: Inspect active sealed study without mutation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Check out monitor definition
+        uses: actions/checkout@v4
+
+      - name: Verify monitor launch identity
+        shell: bash
+        env:
+          MONITOR_GITHUB_REF: ${{ github.ref }}
+        run: |
+          set -Eeuo pipefail
+          expected_ref="refs/heads/codex/xauusd-fresh-walkforward"
+          expected_marker="fresh-xauusd-read-only-monitor-run16-v1"
+          if [[ "${MONITOR_GITHUB_REF}" != "${expected_ref}" ]]; then
+            printf 'refusing monitor from unexpected ref: %s\n' \
+              "${MONITOR_GITHUB_REF}" >&2
+            exit 1
+          fi
+          if ! cmp -s -- .github/research-monitor-launch.txt \
+            <(printf '%s\n' "${expected_marker}"); then
+            printf 'refusing monitor with an unexpected launch marker\n' >&2
+            exit 1
+          fi
+
+      - name: Read active research resource state
+        shell: bash
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          EC2_PORT: ${{ secrets.EC2_PORT || '22' }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          : "${EC2_HOST:?EC2_HOST is missing}"
+          : "${EC2_USER:?EC2_USER is missing}"
+          : "${EC2_PORT:?EC2_PORT is missing}"
+          : "${EC2_SSH_KEY:?EC2_SSH_KEY is missing}"
+
+          key_path="${RUNNER_TEMP}/fresh-read-only-monitor-key"
+          known_hosts="${RUNNER_TEMP}/fresh-read-only-monitor-known-hosts"
+          trap 'rm -f -- "${key_path}" "${known_hosts}"' EXIT
+          printf '%s\n' "${EC2_SSH_KEY}" > "${key_path}"
+          chmod 600 "${key_path}"
+
+          ssh \
+            -T \
+            -i "${key_path}" \
+            -p "${EC2_PORT}" \
+            -o BatchMode=yes \
+            -o PasswordAuthentication=no \
+            -o KbdInteractiveAuthentication=no \
+            -o ClearAllForwardings=yes \
+            -o PermitLocalCommand=no \
+            -o RequestTTY=no \
+            -o StrictHostKeyChecking=accept-new \
+            -o UserKnownHostsFile="${known_hosts}" \
+            -o ConnectTimeout=15 \
+            "${EC2_USER}@${EC2_HOST}" \
+            bash -s <<'REMOTE'
+          set -Eeuo pipefail
+          python3 -B - <<'PY'
+          import datetime as dt
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import stat
+          import time
+
+
+          TARGET_MODULE = "datavis.research.fresh_pipeline_cli"
+          EXPECTED_STATE_ROOT = Path(
+              "/home/ec2-user/.local/state/datavis/fresh-xauusd-research-v2"
+          )
+          SPOOL_PREFIX = ".fresh-entry-spool-"
+          MAXIMUM_LEDGER_BYTES = 32 * 1024 * 1024
+          NOATIME = getattr(os, "O_NOATIME", None)
+          if NOATIME is None:
+              raise SystemExit("O_NOATIME is required for a read-only monitor")
+          FILE_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | NOATIME
+          DIRECTORY_READ_FLAGS = (
+              os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | NOATIME
+          )
+
+
+          def command_arguments(process: Path):
+              try:
+                  raw = (process / "cmdline").read_bytes()
+              except OSError:
+                  return None
+              return [os.fsdecode(part) for part in raw.split(b"\0") if part]
+
+
+          def option(args, name):
+              positions = [index for index, value in enumerate(args) if value == name]
+              if len(positions) != 1 or positions[0] + 1 >= len(args):
+                  return None
+              return args[positions[0] + 1]
+
+
+          def is_pipeline(args):
+              return (
+                  "--execute" in args
+                  and any(
+                      args[index] == "-m"
+                      and index + 1 < len(args)
+                      and args[index + 1] == TARGET_MODULE
+                      for index in range(len(args))
+                  )
+              )
+
+
+          def process_sample(process: Path):
+              raw_stat = (process / "stat").read_text(encoding="ascii")
+              fields = raw_stat[raw_stat.rfind(")") + 2 :].split()
+              status = {}
+              with (process / "status").open(encoding="ascii") as handle:
+                  for line in handle:
+                      key, separator, value = line.partition(":")
+                      if separator and key in {
+                          "VmPeak",
+                          "VmSize",
+                          "VmRSS",
+                          "VmSwap",
+                          "Threads",
+                      }:
+                          status[key] = value.strip()
+              io = {}
+              with (process / "io").open(encoding="ascii") as handle:
+                  for line in handle:
+                      key, separator, value = line.partition(":")
+                      if separator and key in {
+                          "read_bytes",
+                          "write_bytes",
+                          "rchar",
+                          "wchar",
+                      }:
+                          io[key] = int(value.strip())
+              return {
+                  "captured": time.monotonic(),
+                  "state": fields[0],
+                  "cpu_ticks": int(fields[11]) + int(fields[12]),
+                  "start_ticks": int(fields[19]),
+                  "status": status,
+                  "io": io,
+              }
+
+
+          def stable_read_regular(path: Path, maximum_bytes=None):
+              data = b""
+              stable = False
+              for _ in range(3):
+                  descriptor = os.open(path, FILE_READ_FLAGS)
+                  try:
+                      before = os.fstat(descriptor)
+                      if not stat.S_ISREG(before.st_mode):
+                          raise ValueError("not a regular file")
+                      if maximum_bytes is not None and before.st_size > maximum_bytes:
+                          raise ValueError("file exceeds size limit")
+                      chunks = []
+                      total = 0
+                      while True:
+                          chunk = os.read(descriptor, 1024 * 1024)
+                          if not chunk:
+                              break
+                          total += len(chunk)
+                          if maximum_bytes is not None and total > maximum_bytes:
+                              raise ValueError("file exceeds size limit")
+                          chunks.append(chunk)
+                      data = b"".join(chunks)
+                      after = os.fstat(descriptor)
+                      stable = (
+                          before.st_dev == after.st_dev
+                          and before.st_ino == after.st_ino
+                          and before.st_size == after.st_size
+                          and before.st_mtime_ns == after.st_mtime_ns
+                          and len(data) == before.st_size
+                      )
+                  finally:
+                      os.close(descriptor)
+                  if stable:
+                      break
+              return data, stable
+
+
+          def open_directory_noatime(path, *, dir_fd=None):
+              descriptor = os.open(path, DIRECTORY_READ_FLAGS, dir_fd=dir_fd)
+              try:
+                  metadata = os.fstat(descriptor)
+                  if not stat.S_ISDIR(metadata.st_mode):
+                      raise ValueError("not a directory")
+              except BaseException:
+                  os.close(descriptor)
+                  raise
+              return descriptor, metadata
+
+
+          def summarize_spool(output: Path):
+              snapshot_stable = True
+              directory_count = 0
+              file_count = 0
+              total_bytes = 0
+              latest_ns = 0
+              pending = []
+              try:
+                  try:
+                      output_descriptor, _ = open_directory_noatime(output)
+                      with os.scandir(output_descriptor) as entries:
+                          for entry in entries:
+                              if not entry.name.startswith(SPOOL_PREFIX):
+                                  continue
+                              try:
+                                  metadata = entry.stat(follow_symlinks=False)
+                                  if not stat.S_ISDIR(metadata.st_mode):
+                                      snapshot_stable = False
+                                      continue
+                                  descriptor, opened_metadata = open_directory_noatime(
+                                      entry.name, dir_fd=output_descriptor
+                                  )
+                              except (OSError, ValueError):
+                                  snapshot_stable = False
+                                  continue
+                              directory_count += 1
+                              latest_ns = max(
+                                  latest_ns, opened_metadata.st_mtime_ns
+                              )
+                              pending.append(descriptor)
+                  except (OSError, ValueError):
+                      snapshot_stable = False
+                  finally:
+                      if "output_descriptor" in locals():
+                          os.close(output_descriptor)
+
+                  while pending:
+                      directory_descriptor = pending.pop()
+                      try:
+                          with os.scandir(directory_descriptor) as entries:
+                              for entry in entries:
+                                  try:
+                                      metadata = entry.stat(follow_symlinks=False)
+                                  except OSError:
+                                      snapshot_stable = False
+                                      continue
+                                  latest_ns = max(latest_ns, metadata.st_mtime_ns)
+                                  if stat.S_ISDIR(metadata.st_mode):
+                                      try:
+                                          child_descriptor, _ = (
+                                              open_directory_noatime(
+                                                  entry.name,
+                                                  dir_fd=directory_descriptor,
+                                              )
+                                          )
+                                      except (OSError, ValueError):
+                                          snapshot_stable = False
+                                          continue
+                                      pending.append(child_descriptor)
+                                  elif stat.S_ISREG(metadata.st_mode):
+                                      file_count += 1
+                                      total_bytes += metadata.st_size
+                                  else:
+                                      snapshot_stable = False
+                      except OSError:
+                          snapshot_stable = False
+                      finally:
+                          os.close(directory_descriptor)
+              finally:
+                  for descriptor in pending:
+                      os.close(descriptor)
+              latest = (
+                  dt.datetime.fromtimestamp(
+                      latest_ns / 1_000_000_000,
+                      tz=dt.timezone.utc,
+                  ).isoformat()
+                  if latest_ns
+                  else "none"
+              )
+              age = (
+                  max(0.0, time.time() - latest_ns / 1_000_000_000)
+                  if latest_ns
+                  else -1.0
+              )
+              return {
+                  "directory_count": directory_count,
+                  "file_count": file_count,
+                  "bytes": total_bytes,
+                  "latest_mtime_utc": latest,
+                  "latest_age_seconds": age,
+                  "snapshot_stable": snapshot_stable,
+              }
+
+
+          def print_filesystem(label, path: Path):
+              usage = os.statvfs(path)
+              print(f"filesystem[{label}].bytes_total={usage.f_blocks * usage.f_frsize}")
+              print(f"filesystem[{label}].bytes_free={usage.f_bavail * usage.f_frsize}")
+
+
+          processes = []
+          for process in Path("/proc").iterdir():
+              if not process.name.isdigit():
+                  continue
+              args = command_arguments(process)
+              if args and is_pipeline(args):
+                  processes.append((int(process.name), process, args))
+          processes.sort()
+          print(f"pipeline_process_count={len(processes)}")
+          if len(processes) != 1:
+              raise SystemExit("expected exactly one active sealed pipeline")
+
+          pid, process, args = processes[0]
+          output_value = option(args, "--output-dir")
+          state_value = option(args, "--research-state-dir")
+          if output_value is None or state_value is None:
+              raise SystemExit("active pipeline arguments are incomplete")
+
+          output = Path(output_value)
+          state_root = Path(state_value)
+          output_metadata = output.lstat()
+          state_metadata = state_root.lstat()
+          output_real = output.resolve(strict=True)
+          state_real = state_root.resolve(strict=True)
+          if (
+              not stat.S_ISDIR(output_metadata.st_mode)
+              or stat.S_ISLNK(output_metadata.st_mode)
+              or output_real.parent != Path("/tmp")
+              or not output_real.name.startswith("fresh-xauusd-output.")
+              or not stat.S_ISDIR(state_metadata.st_mode)
+              or stat.S_ISLNK(state_metadata.st_mode)
+              or state_real != EXPECTED_STATE_ROOT
+          ):
+              raise SystemExit("active pipeline paths failed containment checks")
+
+          first = process_sample(process)
+          time.sleep(10)
+          second = process_sample(process)
+          if (
+              second["start_ticks"] != first["start_ticks"]
+              or command_arguments(process) != args
+          ):
+              raise SystemExit("active pipeline identity changed during sampling")
+          elapsed = second["captured"] - first["captured"]
+          clock_ticks = os.sysconf("SC_CLK_TCK")
+          cpu_percent = (
+              100.0
+              * (second["cpu_ticks"] - first["cpu_ticks"])
+              / clock_ticks
+              / elapsed
+          )
+          print(f"pipeline_pid={pid}")
+          print(f"pipeline_state={second['state']}")
+          print(f"pipeline_cpu_percent_10s={cpu_percent:.2f}")
+          with open("/proc/uptime", encoding="ascii") as handle:
+              uptime_seconds = float(handle.read().split()[0])
+          process_elapsed = max(
+              0.0,
+              uptime_seconds - second["start_ticks"] / clock_ticks,
+          )
+          print(f"pipeline_elapsed_seconds={process_elapsed:.0f}")
+          for key, value in sorted(second["status"].items()):
+              print(f"pipeline_{key.lower()}={value}")
+          for key in sorted(second["io"]):
+              delta = second["io"][key] - first["io"].get(key, 0)
+              print(f"pipeline_{key}_delta_10s={delta}")
+
+          system_memory = {}
+          with open("/proc/meminfo", encoding="ascii") as handle:
+              for line in handle:
+                  key, separator, value = line.partition(":")
+                  if separator and key in {
+                      "MemTotal",
+                      "MemAvailable",
+                      "SwapTotal",
+                      "SwapFree",
+                  }:
+                      system_memory[key] = int(value.split()[0])
+                      print(f"system_{key.lower()}={value.strip()}")
+          rss_kib = int(second["status"].get("VmRSS", "0").split()[0])
+          memory_percent = (
+              100.0 * rss_kib / system_memory.get("MemTotal", 1)
+          )
+          print(f"pipeline_memory_percent={memory_percent:.2f}")
+          load_one, load_five, load_fifteen = os.getloadavg()
+          print(
+              "system_load_average="
+              f"{load_one:.2f} {load_five:.2f} {load_fifteen:.2f}"
+          )
+          print_filesystem("output", output_real)
+          print_filesystem("state", state_real)
+
+          spool = summarize_spool(output_real)
+          for key, value in spool.items():
+              if isinstance(value, bool):
+                  value = str(value).lower()
+              print(f"spool_{key}={value}")
+
+          binding = output_real / "fresh_research_state_binding_v1.json"
+          binding_metadata = binding.lstat()
+          if not stat.S_ISREG(binding_metadata.st_mode) or stat.S_ISLNK(
+              binding_metadata.st_mode
+          ):
+              raise SystemExit("research state binding is not a regular file")
+          binding_bytes, binding_stable = stable_read_regular(
+              binding, maximum_bytes=1024 * 1024
+          )
+          binding_data = json.loads(binding_bytes.decode("utf-8"))
+          ledger_value = binding_data.get("experimentLedgerPath")
+          if not isinstance(ledger_value, str):
+              raise SystemExit("research state binding has no ledger path")
+
+          ledger = Path(ledger_value)
+          try:
+              ledger_relative = ledger.relative_to(state_root)
+          except ValueError as error:
+              raise SystemExit("ledger path is outside durable state") from error
+          cursor = state_root
+          for component in ledger_relative.parts:
+              cursor = cursor / component
+              component_metadata = cursor.lstat()
+              if stat.S_ISLNK(component_metadata.st_mode):
+                  raise SystemExit("ledger path contains a symbolic link")
+          ledger_real = ledger.resolve(strict=True)
+          try:
+              ledger_real.relative_to(state_real)
+          except ValueError as error:
+              raise SystemExit("resolved ledger is outside durable state") from error
+
+          ledger_bytes, ledger_stable = stable_read_regular(
+              ledger_real, maximum_bytes=MAXIMUM_LEDGER_BYTES
+          )
+          ledger_records = sum(
+              1 for line in ledger_bytes.splitlines() if line.strip()
+          )
+          print(f"binding_snapshot_stable={str(binding_stable).lower()}")
+          print(f"ledger_record_count={ledger_records}")
+          print(f"ledger_sha256={hashlib.sha256(ledger_bytes).hexdigest()}")
+          print(f"ledger_snapshot_stable={str(ledger_stable).lower()}")
+          PY
+          REMOTE
