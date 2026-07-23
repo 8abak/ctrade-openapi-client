@@ -12,6 +12,7 @@ import datavis.research.fresh_spool as spool_module
 from datavis.research.fresh_spool import (
     KeyedObjectSpool,
     SPOOL_DIRECTORY_PREFIX,
+    SpoolCapacityError,
     SpoolStateError,
 )
 
@@ -187,9 +188,43 @@ class FreshSpoolTests(unittest.TestCase):
                     )
 
             self.assertEqual(spool.count("candidate"), 1)
+            self.assertEqual(spool.stored_bytes, len(original_bytes))
             self.assertEqual(path.read_bytes(), original_bytes)
             with spool.load("candidate") as objects:
                 self.assertEqual(tuple(objects), (first,))
+
+    def test_configured_byte_ceiling_is_exact_and_failed_append_rolls_back(self):
+        payload = RichPayload("bounded", tuple(range(10_000)))
+        with KeyedObjectSpool(self.parent) as measuring:
+            measuring.append("candidate", payload)
+            exact_record_bytes = measuring.stored_bytes
+
+        with KeyedObjectSpool(
+            self.parent,
+            maximum_bytes=exact_record_bytes,
+        ) as spool:
+            spool.append("candidate", payload)
+            path = next(spool.directory.iterdir())
+            exact_bytes = path.read_bytes()
+            self.assertEqual(spool.maximum_bytes, exact_record_bytes)
+            self.assertEqual(spool.stored_bytes, exact_record_bytes)
+
+            with self.assertRaises(SpoolCapacityError) as raised:
+                spool.append("candidate", payload)
+
+            self.assertEqual(raised.exception.errno, 28)
+            self.assertEqual(raised.exception.maximum_bytes, exact_record_bytes)
+            self.assertEqual(spool.count("candidate"), 1)
+            self.assertEqual(spool.stored_bytes, exact_record_bytes)
+            self.assertEqual(path.read_bytes(), exact_bytes)
+            with spool.load("candidate") as objects:
+                self.assertEqual(tuple(objects), (payload,))
+
+    def test_invalid_byte_ceiling_is_rejected(self):
+        for value in (0, -1, True, 1.5):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "maximum_bytes"):
+                    KeyedObjectSpool(self.parent, maximum_bytes=value)
 
     def test_only_one_key_can_be_loaded_at_a_time(self):
         with KeyedObjectSpool(self.parent) as spool:

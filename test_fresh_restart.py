@@ -14,7 +14,6 @@ import uuid
 from pathlib import Path
 
 from datavis.research.fresh_restart import (
-    RUN16_ARCHIVE_SHA256,
     RUN16_GITHUB_ARTIFACT_ID,
     RUN16_GITHUB_COMMIT_SHA,
     RUN16_GITHUB_JOB_ID,
@@ -28,6 +27,7 @@ from datavis.research.fresh_restart import (
     _validate_run16_scientific_evidence,
     load_fresh_v3_restart_bundle,
 )
+from datavis.research.fresh_restart_v4 import RUN17_ARCHIVE_SHA256
 
 
 def _ledger_records() -> tuple[dict, ...]:
@@ -163,7 +163,7 @@ def _scientific_evidence() -> dict:
 
 
 class FreshRestartEvidenceTests(unittest.TestCase):
-    def test_workflow_extracts_only_the_exact_flat_run16_artifact(self) -> None:
+    def test_workflow_extracts_only_the_exact_flat_run17_artifact(self) -> None:
         root = Path(__file__).resolve().parent
         workflow = (
             root / ".github/workflows/fresh-xauusd-research.yml"
@@ -175,23 +175,23 @@ class FreshRestartEvidenceTests(unittest.TestCase):
         script_start = workflow.index("          import hashlib\n", invocation_offset)
         script_end = workflow.index("\n          PY", script_start)
         extractor = textwrap.dedent(workflow[script_start:script_end])
-        self.assertEqual(extractor.count(RUN16_ARCHIVE_SHA256), 1)
+        self.assertEqual(extractor.count(RUN17_ARCHIVE_SHA256), 1)
         allowed = {
             "fresh_corpus_manifest_v1.json",
             "fresh_entry_bank_v1.json",
             "fresh_experiment_ledger_v1.jsonl",
             "fresh_implementation_manifest_v1.json",
-            "fresh_preregistration_v2.json",
+            "fresh_preregistration_v3.json",
             "fresh_quantile_bank_v1.json",
-            "fresh_recovery_contract_v1.json",
-            "fresh_recovery_implementation_manifest_v1.json",
-            "fresh_research_state_binding_v1.json",
+            "fresh_research_state_binding_v2.json",
             "fresh_source_inventory_v1.json",
             "fresh_split_manifest_v2.json",
             "fresh_threshold_domain_preflight_v1.json",
+            "predecessor_fresh_experiment_ledger_v1.jsonl",
+            "predecessor_fresh_implementation_manifest_v1.json",
+            "predecessor_fresh_preregistration_v2.json",
+            "predecessor_fresh_research_state_binding_v1.json",
             "remote-exit-status.txt",
-            "run14_remote-exit-status.txt",
-            "run14_server-run.log",
             "server-run.log",
         }
 
@@ -227,7 +227,7 @@ class FreshRestartEvidenceTests(unittest.TestCase):
             archive.write_bytes(payload)
             destination.mkdir()
             selected_script = extractor.replace(
-                RUN16_ARCHIVE_SHA256,
+                RUN17_ARCHIVE_SHA256,
                 hashlib.sha256(payload).hexdigest(),
             )
             completed = subprocess.run(
@@ -258,14 +258,14 @@ class FreshRestartEvidenceTests(unittest.TestCase):
             "nested",
         )
         self.assertNotEqual(nested.returncode, 0)
-        self.assertIn("unsafe run-16 archive member", nested.stderr)
+        self.assertIn("unsafe run-17 archive member", nested.stderr)
 
         missing_root, _ = run_extract(
             archive_bytes(include_root=False),
             "missing-root",
         )
         self.assertNotEqual(missing_root.returncode, 0)
-        self.assertIn("run-16 archive root member changed", missing_root.stderr)
+        self.assertIn("run-17 archive root member changed", missing_root.stderr)
 
     def test_run16_external_metadata_is_exact(self) -> None:
         self.assertEqual(RUN16_GITHUB_JOB_ID, 88917398289)

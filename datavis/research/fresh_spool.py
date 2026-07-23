@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import errno
 import os
 import pickle
 import secrets
@@ -49,33 +50,67 @@ def _write_all(destination, payload: bytes) -> None:
         offset += written
 
 
+class SpoolCapacityError(OSError):
+    """Raised before a configured spool payload budget can be exceeded."""
+
+    def __init__(self, maximum_bytes: int) -> None:
+        super().__init__(
+            errno.ENOSPC,
+            f"configured object spool byte limit of {maximum_bytes} would be exceeded",
+        )
+        self.maximum_bytes = maximum_bytes
+
+
 class _CompressedPickleWriter:
     """Pickler sink that writes one zlib stream without whole-object buffers."""
 
-    __slots__ = ("_compressor", "_destination", "_finished", "compressed_bytes")
+    __slots__ = (
+        "_compressor",
+        "_destination",
+        "_finished",
+        "_maximum_compressed_bytes",
+        "_reported_maximum_bytes",
+        "compressed_bytes",
+    )
 
-    def __init__(self, destination) -> None:
+    def __init__(
+        self,
+        destination,
+        *,
+        maximum_compressed_bytes: int | None = None,
+        reported_maximum_bytes: int | None = None,
+    ) -> None:
         self._compressor = zlib.compressobj(level=1)
         self._destination = destination
         self._finished = False
+        self._maximum_compressed_bytes = maximum_compressed_bytes
+        self._reported_maximum_bytes = (
+            maximum_compressed_bytes
+            if reported_maximum_bytes is None
+            else reported_maximum_bytes
+        )
         self.compressed_bytes = 0
+
+    def _write_compressed(self, compressed: bytes) -> None:
+        if not compressed:
+            return
+        maximum = self._maximum_compressed_bytes
+        if maximum is not None and self.compressed_bytes + len(compressed) > maximum:
+            assert self._reported_maximum_bytes is not None
+            raise SpoolCapacityError(self._reported_maximum_bytes)
+        _write_all(self._destination, compressed)
+        self.compressed_bytes += len(compressed)
 
     def write(self, payload: bytes) -> int:
         if self._finished:
             raise ValueError("compressed pickle writer is already finished")
-        compressed = self._compressor.compress(payload)
-        if compressed:
-            _write_all(self._destination, compressed)
-            self.compressed_bytes += len(compressed)
+        self._write_compressed(self._compressor.compress(payload))
         return len(payload)
 
     def finish(self) -> int:
         if self._finished:
             raise ValueError("compressed pickle writer is already finished")
-        compressed = self._compressor.flush()
-        if compressed:
-            _write_all(self._destination, compressed)
-            self.compressed_bytes += len(compressed)
+        self._write_compressed(self._compressor.flush())
         self._finished = True
         return self.compressed_bytes
 
@@ -150,10 +185,20 @@ class KeyedObjectSpool(Generic[T]):
     def __init__(
         self,
         parent_directory: Optional[Union[str, Path]] = None,
+        *,
+        maximum_bytes: int | None = None,
     ) -> None:
+        if maximum_bytes is not None and (
+            not isinstance(maximum_bytes, int)
+            or isinstance(maximum_bytes, bool)
+            or maximum_bytes <= 0
+        ):
+            raise ValueError("maximum_bytes must be a positive integer or None")
         self._parent_directory = (
             None if parent_directory is None else Path(parent_directory).resolve()
         )
+        self._maximum_bytes = maximum_bytes
+        self._stored_bytes = 0
         self._directory: Optional[Path] = None
         self._created_parent: Optional[Path] = None
         self._filenames: Dict[str, str] = {}
@@ -215,6 +260,19 @@ class KeyedObjectSpool(Generic[T]):
 
         return tuple((key, self._object_counts[key]) for key in self.keys)
 
+    @property
+    def stored_bytes(self) -> int:
+        """Return framed compressed bytes currently owned by this spool."""
+
+        self._require_active()
+        return self._stored_bytes
+
+    @property
+    def maximum_bytes(self) -> int | None:
+        """Return the configured framed compressed-byte ceiling."""
+
+        return self._maximum_bytes
+
     def register_key(self, key: str) -> None:
         """Register an empty key stream, retaining zero-object candidates."""
 
@@ -245,8 +303,21 @@ class KeyedObjectSpool(Generic[T]):
             destination.seek(0, os.SEEK_END)
             record_start = destination.tell()
             try:
+                remaining = (
+                    None
+                    if self._maximum_bytes is None
+                    else self._maximum_bytes
+                    - self._stored_bytes
+                    - _RECORD_LENGTH.size
+                )
+                if remaining is not None and remaining < 0:
+                    raise SpoolCapacityError(self._maximum_bytes)
                 _write_all(destination, _RECORD_LENGTH.pack(0))
-                writer = _CompressedPickleWriter(destination)
+                writer = _CompressedPickleWriter(
+                    destination,
+                    maximum_compressed_bytes=remaining,
+                    reported_maximum_bytes=self._maximum_bytes,
+                )
                 pickle.Pickler(
                     writer,
                     protocol=pickle.HIGHEST_PROTOCOL,
@@ -263,6 +334,7 @@ class KeyedObjectSpool(Generic[T]):
                 destination.seek(record_start)
                 destination.truncate()
                 raise
+        self._stored_bytes += _RECORD_LENGTH.size + compressed_bytes
         self._object_counts[key] += 1
 
     @contextmanager
@@ -326,6 +398,7 @@ class KeyedObjectSpool(Generic[T]):
             self._filenames.clear()
             self._keys_by_filename.clear()
             self._object_counts.clear()
+            self._stored_bytes = 0
             self._closed = True
 
     def _iter_key(self, key: str) -> Generator[T, None, None]:
@@ -390,6 +463,7 @@ class KeyedObjectSpool(Generic[T]):
 __all__ = [
     "KeyedObjectSpool",
     "SPOOL_DIRECTORY_PREFIX",
+    "SpoolCapacityError",
     "SpoolCorruptionError",
     "SpoolStateError",
 ]

@@ -15,6 +15,13 @@ from datavis.research.fresh_pipeline import run_registered_fresh_research
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument(
+        "--scratch-dir",
+        help=(
+            "empty host directory for bounded temporary research spools; "
+            "defaults to --output-dir"
+        ),
+    )
     parser.add_argument("--repository-root", default=str(Path.cwd()))
     parser.add_argument(
         "--research-state-dir",
@@ -38,6 +45,13 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "exact extracted run-16 artifact directory that proves eligibility "
             "for the separately preregistered v3 study"
+        ),
+    )
+    lineage.add_argument(
+        "--restart-v4-artifact-dir",
+        help=(
+            "exact extracted run-17 artifact directory that proves eligibility "
+            "for the separately preregistered full-recompute v4 study"
         ),
     )
     return parser
@@ -64,10 +78,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         repository_root=arguments.repository_root,
         output_directory=arguments.output_dir,
         research_state_directory=arguments.research_state_dir,
+        scratch_directory=arguments.scratch_dir,
         progress=_progress,
         resume_artifact_directory=arguments.resume_artifact_dir,
         infrastructure_restart_artifact_directory=(
             arguments.restart_artifact_dir
+        ),
+        infrastructure_restart_v4_artifact_directory=(
+            arguments.restart_v4_artifact_dir
         ),
     )
     print(

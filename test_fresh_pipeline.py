@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 
@@ -28,10 +28,12 @@ from datavis.research.fresh_pipeline import (
     _replay_session,
     _research_state_binding,
     _research_state_binding_v3,
+    _research_state_binding_v4,
     _restricted_coverage_ms,
     _scenario_ids_for_stage,
     _snapshot_new_file,
     _strongest_record,
+    run_registered_fresh_research,
 )
 from datavis.research.fresh_entry_diagnostics import (
     EntryDiagnosticRejection,
@@ -61,6 +63,7 @@ from datavis.research.fresh_search import (
     FreshChronologicalSearch,
     FrozenEntryCandidate,
     FrozenResearchWindow,
+    StageRunResult,
 )
 from datavis.research.fresh_session_eval import FreshSessionTape
 from datavis.research.fresh_sessions import broker_session_bounds
@@ -306,6 +309,9 @@ class FreshPipelineTests(unittest.TestCase):
         }
         pipeline = object.__new__(RegisteredFreshResearchPipeline)
         pipeline.output = output
+        pipeline.spool_directory = output
+        pipeline.spool_maximum_bytes = 8 * 1024 * 1024
+        pipeline.event_spool_maximum_bytes = 4 * 1024 * 1024
         pipeline.quantile_bank = SimpleNamespace(bank_sha256="9" * 64)
         pipeline.regime_definition = FreshRegimeDefinition(
             volatility_column="volatility",
@@ -703,6 +709,138 @@ class FreshPipelineTests(unittest.TestCase):
             predecessor["holdoutAuthorizationRegistryPath"],
         )
 
+    def test_v4_uses_a_new_lineage_ledger_and_the_identical_global_holdout_lock(
+        self,
+    ):
+        roles = (
+            "discovery",
+            "walk_forward_1",
+            "walk_forward_2",
+            "walk_forward_3",
+            "validation",
+            "holdout",
+        )
+        body = {
+            "schemaVersion": "test",
+            "windows": {
+                role: {
+                    "role": role,
+                    "sessionAnchors": [f"2026-07-{ordinal + 1:02d}"],
+                }
+                for ordinal, role in enumerate(roles)
+            },
+        }
+        split = {**body, "manifestSha256": canonical_hash(body)}
+        predecessor = _research_state_binding("durable-state", split)
+        scientific_sha = "f" * 64
+        predecessor_lineage_sha = "d" * 64
+        lineage_body = {
+            "schema": "fresh-xauusd-study-lineage/v1",
+            "studyId": "xauusd-fresh-causal-acceleration-v4",
+            "predecessorStudyId": "xauusd-fresh-causal-acceleration-v3",
+            "predecessorPreregistrationSha256": "a" * 64,
+            "predecessorTerminalLedgerSha256": "b" * 64,
+            "splitManifestSha256": split["manifestSha256"],
+            "researchWindowSetSha256": predecessor["researchWindowSetSha256"],
+            "scientificSpecificationSha256": scientific_sha,
+        }
+        expected_lineage = canonical_hash(lineage_body)
+        provenance = {
+            "studyId": "xauusd-fresh-causal-acceleration-v4",
+            "studyLineageSha256": expected_lineage,
+            "predecessorLedgerSha256": "b" * 64,
+            "predecessorPreregistrationSha256": "a" * 64,
+            "predecessorLineageTerminal": True,
+            "candidateOutcomeRecordCount": 0,
+            "laterWindowOutcomeRecordCount": 0,
+            "transientSpoolsRecovered": False,
+            "transientCandidateComputationsRecovered": False,
+            "partialCandidateResultsImported": False,
+            "batchResultSealed": False,
+            "restartPolicy": {
+                "recomputeFromDiscoverySessionOrdinal": 1,
+                "discardTransientSpools": True,
+                "discardPartialCandidateComputations": True,
+                "importCandidateResults": False,
+            },
+        }
+        predecessor_state_binding = {
+            "schema": "fresh-xauusd-durable-research-state/v2",
+            "studyId": "xauusd-fresh-causal-acceleration-v3",
+            "studyLineageSha256": predecessor_lineage_sha,
+            "splitManifestSha256": predecessor["splitManifestSha256"],
+            "researchWindowSetSha256": predecessor[
+                "researchWindowSetSha256"
+            ],
+            "holdoutWindowSha256": predecessor["holdoutWindowSha256"],
+            "stateDirectory": predecessor["stateDirectory"],
+            "experimentLedgerPath": str(
+                Path(predecessor["stateDirectory"])
+                / "studies"
+                / predecessor["researchWindowSetSha256"]
+                / "lineages"
+                / predecessor_lineage_sha
+                / "fresh_experiment_ledger_v1.jsonl"
+            ),
+            "holdoutAuthorizationRegistryPath": predecessor[
+                "holdoutAuthorizationRegistryPath"
+            ],
+        }
+        with (
+            patch(
+                "datavis.research.fresh_pipeline.RUN17_LEDGER_SHA256",
+                "b" * 64,
+            ),
+            patch(
+                "datavis.research.fresh_pipeline.RUN17_PREREGISTRATION_SHA256",
+                "a" * 64,
+            ),
+            patch(
+                "datavis.research.fresh_pipeline.RUN17_STUDY_LINEAGE_SHA256",
+                expected_lineage,
+            ),
+            patch(
+                "datavis.research.fresh_pipeline.FRESH_V3_STUDY_LINEAGE_SHA256",
+                predecessor_lineage_sha,
+            ),
+            patch(
+                "datavis.research.fresh_pipeline.canonical_fresh_v4_study_lineage",
+                return_value=lineage_body,
+            ),
+            patch(
+                "datavis.research.fresh_pipeline.fresh_v4_scientific_specification_sha256",
+                return_value=scientific_sha,
+            ),
+        ):
+            restarted = _research_state_binding_v4(
+                "durable-state",
+                split,
+                provenance,
+                predecessor_state_binding,
+            )
+            with self.assertRaisesRegex(PermissionError, "exact terminal v3"):
+                _research_state_binding_v4(
+                    "alternate-durable-state",
+                    split,
+                    provenance,
+                    predecessor_state_binding,
+                )
+
+        self.assertEqual(
+            restarted["schema"],
+            "fresh-xauusd-durable-research-state/v3",
+        )
+        self.assertEqual(restarted["studyLineage"], lineage_body)
+        self.assertEqual(restarted["studyLineageSha256"], expected_lineage)
+        self.assertIn(expected_lineage, restarted["experimentLedgerPath"])
+        self.assertIn(
+            predecessor_lineage_sha,
+            restarted["predecessorExperimentLedgerPath"],
+        )
+        self.assertEqual(
+            restarted["holdoutAuthorizationRegistryPath"],
+            predecessor["holdoutAuthorizationRegistryPath"],
+        )
     def test_later_stages_report_all_registered_execution_sensitivities(self):
         registered = (
             "mechanics-zero-friction",
@@ -1044,6 +1182,34 @@ class FreshPipelineTests(unittest.TestCase):
         )
         self.assertEqual(self._spool_directories(pipeline.output), ())
 
+    def test_external_spool_directory_does_not_change_scores_or_touch_output(self):
+        pipeline, _runtimes, candidates, context = self._synthetic_entry_pipeline()
+        with self._synthetic_entry_dependencies([]):
+            expected = pipeline.score_entries_batch_materialized_reference(
+                candidates,
+                context,
+            )
+
+        scratch = self._spool_test_output()
+        pipeline.spool_directory = scratch
+        _AuditedPipelineSpool.instances = []
+        with (
+            self._synthetic_entry_dependencies([]),
+            patch(
+                "datavis.research.fresh_pipeline.KeyedObjectSpool",
+                _AuditedPipelineSpool,
+            ),
+        ):
+            actual = pipeline.score_entries_batch(candidates, context)
+
+        self.assertEqual(actual, expected)
+        self.assertEqual(self._spool_directories(pipeline.output), ())
+        self.assertEqual(self._spool_directories(scratch), ())
+        self.assertTrue(_AuditedPipelineSpool.instances)
+        outer = _AuditedPipelineSpool.instances[0]
+        self.assertEqual(outer.created_directory.parent, scratch)
+        self.assertEqual(outer.maximum_bytes, pipeline.spool_maximum_bytes)
+
     def test_spooled_pipeline_drops_prior_session_diagnostics(self):
         weak_references = []
 
@@ -1286,11 +1452,277 @@ class FreshPipelineTests(unittest.TestCase):
         self.assertIn("datavis/research/fresh_scoring.py", paths)
         self.assertIn("datavis/research/fresh_candidate_grid.py", paths)
 
+    def test_v4_orchestration_recomputes_frozen_discovery_from_session_one(self):
+        repository = Path(__file__).resolve().parent
+        output = self._spool_test_output()
+        state = self._spool_test_output()
+        scratch = self._spool_test_output()
+        predecessor_ledger = state / "v3" / "fresh_experiment_ledger_v1.jsonl"
+        predecessor_ledger.parent.mkdir()
+        predecessor_ledger.write_text("terminal-v3\n", encoding="utf-8")
+        ledger = state / "v4" / "fresh_experiment_ledger_v1.jsonl"
+        holdout = state / "holdout" / "fresh_holdout_authorization_v1.json"
+        entry_bank_sha = "e" * 64
+        predecessor_ledger_sha = "b" * 64
+        discovery_window = {
+            "role": "discovery",
+            "sessionAnchors": ["2026-01-02"],
+        }
+        split = {
+            "manifestSha256": "s" * 64,
+            "windows": {"discovery": discovery_window},
+        }
+        provenance = {
+            "predecessorRunId": 30000411128,
+            "reusedOutcomeBlindInputs": {
+                "fresh_entry_bank_v1.json": entry_bank_sha,
+            },
+        }
+        required_bundle_paths = {
+            name: repository / name
+            for name in (
+                "fresh_source_inventory_v1.json",
+                "fresh_corpus_manifest_v1.json",
+                "fresh_split_manifest_v2.json",
+                "fresh_research_state_binding_v2.json",
+                "fresh_experiment_ledger_v1.jsonl",
+                "fresh_preregistration_v3.json",
+                "fresh_implementation_manifest_v1.json",
+                "fresh_quantile_bank_v1.json",
+                "fresh_threshold_domain_preflight_v1.json",
+            )
+        }
+        bundle = SimpleNamespace(
+            inventory={"inventorySha256": "i" * 64},
+            corpus={"corpusManifestSha256": "c" * 64},
+            split=split,
+            provenance=provenance,
+            predecessor_state_binding={"stateDirectory": str(state)},
+            quantile_bank={"bankSha256": "q" * 64},
+            threshold_preflight={"allRegisteredThresholdDomainsResolved": True},
+            paths=required_bundle_paths,
+        )
+        state_binding = {
+            "studyId": "xauusd-fresh-causal-acceleration-v4",
+            "studyLineageSha256": "a" * 64,
+            "experimentLedgerPath": str(ledger),
+            "predecessorExperimentLedgerPath": str(predecessor_ledger),
+            "holdoutAuthorizationRegistryPath": str(holdout),
+        }
+        discovery_result = StageRunResult(
+            stage="discovery",
+            evaluated_ids=("candidate",),
+            promoted_ids=(),
+            ledger_record_numbers=(1,),
+            study_failed=True,
+        )
+        frozen_discovery = MagicMock(return_value=discovery_result)
+        search = SimpleNamespace(
+            run_frozen_discovery=frozen_discovery,
+            run_walk_forward_1=MagicMock(),
+            run_walk_forward_2=MagicMock(),
+            run_exit_search=MagicMock(),
+            run_walk_forward_3=MagicMock(),
+            run_validation=MagicMock(),
+            audit_records=(),
+        )
+        build_entries = MagicMock(return_value=("entry-spec",))
+        build_search = MagicMock(return_value=search)
+        pipeline = SimpleNamespace(
+            quantile_bank=None,
+            threshold_preflight=None,
+            stage_results=[],
+            build_entry_candidates=build_entries,
+            build_search=build_search,
+        )
+        implementation = {"manifestSha256": "m" * 64}
+        preregistration = {"preregistrationSha256": "p" * 64}
+
+        with (
+            patch(
+                "datavis.research.fresh_pipeline.load_fresh_v4_restart_bundle",
+                return_value=bundle,
+            ) as load_bundle,
+            patch(
+                "datavis.research.fresh_pipeline._research_state_binding_v4",
+                return_value=state_binding,
+            ) as bind_state,
+            patch(
+                "datavis.research.fresh_pipeline._snapshot_new_file",
+            ),
+            patch(
+                "datavis.research.fresh_pipeline._file_sha256",
+                side_effect=(predecessor_ledger_sha, entry_bank_sha),
+            ),
+            patch(
+                "datavis.research.fresh_pipeline.RUN17_LEDGER_SHA256",
+                predecessor_ledger_sha,
+            ),
+            patch(
+                "datavis.research.fresh_pipeline.build_fresh_implementation_manifest",
+                return_value=implementation,
+            ),
+            patch(
+                "datavis.research.fresh_pipeline.build_fresh_preregistration_v4",
+                return_value=preregistration,
+            ) as build_preregistration,
+            patch(
+                "datavis.research.fresh_pipeline.fresh_quantile_bank_from_payload",
+                return_value="bound-quantile-bank",
+            ),
+            patch(
+                "datavis.research.fresh_pipeline.RegisteredFreshResearchPipeline",
+                return_value=pipeline,
+            ) as construct_pipeline,
+        ):
+            summary = run_registered_fresh_research(
+                lambda: None,
+                repository_root=repository,
+                output_directory=output,
+                research_state_directory=state,
+                scratch_directory=scratch,
+                infrastructure_restart_v4_artifact_directory="run17",
+            )
+
+        load_bundle.assert_called_once_with("run17")
+        bind_state.assert_called_once_with(
+            state.resolve(),
+            split,
+            provenance,
+            bundle.predecessor_state_binding,
+        )
+        construct_pipeline.assert_called_once()
+        self.assertEqual(
+            construct_pipeline.call_args.kwargs["spool_directory"],
+            scratch.resolve(),
+        )
+        build_preregistration.assert_called_once()
+        self.assertIs(
+            build_preregistration.call_args.kwargs[
+                "infrastructure_restart_provenance"
+            ],
+            provenance,
+        )
+        self.assertEqual(
+            build_entries.call_args.args[1].windows[0].session_anchors,
+            ("2026-01-02",),
+        )
+        frozen_discovery.assert_called_once_with(
+            threshold_bank=bundle.quantile_bank,
+            entry_specs=("entry-spec",),
+        )
+        for operation in (
+            search.run_walk_forward_1,
+            search.run_walk_forward_2,
+            search.run_exit_search,
+            search.run_walk_forward_3,
+            search.run_validation,
+        ):
+            operation.assert_not_called()
+        self.assertEqual(summary["infrastructureRestartVersion"], 4)
+        self.assertEqual(summary["predecessorRunId"], 30000411128)
+        self.assertFalse(summary["holdoutOpened"])
+
+    def test_research_scratch_must_not_overlap_output_or_durable_state(self):
+        repository = Path(__file__).resolve().parent
+        state = self._spool_test_output()
+        scratch_parent = self._spool_test_output()
+        output_inside_scratch = scratch_parent / "output"
+        output_inside_scratch.mkdir()
+
+        with self.assertRaisesRegex(ValueError, "scratch must be separate"):
+            run_registered_fresh_research(
+                lambda: None,
+                repository_root=repository,
+                output_directory=output_inside_scratch,
+                research_state_directory=state,
+                scratch_directory=scratch_parent,
+            )
+
+        output = self._spool_test_output()
+        with self.assertRaisesRegex(ValueError, "scratch must be separate"):
+            run_registered_fresh_research(
+                lambda: None,
+                repository_root=repository,
+                output_directory=output,
+                research_state_directory=state,
+                scratch_directory=state,
+            )
+
+    def test_research_scratch_must_be_empty_before_outcome_access(self):
+        repository = Path(__file__).resolve().parent
+        output = self._spool_test_output()
+        state = self._spool_test_output()
+        scratch = self._spool_test_output()
+        marker = scratch / "unexpected"
+        marker.write_text("not empty", encoding="utf-8")
+
+        with self.assertRaisesRegex(FileExistsError, "scratch directory must be empty"):
+            run_registered_fresh_research(
+                lambda: None,
+                repository_root=repository,
+                output_directory=output,
+                research_state_directory=state,
+                scratch_directory=scratch,
+            )
+
+    def test_v4_restart_requires_an_explicit_separate_scratch(self):
+        repository = Path(__file__).resolve().parent
+        output = self._spool_test_output()
+        state = self._spool_test_output()
+
+        with self.assertRaisesRegex(ValueError, "explicit separate scratch"):
+            run_registered_fresh_research(
+                lambda: None,
+                repository_root=repository,
+                output_directory=output,
+                research_state_directory=state,
+                infrastructure_restart_v4_artifact_directory="unused",
+            )
+        with self.assertRaisesRegex(ValueError, "explicit separate scratch"):
+            run_registered_fresh_research(
+                lambda: None,
+                repository_root=repository,
+                output_directory=output,
+                research_state_directory=state,
+                scratch_directory=output,
+                infrastructure_restart_v4_artifact_directory="unused",
+            )
+
     def test_cli_requires_explicit_execute(self):
         with self.assertRaisesRegex(SystemExit, "without --execute"):
             main(["--output-dir", "unused"])
         with self.assertRaisesRegex(SystemExit, "durable --research-state-dir"):
             main(["--output-dir", "unused", "--execute"])
+
+    def test_cli_passes_separate_scratch_directory(self):
+        with patch(
+            "datavis.research.fresh_pipeline_cli.run_registered_fresh_research",
+            return_value={"status": "complete", "holdoutOpened": False},
+        ) as run:
+            self.assertEqual(
+                main(
+                    [
+                        "--output-dir",
+                        "output",
+                        "--scratch-dir",
+                        "scratch",
+                        "--restart-v4-artifact-dir",
+                        "restart-v4",
+                        "--research-state-dir",
+                        "state",
+                        "--execute",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(run.call_args.kwargs["scratch_directory"], "scratch")
+        self.assertEqual(
+            run.call_args.kwargs[
+                "infrastructure_restart_v4_artifact_directory"
+            ],
+            "restart-v4",
+        )
 
 
 if __name__ == "__main__":
