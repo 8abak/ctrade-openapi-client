@@ -32,7 +32,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           expected_ref="refs/heads/codex/xauusd-fresh-walkforward"
-          expected_marker="fresh-xauusd-v4-bootstrap-2026-07-23-1"
+          expected_marker="fresh-xauusd-v4-bootstrap-2026-07-23-2"
           if [[ "${BOOTSTRAP_REF}" != "${expected_ref}" ]]; then
             printf 'refusing bootstrap from unexpected ref: %s\n' \
               "${BOOTSTRAP_REF}" >&2
@@ -207,8 +207,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git fetch origin "${BOOTSTRAP_BRANCH}"
-          if [[ "$(git rev-parse "origin/${BOOTSTRAP_BRANCH}")" !=
-            "${BOOTSTRAP_SHA}" ]]; then
+          remote_head="$(git rev-parse "origin/${BOOTSTRAP_BRANCH}")"
+          if [[ "${remote_head}" != "${BOOTSTRAP_SHA}" ]]; then
             printf 'branch advanced during v4 bootstrap\n' >&2
             exit 1
           fi
