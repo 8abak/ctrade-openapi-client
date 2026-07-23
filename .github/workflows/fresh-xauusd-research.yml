@@ -31,7 +31,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           expected_ref="refs/heads/codex/xauusd-fresh-walkforward"
-          expected_marker="fresh-xauusd-run-2026-07-23-v17-v3-bounded-memory"
+          expected_marker="fresh-xauusd-run-2026-07-23-v18-v4-bounded-storage"
           if [[ "${FRESH_GITHUB_REF}" != "${expected_ref}" ]]; then
             printf 'refusing research run from unexpected ref: %s\n' \
               "${FRESH_GITHUB_REF}" >&2
@@ -43,24 +43,24 @@ jobs:
             exit 1
           fi
 
-      - name: Download the immutable terminal run-16 artifact
+      - name: Download the immutable terminal run-17 artifact
         uses: actions/download-artifact@v4
         with:
-          name: fresh-xauusd-29918347818-1
-          path: ${{ runner.temp }}/fresh-xauusd-run16
+          name: fresh-xauusd-30000411128-1
+          path: ${{ runner.temp }}/fresh-xauusd-run17
           github-token: ${{ github.token }}
-          run-id: 29918347818
+          run-id: 30000411128
 
-      - name: Verify the immutable terminal run-16 archive
+      - name: Verify the immutable terminal run-17 archive
         shell: bash
         run: |
           set -Eeuo pipefail
-          archive="${RUNNER_TEMP}/fresh-xauusd-run16/fresh-xauusd-29918347818-1.tgz"
-          expected="59cca29ee5536b9c2dccb07c4c3c029f75e558bf8d468fff7a0f261338fdc830"
+          archive="${RUNNER_TEMP}/fresh-xauusd-run17/fresh-xauusd-30000411128-1.tgz"
+          expected="13f3c091ecb54d58f1d467d9ce0022617658f80a1a7fa38f4c78c33a9c865ada"
           [[ -f "${archive}" && ! -L "${archive}" ]]
           actual="$(sha256sum -- "${archive}" | awk '{print $1}')"
           if [[ "${actual}" != "${expected}" ]]; then
-            printf 'terminal run-16 archive digest changed\n' >&2
+            printf 'terminal run-17 archive digest changed\n' >&2
             exit 1
           fi
 
@@ -76,7 +76,7 @@ jobs:
           FRESH_SHA: ${{ github.sha }}
           FRESH_RUN_ID: ${{ github.run_id }}
           FRESH_RUN_ATTEMPT: ${{ github.run_attempt }}
-          RUN16_ARCHIVE: ${{ runner.temp }}/fresh-xauusd-run16/fresh-xauusd-29918347818-1.tgz
+          RUN17_ARCHIVE: ${{ runner.temp }}/fresh-xauusd-run17/fresh-xauusd-30000411128-1.tgz
         run: |
           set -uo pipefail
           umask 077
@@ -114,10 +114,10 @@ jobs:
               ;;
           esac
           archive_remote="${transfer_directory}/${archive_name}"
-          restart_archive_remote="${transfer_directory}/run16-restart.tgz"
+          restart_archive_remote="${transfer_directory}/run17-restart.tgz"
 
           if ! scp "${scp_options[@]}" \
-            "${RUN16_ARCHIVE}" \
+            "${RUN17_ARCHIVE}" \
             "${EC2_USER}@${EC2_HOST}:${restart_archive_remote}"; then
             rm -f "${key_path}"
             exit 1
@@ -206,7 +206,12 @@ jobs:
           for stale_directory in \
             /tmp/fresh-xauusd-worktree.* \
             /tmp/fresh-xauusd-output.* \
-            /tmp/fresh-xauusd-restart.*; do
+            /tmp/fresh-xauusd-restart.* \
+            /tmp/fresh-xauusd-transfer.*; do
+            if [[ "$(readlink -f -- "${stale_directory}")" ==
+              "${transfer_resolved}" ]]; then
+              continue
+            fi
             remove_scoped_directory "${stale_directory}"
           done
           for stale_file in \
@@ -224,6 +229,9 @@ jobs:
           log_path="$(mktemp /tmp/fresh-xauusd-run.XXXXXX.log)"
           restart_directory="$(mktemp -d /tmp/fresh-xauusd-restart.XXXXXX)"
           durable_state_root="/home/ec2-user/.local/state/datavis/fresh-xauusd-research-v2"
+          scratch_root="/home/ec2-user/.local/state/datavis/fresh-xauusd-scratch-v1"
+          scratch=""
+          scratch_owner_value="fresh-xauusd-scratch-owner-v1:${run_id}:${attempt}:${sha}"
 
           python3 - "${restart_archive}" "${restart_directory}" <<'PY'
           import hashlib
@@ -234,29 +242,29 @@ jobs:
 
           archive = pathlib.Path(sys.argv[1]).resolve()
           destination = pathlib.Path(sys.argv[2]).resolve()
-          expected_archive = "59cca29ee5536b9c2dccb07c4c3c029f75e558bf8d468fff7a0f261338fdc830"
+          expected_archive = "13f3c091ecb54d58f1d467d9ce0022617658f80a1a7fa38f4c78c33a9c865ada"
           digest = hashlib.sha256()
           with archive.open("rb") as handle:
               for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                   digest.update(chunk)
           if digest.hexdigest() != expected_archive:
-              raise SystemExit("remote terminal run-16 archive digest changed")
+              raise SystemExit("remote terminal run-17 archive digest changed")
           allowed = {
               "fresh_corpus_manifest_v1.json",
               "fresh_entry_bank_v1.json",
               "fresh_experiment_ledger_v1.jsonl",
               "fresh_implementation_manifest_v1.json",
-              "fresh_preregistration_v2.json",
+              "fresh_preregistration_v3.json",
               "fresh_quantile_bank_v1.json",
-              "fresh_recovery_contract_v1.json",
-              "fresh_recovery_implementation_manifest_v1.json",
-              "fresh_research_state_binding_v1.json",
+              "fresh_research_state_binding_v2.json",
               "fresh_source_inventory_v1.json",
               "fresh_split_manifest_v2.json",
               "fresh_threshold_domain_preflight_v1.json",
+              "predecessor_fresh_experiment_ledger_v1.jsonl",
+              "predecessor_fresh_implementation_manifest_v1.json",
+              "predecessor_fresh_preregistration_v2.json",
+              "predecessor_fresh_research_state_binding_v1.json",
               "remote-exit-status.txt",
-              "run14_remote-exit-status.txt",
-              "run14_server-run.log",
               "server-run.log",
           }
           with tarfile.open(archive, "r:gz") as bundle:
@@ -266,7 +274,7 @@ jobs:
               for member in members:
                   if member.name == ".":
                       if root_directory_seen or not member.isdir():
-                          raise SystemExit("unsafe run-16 archive root member")
+                          raise SystemExit("unsafe run-17 archive root member")
                       root_directory_seen = True
                       continue
                   name = member.name[2:] if member.name.startswith("./") else member.name
@@ -276,17 +284,17 @@ jobs:
                       or not member.isfile()
                       or name != pathlib.PurePosixPath(name).name
                   ):
-                      raise SystemExit("unsafe run-16 archive member")
+                      raise SystemExit("unsafe run-17 archive member")
                   normalized.append((name, member))
               names = [name for name, _ in normalized]
               if not root_directory_seen:
-                  raise SystemExit("run-16 archive root member changed")
+                  raise SystemExit("run-17 archive root member changed")
               if set(names) != allowed or len(names) != len(allowed):
-                  raise SystemExit("run-16 archive member set changed")
+                  raise SystemExit("run-17 archive member set changed")
               for name, member in normalized:
                   source = bundle.extractfile(member)
                   if source is None:
-                      raise SystemExit("run-16 archive member is unreadable")
+                      raise SystemExit("run-17 archive member is unreadable")
                   target = destination / name
                   descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                   with os.fdopen(descriptor, "wb") as output:
@@ -386,7 +394,7 @@ jobs:
           }
 
           snapshot_durable_research_state() {
-            binding_path="${output}/fresh_research_state_binding_v2.json"
+            binding_path="${output}/fresh_research_state_binding_v3.json"
             if [[ -L "${binding_path}" ]]; then
               printf 'refusing symlink research state binding: %s\n' \
                 "${binding_path}" >&2
@@ -408,6 +416,84 @@ jobs:
               "${ledger_source}" fresh_experiment_ledger_v1.jsonl || return 1
             snapshot_state_file \
               "${holdout_source}" fresh_holdout_authorization_v1.json || return 1
+          }
+
+          remove_scoped_scratch() {
+            candidate="$1"
+            [[ -n "${candidate}" ]] || return 0
+            if [[ -L "${candidate}" || ! -d "${candidate}" ]]; then
+              printf 'refusing unexpected scratch path: %s\n' "${candidate}" >&2
+              return 1
+            fi
+            candidate_resolved="$(readlink -f -- "${candidate}")" || return 1
+            scratch_parent="$(dirname -- "${candidate_resolved}")"
+            scratch_name="$(basename -- "${candidate_resolved}")"
+            if [[ "${scratch_parent}" != "${scratch_root_resolved}" ]]; then
+              printf 'refusing scratch outside scoped root: %s\n' \
+                "${candidate_resolved}" >&2
+              return 1
+            fi
+            case "${scratch_name}" in
+              "run.${run_id}.${attempt}."*)
+                ;;
+              *)
+                printf 'refusing scratch with unexpected name: %s\n' \
+                  "${candidate_resolved}" >&2
+                return 1
+                ;;
+            esac
+            owner_path="${scratch_root_resolved}/.${scratch_name}.owner"
+            if [[ -L "${owner_path}" || ! -f "${owner_path}" ]] ||
+              ! cmp -s -- "${owner_path}" \
+                <(printf '%s\n' "${scratch_owner_value}"); then
+              printf 'refusing scratch without exact ownership marker: %s\n' \
+                "${candidate_resolved}" >&2
+              return 1
+            fi
+            rm -rf -- "${candidate_resolved}"
+            rm -f -- "${owner_path}"
+          }
+
+          remove_stale_scoped_scratch() {
+            candidate="$1"
+            if [[ -L "${candidate}" || ! -d "${candidate}" ]]; then
+              printf 'refusing unexpected stale scratch path: %s\n' \
+                "${candidate}" >&2
+              return 1
+            fi
+            candidate_resolved="$(readlink -f -- "${candidate}")" || return 1
+            scratch_parent="$(dirname -- "${candidate_resolved}")"
+            scratch_name="$(basename -- "${candidate_resolved}")"
+            if [[ "${scratch_parent}" != "${scratch_root_resolved}" ||
+              ! "${scratch_name}" =~ ^run\.([0-9]+)\.([0-9]+)\.([A-Za-z0-9]{6})$ ]]; then
+              printf 'refusing unscoped stale scratch: %s\n' \
+                "${candidate_resolved}" >&2
+              return 1
+            fi
+            stale_run_id="${BASH_REMATCH[1]}"
+            stale_attempt="${BASH_REMATCH[2]}"
+            owner_path="${scratch_root_resolved}/.${scratch_name}.owner"
+            if [[ -L "${owner_path}" || ! -f "${owner_path}" ]]; then
+              printf 'refusing stale scratch without owner marker: %s\n' \
+                "${candidate_resolved}" >&2
+              return 1
+            fi
+            owner_value="$(<"${owner_path}")"
+            if [[ ! "${owner_value}" =~ ^fresh-xauusd-scratch-owner-v1:${stale_run_id}:${stale_attempt}:[0-9a-f]{40}$ ]]; then
+              printf 'refusing stale scratch with invalid owner marker: %s\n' \
+                "${candidate_resolved}" >&2
+              return 1
+            fi
+            while IFS= read -r process_line; do
+              if [[ " ${process_line} " ==
+                *" --scratch-dir ${candidate_resolved} "* ]]; then
+                printf 'refusing to remove scratch used by a live process: %s\n' \
+                  "${candidate_resolved}" >&2
+                return 1
+              fi
+            done < <(pgrep -af 'datavis[.]research[.]fresh_pipeline_cli' || true)
+            rm -rf -- "${candidate_resolved}"
+            rm -f -- "${owner_path}"
           }
 
           finalize() {
@@ -450,6 +536,9 @@ jobs:
               esac
             done
             shopt -u nullglob
+            if ! remove_scoped_scratch "${scratch}"; then
+              status=1
+            fi
             if ! snapshot_durable_research_state; then
               printf 'failed to snapshot durable research state\n' >&2
               status=1
@@ -484,6 +573,76 @@ jobs:
           }
           trap finalize EXIT
 
+          if [[ -L "${scratch_root}" ]]; then
+            printf 'refusing symlink research scratch root\n' >&2
+            exit 1
+          fi
+          mkdir -p -- "${scratch_root}"
+          chmod 700 -- "${scratch_root}"
+          if [[ ! -d "${scratch_root}" || -L "${scratch_root}" ]]; then
+            printf 'research scratch root is not a real directory\n' >&2
+            exit 1
+          fi
+          scratch_root_resolved="$(readlink -f -- "${scratch_root}")"
+          if [[ -z "${scratch_root_resolved}" ||
+            "${scratch_root_resolved}" == "${durable_state_root_resolved}" ]]; then
+            printf 'research scratch root overlaps durable state\n' >&2
+            exit 1
+          fi
+          case "${scratch_root_resolved}" in
+            /tmp|/tmp/*|"${durable_state_root_resolved}"/*)
+              printf 'research scratch root has an unsafe location\n' >&2
+              exit 1
+              ;;
+          esac
+          shopt -s nullglob
+          for stale_scratch in "${scratch_root_resolved}"/run.*.*.*; do
+            remove_stale_scoped_scratch "${stale_scratch}"
+          done
+          shopt -u nullglob
+          scratch="$(
+            mktemp -d \
+              "${scratch_root_resolved}/run.${run_id}.${attempt}.XXXXXX"
+          )"
+          scratch_resolved="$(readlink -f -- "${scratch}")"
+          if [[ "$(dirname -- "${scratch_resolved}")" !=
+            "${scratch_root_resolved}" || -L "${scratch}" ]]; then
+            printf 'allocated research scratch escaped its scoped root\n' >&2
+            exit 1
+          fi
+          scratch_name="$(basename -- "${scratch_resolved}")"
+          scratch_owner_path="${scratch_root_resolved}/.${scratch_name}.owner"
+          if ! (
+            set -o noclobber
+            printf '%s\n' "${scratch_owner_value}" > "${scratch_owner_path}"
+          ); then
+            printf 'could not create exclusive scratch ownership marker\n' >&2
+            exit 1
+          fi
+          chmod 600 -- "${scratch_owner_path}"
+          scratch_free_bytes="$(
+            df --output=avail -B1 -- "${scratch_resolved}" |
+              awk 'NR == 2 {print $1}'
+          )"
+          scratch_free_inodes="$(
+            df --output=iavail -- "${scratch_resolved}" |
+              awk 'NR == 2 {print $1}'
+          )"
+          minimum_scratch_free_bytes="$((12 * 1024 * 1024 * 1024))"
+          minimum_scratch_free_inodes=4096
+          if [[ ! "${scratch_free_bytes}" =~ ^[0-9]+$ ||
+            "${scratch_free_bytes}" -lt "${minimum_scratch_free_bytes}" ]]; then
+            printf 'research scratch has insufficient free bytes: %s\n' \
+              "${scratch_free_bytes}" >&2
+            exit 1
+          fi
+          if [[ ! "${scratch_free_inodes}" =~ ^[0-9]+$ ||
+            "${scratch_free_inodes}" -lt "${minimum_scratch_free_inodes}" ]]; then
+            printf 'research scratch has insufficient free inodes: %s\n' \
+              "${scratch_free_inodes}" >&2
+            exit 1
+          fi
+
           cd "${production_repo}"
           git fetch origin "${branch}"
           git worktree add --detach "${worktree}" "${sha}"
@@ -513,8 +672,9 @@ jobs:
           "${research_python}" -m datavis.research.fresh_pipeline_cli \
             --repository-root "${worktree}" \
             --output-dir "${output}" \
+            --scratch-dir "${scratch_resolved}" \
             --research-state-dir "${durable_state_root}" \
-            --restart-artifact-dir "${restart_directory}" \
+            --restart-v4-artifact-dir "${restart_directory}" \
             --execute 2>&1 | tee "${log_path}"
           research_status="${PIPESTATUS[0]}"
           set -e
@@ -526,11 +686,38 @@ jobs:
             "${EC2_USER}@${EC2_HOST}:${archive_remote}" \
             "${archive_name}"
           scp_status=$?
+          cleanup_status=0
+          if [[ "${scp_status}" -eq 0 ]]; then
+            ssh "${ssh_options[@]}" "${EC2_USER}@${EC2_HOST}" \
+              bash -s -- "${transfer_directory}" <<'CLEANUP' || cleanup_status=$?
+          set -Eeuo pipefail
+          candidate="$1"
+          if [[ -L "${candidate}" || ! -d "${candidate}" ]]; then
+            printf 'refusing unexpected completed transfer directory: %s\n' \
+              "${candidate}" >&2
+            exit 1
+          fi
+          resolved="$(readlink -f -- "${candidate}")"
+          case "${resolved}" in
+            /tmp/fresh-xauusd-transfer.*)
+              rm -rf -- "${resolved}"
+              ;;
+            *)
+              printf 'refusing unscoped completed transfer cleanup: %s\n' \
+                "${resolved}" >&2
+              exit 1
+              ;;
+          esac
+          CLEANUP
+          fi
           rm -f "${key_path}"
           echo "archive=${archive_name}" >> "${GITHUB_OUTPUT}"
           echo "remote_archive=${archive_remote}" >> "${GITHUB_OUTPUT}"
           if [[ "${scp_status}" -ne 0 ]]; then
             exit "${scp_status}"
+          fi
+          if [[ "${cleanup_status}" -ne 0 ]]; then
+            exit "${cleanup_status}"
           fi
           exit "${research_status}"
 
