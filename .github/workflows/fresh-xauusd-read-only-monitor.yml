@@ -6,6 +6,7 @@ on:
       - codex/xauusd-fresh-walkforward
     paths:
       - .github/research-monitor-launch.txt
+  workflow_dispatch:
 
 concurrency:
   group: fresh-xauusd-read-only-monitor
