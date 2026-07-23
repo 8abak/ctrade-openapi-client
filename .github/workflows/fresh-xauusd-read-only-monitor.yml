@@ -29,7 +29,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           expected_ref="refs/heads/codex/xauusd-fresh-walkforward"
-          expected_marker="fresh-xauusd-read-only-monitor-run16-v1"
+          expected_marker="fresh-xauusd-read-only-monitor-run17-v3"
           if [[ "${MONITOR_GITHUB_REF}" != "${expected_ref}" ]]; then
             printf 'refusing monitor from unexpected ref: %s\n' \
               "${MONITOR_GITHUB_REF}" >&2
@@ -413,7 +413,7 @@ jobs:
                   value = str(value).lower()
               print(f"spool_{key}={value}")
 
-          binding = output_real / "fresh_research_state_binding_v1.json"
+          binding = output_real / "fresh_research_state_binding_v2.json"
           binding_metadata = binding.lstat()
           if not stat.S_ISREG(binding_metadata.st_mode) or stat.S_ISLNK(
               binding_metadata.st_mode
