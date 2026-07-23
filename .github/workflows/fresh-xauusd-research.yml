@@ -31,7 +31,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           expected_ref="refs/heads/codex/xauusd-fresh-walkforward"
-          expected_marker="fresh-xauusd-run-2026-07-23-v18-v4-bounded-storage"
+          expected_marker="fresh-xauusd-run-2026-07-24-v19-v4-bounded-storage"
           if [[ "${FRESH_GITHUB_REF}" != "${expected_ref}" ]]; then
             printf 'refusing research run from unexpected ref: %s\n' \
               "${FRESH_GITHUB_REF}" >&2
@@ -123,15 +123,8 @@ jobs:
             exit 1
           fi
 
-          set +e
-          ssh "${ssh_options[@]}" "${EC2_USER}@${EC2_HOST}" \
-            bash -s -- \
-            "${FRESH_BRANCH}" \
-            "${FRESH_SHA}" \
-            "${FRESH_RUN_ID}" \
-            "${FRESH_RUN_ATTEMPT}" \
-            "${restart_archive_remote}" \
-            "${archive_remote}" <<'REMOTE'
+          remote_script_path="${RUNNER_TEMP}/fresh-xauusd-remote.sh"
+          cat > "${remote_script_path}" <<'REMOTE'
           set -Eeuo pipefail
           umask 077
           branch="$1"
@@ -208,8 +201,7 @@ jobs:
             /tmp/fresh-xauusd-output.* \
             /tmp/fresh-xauusd-restart.* \
             /tmp/fresh-xauusd-transfer.*; do
-            if [[ "$(readlink -f -- "${stale_directory}")" ==
-              "${transfer_resolved}" ]]; then
+            if [[ "$(readlink -f -- "${stale_directory}")" == "${transfer_resolved}" ]]; then
               continue
             fi
             remove_scoped_directory "${stale_directory}"
@@ -485,8 +477,7 @@ jobs:
               return 1
             fi
             while IFS= read -r process_line; do
-              if [[ " ${process_line} " ==
-                *" --scratch-dir ${candidate_resolved} "* ]]; then
+              if [[ " ${process_line} " == *" --scratch-dir ${candidate_resolved} "* ]]; then
                 printf 'refusing to remove scratch used by a live process: %s\n' \
                   "${candidate_resolved}" >&2
                 return 1
@@ -605,8 +596,8 @@ jobs:
               "${scratch_root_resolved}/run.${run_id}.${attempt}.XXXXXX"
           )"
           scratch_resolved="$(readlink -f -- "${scratch}")"
-          if [[ "$(dirname -- "${scratch_resolved}")" !=
-            "${scratch_root_resolved}" || -L "${scratch}" ]]; then
+          if [[ "$(dirname -- "${scratch_resolved}")" != "${scratch_root_resolved}" ||
+            -L "${scratch}" ]]; then
             printf 'allocated research scratch escaped its scoped root\n' >&2
             exit 1
           fi
@@ -680,7 +671,23 @@ jobs:
           set -e
           exit "${research_status}"
           REMOTE
+          chmod 600 "${remote_script_path}"
+          if ! bash -n -- "${remote_script_path}"; then
+            rm -f -- "${key_path}" "${remote_script_path}"
+            exit 1
+          fi
+
+          set +e
+          ssh "${ssh_options[@]}" "${EC2_USER}@${EC2_HOST}" \
+            bash -s -- \
+            "${FRESH_BRANCH}" \
+            "${FRESH_SHA}" \
+            "${FRESH_RUN_ID}" \
+            "${FRESH_RUN_ATTEMPT}" \
+            "${restart_archive_remote}" \
+            "${archive_remote}" < "${remote_script_path}"
           research_status=$?
+          rm -f -- "${remote_script_path}"
 
           scp "${scp_options[@]}" \
             "${EC2_USER}@${EC2_HOST}:${archive_remote}" \
