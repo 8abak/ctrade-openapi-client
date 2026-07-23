@@ -32,7 +32,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           expected_ref="refs/heads/codex/xauusd-fresh-walkforward"
-          expected_marker="fresh-xauusd-v4-bootstrap-2026-07-23-2"
+          expected_marker="fresh-xauusd-v4-bootstrap-2026-07-23-3"
           if [[ "${BOOTSTRAP_REF}" != "${expected_ref}" ]]; then
             printf 'refusing bootstrap from unexpected ref: %s\n' \
               "${BOOTSTRAP_REF}" >&2
@@ -191,9 +191,10 @@ jobs:
         run: |
           set -Eeuo pipefail
           rm -rf -- .fresh-bootstrap-venv
+          git restore --source=HEAD -- \
+            .github/workflows/fresh-xauusd-research.yml
           git rm -r -- .github/v4-bootstrap
           git add -- \
-            .github/workflows/fresh-xauusd-research.yml \
             datavis/research/fresh_pipeline.py \
             datavis/research/fresh_pipeline_cli.py \
             datavis/research/fresh_preregistration.py \
