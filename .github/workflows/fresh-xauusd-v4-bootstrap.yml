@@ -1,0 +1,216 @@
+name: Assemble sealed XAUUSD v4 restart
+
+on:
+  push:
+    branches:
+      - codex/xauusd-fresh-walkforward
+    paths:
+      - .github/v4-bootstrap-launch.txt
+
+concurrency:
+  group: fresh-xauusd-v4-bootstrap
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  assemble:
+    name: Reconstruct and verify the bounded-storage restart
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out the exact bootstrap commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify bootstrap identity
+        shell: bash
+        env:
+          BOOTSTRAP_REF: ${{ github.ref }}
+        run: |
+          set -Eeuo pipefail
+          expected_ref="refs/heads/codex/xauusd-fresh-walkforward"
+          expected_marker="fresh-xauusd-v4-bootstrap-2026-07-23-1"
+          if [[ "${BOOTSTRAP_REF}" != "${expected_ref}" ]]; then
+            printf 'refusing bootstrap from unexpected ref: %s\n' \
+              "${BOOTSTRAP_REF}" >&2
+            exit 1
+          fi
+          if ! cmp -s -- .github/v4-bootstrap-launch.txt \
+            <(printf '%s\n' "${expected_marker}"); then
+            printf 'refusing bootstrap with an unexpected marker\n' >&2
+            exit 1
+          fi
+
+      - name: Reconstruct exact source blobs
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import base64
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import stat
+          import tempfile
+
+          root = pathlib.Path.cwd().resolve()
+          manifest_path = root / ".github/v4-bootstrap/manifest.json"
+          with manifest_path.open("r", encoding="utf-8") as source:
+              manifest = json.load(source)
+          allowed_targets = {
+              ".github/workflows/fresh-xauusd-research.yml",
+              "datavis/research/fresh_pipeline.py",
+              "datavis/research/fresh_pipeline_cli.py",
+              "datavis/research/fresh_preregistration.py",
+              "datavis/research/fresh_restart_v4.py",
+              "datavis/research/fresh_spool.py",
+              "test_fresh_pipeline.py",
+              "test_fresh_preregistration_v4.py",
+              "test_fresh_restart.py",
+              "test_fresh_restart_v4.py",
+              "test_fresh_spool.py",
+          }
+          if (
+              manifest.get("schema") != "fresh-xauusd-v4-bootstrap/v1"
+              or manifest.get("baseCommitSha256")
+              != "add6a049b6fbb197254de01910bb7bde0dda6055"
+              or not isinstance(manifest.get("targets"), list)
+          ):
+              raise SystemExit("bootstrap manifest identity changed")
+          rows = manifest["targets"]
+          if (
+              {row.get("path") for row in rows} != allowed_targets
+              or len(rows) != len(allowed_targets)
+          ):
+              raise SystemExit("bootstrap target set changed")
+
+          for row in rows:
+              target_name = row["path"]
+              chunks = row.get("chunks")
+              if (
+                  not isinstance(chunks, list)
+                  or not chunks
+                  or not all(isinstance(item, str) for item in chunks)
+              ):
+                  raise SystemExit(f"invalid chunk list for {target_name}")
+              encoded_parts = []
+              for chunk_name in chunks:
+                  chunk = (root / chunk_name).resolve()
+                  expected_parent = (root / ".github/v4-bootstrap/payload").resolve()
+                  if (
+                      chunk.parent != expected_parent
+                      or not chunk.name.endswith(".b64")
+                  ):
+                      raise SystemExit("bootstrap chunk escaped its payload directory")
+                  metadata = chunk.lstat()
+                  if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(
+                      metadata.st_mode
+                  ):
+                      raise SystemExit("bootstrap chunk is not a regular file")
+                  encoded_parts.append(chunk.read_text(encoding="ascii"))
+              try:
+                  payload = base64.b64decode(
+                      "".join(encoded_parts),
+                      validate=True,
+                  )
+              except (ValueError, base64.binascii.Error) as error:
+                  raise SystemExit(
+                      f"invalid base64 payload for {target_name}"
+                  ) from error
+              sha256 = hashlib.sha256(payload).hexdigest()
+              git_blob = hashlib.sha1(
+                  f"blob {len(payload)}\0".encode("ascii") + payload
+              ).hexdigest()
+              if (
+                  sha256 != row.get("sha256")
+                  or git_blob != row.get("gitBlobSha1")
+              ):
+                  raise SystemExit(f"payload identity changed for {target_name}")
+
+              target = (root / target_name).resolve()
+              if root not in target.parents or target.is_symlink():
+                  raise SystemExit(f"unsafe target path for {target_name}")
+              target.parent.mkdir(parents=True, exist_ok=True)
+              descriptor, temporary_name = tempfile.mkstemp(
+                  prefix=".fresh-v4-bootstrap-",
+                  dir=target.parent,
+              )
+              temporary = pathlib.Path(temporary_name)
+              try:
+                  with os.fdopen(descriptor, "wb", closefd=True) as output:
+                      output.write(payload)
+                      output.flush()
+                      os.fsync(output.fileno())
+                  os.replace(temporary, target)
+              finally:
+                  temporary.unlink(missing_ok=True)
+          PY
+
+      - name: Verify reconstructed implementation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 -m venv .fresh-bootstrap-venv
+          .fresh-bootstrap-venv/bin/python -m pip install \
+            --disable-pip-version-check \
+            --no-cache-dir \
+            numpy==2.0.2 \
+            pandas==2.2.3 \
+            psycopg2-binary==2.9.10 \
+            python-dotenv==1.1.1
+          fresh_test_modules=()
+          for test_path in test_fresh_*.py; do
+            fresh_test_modules+=("${test_path%.py}")
+          done
+          .fresh-bootstrap-venv/bin/python -m unittest \
+            "${fresh_test_modules[@]}"
+          scientific_sha="$(
+            .fresh-bootstrap-venv/bin/python - <<'PY'
+          from datavis.research.fresh_preregistration import (
+              fresh_v4_scientific_specification_sha256,
+          )
+          print(fresh_v4_scientific_specification_sha256())
+          PY
+          )"
+          expected_scientific_sha="fef6b1a4898aaeb4ce33ad96ea270f0211448357399d94f76051b01c9dabcbd8"
+          if [[ "${scientific_sha}" != "${expected_scientific_sha}" ]]; then
+            printf 'v4 scientific specification changed\n' >&2
+            exit 1
+          fi
+          git diff --check
+
+      - name: Commit the exact reconstructed source
+        shell: bash
+        env:
+          BOOTSTRAP_SHA: ${{ github.sha }}
+          BOOTSTRAP_BRANCH: ${{ github.ref_name }}
+        run: |
+          set -Eeuo pipefail
+          rm -rf -- .fresh-bootstrap-venv
+          git rm -r -- .github/v4-bootstrap
+          git add -- \
+            .github/workflows/fresh-xauusd-research.yml \
+            datavis/research/fresh_pipeline.py \
+            datavis/research/fresh_pipeline_cli.py \
+            datavis/research/fresh_preregistration.py \
+            datavis/research/fresh_restart_v4.py \
+            datavis/research/fresh_spool.py \
+            test_fresh_pipeline.py \
+            test_fresh_preregistration_v4.py \
+            test_fresh_restart.py \
+            test_fresh_restart_v4.py \
+            test_fresh_spool.py
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin "${BOOTSTRAP_BRANCH}"
+          if [[ "$(git rev-parse "origin/${BOOTSTRAP_BRANCH}")" !=
+            "${BOOTSTRAP_SHA}" ]]; then
+            printf 'branch advanced during v4 bootstrap\n' >&2
+            exit 1
+          fi
+          git commit -m "Assemble sealed XAUUSD v4 restart"
+          git push origin "HEAD:${BOOTSTRAP_BRANCH}"

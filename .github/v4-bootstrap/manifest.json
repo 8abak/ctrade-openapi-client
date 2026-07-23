@@ -1,0 +1,104 @@
+{
+  "schema": "fresh-xauusd-v4-bootstrap/v1",
+  "baseCommitSha256": "add6a049b6fbb197254de01910bb7bde0dda6055",
+  "targets": [
+    {
+      "path": ".github/workflows/fresh-xauusd-research.yml",
+      "sha256": "082b15924077911c45806dbb64ff321c35996466a5e599df339531aa07868ec1",
+      "gitBlobSha1": "33202e48e6100ca6fb01f8bf0c760a97a6e5cc26",
+      "chunks": [
+        ".github/v4-bootstrap/payload/000.b64"
+      ]
+    },
+    {
+      "path": "datavis/research/fresh_pipeline.py",
+      "sha256": "2fc387f32e640d78fd3c8d004662c71f02d2fd4de5e8290c4e985d902d8cd9c3",
+      "gitBlobSha1": "19b851381f2f76c7339920ee657e8a0ce97c0846",
+      "chunks": [
+        ".github/v4-bootstrap/payload/001.b64",
+        ".github/v4-bootstrap/payload/002.b64",
+        ".github/v4-bootstrap/payload/003.b64",
+        ".github/v4-bootstrap/payload/004.b64",
+        ".github/v4-bootstrap/payload/005.b64"
+      ]
+    },
+    {
+      "path": "datavis/research/fresh_pipeline_cli.py",
+      "sha256": "8967815431850d36b4bf9ad30dabfdcdc453f840a91a56df3e6c47bdf6980822",
+      "gitBlobSha1": "d49dae1a3b4d1921410db348d2b34c3ca9c29e1a",
+      "chunks": [
+        ".github/v4-bootstrap/payload/006.b64"
+      ]
+    },
+    {
+      "path": "datavis/research/fresh_preregistration.py",
+      "sha256": "40efe172a6536354d3c90fc1ab6aa43cad476ea77011ebc758fa61922775e069",
+      "gitBlobSha1": "43cde2769af79329e743bae0bf55170caa79f8fd",
+      "chunks": [
+        ".github/v4-bootstrap/payload/007.b64",
+        ".github/v4-bootstrap/payload/008.b64",
+        ".github/v4-bootstrap/payload/009.b64",
+        ".github/v4-bootstrap/payload/010.b64"
+      ]
+    },
+    {
+      "path": "datavis/research/fresh_restart_v4.py",
+      "sha256": "2d19382490fed141de26efde6e6f2ed45456bd897b6ecb7ae0bc0c09b624a291",
+      "gitBlobSha1": "ea9121bf5cb8f1af4efa0cea67579a284a0eb0cd",
+      "chunks": [
+        ".github/v4-bootstrap/payload/011.b64",
+        ".github/v4-bootstrap/payload/012.b64"
+      ]
+    },
+    {
+      "path": "datavis/research/fresh_spool.py",
+      "sha256": "d88fad486740d2ad8b9608d84b6817e8099d36f2b5a348e65a52aa4f5e41060b",
+      "gitBlobSha1": "e83fab94640a74870c8c96539bcc36e70dc36373",
+      "chunks": [
+        ".github/v4-bootstrap/payload/013.b64"
+      ]
+    },
+    {
+      "path": "test_fresh_pipeline.py",
+      "sha256": "ced9cd9f74b5e2688130314c82bf007bf152b6730533fa0920aba1acecc14dbd",
+      "gitBlobSha1": "24ecd81436b86079ddc97b31f866d205e7dc0e5e",
+      "chunks": [
+        ".github/v4-bootstrap/payload/014.b64",
+        ".github/v4-bootstrap/payload/015.b64",
+        ".github/v4-bootstrap/payload/016.b64"
+      ]
+    },
+    {
+      "path": "test_fresh_preregistration_v4.py",
+      "sha256": "37ecbc951bd2a96d57c3b9811d1e84eeee9fc42067f299b068f1c385e179a756",
+      "gitBlobSha1": "1b85935c53d6605f5c0b1b4ca9d76b0e1b6fc2a1",
+      "chunks": [
+        ".github/v4-bootstrap/payload/017.b64"
+      ]
+    },
+    {
+      "path": "test_fresh_restart.py",
+      "sha256": "7a0cbe61d8d7d6fda2970f59b092afdb802f9cb65c89f9f37e462267eb34751c",
+      "gitBlobSha1": "59d9d3f8dd4a1d4e4cdbf8ff98e5c5023e26d092",
+      "chunks": [
+        ".github/v4-bootstrap/payload/018.b64"
+      ]
+    },
+    {
+      "path": "test_fresh_restart_v4.py",
+      "sha256": "e527aefade03983aff1067643ab7000e4aa3bb39818b0c24426bbfc6ee017ff5",
+      "gitBlobSha1": "8e915897dd1a5f00edbfed9023112e2dbae38c05",
+      "chunks": [
+        ".github/v4-bootstrap/payload/019.b64"
+      ]
+    },
+    {
+      "path": "test_fresh_spool.py",
+      "sha256": "0494105b48d1114cb88622ac4386559ea326749cf3123253f30bfdb742c8a441",
+      "gitBlobSha1": "9b3db58468421720682a548197a3b5abbb7e3561",
+      "chunks": [
+        ".github/v4-bootstrap/payload/020.b64"
+      ]
+    }
+  ]
+}
