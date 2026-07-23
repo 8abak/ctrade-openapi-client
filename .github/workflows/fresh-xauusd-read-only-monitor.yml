@@ -29,7 +29,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           expected_ref="refs/heads/codex/xauusd-fresh-walkforward"
-          expected_marker="fresh-xauusd-read-only-monitor-run19-v4"
+          expected_marker="fresh-xauusd-read-only-monitor-run19-v4-outcome-blind"
           if [[ "${MONITOR_GITHUB_REF}" != "${expected_ref}" ]]; then
             printf 'refusing monitor from unexpected ref: %s\n' \
               "${MONITOR_GITHUB_REF}" >&2
@@ -80,7 +80,6 @@ jobs:
           set -Eeuo pipefail
           python3 -B - <<'PY'
           import datetime as dt
-          import hashlib
           import json
           import os
           from pathlib import Path
@@ -100,7 +99,6 @@ jobs:
               r"run\.30042880650\.1\.[A-Za-z0-9]{6}\Z"
           )
           SPOOL_PREFIX = ".fresh-entry-spool-"
-          MAXIMUM_LEDGER_BYTES = 32 * 1024 * 1024
           NOATIME = getattr(os, "O_NOATIME", None)
           if NOATIME is None:
               raise SystemExit("O_NOATIME is required for a read-only monitor")
@@ -464,15 +462,7 @@ jobs:
           except ValueError as error:
               raise SystemExit("resolved ledger is outside durable state") from error
 
-          ledger_bytes, ledger_stable = stable_read_regular(
-              ledger_real, maximum_bytes=MAXIMUM_LEDGER_BYTES
-          )
-          ledger_records = sum(
-              1 for line in ledger_bytes.splitlines() if line.strip()
-          )
           print(f"binding_snapshot_stable={str(binding_stable).lower()}")
-          print(f"ledger_record_count={ledger_records}")
-          print(f"ledger_sha256={hashlib.sha256(ledger_bytes).hexdigest()}")
-          print(f"ledger_snapshot_stable={str(ledger_stable).lower()}")
+          print("ledger_path_contained=true")
           PY
           REMOTE
