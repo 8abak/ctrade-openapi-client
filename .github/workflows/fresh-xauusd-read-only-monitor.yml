@@ -29,7 +29,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           expected_ref="refs/heads/codex/xauusd-fresh-walkforward"
-          expected_marker="fresh-xauusd-read-only-monitor-run17-v3"
+          expected_marker="fresh-xauusd-read-only-monitor-run19-v4"
           if [[ "${MONITOR_GITHUB_REF}" != "${expected_ref}" ]]; then
             printf 'refusing monitor from unexpected ref: %s\n' \
               "${MONITOR_GITHUB_REF}" >&2
@@ -84,6 +84,7 @@ jobs:
           import json
           import os
           from pathlib import Path
+          import re
           import stat
           import time
 
@@ -91,6 +92,12 @@ jobs:
           TARGET_MODULE = "datavis.research.fresh_pipeline_cli"
           EXPECTED_STATE_ROOT = Path(
               "/home/ec2-user/.local/state/datavis/fresh-xauusd-research-v2"
+          )
+          EXPECTED_SCRATCH_ROOT = Path(
+              "/home/ec2-user/.local/state/datavis/fresh-xauusd-scratch-v1"
+          )
+          EXPECTED_SCRATCH_NAME = re.compile(
+              r"run\.30042880650\.1\.[A-Za-z0-9]{6}\Z"
           )
           SPOOL_PREFIX = ".fresh-entry-spool-"
           MAXIMUM_LEDGER_BYTES = 32 * 1024 * 1024
@@ -329,21 +336,33 @@ jobs:
 
           pid, process, args = processes[0]
           output_value = option(args, "--output-dir")
+          scratch_value = option(args, "--scratch-dir")
           state_value = option(args, "--research-state-dir")
-          if output_value is None or state_value is None:
+          if (
+              output_value is None
+              or scratch_value is None
+              or state_value is None
+          ):
               raise SystemExit("active pipeline arguments are incomplete")
 
           output = Path(output_value)
+          scratch = Path(scratch_value)
           state_root = Path(state_value)
           output_metadata = output.lstat()
+          scratch_metadata = scratch.lstat()
           state_metadata = state_root.lstat()
           output_real = output.resolve(strict=True)
+          scratch_real = scratch.resolve(strict=True)
           state_real = state_root.resolve(strict=True)
           if (
               not stat.S_ISDIR(output_metadata.st_mode)
               or stat.S_ISLNK(output_metadata.st_mode)
               or output_real.parent != Path("/tmp")
               or not output_real.name.startswith("fresh-xauusd-output.")
+              or not stat.S_ISDIR(scratch_metadata.st_mode)
+              or stat.S_ISLNK(scratch_metadata.st_mode)
+              or scratch_real.parent != EXPECTED_SCRATCH_ROOT
+              or EXPECTED_SCRATCH_NAME.fullmatch(scratch_real.name) is None
               or not stat.S_ISDIR(state_metadata.st_mode)
               or stat.S_ISLNK(state_metadata.st_mode)
               or state_real != EXPECTED_STATE_ROOT
@@ -405,15 +424,16 @@ jobs:
               f"{load_one:.2f} {load_five:.2f} {load_fifteen:.2f}"
           )
           print_filesystem("output", output_real)
+          print_filesystem("scratch", scratch_real)
           print_filesystem("state", state_real)
 
-          spool = summarize_spool(output_real)
+          spool = summarize_spool(scratch_real)
           for key, value in spool.items():
               if isinstance(value, bool):
                   value = str(value).lower()
               print(f"spool_{key}={value}")
 
-          binding = output_real / "fresh_research_state_binding_v2.json"
+          binding = output_real / "fresh_research_state_binding_v3.json"
           binding_metadata = binding.lstat()
           if not stat.S_ISREG(binding_metadata.st_mode) or stat.S_ISLNK(
               binding_metadata.st_mode
