@@ -22,7 +22,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from functools import lru_cache
 from numbers import Integral, Real
-from typing import Iterable, Literal, Sequence, Union
+from typing import Iterable, Iterator, Literal, Sequence, Union
 
 try:
     from typing import TypeAlias
@@ -1477,6 +1477,91 @@ def _quote_translation_pressure_batch(
     return [item[2] for item in ranked]
 
 
+def _selected_configs(
+    configs: Sequence[FreshSignalConfig],
+    engine: GenerationEngine,
+) -> tuple[FreshSignalConfig, ...]:
+    selected = tuple(configs)
+    if engine not in ("batch", "reference"):
+        raise ValueError("engine must be 'batch' or 'reference'")
+    if any(not isinstance(config, _SIGNAL_CONFIG_TYPES) for config in selected):
+        raise TypeError("configs must contain only supported signal configurations")
+    candidate_ids = [config.candidate_id for config in selected]
+    if len(candidate_ids) != len(set(candidate_ids)):
+        raise ValueError("candidate_id values must be unique within a generation run")
+    return selected
+
+
+def _generate_prepared_config_events(
+    prepared: _PreparedFrame,
+    config: FreshSignalConfig,
+    *,
+    engine: GenerationEngine,
+) -> tuple[FrozenSignalEvent, ...]:
+    if isinstance(config, TrendAccelerationSignalConfig):
+        events = (
+            _trend_acceleration_batch(prepared, config)
+            if engine == "batch"
+            else _trend_acceleration_reference(prepared, config)
+        )
+    elif isinstance(config, PullbackResumptionSignalConfig):
+        events = (
+            _pullback_resumption_batch(prepared, config)
+            if engine == "batch"
+            else _pullback_resumption_reference(prepared, config)
+        )
+    elif isinstance(config, CountertrendPivotSignalConfig):
+        events = (
+            _countertrend_pivot_batch(prepared, config)
+            if engine == "batch"
+            else _countertrend_pivot_reference(prepared, config)
+        )
+    elif isinstance(config, CompressionExpansionBreakoutSignalConfig):
+        events = (
+            _compression_breakout_batch(prepared, config)
+            if engine == "batch"
+            else _compression_breakout_reference(prepared, config)
+        )
+    elif isinstance(config, QuoteTranslationPressureSignalConfig):
+        events = (
+            _quote_translation_pressure_batch(prepared, config)
+            if engine == "batch"
+            else _quote_translation_pressure_reference(prepared, config)
+        )
+    else:  # pragma: no cover - guarded by the caller's type check
+        raise TypeError("unsupported signal configuration")
+    output = tuple(events)
+    _validate_event_bindings_prepared(prepared, output)
+    return output
+
+
+def iter_frozen_signal_event_groups(
+    features: pd.DataFrame,
+    *,
+    configs: Sequence[FreshSignalConfig],
+    engine: GenerationEngine = "batch",
+) -> Iterator[tuple[str, tuple[FrozenSignalEvent, ...]]]:
+    """Yield one frozen candidate's causal events after one shared preparation.
+
+    The prepared feature arrays live only for the duration of this iterator,
+    and at most one candidate event tuple is yielded at a time.  This is the
+    bounded-memory equivalent of grouping :func:`generate_frozen_signal_events`
+    by ``candidate_id``.  Each group's event order is exactly the order the
+    materialized API would retain for that candidate.
+    """
+
+    selected = _selected_configs(configs, engine)
+    required_columns = tuple(
+        column for config in selected for column in _configured_columns(config)
+    )
+    prepared = _prepare_frame(features, required_columns)
+    for config in selected:
+        yield (
+            config.candidate_id,
+            _generate_prepared_config_events(prepared, config, engine=engine),
+        )
+
+
 def generate_frozen_signal_events(
     features: pd.DataFrame,
     *,
@@ -1494,59 +1579,22 @@ def generate_frozen_signal_events(
     machines in both modes.
     """
 
-    selected = tuple(configs)
-    if engine not in ("batch", "reference"):
-        raise ValueError("engine must be 'batch' or 'reference'")
-    if any(not isinstance(config, _SIGNAL_CONFIG_TYPES) for config in selected):
-        raise TypeError("configs must contain only supported signal configurations")
-    candidate_ids = [config.candidate_id for config in selected]
-    if len(candidate_ids) != len(set(candidate_ids)):
-        raise ValueError("candidate_id values must be unique within a generation run")
-    required_columns = tuple(
-        column for config in selected for column in _configured_columns(config)
-    )
-    prepared = _prepare_frame(features, required_columns)
-
     ranked: list[tuple[int, int, int, FrozenSignalEvent]] = []
-    for config_order, config in enumerate(selected):
-        if isinstance(config, TrendAccelerationSignalConfig):
-            events = (
-                _trend_acceleration_batch(prepared, config)
-                if engine == "batch"
-                else _trend_acceleration_reference(prepared, config)
-            )
-        elif isinstance(config, PullbackResumptionSignalConfig):
-            events = (
-                _pullback_resumption_batch(prepared, config)
-                if engine == "batch"
-                else _pullback_resumption_reference(prepared, config)
-            )
-        elif isinstance(config, CountertrendPivotSignalConfig):
-            events = (
-                _countertrend_pivot_batch(prepared, config)
-                if engine == "batch"
-                else _countertrend_pivot_reference(prepared, config)
-            )
-        elif isinstance(config, CompressionExpansionBreakoutSignalConfig):
-            events = (
-                _compression_breakout_batch(prepared, config)
-                if engine == "batch"
-                else _compression_breakout_reference(prepared, config)
-            )
-        elif isinstance(config, QuoteTranslationPressureSignalConfig):
-            events = (
-                _quote_translation_pressure_batch(prepared, config)
-                if engine == "batch"
-                else _quote_translation_pressure_reference(prepared, config)
-            )
-        else:  # pragma: no cover - guarded by the type check above
-            raise TypeError("unsupported signal configuration")
+    selected = _selected_configs(configs, engine)
+    config_order_by_id = {
+        config.candidate_id: order for order, config in enumerate(selected)
+    }
+    for candidate_id, events in iter_frozen_signal_event_groups(
+        features,
+        configs=selected,
+        engine=engine,
+    ):
+        config_order = config_order_by_id[candidate_id]
         for event in events:
             side_order = 0 if event.side == "long" else 1
             ranked.append((event.tick_index, config_order, side_order, event))
     ranked.sort(key=lambda item: item[:3])
     output = tuple(item[3] for item in ranked)
-    _validate_event_bindings_prepared(prepared, output)
     return output
 
 
@@ -1618,6 +1666,7 @@ __all__ = [
     "QuoteTranslationPressureSignalConfig",
     "TrendAccelerationSignalConfig",
     "generate_frozen_signal_events",
+    "iter_frozen_signal_event_groups",
     "preflight_signal_bindings",
     "signal_config_fingerprint",
     "signal_required_columns",

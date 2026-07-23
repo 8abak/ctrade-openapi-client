@@ -28,10 +28,27 @@ from datavis.research.fresh_protocol import (
     canonical_hash,
 )
 from datavis.research.fresh_replay import FreshExecutionConfig
+from datavis.research.fresh_restart import (
+    FRESH_V3_STUDY_ID,
+    RUN16_ARCHIVE_SHA256,
+    RUN16_GITHUB_ARTIFACT_ID,
+    RUN16_GITHUB_COMMIT_SHA,
+    RUN16_GITHUB_JOB_ID,
+    RUN16_GITHUB_RUN_ATTEMPT,
+    RUN16_GITHUB_RUN_ID,
+    RUN16_INHERITED_SCIENTIFIC_IDENTITIES,
+    RUN16_LEDGER_SHA256,
+    RUN16_ORDERED_LEDGER_RECORD_SHA256,
+    RUN16_PREDECESSOR_IMPLEMENTATION_MANIFEST_SHA256,
+    RUN16_PREDECESSOR_PREREGISTRATION_SHA256,
+    RUN16_REUSED_OUTCOME_BLIND_FILE_SHA256,
+    RUN16_TERMINAL_RECORD_SHA256,
+)
 from datavis.research.fresh_sessions import SessionAuditConfig
 
 
 PREREGISTRATION_SCHEMA = "fresh-xauusd-acceleration-preregistration/v2"
+PREREGISTRATION_V3_SCHEMA = "fresh-xauusd-acceleration-preregistration/v3"
 IMPLEMENTATION_MANIFEST_SCHEMA = "fresh-xauusd-implementation-manifest/v1"
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _ROLE_ORDER = (
@@ -73,6 +90,12 @@ _REQUIRED_IMPLEMENTATION_FILES = frozenset(
         "datavis/research/fresh_signals.py",
         "datavis/research/fresh_thresholds.py",
         "datavis/research/ticks.py",
+    }
+)
+_V3_REQUIRED_IMPLEMENTATION_FILES = frozenset(
+    {
+        "datavis/research/fresh_restart.py",
+        "datavis/research/fresh_spool.py",
     }
 )
 
@@ -1138,6 +1161,187 @@ def _preregistration_body(source_bindings: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def fresh_v3_scientific_specification_sha256() -> str:
+    """Hash the v2/v3 scientific rules while excluding infrastructure identity."""
+
+    body = _preregistration_body({})
+    keys = (
+        "chronologicalWindowPolicy",
+        "sessionAndData",
+        "features",
+        "execution",
+        "entryDiagnostics",
+        "candidateSearch",
+        "exitResearch",
+        "robustnessAndGates",
+        "holdout",
+    )
+    return canonical_hash({key: body[key] for key in keys})
+
+
+def _canonical_v3_restart_provenance(
+    provenance: Mapping[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(provenance, Mapping):
+        raise ValueError("infrastructure restart provenance must be a mapping")
+    selected = copy.deepcopy(dict(provenance))
+    supplied_scientific_sha = selected.pop(
+        "scientificSpecificationSha256",
+        None,
+    )
+    supplied_interruption = selected.pop("interruptionPolicy", None)
+    expected_keys = {
+        "schema",
+        "classification",
+        "predecessorStudyId",
+        "predecessorRunId",
+        "predecessorRunAttempt",
+        "predecessorJobId",
+        "predecessorArtifactId",
+        "predecessorCommitSha",
+        "predecessorArtifactName",
+        "predecessorArchiveSha256",
+        "predecessorLedgerSha256",
+        "predecessorTerminalRecordSha256",
+        "predecessorOrderedLedgerRecordSha256",
+        "predecessorPreregistrationSha256",
+        "predecessorImplementationManifestSha256",
+        "predecessorExitStatus",
+        "candidateOutcomeRecordCount",
+        "laterWindowOutcomeRecordCount",
+        "batchResultSealed",
+        "completedDiscoverySessionCount",
+        "nextDiscoverySessionOrdinal",
+        "transientCandidateComputationsRecovered",
+        "holdoutAuthorizationPresent",
+        "predecessorRecoveryAttemptConsumed",
+        "inheritedScientificIdentities",
+        "reusedOutcomeBlindInputs",
+        "permittedChange",
+        "scientificDefinitionsChanged",
+        "predecessorLineageTerminal",
+    }
+    if set(selected) != expected_keys:
+        raise ValueError("infrastructure restart provenance fields changed")
+    fixed = {
+        "schema": "fresh-xauusd-infrastructure-restart/v1",
+        "classification": "new-study-after-terminal-infrastructure-failure",
+        "predecessorStudyId": "xauusd-fresh-causal-acceleration-v2",
+        "predecessorRunId": RUN16_GITHUB_RUN_ID,
+        "predecessorRunAttempt": RUN16_GITHUB_RUN_ATTEMPT,
+        "predecessorJobId": RUN16_GITHUB_JOB_ID,
+        "predecessorArtifactId": RUN16_GITHUB_ARTIFACT_ID,
+        "predecessorCommitSha": RUN16_GITHUB_COMMIT_SHA,
+        "predecessorArtifactName": "fresh-xauusd-29918347818-1",
+        "predecessorArchiveSha256": RUN16_ARCHIVE_SHA256,
+        "predecessorLedgerSha256": RUN16_LEDGER_SHA256,
+        "predecessorTerminalRecordSha256": RUN16_TERMINAL_RECORD_SHA256,
+        "predecessorOrderedLedgerRecordSha256": list(
+            RUN16_ORDERED_LEDGER_RECORD_SHA256
+        ),
+        "predecessorPreregistrationSha256": (
+            RUN16_PREDECESSOR_PREREGISTRATION_SHA256
+        ),
+        "predecessorImplementationManifestSha256": (
+            RUN16_PREDECESSOR_IMPLEMENTATION_MANIFEST_SHA256
+        ),
+        "predecessorExitStatus": 137,
+        "candidateOutcomeRecordCount": 0,
+        "laterWindowOutcomeRecordCount": 0,
+        "batchResultSealed": False,
+        "completedDiscoverySessionCount": 10,
+        "nextDiscoverySessionOrdinal": 11,
+        "transientCandidateComputationsRecovered": False,
+        "holdoutAuthorizationPresent": False,
+        "predecessorRecoveryAttemptConsumed": True,
+        "permittedChange": "bounded-memory-computation-only",
+        "scientificDefinitionsChanged": False,
+        "predecessorLineageTerminal": True,
+    }
+    if any(selected.get(key) != value for key, value in fixed.items()):
+        raise ValueError("infrastructure restart identity changed")
+    inherited = selected["inheritedScientificIdentities"]
+    if (
+        not isinstance(inherited, Mapping)
+        or dict(inherited) != RUN16_INHERITED_SCIENTIFIC_IDENTITIES
+    ):
+        raise ValueError("inherited scientific identities changed")
+    selected["inheritedScientificIdentities"] = dict(
+        RUN16_INHERITED_SCIENTIFIC_IDENTITIES
+    )
+    reused = selected["reusedOutcomeBlindInputs"]
+    expected_input_names = {
+        "fresh_source_inventory_v1.json",
+        "fresh_corpus_manifest_v1.json",
+        "fresh_split_manifest_v2.json",
+        "fresh_quantile_bank_v1.json",
+        "fresh_threshold_domain_preflight_v1.json",
+        "fresh_entry_bank_v1.json",
+    }
+    if not isinstance(reused, Mapping) or set(reused) != expected_input_names:
+        raise ValueError("reused outcome-blind input set changed")
+    normalized_reused = {
+        name: _sha256(str(reused[name]), f"restart input {name}")
+        for name in sorted(expected_input_names)
+    }
+    if normalized_reused != RUN16_REUSED_OUTCOME_BLIND_FILE_SHA256:
+        raise ValueError("reused outcome-blind input identities changed")
+    selected["reusedOutcomeBlindInputs"] = normalized_reused
+
+    scientific_sha = fresh_v3_scientific_specification_sha256()
+    interruption = {
+        "mode": "terminal-on-first-outcome-access",
+        "sameLineageRetryBeforeFirstOutcomeAccess": True,
+        "sameLineageRetryAfterFirstOutcomeAccess": False,
+        "automaticResumeAllowed": False,
+        "partialCandidateResultsMayBeImported": False,
+        "implementationChangesMayUseOnlyResourceAndTraceEvidence": True,
+        "furtherLineageRequiresASeparateExplicitProtocol": True,
+        "holdoutAuthorizationOrAccessConsumesHoldout": True,
+    }
+    if (
+        supplied_scientific_sha is not None
+        and supplied_scientific_sha != scientific_sha
+    ):
+        raise ValueError("v3 scientific specification identity changed")
+    if (
+        supplied_interruption is not None
+        and supplied_interruption != interruption
+    ):
+        raise ValueError("v3 interruption policy changed")
+    return {
+        **selected,
+        "scientificSpecificationSha256": scientific_sha,
+        "interruptionPolicy": interruption,
+    }
+
+
+def _preregistration_v3_body(
+    source_bindings: Mapping[str, Any],
+    restart_provenance: Mapping[str, Any],
+) -> dict[str, Any]:
+    body = _preregistration_body(source_bindings)
+    body["schema"] = PREREGISTRATION_V3_SCHEMA
+    body["studyId"] = FRESH_V3_STUDY_ID
+    body["outcomeBlindDeclaration"] = {
+        "strategyThresholdsFitted": True,
+        "thresholdsInheritedByteForByte": True,
+        "thresholdSource": (
+            "immutable v2 discovery quantile bank fitted before candidate "
+            "outcomes existed"
+        ),
+        "candidateOutcomeRecordCountAvailableToBuilder": 0,
+        "partialCandidateResultsRecovered": False,
+        "tickPriceValuesRequiredByBuilder": False,
+        "holdoutOutcomeAccessed": False,
+        "thresholdOrCandidateRetuningPermitted": False,
+    }
+    body["infrastructureRestart"] = _canonical_v3_restart_provenance(
+        restart_provenance
+    )
+    return body
+
+
 def build_fresh_preregistration_v2(
     *,
     split_manifest: Mapping[str, Any],
@@ -1189,6 +1393,40 @@ def build_fresh_preregistration_v2(
             "experimentLedgerPath": ledger_path,
             "holdoutAuthorizationRegistryPath": authorization_path,
         }
+    )
+    return {**body, "preregistrationSha256": canonical_hash(body)}
+
+
+def build_fresh_preregistration_v3(
+    *,
+    split_manifest: Mapping[str, Any],
+    corpus_manifest_sha256: str,
+    protocol_code_identifier: str,
+    implementation_manifest: Mapping[str, Any],
+    experiment_ledger_path: str | Path,
+    holdout_authorization_registry_path: str | Path,
+    infrastructure_restart_provenance: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the new-study v3 document around the verified terminal v2 lineage."""
+
+    v2 = build_fresh_preregistration_v2(
+        split_manifest=split_manifest,
+        corpus_manifest_sha256=corpus_manifest_sha256,
+        protocol_code_identifier=protocol_code_identifier,
+        implementation_manifest=implementation_manifest,
+        experiment_ledger_path=experiment_ledger_path,
+        holdout_authorization_registry_path=holdout_authorization_registry_path,
+    )
+    implementation_paths = {
+        str(item["path"])
+        for item in implementation_manifest.get("files", ())
+        if isinstance(item, Mapping) and "path" in item
+    }
+    if not _V3_REQUIRED_IMPLEMENTATION_FILES.issubset(implementation_paths):
+        raise ValueError("v3 implementation manifest omits restart or spool code")
+    body = _preregistration_v3_body(
+        v2["sourceBindings"],
+        infrastructure_restart_provenance,
     )
     return {**body, "preregistrationSha256": canonical_hash(body)}
 
@@ -1290,6 +1528,90 @@ def validate_fresh_preregistration_v2(
     return claimed
 
 
+def validate_fresh_preregistration_v3(
+    preregistration: Mapping[str, Any],
+    *,
+    verify_current_implementation_files: bool = True,
+) -> str:
+    """Return the registered v3 digest or reject changed science/provenance."""
+
+    if not isinstance(preregistration, Mapping):
+        raise ValueError("preregistration must be a mapping")
+    body = copy.deepcopy(dict(preregistration))
+    claimed = _sha256(
+        str(body.pop("preregistrationSha256", "")),
+        "preregistrationSha256",
+    )
+    if body.get("schema") != PREREGISTRATION_V3_SCHEMA:
+        raise ValueError("unsupported v3 preregistration schema")
+    if body.get("studyId") != FRESH_V3_STUDY_ID:
+        raise ValueError("v3 study identity changed")
+    if canonical_hash(body) != claimed:
+        raise ValueError("preregistration hash does not match its contents")
+    restart = body.pop("infrastructureRestart", None)
+    if restart != _canonical_v3_restart_provenance(restart):
+        raise ValueError("v3 infrastructure restart provenance is not canonical")
+    source = body.get("sourceBindings")
+    manifest = source.get("implementationManifest") if isinstance(source, Mapping) else None
+    manifest_files = (
+        manifest.get("files", ()) if isinstance(manifest, Mapping) else ()
+    )
+    implementation_paths = {
+        str(item["path"])
+        for item in manifest_files
+        if isinstance(item, Mapping) and "path" in item
+    }
+    if not _V3_REQUIRED_IMPLEMENTATION_FILES.issubset(implementation_paths):
+        raise ValueError("v3 implementation manifest omits restart or spool code")
+
+    # Every trading, execution, gate, and holdout rule must remain the exact v2
+    # canonical document.  Only study identity and infrastructure provenance
+    # differ.
+    body["schema"] = PREREGISTRATION_SCHEMA
+    body["studyId"] = "xauusd-fresh-causal-acceleration-v2"
+    body["outcomeBlindDeclaration"] = _preregistration_body({})[
+        "outcomeBlindDeclaration"
+    ]
+    synthetic_v2 = {
+        **body,
+        "preregistrationSha256": canonical_hash(body),
+    }
+    validate_fresh_preregistration_v2(
+        synthetic_v2,
+        verify_current_implementation_files=verify_current_implementation_files,
+    )
+    return claimed
+
+
+def validate_fresh_preregistration(
+    preregistration: Mapping[str, Any],
+    *,
+    verify_current_implementation_files: bool = True,
+) -> str:
+    """Validate either the immutable v2 lineage or the explicit v3 study."""
+
+    schema = (
+        preregistration.get("schema")
+        if isinstance(preregistration, Mapping)
+        else None
+    )
+    if schema == PREREGISTRATION_SCHEMA:
+        return validate_fresh_preregistration_v2(
+            preregistration,
+            verify_current_implementation_files=(
+                verify_current_implementation_files
+            ),
+        )
+    if schema == PREREGISTRATION_V3_SCHEMA:
+        return validate_fresh_preregistration_v3(
+            preregistration,
+            verify_current_implementation_files=(
+                verify_current_implementation_files
+            ),
+        )
+    raise ValueError("unsupported preregistration schema")
+
+
 def session_audit_config_from_preregistration(
     preregistration: Mapping[str, Any],
     *,
@@ -1297,7 +1619,7 @@ def session_audit_config_from_preregistration(
 ) -> SessionAuditConfig:
     """Materialize every session-QC field explicitly; use no class defaults."""
 
-    validate_fresh_preregistration_v2(
+    validate_fresh_preregistration(
         preregistration,
         verify_current_implementation_files=verify_current_implementation_files,
     )
@@ -1317,7 +1639,7 @@ def feature_configs_from_preregistration(
 ) -> tuple[FreshFeatureConfig, ...]:
     """Materialize the registered measurement bank with all fields explicit."""
 
-    validate_fresh_preregistration_v2(
+    validate_fresh_preregistration(
         preregistration,
         verify_current_implementation_files=verify_current_implementation_files,
     )
@@ -1346,7 +1668,7 @@ def entry_diagnostic_configs_from_preregistration(
 ) -> dict[str, EntryDiagnosticConfig]:
     """Materialize registered execution scenarios with no inherited values."""
 
-    validate_fresh_preregistration_v2(
+    validate_fresh_preregistration(
         preregistration,
         verify_current_implementation_files=verify_current_implementation_files,
     )
@@ -1378,7 +1700,7 @@ def replay_execution_configs_from_preregistration(
 ) -> dict[str, FreshExecutionConfig]:
     """Materialize full-replay execution scenarios with all fields explicit."""
 
-    validate_fresh_preregistration_v2(
+    validate_fresh_preregistration(
         preregistration,
         verify_current_implementation_files=verify_current_implementation_files,
     )
@@ -1566,7 +1888,7 @@ def authorize_registered_holdout(
     authorization and requires human audit rather than silently trying again.
     """
 
-    prereg_sha = validate_fresh_preregistration_v2(
+    prereg_sha = validate_fresh_preregistration(
         preregistration,
         verify_current_implementation_files=verify_current_implementation_files,
     )
@@ -1744,16 +2066,21 @@ __all__ = [
     "FRESH_V2_WINDOW_POLICY",
     "IMPLEMENTATION_MANIFEST_SCHEMA",
     "PREREGISTRATION_SCHEMA",
+    "PREREGISTRATION_V3_SCHEMA",
     "authorize_registered_holdout",
+    "build_fresh_preregistration_v3",
     "build_fresh_preregistration_v2",
     "build_fresh_implementation_manifest",
     "entry_barrier_diagnostic_configs_from_preregistration",
     "entry_diagnostic_configs_from_preregistration",
     "feature_configs_from_preregistration",
+    "fresh_v3_scientific_specification_sha256",
     "required_fresh_implementation_files",
     "replay_execution_configs_from_preregistration",
     "replay_execution_config_for_candidate",
     "session_audit_config_from_preregistration",
     "validate_fresh_preregistration_v2",
+    "validate_fresh_preregistration_v3",
+    "validate_fresh_preregistration",
     "validate_fresh_implementation_manifest",
 ]

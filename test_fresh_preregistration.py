@@ -11,9 +11,11 @@ from pathlib import Path
 from datavis.research.fresh_preregistration import (
     FRESH_V2_WINDOW_POLICY,
     PREREGISTRATION_SCHEMA,
+    PREREGISTRATION_V3_SCHEMA,
     authorize_registered_holdout,
     build_fresh_implementation_manifest,
     build_fresh_preregistration_v2,
+    build_fresh_preregistration_v3,
     entry_barrier_diagnostic_configs_from_preregistration,
     entry_diagnostic_configs_from_preregistration,
     feature_configs_from_preregistration,
@@ -21,12 +23,30 @@ from datavis.research.fresh_preregistration import (
     replay_execution_config_for_candidate,
     replay_execution_configs_from_preregistration,
     session_audit_config_from_preregistration,
+    validate_fresh_preregistration,
     validate_fresh_preregistration_v2,
+    validate_fresh_preregistration_v3,
 )
 from datavis.research.fresh_protocol import (
     append_fresh_record,
     build_fresh_split_manifest,
     canonical_hash,
+)
+from datavis.research.fresh_restart import (
+    FRESH_V3_STUDY_ID,
+    RUN16_ARCHIVE_SHA256,
+    RUN16_GITHUB_ARTIFACT_ID,
+    RUN16_GITHUB_COMMIT_SHA,
+    RUN16_GITHUB_JOB_ID,
+    RUN16_GITHUB_RUN_ATTEMPT,
+    RUN16_GITHUB_RUN_ID,
+    RUN16_INHERITED_SCIENTIFIC_IDENTITIES,
+    RUN16_LEDGER_SHA256,
+    RUN16_ORDERED_LEDGER_RECORD_SHA256,
+    RUN16_PREDECESSOR_IMPLEMENTATION_MANIFEST_SHA256,
+    RUN16_PREDECESSOR_PREREGISTRATION_SHA256,
+    RUN16_REUSED_OUTCOME_BLIND_FILE_SHA256,
+    RUN16_TERMINAL_RECORD_SHA256,
 )
 
 
@@ -69,6 +89,65 @@ def implementation_manifest() -> dict:
         repository_root=REPOSITORY_ROOT,
         relative_paths=IMPLEMENTATION_FILES,
     )
+
+
+def v3_implementation_manifest() -> dict:
+    return build_fresh_implementation_manifest(
+        repository_root=REPOSITORY_ROOT,
+        relative_paths=tuple(
+            sorted(
+                {
+                    *IMPLEMENTATION_FILES,
+                    "datavis/research/fresh_restart.py",
+                    "datavis/research/fresh_spool.py",
+                }
+            )
+        ),
+    )
+
+
+def restart_provenance() -> dict:
+    return {
+        "schema": "fresh-xauusd-infrastructure-restart/v1",
+        "classification": "new-study-after-terminal-infrastructure-failure",
+        "predecessorStudyId": "xauusd-fresh-causal-acceleration-v2",
+        "predecessorRunId": RUN16_GITHUB_RUN_ID,
+        "predecessorRunAttempt": RUN16_GITHUB_RUN_ATTEMPT,
+        "predecessorJobId": RUN16_GITHUB_JOB_ID,
+        "predecessorArtifactId": RUN16_GITHUB_ARTIFACT_ID,
+        "predecessorCommitSha": RUN16_GITHUB_COMMIT_SHA,
+        "predecessorArtifactName": "fresh-xauusd-29918347818-1",
+        "predecessorArchiveSha256": RUN16_ARCHIVE_SHA256,
+        "predecessorLedgerSha256": RUN16_LEDGER_SHA256,
+        "predecessorTerminalRecordSha256": RUN16_TERMINAL_RECORD_SHA256,
+        "predecessorOrderedLedgerRecordSha256": list(
+            RUN16_ORDERED_LEDGER_RECORD_SHA256
+        ),
+        "predecessorPreregistrationSha256": (
+            RUN16_PREDECESSOR_PREREGISTRATION_SHA256
+        ),
+        "predecessorImplementationManifestSha256": (
+            RUN16_PREDECESSOR_IMPLEMENTATION_MANIFEST_SHA256
+        ),
+        "predecessorExitStatus": 137,
+        "candidateOutcomeRecordCount": 0,
+        "laterWindowOutcomeRecordCount": 0,
+        "batchResultSealed": False,
+        "completedDiscoverySessionCount": 10,
+        "nextDiscoverySessionOrdinal": 11,
+        "transientCandidateComputationsRecovered": False,
+        "holdoutAuthorizationPresent": False,
+        "predecessorRecoveryAttemptConsumed": True,
+        "inheritedScientificIdentities": dict(
+            RUN16_INHERITED_SCIENTIFIC_IDENTITIES
+        ),
+        "reusedOutcomeBlindInputs": dict(
+            RUN16_REUSED_OUTCOME_BLIND_FILE_SHA256
+        ),
+        "permittedChange": "bounded-memory-computation-only",
+        "scientificDefinitionsChanged": False,
+        "predecessorLineageTerminal": True,
+    }
 
 
 def weekday_anchors(count: int, start: date = date(2025, 1, 2)) -> list[str]:
@@ -201,6 +280,68 @@ class FreshPreregistrationTests(unittest.TestCase):
             validate_fresh_preregistration_v2(persisted),
             first["preregistrationSha256"],
         )
+
+    def test_v3_is_a_new_truthful_lineage_with_identical_scientific_rules(self):
+        split = split_manifest()
+        v3 = build_fresh_preregistration_v3(
+            split_manifest=split,
+            corpus_manifest_sha256="b" * 64,
+            protocol_code_identifier="tree:causal-protocol-v3",
+            implementation_manifest=v3_implementation_manifest(),
+            experiment_ledger_path=DEFAULT_LEDGER.with_name("v3-ledger.jsonl"),
+            holdout_authorization_registry_path=DEFAULT_REGISTRY,
+            infrastructure_restart_provenance=restart_provenance(),
+        )
+
+        self.assertEqual(v3["schema"], PREREGISTRATION_V3_SCHEMA)
+        self.assertEqual(v3["studyId"], FRESH_V3_STUDY_ID)
+        self.assertTrue(
+            v3["outcomeBlindDeclaration"]["thresholdsInheritedByteForByte"]
+        )
+        self.assertEqual(
+            v3["outcomeBlindDeclaration"][
+                "candidateOutcomeRecordCountAvailableToBuilder"
+            ],
+            0,
+        )
+        self.assertFalse(
+            v3["outcomeBlindDeclaration"]["partialCandidateResultsRecovered"]
+        )
+        self.assertFalse(
+            v3["infrastructureRestart"]["interruptionPolicy"][
+                "automaticResumeAllowed"
+            ]
+        )
+        self.assertEqual(
+            v3["infrastructureRestart"]["interruptionPolicy"]["mode"],
+            "terminal-on-first-outcome-access",
+        )
+        self.assertEqual(
+            validate_fresh_preregistration_v3(v3),
+            v3["preregistrationSha256"],
+        )
+        self.assertEqual(
+            validate_fresh_preregistration(v3),
+            v3["preregistrationSha256"],
+        )
+        self.assertEqual(len(feature_configs_from_preregistration(v3)), 9)
+
+        tampered_provenance = copy.deepcopy(v3)
+        tampered_provenance["infrastructureRestart"][
+            "candidateOutcomeRecordCount"
+        ] = 1
+        with self.assertRaisesRegex(ValueError, "hash"):
+            validate_fresh_preregistration_v3(tampered_provenance)
+
+        tampered_science = copy.deepcopy(v3)
+        tampered_science["candidateSearch"]["budgets"][
+            "discoveryDistinctCandidates"
+        ] = 239
+        body = copy.deepcopy(tampered_science)
+        body.pop("preregistrationSha256")
+        tampered_science["preregistrationSha256"] = canonical_hash(body)
+        with self.assertRaisesRegex(ValueError, "canonical v2"):
+            validate_fresh_preregistration_v3(tampered_science)
 
     def test_split_must_be_exact_hash_valid_dst_aware_and_registered_sessions(self):
         split = split_manifest()

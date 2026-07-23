@@ -4,10 +4,12 @@ import dataclasses
 import time
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
 
+import datavis.research.fresh_signals as signal_module
 from datavis.research.fresh_entry_diagnostics import FrozenSignalEvent
 from datavis.research.fresh_signals import (
     COMPRESSION_EXPANSION_BREAKOUT,
@@ -21,6 +23,7 @@ from datavis.research.fresh_signals import (
     QuoteTranslationPressureSignalConfig,
     TrendAccelerationSignalConfig,
     generate_frozen_signal_events,
+    iter_frozen_signal_event_groups,
     preflight_signal_bindings,
     signal_config_fingerprint,
     signal_required_columns,
@@ -388,6 +391,58 @@ class FreshSignalTests(unittest.TestCase):
             features, configs=configs, engine="reference"
         )
         self.assertEqual(batch, reference)
+
+    def test_streamed_groups_equal_materialized_grouping_after_one_preparation(self):
+        features = frame(
+            [100.0] * 8,
+            milliseconds=[0, 0, 100, 200, 300, 400, 500, 600],
+            ids=[10, 11, 12, 13, 14, 15, 16, 17],
+            trend=[1.0] * 8,
+            move=[0.1, 0.7, 0.8, 0.1, 0.8, 0.1, 0.9, 0.9],
+            accel=[0.0, 0.5, 0.6, 0.0, 0.7, 0.0, 0.8, 0.8],
+            coherence=[0.9] * 8,
+        )
+        configs = (
+            trend_config("trend-stream-a"),
+            dataclasses.replace(
+                trend_config("trend-stream-b"),
+                minimum_velocity=0.75,
+            ),
+        )
+        materialized = generate_frozen_signal_events(
+            features,
+            configs=configs,
+            engine="batch",
+        )
+        expected = tuple(
+            (
+                config.candidate_id,
+                tuple(
+                    event
+                    for event in materialized
+                    if event.metadata["candidate_id"] == config.candidate_id
+                ),
+            )
+            for config in configs
+        )
+
+        with patch.object(
+            signal_module,
+            "_prepare_frame",
+            wraps=signal_module._prepare_frame,
+        ) as prepare_frame:
+            actual = tuple(
+                iter_frozen_signal_event_groups(
+                    features,
+                    configs=configs,
+                    engine="batch",
+                )
+            )
+
+        self.assertEqual(actual, expected)
+        self.assertEqual(prepare_frame.call_count, 1)
+        # Equal quote timestamps remain distinct ordered execution units.
+        self.assertEqual(actual[0][1][0].tick_id, 11)
 
     def test_batch_onset_engine_has_material_synthetic_speedup(self):
         size = 10_000

@@ -12,8 +12,10 @@ from __future__ import annotations
 import math
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Literal, Mapping, Sequence
+
+import numpy as np
 
 from datavis.research.ticks import Tick
 
@@ -254,6 +256,92 @@ class FreshEntryDiagnosticsResult:
         return len(self.rejections)
 
 
+_PREPARED_ENTRY_TAPE_TOKEN = object()
+_UTC_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+class PreparedEntryDiagnosticTape:
+    """One validated immutable session tape prepared for repeated diagnostics.
+
+    The compact timestamp and executable-price arrays are created once per
+    session.  Repeated candidate batches reuse those arrays and lazily cache
+    only the sparse positions of intertick gaps for each requested threshold.
+    Construction is restricted to :func:`prepare_entry_diagnostic_tape`.
+    """
+
+    __slots__ = (
+        "ticks",
+        "_timestamp_us",
+        "_bid",
+        "_ask",
+        "_intertick_us",
+        "_gap_indexes_by_threshold",
+    )
+
+    def __init__(
+        self,
+        ticks: tuple[Tick, ...],
+        timestamp_us: np.ndarray,
+        bid: np.ndarray,
+        ask: np.ndarray,
+        intertick_us: np.ndarray,
+        *,
+        _token: object,
+    ) -> None:
+        if _token is not _PREPARED_ENTRY_TAPE_TOKEN:
+            raise TypeError(
+                "prepared entry diagnostic tapes must be created by the factory"
+            )
+        self.ticks = ticks
+        self._timestamp_us = timestamp_us
+        self._bid = bid
+        self._ask = ask
+        self._intertick_us = intertick_us
+        self._gap_indexes_by_threshold: dict[int, np.ndarray] = {}
+
+    @property
+    def tick_count(self) -> int:
+        return len(self.ticks)
+
+    def _timestamp_index(
+        self,
+        timestamp: datetime,
+        *,
+        side: Literal["left", "right"],
+        minimum: int,
+    ) -> int:
+        position = int(
+            np.searchsorted(
+                self._timestamp_us,
+                _utc_microseconds(timestamp),
+                side=side,
+            )
+        )
+        return max(position, minimum)
+
+    def _gap_indexes(self, maximum_intertick_gap_ms: int) -> np.ndarray:
+        cached = self._gap_indexes_by_threshold.get(maximum_intertick_gap_ms)
+        if cached is not None:
+            return cached
+        positions = np.flatnonzero(
+            self._intertick_us > maximum_intertick_gap_ms * 1_000
+        ).astype(np.int64, copy=False)
+        positions.setflags(write=False)
+        self._gap_indexes_by_threshold[maximum_intertick_gap_ms] = positions
+        return positions
+
+    def _next_gap_index(
+        self,
+        index: int,
+        maximum_intertick_gap_ms: int,
+    ) -> int:
+        positions = self._gap_indexes(maximum_intertick_gap_ms)
+        offset = int(np.searchsorted(positions, index, side="right"))
+        if offset == positions.size:
+            return len(self.ticks)
+        return int(positions[offset])
+
+
 @dataclass(frozen=True, slots=True)
 class _ExecutableMark:
     tick_index: int
@@ -272,6 +360,14 @@ class _AttemptOutcome:
 
 def _milliseconds(value: timedelta) -> float:
     return value.total_seconds() * 1_000.0
+
+
+def _utc_microseconds(value: datetime) -> int:
+    delta = value.astimezone(timezone.utc) - _UTC_EPOCH
+    return (
+        (delta.days * 86_400 + delta.seconds) * 1_000_000
+        + delta.microseconds
+    )
 
 
 def _validate_ticks(ticks: Iterable[Tick]) -> tuple[Tick, ...]:
@@ -301,6 +397,58 @@ def _trusted_tick_tuple(ticks: Iterable[Tick]) -> tuple[Tick, ...]:
             "_trusted_validated_ticks requires an already validated tick tuple"
         )
     return ticks
+
+
+def prepare_entry_diagnostic_tape(
+    ticks: Iterable[Tick],
+    *,
+    _trusted_validated_ticks: bool = False,
+) -> PreparedEntryDiagnosticTape:
+    """Validate and prepare one exact tick tuple for repeated entry evaluation.
+
+    The trusted option has the same narrow contract as
+    :func:`evaluate_frozen_entries`: it accepts only the immutable tuple already
+    validated by ``FreshSessionTape``.  Identical quote values and timestamps
+    remain distinct rows; their distinct IDs preserve their execution order and
+    volume contribution.
+    """
+
+    if not isinstance(_trusted_validated_ticks, bool):
+        raise TypeError("_trusted_validated_ticks must be boolean")
+    points = (
+        _trusted_tick_tuple(ticks)
+        if _trusted_validated_ticks
+        else _validate_ticks(ticks)
+    )
+    timestamp_us = np.fromiter(
+        (_utc_microseconds(tick.timestamp) for tick in points),
+        dtype=np.int64,
+        count=len(points),
+    )
+    bid = np.fromiter(
+        (tick.bid for tick in points),
+        dtype=np.float64,
+        count=len(points),
+    )
+    ask = np.fromiter(
+        (tick.ask for tick in points),
+        dtype=np.float64,
+        count=len(points),
+    )
+    intertick_us = np.empty(len(points), dtype=np.int64)
+    if len(points):
+        intertick_us[0] = 0
+        intertick_us[1:] = np.diff(timestamp_us)
+    for values in (timestamp_us, bid, ask, intertick_us):
+        values.setflags(write=False)
+    return PreparedEntryDiagnosticTape(
+        points,
+        timestamp_us,
+        bid,
+        ask,
+        intertick_us,
+        _token=_PREPARED_ENTRY_TAPE_TOKEN,
+    )
 
 
 def _validate_events(
@@ -737,6 +885,396 @@ def _attempt_event(
     return _AttemptOutcome(diagnostic=diagnostic, rejection=None)
 
 
+def _first_true_position(values: np.ndarray) -> int | None:
+    if not bool(np.any(values)):
+        return None
+    return int(np.argmax(values))
+
+
+def _attempt_event_prepared(
+    event_position: int,
+    event: FrozenSignalEvent,
+    prepared: PreparedEntryDiagnosticTape,
+    config: EntryDiagnosticConfig,
+    boundary: DiagnosticBoundary,
+) -> _AttemptOutcome:
+    """Vectorized equivalent of :func:`_attempt_event` on a prepared tape."""
+
+    points = prepared.ticks
+    decision_tick = points[event.tick_index]
+    ready_timestamp = event.timestamp + timedelta(milliseconds=config.entry_latency_ms)
+    expires_timestamp = ready_timestamp + timedelta(
+        milliseconds=config.maximum_entry_lag_ms
+    )
+    if (
+        (boundary.start is not None and event.timestamp < boundary.start)
+        or (boundary.end is not None and event.timestamp >= boundary.end)
+    ):
+        return _rejection(
+            event_position,
+            event,
+            "outside_boundary",
+            event.timestamp,
+            ready_timestamp,
+            expires_timestamp,
+            event.timestamp,
+        )
+
+    tick_count = len(points)
+    first_later_index = event.tick_index + 1
+    boundary_index = tick_count
+    if boundary.end is not None:
+        boundary_index = prepared._timestamp_index(
+            boundary.end,
+            side="left",
+            minimum=first_later_index,
+        )
+    gap_index = prepared._next_gap_index(
+        event.tick_index,
+        config.maximum_intertick_gap_ms,
+    )
+    expiry_index = prepared._timestamp_index(
+        expires_timestamp,
+        side="right",
+        minimum=first_later_index,
+    )
+    eligible_fill_index = prepared._timestamp_index(
+        ready_timestamp,
+        side="left",
+        minimum=first_later_index,
+    )
+    first_decisive_index = min(
+        boundary_index,
+        gap_index,
+        expiry_index,
+        eligible_fill_index,
+    )
+
+    fill_index: int | None = None
+    if first_decisive_index < tick_count:
+        observed_tick = points[first_decisive_index]
+        # These checks intentionally preserve the scalar loop's precedence when
+        # two conditions occur on the same physical quote row.
+        if boundary_index == first_decisive_index:
+            assert boundary.end is not None
+            return _rejection(
+                event_position,
+                event,
+                _boundary_rejection_reason(boundary),
+                boundary.end,
+                ready_timestamp,
+                expires_timestamp,
+                boundary.end,
+            )
+        if gap_index == first_decisive_index:
+            return _rejection(
+                event_position,
+                event,
+                "intertick_gap_before_fill",
+                observed_tick.timestamp,
+                ready_timestamp,
+                expires_timestamp,
+                observed_tick.timestamp,
+            )
+        if expiry_index == first_decisive_index:
+            return _rejection(
+                event_position,
+                event,
+                "maximum_entry_lag_exceeded",
+                observed_tick.timestamp,
+                ready_timestamp,
+                expires_timestamp,
+                expires_timestamp,
+            )
+        assert eligible_fill_index == first_decisive_index
+        fill_index = eligible_fill_index
+
+    if fill_index is None:
+        if boundary.end is not None and boundary.input_complete_through_end:
+            if boundary.end <= expires_timestamp:
+                return _rejection(
+                    event_position,
+                    event,
+                    _boundary_rejection_reason(boundary),
+                    boundary.end,
+                    ready_timestamp,
+                    expires_timestamp,
+                    boundary.end,
+                )
+            return _rejection(
+                event_position,
+                event,
+                "maximum_entry_lag_exceeded",
+                expires_timestamp,
+                ready_timestamp,
+                expires_timestamp,
+                expires_timestamp,
+            )
+        return _rejection(
+            event_position,
+            event,
+            "input_ended_before_fill",
+            points[-1].timestamp if points else None,
+            ready_timestamp,
+            expires_timestamp,
+            expires_timestamp,
+        )
+
+    fill_tick = points[fill_index]
+    entry_quote, entry_fill = _entry_prices(fill_tick, event.side, config)
+    horizon_end = fill_tick.timestamp + timedelta(
+        milliseconds=config.diagnostic_horizon_ms
+    )
+    scheduled_stop = horizon_end
+    scheduled_stop_reason = "horizon_complete"
+    if boundary.end is not None and boundary.end <= horizon_end:
+        scheduled_stop = boundary.end
+        scheduled_stop_reason = boundary.end_reason
+
+    stop_index = prepared._timestamp_index(
+        scheduled_stop,
+        side="left",
+        minimum=fill_index + 1,
+    )
+    observation_gap_index = prepared._next_gap_index(
+        fill_index,
+        config.maximum_intertick_gap_ms,
+    )
+    observation_end_timestamp: datetime
+    observation_end_reason: str
+    scheduling_release_timestamp: datetime
+    horizon_complete = False
+
+    if stop_index < tick_count and stop_index <= observation_gap_index:
+        observed_stop_index = stop_index
+        previous_tick = points[observed_stop_index - 1]
+        trailing_ms = _milliseconds(scheduled_stop - previous_tick.timestamp)
+        observation_end_timestamp = scheduled_stop
+        scheduling_release_timestamp = scheduled_stop
+        if trailing_ms > config.maximum_intertick_gap_ms:
+            observation_end_reason = "intertick_gap"
+        else:
+            observation_end_reason = scheduled_stop_reason
+            horizon_complete = scheduled_stop_reason == "horizon_complete"
+    elif (
+        observation_gap_index < tick_count
+        and observation_gap_index < stop_index
+    ):
+        observed_stop_index = observation_gap_index
+        gap_tick = points[observation_gap_index]
+        observation_end_timestamp = gap_tick.timestamp
+        observation_end_reason = "intertick_gap"
+        scheduling_release_timestamp = gap_tick.timestamp
+    else:
+        observed_stop_index = tick_count
+        previous_tick = points[observed_stop_index - 1]
+        if boundary.end is not None and boundary.input_complete_through_end:
+            trailing_ms = _milliseconds(scheduled_stop - previous_tick.timestamp)
+            observation_end_timestamp = scheduled_stop
+            scheduling_release_timestamp = scheduled_stop
+            if trailing_ms > config.maximum_intertick_gap_ms:
+                observation_end_reason = "intertick_gap"
+            else:
+                observation_end_reason = scheduled_stop_reason
+                horizon_complete = scheduled_stop_reason == "horizon_complete"
+        else:
+            observation_end_timestamp = previous_tick.timestamp
+            observation_end_reason = "input_end"
+            scheduling_release_timestamp = horizon_end
+
+    quote_slice = (
+        prepared._bid[fill_index:observed_stop_index]
+        if event.side == "long"
+        else prepared._ask[fill_index:observed_stop_index]
+    )
+    net_values = np.array(quote_slice, dtype=np.float64, copy=True)
+    if event.side == "long":
+        net_values -= config.exit_slippage_per_unit
+        direction = 1.0
+    else:
+        net_values += config.exit_slippage_per_unit
+        direction = -1.0
+    initial_exit_fill = float(net_values[0])
+    commission = (
+        config.entry_commission_per_unit + config.exit_commission_per_unit
+    )
+    net_values -= entry_fill
+    net_values *= direction
+    net_values -= commission
+
+    coverage_position = _first_true_position(net_values >= 0.0)
+    coverage_index = (
+        fill_index + coverage_position
+        if coverage_position is not None
+        else None
+    )
+    coverage_tick = points[coverage_index] if coverage_index is not None else None
+    coverage_ms = (
+        _milliseconds(coverage_tick.timestamp - fill_tick.timestamp)
+        if coverage_tick is not None
+        else None
+    )
+    checkpoints = {
+        seconds: bool(
+            coverage_ms is not None
+            and (
+                coverage_ms < seconds * 1_000.0
+                if seconds == 60
+                else coverage_ms <= seconds * 1_000.0
+            )
+        )
+        for seconds in _CHECKPOINT_SECONDS
+    }
+
+    if coverage_position == 0:
+        mae_before = 0.0
+        mfe_before = 0.0
+    else:
+        before_values = (
+            net_values
+            if coverage_position is None
+            else net_values[:coverage_position]
+        )
+        mae_before = float(np.min(before_values))
+        mfe_before = float(np.max(before_values))
+    mae_horizon = float(np.min(net_values))
+    mfe_horizon = float(np.max(net_values))
+    favorable = max(mfe_horizon, 0.0)
+    adverse = max(-mae_horizon, 0.0)
+    efficiency_denominator = favorable + adverse
+    entry_efficiency = (
+        favorable / efficiency_denominator
+        if efficiency_denominator > 0.0
+        else math.nan
+    )
+
+    profit_position: int | None = None
+    loss_position: int | None = None
+    if config.profit_barrier_net_per_unit is not None:
+        profit_position = _first_true_position(
+            net_values >= config.profit_barrier_net_per_unit
+        )
+    if config.loss_barrier_net_per_unit is not None:
+        loss_position = _first_true_position(
+            net_values <= -config.loss_barrier_net_per_unit
+        )
+    profit_index = (
+        fill_index + profit_position if profit_position is not None else None
+    )
+    loss_index = fill_index + loss_position if loss_position is not None else None
+    first_barrier: BarrierHit | None = None
+    first_barrier_index: int | None = None
+    if profit_position is not None and loss_position is not None:
+        if profit_position < loss_position:
+            first_barrier, first_barrier_index = "profit", profit_index
+        else:
+            first_barrier, first_barrier_index = "loss", loss_index
+    elif profit_position is not None:
+        first_barrier, first_barrier_index = "profit", profit_index
+    elif loss_position is not None:
+        first_barrier, first_barrier_index = "loss", loss_index
+
+    initial_quote = float(quote_slice[0])
+    initial_net = float(net_values[0])
+    explicit_cost = (
+        config.entry_slippage_per_unit
+        + config.exit_slippage_per_unit
+        + config.entry_commission_per_unit
+        + config.exit_commission_per_unit
+    )
+    if event.side == "long":
+        break_even_quote = (
+            entry_fill
+            + config.exit_slippage_per_unit
+            + config.entry_commission_per_unit
+            + config.exit_commission_per_unit
+        )
+    else:
+        break_even_quote = (
+            entry_fill
+            - config.exit_slippage_per_unit
+            - config.entry_commission_per_unit
+            - config.exit_commission_per_unit
+        )
+
+    def elapsed_at(index: int | None) -> float | None:
+        if index is None:
+            return None
+        return _milliseconds(points[index].timestamp - fill_tick.timestamp)
+
+    diagnostic = FilledEntryDiagnostic(
+        event_position=event_position,
+        event=event,
+        fill_tick_index=fill_index,
+        fill_tick_id=fill_tick.id,
+        fill_timestamp=fill_tick.timestamp,
+        ready_timestamp=ready_timestamp,
+        expires_timestamp=expires_timestamp,
+        decision_to_fill_ms=_milliseconds(fill_tick.timestamp - event.timestamp),
+        ready_to_fill_lag_ms=_milliseconds(fill_tick.timestamp - ready_timestamp),
+        decision_spread=decision_tick.spread,
+        fill_spread=fill_tick.spread,
+        entry_quote_price=entry_quote,
+        entry_fill_price=entry_fill,
+        initial_executable_quote_price=initial_quote,
+        initial_executable_fill_price=initial_exit_fill,
+        explicit_round_trip_cost_per_unit=explicit_cost,
+        initial_net_pnl_per_unit=initial_net,
+        initial_net_pnl=initial_net * config.quantity,
+        break_even_executable_quote_price=break_even_quote,
+        cost_coverage_tick_index=coverage_index,
+        cost_coverage_tick_id=coverage_tick.id if coverage_tick is not None else None,
+        cost_coverage_timestamp=(
+            coverage_tick.timestamp if coverage_tick is not None else None
+        ),
+        time_to_cost_coverage_ms=coverage_ms,
+        decision_to_cost_coverage_ms=(
+            _milliseconds(coverage_tick.timestamp - event.timestamp)
+            if coverage_tick is not None
+            else None
+        ),
+        cost_covered_by_1s=checkpoints[1],
+        cost_covered_by_2s=checkpoints[2],
+        cost_covered_by_5s=checkpoints[5],
+        cost_covered_by_10s=checkpoints[10],
+        cost_covered_by_20s=checkpoints[20],
+        cost_covered_by_30s=checkpoints[30],
+        cost_covered_by_60s=checkpoints[60],
+        observed_quote_count=observed_stop_index - fill_index,
+        observation_end_timestamp=observation_end_timestamp,
+        observation_end_reason=observation_end_reason,
+        scheduling_release_timestamp=scheduling_release_timestamp,
+        horizon_complete=horizon_complete,
+        censored=not horizon_complete,
+        mae_before_coverage_per_unit=mae_before,
+        mfe_before_coverage_per_unit=mfe_before,
+        mae_horizon_per_unit=mae_horizon,
+        mfe_horizon_per_unit=mfe_horizon,
+        mae_before_coverage=mae_before * config.quantity,
+        mfe_before_coverage=mfe_before * config.quantity,
+        mae_horizon=mae_horizon * config.quantity,
+        mfe_horizon=mfe_horizon * config.quantity,
+        entry_efficiency=entry_efficiency,
+        profit_barrier_hit=profit_position is not None,
+        profit_barrier_first_hit_ms=elapsed_at(profit_index),
+        loss_barrier_hit=loss_position is not None,
+        loss_barrier_first_hit_ms=elapsed_at(loss_index),
+        first_barrier_hit=first_barrier,
+        first_barrier_hit_tick_id=(
+            points[first_barrier_index].id
+            if first_barrier_index is not None
+            else None
+        ),
+        first_barrier_hit_timestamp=(
+            points[first_barrier_index].timestamp
+            if first_barrier_index is not None
+            else None
+        ),
+        first_barrier_hit_ms=elapsed_at(first_barrier_index),
+    )
+    return _AttemptOutcome(diagnostic=diagnostic, rejection=None)
+
+
 def _scheduling_rejection(
     event_position: int,
     event: FrozenSignalEvent,
@@ -847,6 +1385,95 @@ def evaluate_frozen_entries(
     )
 
 
+def evaluate_prepared_frozen_entries(
+    prepared: PreparedEntryDiagnosticTape,
+    events: Iterable[FrozenSignalEvent],
+    *,
+    config: EntryDiagnosticConfig,
+    boundary: DiagnosticBoundary | None = None,
+    scheduling: EntrySchedulingConfig | None = None,
+) -> FreshEntryDiagnosticsResult:
+    """Diagnose one bounded event batch against a reusable prepared session.
+
+    Results are intentionally identical to :func:`evaluate_frozen_entries`.
+    Only tape preparation, timestamp searches, gap lookup, and quote-path
+    reductions are accelerated; event scheduling and all causal execution
+    semantics retain their scalar ordering.
+    """
+
+    if not isinstance(prepared, PreparedEntryDiagnosticTape):
+        raise TypeError("prepared must be a PreparedEntryDiagnosticTape")
+    if not isinstance(config, EntryDiagnosticConfig):
+        raise TypeError("config must be an EntryDiagnosticConfig")
+    bounds = boundary or DiagnosticBoundary()
+    if not isinstance(bounds, DiagnosticBoundary):
+        raise TypeError("boundary must be a DiagnosticBoundary")
+    schedule = scheduling or EntrySchedulingConfig()
+    if not isinstance(schedule, EntrySchedulingConfig):
+        raise TypeError("scheduling must be an EntrySchedulingConfig")
+    selected_events = _validate_events(events, prepared.ticks)
+
+    diagnostics: list[FilledEntryDiagnostic] = []
+    rejections: list[EntryDiagnosticRejection] = []
+    active_until: datetime | None = None
+    cooldown_until: datetime | None = None
+    for event_position, event in enumerate(selected_events):
+        if schedule.mode == "non_overlapping":
+            if active_until is not None and event.timestamp < active_until:
+                rejections.append(
+                    _scheduling_rejection(
+                        event_position,
+                        event,
+                        "scheduling_overlap",
+                        config,
+                    )
+                )
+                continue
+            if cooldown_until is not None and event.timestamp < cooldown_until:
+                rejections.append(
+                    _scheduling_rejection(
+                        event_position,
+                        event,
+                        "scheduling_cooldown",
+                        config,
+                    )
+                )
+                continue
+
+        outcome = _attempt_event_prepared(
+            event_position,
+            event,
+            prepared,
+            config,
+            bounds,
+        )
+        if outcome.diagnostic is not None:
+            diagnostic = outcome.diagnostic
+            diagnostics.append(diagnostic)
+            if schedule.mode == "non_overlapping":
+                active_until = diagnostic.scheduling_release_timestamp
+                cooldown_until = active_until + timedelta(
+                    milliseconds=schedule.cooldown_ms
+                )
+        else:
+            assert outcome.rejection is not None
+            rejection = outcome.rejection
+            rejections.append(rejection)
+            if schedule.mode == "non_overlapping" and rejection.reason not in (
+                "outside_boundary",
+            ):
+                active_until = rejection.scheduling_release_timestamp
+                cooldown_until = active_until
+
+    counts = Counter(rejection.reason for rejection in rejections)
+    return FreshEntryDiagnosticsResult(
+        diagnostics=tuple(diagnostics),
+        rejections=tuple(rejections),
+        rejected_reason_counts=dict(sorted(counts.items())),
+        event_count=len(selected_events),
+    )
+
+
 __all__ = [
     "BarrierHit",
     "BoundaryEndReason",
@@ -857,7 +1484,10 @@ __all__ = [
     "FilledEntryDiagnostic",
     "FreshEntryDiagnosticsResult",
     "FrozenSignalEvent",
+    "PreparedEntryDiagnosticTape",
     "SchedulingMode",
     "Side",
     "evaluate_frozen_entries",
+    "evaluate_prepared_frozen_entries",
+    "prepare_entry_diagnostic_tape",
 ]

@@ -779,6 +779,84 @@ def enrich_and_filter_frozen_events(
     )
 
 
+def _selected_filter_requests(
+    requests: Sequence[FreshEventFilterRequest],
+) -> tuple[FreshEventFilterRequest, ...]:
+    try:
+        selected = tuple(requests)
+    except TypeError as exc:
+        raise TypeError(
+            "requests must be an iterable of FreshEventFilterRequest values"
+        ) from exc
+    for position, request in enumerate(selected):
+        if not isinstance(request, FreshEventFilterRequest):
+            raise TypeError(
+                f"requests[{position}] is not a FreshEventFilterRequest"
+            )
+    return selected
+
+
+class FreshEventFilterBatchEvaluator:
+    """Reuse one causally bounded prepared row set across small request groups."""
+
+    __slots__ = ("_definition", "_rows")
+
+    def __init__(
+        self,
+        features: pd.DataFrame,
+        *,
+        regime_definition: FreshRegimeDefinition,
+        row_limit: int,
+    ) -> None:
+        self._definition = regime_definition
+        self._rows = _prepare_rows(
+            features,
+            regime_definition,
+            row_limit=row_limit,
+        )
+
+    def enrich_and_filter(
+        self,
+        requests: Sequence[FreshEventFilterRequest],
+        *,
+        quantile_bank: FreshQuantileBank,
+    ) -> tuple[FreshEventFilterResult, ...]:
+        """Return scalar-equivalent results without re-preparing feature rows."""
+
+        selected = _selected_filter_requests(requests)
+        if any(
+            request.config.regime_definition != self._definition
+            for request in selected
+        ):
+            raise ValueError(
+                "all requests must use the evaluator's regime definition"
+            )
+
+        config_hashes: dict[FreshEventFilterConfig, str] = {}
+        for request in selected:
+            if request.config not in config_hashes:
+                config_hashes[request.config] = (
+                    fresh_event_filter_config_fingerprint(
+                        request.config,
+                        quantile_bank,
+                    )
+                )
+
+        results: list[FreshEventFilterResult] = []
+        for request in selected:
+            _validate_event_bindings(self._rows, request.events)
+            results.append(
+                _enrich_and_filter_prepared(
+                    self._rows,
+                    request.events,
+                    config=request.config,
+                    quantile_bank=quantile_bank,
+                    config_sha=config_hashes[request.config],
+                )
+            )
+        return tuple(results)
+
+
 def enrich_and_filter_frozen_event_batch(
     features: pd.DataFrame,
     requests: Sequence[FreshEventFilterRequest],
@@ -794,17 +872,7 @@ def enrich_and_filter_frozen_event_batch(
     their prepared measurement arrays are shared.
     """
 
-    try:
-        selected_requests = tuple(requests)
-    except TypeError as exc:
-        raise TypeError(
-            "requests must be an iterable of FreshEventFilterRequest values"
-        ) from exc
-    for position, request in enumerate(selected_requests):
-        if not isinstance(request, FreshEventFilterRequest):
-            raise TypeError(
-                f"requests[{position}] is not a FreshEventFilterRequest"
-            )
+    selected_requests = _selected_filter_requests(requests)
     if not selected_requests:
         return ()
 
@@ -815,13 +883,6 @@ def enrich_and_filter_frozen_event_batch(
     ):
         raise ValueError("all batch requests must use the same regime definition")
 
-    config_hashes: dict[FreshEventFilterConfig, str] = {}
-    for request in selected_requests:
-        if request.config not in config_hashes:
-            config_hashes[request.config] = fresh_event_filter_config_fingerprint(
-                request.config, quantile_bank
-            )
-
     last_index = max(
         (
             event.tick_index
@@ -830,21 +891,15 @@ def enrich_and_filter_frozen_event_batch(
         ),
         default=-1,
     )
-    rows = _prepare_rows(features, definition, row_limit=last_index + 1)
-
-    results: list[FreshEventFilterResult] = []
-    for request in selected_requests:
-        _validate_event_bindings(rows, request.events)
-        results.append(
-            _enrich_and_filter_prepared(
-                rows,
-                request.events,
-                config=request.config,
-                quantile_bank=quantile_bank,
-                config_sha=config_hashes[request.config],
-            )
-        )
-    return tuple(results)
+    evaluator = FreshEventFilterBatchEvaluator(
+        features,
+        regime_definition=definition,
+        row_limit=last_index + 1,
+    )
+    return evaluator.enrich_and_filter(
+        selected_requests,
+        quantile_bank=quantile_bank,
+    )
 
 
 def _filter_catalog(
@@ -1065,6 +1120,7 @@ __all__ = [
     "MAXIMUM_DISCOVERY_CANDIDATES",
     "MAXIMUM_DISCOVERY_CANDIDATES_PER_FAMILY",
     "EventFilterVariantSource",
+    "FreshEventFilterBatchEvaluator",
     "FreshEventFilterConfig",
     "FreshEventFilterRequest",
     "FreshEventFilterResult",

@@ -27,6 +27,7 @@ from datavis.research.fresh_pipeline import (
     _parameter_neighbourhood_audit,
     _replay_session,
     _research_state_binding,
+    _research_state_binding_v3,
     _restricted_coverage_ms,
     _scenario_ids_for_stage,
     _snapshot_new_file,
@@ -37,6 +38,7 @@ from datavis.research.fresh_entry_diagnostics import (
     FilledEntryDiagnostic,
     FreshEntryDiagnosticsResult,
     FrozenSignalEvent,
+    prepare_entry_diagnostic_tape,
 )
 from datavis.research.fresh_event_filters import (
     FreshEventFilterConfig,
@@ -418,7 +420,14 @@ class FreshPipelineTests(unittest.TestCase):
         return pipeline, tuple(runtimes), tuple(candidates), context
 
     @contextmanager
-    def _synthetic_entry_dependencies(self, observed, *, diagnose=None):
+    def _synthetic_entry_dependencies(
+        self,
+        observed,
+        *,
+        diagnose=None,
+        filter_request_sizes=None,
+        prepared_diagnostics=None,
+    ):
         def generate(frame, *, configs, engine):
             self.assertEqual(engine, "batch")
             anchor = frame.attrs["anchor"]
@@ -441,6 +450,17 @@ class FreshPipelineTests(unittest.TestCase):
                     )
             return tuple(output)
 
+        def generate_groups(frame, *, configs, engine):
+            for candidate_config in configs:
+                yield (
+                    candidate_config.candidate_id,
+                    generate(
+                        frame,
+                        configs=(candidate_config,),
+                        engine=engine,
+                    ),
+                )
+
         def baseline(_frame, tape):
             return tuple(
                 FrozenSignalEvent(
@@ -455,13 +475,39 @@ class FreshPipelineTests(unittest.TestCase):
 
         def filtered(_frame, requests, *, quantile_bank):
             self.assertIsNotNone(quantile_bank)
+            if filter_request_sizes is not None:
+                filter_request_sizes.append(len(requests))
             return tuple(SimpleNamespace(events=request.events) for request in requests)
+
+        class SyntheticFilterEvaluator:
+            def __init__(self, frame, *, regime_definition, row_limit):
+                del regime_definition, row_limit
+                self.frame = frame
+
+            def enrich_and_filter(self, requests, *, quantile_bank):
+                return filtered(
+                    self.frame,
+                    requests,
+                    quantile_bank=quantile_bank,
+                )
 
         diagnostic = diagnose or (
             lambda tape, events, *, config: self._synthetic_diagnostics(
                 tape, events, observed
             )
         )
+
+        def diagnose_compatibility(
+            tape,
+            events,
+            *,
+            config,
+            prepared_tape=None,
+        ):
+            if prepared_diagnostics is not None:
+                prepared_diagnostics.append(prepared_tape is not None)
+            return diagnostic(tape, events, config=config)
+
         with ExitStack() as stack:
             stack.enter_context(
                 patch(
@@ -483,6 +529,12 @@ class FreshPipelineTests(unittest.TestCase):
             )
             stack.enter_context(
                 patch(
+                    "datavis.research.fresh_pipeline.iter_frozen_signal_event_groups",
+                    side_effect=generate_groups,
+                )
+            )
+            stack.enter_context(
+                patch(
                     "datavis.research.fresh_pipeline._baseline_events",
                     side_effect=baseline,
                 )
@@ -495,6 +547,12 @@ class FreshPipelineTests(unittest.TestCase):
             )
             stack.enter_context(
                 patch(
+                    "datavis.research.fresh_pipeline.FreshEventFilterBatchEvaluator",
+                    SyntheticFilterEvaluator,
+                )
+            )
+            stack.enter_context(
+                patch(
                     "datavis.research.fresh_pipeline.fresh_event_filter_config_fingerprint",
                     side_effect=lambda config, _bank: config.variant_id,
                 )
@@ -502,7 +560,7 @@ class FreshPipelineTests(unittest.TestCase):
             stack.enter_context(
                 patch(
                     "datavis.research.fresh_pipeline._diagnose",
-                    side_effect=diagnostic,
+                    side_effect=diagnose_compatibility,
                 )
             )
             yield
@@ -563,6 +621,86 @@ class FreshPipelineTests(unittest.TestCase):
         self.assertIn(
             first["holdoutWindowSha256"],
             first["holdoutAuthorizationRegistryPath"],
+        )
+
+    def test_v3_uses_a_separate_ledger_and_the_identical_global_holdout_lock(self):
+        roles = (
+            "discovery",
+            "walk_forward_1",
+            "walk_forward_2",
+            "walk_forward_3",
+            "validation",
+            "holdout",
+        )
+        body = {
+            "schemaVersion": "test",
+            "windows": {
+                role: {
+                    "role": role,
+                    "sessionAnchors": [f"2026-07-{ordinal + 1:02d}"],
+                }
+                for ordinal, role in enumerate(roles)
+            },
+        }
+        split = {**body, "manifestSha256": canonical_hash(body)}
+        predecessor = _research_state_binding("durable-state", split)
+        research_sha = predecessor["researchWindowSetSha256"]
+        lineage_body = {
+            "schema": "fresh-xauusd-study-lineage/v1",
+            "studyId": "xauusd-fresh-causal-acceleration-v3",
+            "predecessorStudyId": "xauusd-fresh-causal-acceleration-v2",
+            "predecessorPreregistrationSha256": (
+                "209108a553eb186e9048e739981545975bd128528bb1891b28261f09bf1ca2cf"
+            ),
+            "predecessorTerminalLedgerSha256": (
+                "209d80249abd3082df7b50b55c845b71c18401f0c9d2c61a25f5c66e4de28c40"
+            ),
+            "splitManifestSha256": split["manifestSha256"],
+            "researchWindowSetSha256": research_sha,
+            "scientificSpecificationSha256": (
+                "fef6b1a4898aaeb4ce33ad96ea270f0211448357399d94f76051b01c9dabcbd8"
+            ),
+        }
+        expected_lineage = canonical_hash(lineage_body)
+        provenance = {
+            "predecessorLedgerSha256": (
+                "209d80249abd3082df7b50b55c845b71c18401f0c9d2c61a25f5c66e4de28c40"
+            ),
+            "predecessorPreregistrationSha256": (
+                "209108a553eb186e9048e739981545975bd128528bb1891b28261f09bf1ca2cf"
+            ),
+            "predecessorLineageTerminal": True,
+            "candidateOutcomeRecordCount": 0,
+            "transientCandidateComputationsRecovered": False,
+            "batchResultSealed": False,
+        }
+        with patch(
+            "datavis.research.fresh_pipeline.FRESH_V3_STUDY_LINEAGE_SHA256",
+            expected_lineage,
+        ):
+            restarted = _research_state_binding_v3(
+                "durable-state",
+                split,
+                provenance,
+            )
+
+        self.assertEqual(
+            restarted["schema"],
+            "fresh-xauusd-durable-research-state/v2",
+        )
+        self.assertEqual(restarted["studyLineage"], lineage_body)
+        self.assertEqual(restarted["studyLineageSha256"], expected_lineage)
+        self.assertNotEqual(
+            restarted["experimentLedgerPath"],
+            predecessor["experimentLedgerPath"],
+        )
+        self.assertEqual(
+            restarted["predecessorExperimentLedgerPath"],
+            predecessor["experimentLedgerPath"],
+        )
+        self.assertEqual(
+            restarted["holdoutAuthorizationRegistryPath"],
+            predecessor["holdoutAuthorizationRegistryPath"],
         )
 
     def test_later_stages_report_all_registered_execution_sensitivities(self):
@@ -754,6 +892,41 @@ class FreshPipelineTests(unittest.TestCase):
         self.assertIs(evaluate.call_args.args[0], tape.ticks)
         self.assertTrue(evaluate.call_args.kwargs["_trusted_validated_ticks"])
 
+        prepared = prepare_entry_diagnostic_tape(
+            tape.ticks,
+            _trusted_validated_ticks=True,
+        )
+        with patch(
+            "datavis.research.fresh_pipeline.evaluate_prepared_frozen_entries",
+            return_value=sentinel,
+        ) as evaluate_prepared:
+            actual = _diagnose(
+                tape,
+                (),
+                config=SimpleNamespace(),
+                prepared_tape=prepared,
+            )
+
+        self.assertIs(actual, sentinel)
+        self.assertIs(evaluate_prepared.call_args.args[0], prepared)
+        self.assertEqual(evaluate_prepared.call_args.kwargs["boundary"].name, tape.anchor)
+        self.assertEqual(
+            evaluate_prepared.call_args.kwargs["scheduling"].mode,
+            "independent",
+        )
+
+        other_tape = self._synthetic_tape("2026-01-05", 100)
+        with self.assertRaisesRegex(TypeError, "same FreshSessionTape tuple"):
+            _diagnose(
+                tape,
+                (),
+                config=SimpleNamespace(),
+                prepared_tape=prepare_entry_diagnostic_tape(
+                    other_tape.ticks,
+                    _trusted_validated_ticks=True,
+                ),
+            )
+
         with self.assertRaisesRegex(TypeError, "FreshSessionTape"):
             _diagnose(SimpleNamespace(ticks=ticks), (), config=SimpleNamespace())
 
@@ -851,7 +1024,7 @@ class FreshPipelineTests(unittest.TestCase):
             self.assertEqual(events[0][1:], events[1][1:])
         self.assertEqual(spooled_observed, materialized_observed)
 
-        self.assertEqual(len(_AuditedPipelineSpool.instances), 1)
+        self.assertEqual(len(_AuditedPipelineSpool.instances), 3)
         spool = _AuditedPipelineSpool.instances[0]
         self.assertEqual(spool.maximum_active_loads, 1)
         self.assertEqual(
@@ -863,7 +1036,12 @@ class FreshPipelineTests(unittest.TestCase):
                 pipeline._baseline_spool_key("all"),
             ],
         )
-        self.assertFalse(spool.created_directory.exists())
+        self.assertTrue(
+            all(
+                not audited.created_directory.exists()
+                for audited in _AuditedPipelineSpool.instances
+            )
+        )
         self.assertEqual(self._spool_directories(pipeline.output), ())
 
     def test_spooled_pipeline_drops_prior_session_diagnostics(self):
@@ -901,6 +1079,114 @@ class FreshPipelineTests(unittest.TestCase):
 
         self.assertEqual(self._spool_directories(pipeline.output), ())
 
+    def test_streamed_pipeline_enriches_only_one_result_at_a_time(self):
+        pipeline, _runtimes, candidates, context = self._synthetic_entry_pipeline()
+        request_sizes = []
+        prepared_usage = []
+
+        with (
+            self._synthetic_entry_dependencies(
+                [],
+                filter_request_sizes=request_sizes,
+                prepared_diagnostics=prepared_usage,
+            ),
+            patch(
+                "datavis.research.fresh_pipeline.prepare_entry_diagnostic_tape",
+                wraps=prepare_entry_diagnostic_tape,
+            ) as prepare,
+        ):
+            pipeline.score_entries_batch(candidates, context)
+
+        self.assertEqual(request_sizes, [1, 1, 1, 1, 1, 1])
+        self.assertEqual(prepare.call_count, 2)
+        self.assertTrue(prepared_usage)
+        self.assertTrue(all(prepared_usage))
+        self.assertEqual(self._spool_directories(pipeline.output), ())
+
+    def test_streamed_pipeline_releases_last_first_pass_group_before_filtering(self):
+        pipeline, runtimes, _candidates, context = self._synthetic_entry_pipeline()
+        marker_references = []
+
+        def generate_groups(frame, *, configs, engine):
+            self.assertEqual(engine, "batch")
+            previous_reference = None
+            for candidate_config in configs:
+                if previous_reference is not None:
+                    gc.collect()
+                    self.assertIsNone(previous_reference())
+                marker = _TrackedDiagnostic(candidate_config.candidate_id)
+                previous_reference = weakref.ref(marker)
+                marker_references.append(previous_reference)
+                row = frame.iloc[0]
+                yield (
+                    candidate_config.candidate_id,
+                    (
+                        FrozenSignalEvent(
+                            tick_index=0,
+                            tick_id=int(row["tick_id"]),
+                            timestamp=row["timestamp"].to_pydatetime(),
+                            side="long",
+                            metadata={
+                                "candidate_id": candidate_config.candidate_id,
+                                "context": self._entry_context(frame.attrs["anchor"]),
+                                "retention_marker": marker,
+                            },
+                        ),
+                    ),
+                )
+                del marker
+            gc.collect()
+            if previous_reference is not None:
+                self.assertIsNone(previous_reference())
+
+        class RetentionAuditedEvaluator:
+            def __init__(
+                inner_self,
+                frame,
+                *,
+                regime_definition,
+                row_limit,
+            ):
+                del regime_definition, row_limit
+                gc.collect()
+                self.assertTrue(marker_references)
+                self.assertTrue(
+                    all(reference() is None for reference in marker_references)
+                )
+                inner_self.frame = frame
+
+            def enrich_and_filter(
+                inner_self,
+                requests,
+                *,
+                quantile_bank,
+            ):
+                del inner_self, quantile_bank
+                return tuple(
+                    SimpleNamespace(events=request.events)
+                    for request in requests
+                )
+
+        with (
+            self._synthetic_entry_dependencies([]),
+            patch(
+                "datavis.research.fresh_pipeline.iter_frozen_signal_event_groups",
+                side_effect=generate_groups,
+            ),
+            patch(
+                "datavis.research.fresh_pipeline.FreshEventFilterBatchEvaluator",
+                RetentionAuditedEvaluator,
+            ),
+        ):
+            with pipeline._entry_session_spool(
+                runtimes,
+                context.windows[0].session_anchors,
+                stage="first-pass-retention-audit",
+            ) as (spool, _baseline_by_candidate):
+                self.assertEqual({count for _key, count in spool.inventory}, {2})
+
+        self.assertEqual(self._spool_directories(pipeline.output), ())
+
     def test_spooled_pipeline_cleans_up_after_processing_failure(self):
         pipeline, _runtimes, candidates, context = self._synthetic_entry_pipeline()
         _AuditedPipelineSpool.instances = []
@@ -930,8 +1216,13 @@ class FreshPipelineTests(unittest.TestCase):
                 pipeline.score_entries_batch(candidates, context)
 
         self.assertEqual(calls, 2)
-        self.assertEqual(len(_AuditedPipelineSpool.instances), 1)
-        self.assertFalse(_AuditedPipelineSpool.instances[0].created_directory.exists())
+        self.assertEqual(len(_AuditedPipelineSpool.instances), 2)
+        self.assertTrue(
+            all(
+                not audited.created_directory.exists()
+                for audited in _AuditedPipelineSpool.instances
+            )
+        )
         self.assertEqual(self._spool_directories(pipeline.output), ())
 
     def test_spooled_pipeline_cleans_up_after_scoring_failure(self):
@@ -952,8 +1243,13 @@ class FreshPipelineTests(unittest.TestCase):
             with self.assertRaisesRegex(_InjectedPipelineFailure, "scoring failed"):
                 pipeline.score_entries_batch(candidates, context)
 
-        self.assertEqual(len(_AuditedPipelineSpool.instances), 1)
-        self.assertFalse(_AuditedPipelineSpool.instances[0].created_directory.exists())
+        self.assertEqual(len(_AuditedPipelineSpool.instances), 3)
+        self.assertTrue(
+            all(
+                not audited.created_directory.exists()
+                for audited in _AuditedPipelineSpool.instances
+            )
+        )
         self.assertEqual(self._spool_directories(pipeline.output), ())
 
     def test_spooled_pipeline_cleans_up_after_serialization_failure(self):
@@ -966,7 +1262,7 @@ class FreshPipelineTests(unittest.TestCase):
                 _AuditedPipelineSpool,
             ),
             patch(
-                "datavis.research.fresh_spool.pickle.dumps",
+                "datavis.research.fresh_spool._CompressedPickleWriter.write",
                 side_effect=_InjectedPipelineFailure("serialization failed"),
             ),
         ):
@@ -975,8 +1271,13 @@ class FreshPipelineTests(unittest.TestCase):
             ):
                 pipeline.score_entries_batch(candidates, context)
 
-        self.assertEqual(len(_AuditedPipelineSpool.instances), 1)
-        self.assertFalse(_AuditedPipelineSpool.instances[0].created_directory.exists())
+        self.assertEqual(len(_AuditedPipelineSpool.instances), 2)
+        self.assertTrue(
+            all(
+                not audited.created_directory.exists()
+                for audited in _AuditedPipelineSpool.instances
+            )
+        )
         self.assertEqual(self._spool_directories(pipeline.output), ())
 
     def test_manifest_binding_covers_the_complete_runner(self):

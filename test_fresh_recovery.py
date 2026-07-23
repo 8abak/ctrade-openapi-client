@@ -36,6 +36,7 @@ from datavis.research.fresh_recovery import (
     load_run14_recovery_bundle,
     validate_run14_recovery_for_holdout,
 )
+from datavis.research.fresh_restart import RUN16_ARCHIVE_SHA256
 from datavis.research.fresh_search import (
     CandidateEvaluation,
     EvaluationContext,
@@ -284,12 +285,12 @@ class FreshRun14RecoveryTests(unittest.TestCase):
         with self.assertRaisesRegex(PermissionError, "digest changed"):
             load_run14_recovery_bundle(destination)
 
-    def test_workflow_extractor_accepts_only_the_tar_root_directory_marker(self):
+    def test_workflow_restart_extractor_accepts_only_the_tar_root_directory_marker(self):
         assert self.repository_root is not None
         workflow = (
             self.repository_root / ".github/workflows/fresh-xauusd-research.yml"
         ).read_text(encoding="utf-8")
-        invocation = 'python3 - "${recovery_archive}" "${recovery_directory}" <<\'PY\''
+        invocation = 'python3 - "${restart_archive}" "${restart_directory}" <<\'PY\''
         invocation_offset = workflow.index(invocation)
         script_start = workflow.index("          import hashlib\n", invocation_offset)
         script_end = workflow.index("\n          PY", script_start)
@@ -302,11 +303,15 @@ class FreshRun14RecoveryTests(unittest.TestCase):
             "fresh_implementation_manifest_v1.json",
             "fresh_preregistration_v2.json",
             "fresh_quantile_bank_v1.json",
+            "fresh_recovery_contract_v1.json",
+            "fresh_recovery_implementation_manifest_v1.json",
             "fresh_research_state_binding_v1.json",
             "fresh_source_inventory_v1.json",
             "fresh_split_manifest_v2.json",
             "fresh_threshold_domain_preflight_v1.json",
             "remote-exit-status.txt",
+            "run14_remote-exit-status.txt",
+            "run14_server-run.log",
             "server-run.log",
         }
         scratch = self.scratch_directory()
@@ -350,7 +355,7 @@ class FreshRun14RecoveryTests(unittest.TestCase):
             path.write_bytes(gzip.compress(uncompressed, mtime=0))
 
         ordered_names = tuple(sorted(allowed))
-        archive = scratch / "run14-shape.tgz"
+        archive = scratch / "run16-shape.tgz"
         write_archive(
             archive,
             leading_headers=(directory_header("."),),
@@ -361,11 +366,11 @@ class FreshRun14RecoveryTests(unittest.TestCase):
         self.assertEqual(root.name, ".")
         self.assertTrue(root.isdir())
 
-        self.assertEqual(extractor.count(RUN14_TGZ_SHA256), 1)
+        self.assertEqual(extractor.count(RUN16_ARCHIVE_SHA256), 1)
 
         def run_extractor(selected_archive: Path, label: str):
             selected_script = extractor.replace(
-                RUN14_TGZ_SHA256,
+                RUN16_ARCHIVE_SHA256,
                 hashlib.sha256(selected_archive.read_bytes()).hexdigest(),
             )
             destination = scratch / label
@@ -404,22 +409,22 @@ class FreshRun14RecoveryTests(unittest.TestCase):
             "duplicate-root": (
                 (directory_header("."), directory_header(".")),
                 ordered_names,
-                "unsafe run-14 archive root member",
+                "unsafe run-16 archive root member",
             ),
             "slash-file-member": (
                 (directory_header("."), special_header("./", tarfile.REGTYPE)),
                 ordered_names,
-                "unsafe run-14 archive member",
+                "unsafe run-16 archive member",
             ),
             "unexpected-directory": (
                 (directory_header("."), directory_header("unexpected")),
                 ordered_names,
-                "unsafe run-14 archive member",
+                "unsafe run-16 archive member",
             ),
             "root-symlink": (
                 (special_header(".", tarfile.SYMTYPE),),
                 ordered_names,
-                "unsafe run-14 archive root member",
+                "unsafe run-16 archive root member",
             ),
             "nested-file": (
                 (
@@ -427,27 +432,27 @@ class FreshRun14RecoveryTests(unittest.TestCase):
                     special_header("./nested/file", tarfile.REGTYPE),
                 ),
                 ordered_names,
-                "unsafe run-14 archive member",
+                "unsafe run-16 archive member",
             ),
             "duplicate-file": (
                 (directory_header("."),),
                 (*ordered_names, first_name),
-                "run-14 archive member set changed",
+                "run-16 archive member set changed",
             ),
             "missing-file": (
                 (directory_header("."),),
                 ordered_names[1:],
-                "run-14 archive member set changed",
+                "run-16 archive member set changed",
             ),
             "extra-file": (
                 (directory_header("."),),
                 (*ordered_names, "unexpected.json"),
-                "run-14 archive member set changed",
+                "run-16 archive member set changed",
             ),
             "missing-root": (
                 (),
                 ordered_names,
-                "run-14 archive root member changed",
+                "run-16 archive root member changed",
             ),
         }
         for label, (headers, names, expected_error) in negative_cases.items():

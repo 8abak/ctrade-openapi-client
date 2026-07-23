@@ -1592,6 +1592,107 @@ class FreshChronologicalSearch:
             study_failed=failed,
         )
 
+    def run_frozen_discovery(
+        self,
+        *,
+        threshold_bank: Mapping[str, Any],
+        entry_specs: Sequence[EntryCandidateSpec],
+    ) -> StageRunResult:
+        """Evaluate an immutable outcome-blind bank in a new empty study.
+
+        This is not recovery of an existing ledger.  It starts a separately
+        preregistered study whose lineage already binds the imported threshold
+        and entry-bank artifacts.  The normal stage/batch access records are
+        written to the new ledger before any candidate outcome is evaluated.
+        """
+
+        self._require_stage(FreshSearchStage.NEW)
+        self._consume_role("discovery")
+        context = self._context(
+            stage="discovery",
+            training_roles=("discovery",),
+            evaluation_roles=("discovery",),
+        )
+        access = self._append_stage_window_access_record(
+            context=context,
+            role="discovery",
+            purpose=(
+                "evaluate the immutable outcome-blind predecessor discovery "
+                "threshold and entry bank in the new study"
+            ),
+        )
+        numbers = [int(access["recordNumber"])]
+        try:
+            if not isinstance(threshold_bank, Mapping):
+                raise ValueError("threshold_bank must be a mapping")
+            self._threshold_bank_json = _canonical_json(
+                threshold_bank,
+                "threshold bank",
+            )
+            self._threshold_bank_sha256 = canonical_hash(
+                json.loads(self._threshold_bank_json)
+            )
+            specs = tuple(entry_specs)
+            if not specs or any(
+                not isinstance(spec, EntryCandidateSpec) for spec in specs
+            ):
+                raise ValueError(
+                    "entry_specs must contain frozen entry candidate specs"
+                )
+            if len(specs) > self._budgets.discovery_distinct_candidates:
+                raise ValueError("discovery candidate budget exceeded")
+            candidates = tuple(
+                FrozenEntryCandidate.freeze(
+                    spec,
+                    threshold_bank_sha256=self._threshold_bank_sha256,
+                )
+                for spec in specs
+            )
+            identifiers = [candidate.candidate_id for candidate in candidates]
+            if len(identifiers) != len(set(identifiers)):
+                raise ValueError("discovery candidate ids must be unique")
+            family_counts: dict[str, int] = {}
+            for candidate in candidates:
+                family_counts[candidate.family] = (
+                    family_counts.get(candidate.family, 0) + 1
+                )
+            if any(
+                count > self._budgets.discovery_per_family_maximum
+                for count in family_counts.values()
+            ):
+                raise ValueError("discovery per-family candidate budget exceeded")
+            evaluated, evaluation_numbers = self._evaluate_entries(
+                candidates=candidates,
+                context=context,
+                role="discovery",
+            )
+            numbers.extend(evaluation_numbers)
+        except Exception:
+            self._stage = FreshSearchStage.FAILED
+            raise
+        self._entry_pool = self._rank_passed(
+            evaluated,
+            identifier=lambda candidate: candidate.candidate_id,
+            limit=self._budgets.walk_forward_1_frozen_candidates,
+        )
+        failed = not self._entry_pool
+        self._stage = (
+            FreshSearchStage.FAILED
+            if failed
+            else FreshSearchStage.DISCOVERY_COMPLETE
+        )
+        return StageRunResult(
+            stage="discovery",
+            evaluated_ids=tuple(
+                candidate.candidate_id for candidate, _ in evaluated
+            ),
+            promoted_ids=tuple(
+                candidate.candidate_id for candidate in self._entry_pool
+            ),
+            ledger_record_numbers=tuple(numbers),
+            study_failed=failed,
+        )
+
     def resume_discovery(self) -> StageRunResult:
         """Recompute and seal the exact incomplete discovery batch once.
 

@@ -25,11 +25,19 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="required acknowledgement that the frozen chronological run may begin",
     )
-    parser.add_argument(
+    lineage = parser.add_mutually_exclusive_group()
+    lineage.add_argument(
         "--resume-artifact-dir",
         help=(
             "exact extracted run-14 artifact directory for the sole audited "
             "discovery continuation"
+        ),
+    )
+    lineage.add_argument(
+        "--restart-artifact-dir",
+        help=(
+            "exact extracted run-16 artifact directory that proves eligibility "
+            "for the separately preregistered v3 study"
         ),
     )
     return parser
@@ -58,6 +66,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         research_state_directory=arguments.research_state_dir,
         progress=_progress,
         resume_artifact_directory=arguments.resume_artifact_dir,
+        infrastructure_restart_artifact_directory=(
+            arguments.restart_artifact_dir
+        ),
     )
     print(
         json.dumps(

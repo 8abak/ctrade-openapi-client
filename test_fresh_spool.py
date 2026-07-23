@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import patch
 
+import datavis.research.fresh_spool as spool_module
 from datavis.research.fresh_spool import (
     KeyedObjectSpool,
     SPOOL_DIRECTORY_PREFIX,
@@ -128,6 +129,67 @@ class FreshSpoolTests(unittest.TestCase):
                     tuple(objects),
                     (RichPayload("collectable", (1, 2)),),
                 )
+
+    def test_large_round_trip_never_uses_whole_object_buffer_helpers(self):
+        payload = RichPayload("large", tuple(range(200_000)))
+        with (
+            patch.object(
+                spool_module.pickle,
+                "dumps",
+                side_effect=AssertionError("whole pickle buffer used"),
+            ),
+            patch.object(
+                spool_module.zlib,
+                "compress",
+                side_effect=AssertionError("whole compression buffer used"),
+            ),
+            patch.object(
+                spool_module.pickle,
+                "loads",
+                side_effect=AssertionError("whole pickle load used"),
+            ),
+            patch.object(
+                spool_module.zlib,
+                "decompress",
+                side_effect=AssertionError("whole decompression buffer used"),
+            ),
+        ):
+            with KeyedObjectSpool(self.parent) as spool:
+                spool.append("candidate", payload)
+                with spool.load("candidate") as objects:
+                    self.assertEqual(tuple(objects), (payload,))
+
+    def test_failed_streaming_append_rolls_back_bytes_and_inventory(self):
+        original_write = spool_module._CompressedPickleWriter.write
+        with KeyedObjectSpool(self.parent) as spool:
+            first = RichPayload("first", tuple(range(1_000)))
+            spool.append("candidate", first)
+            path = next(spool.directory.iterdir())
+            original_bytes = path.read_bytes()
+
+            def write_then_fail(writer, payload):
+                original_write(writer, payload)
+                raise IntendedFailure("streaming append failed")
+
+            with patch.object(
+                spool_module._CompressedPickleWriter,
+                "write",
+                autospec=True,
+                side_effect=write_then_fail,
+            ):
+                with self.assertRaisesRegex(
+                    IntendedFailure,
+                    "streaming append failed",
+                ):
+                    spool.append(
+                        "candidate",
+                        RichPayload("failed", tuple(range(10_000))),
+                    )
+
+            self.assertEqual(spool.count("candidate"), 1)
+            self.assertEqual(path.read_bytes(), original_bytes)
+            with spool.load("candidate") as objects:
+                self.assertEqual(tuple(objects), (first,))
 
     def test_only_one_key_can_be_loaded_at_a_time(self):
         with KeyedObjectSpool(self.parent) as spool:

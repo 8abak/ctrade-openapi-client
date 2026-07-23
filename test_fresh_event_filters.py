@@ -12,6 +12,7 @@ from datavis.research.fresh_entry_diagnostics import FrozenSignalEvent
 from datavis.research.fresh_event_filters import (
     FRESH_REGIME_QUINTILE_RANKS,
     EventFilterVariantSource,
+    FreshEventFilterBatchEvaluator,
     FreshEventFilterConfig,
     FreshEventFilterRequest,
     FreshRegimeDefinition,
@@ -239,6 +240,60 @@ class FreshEventFilterTests(unittest.TestCase):
             [[event.tick_id for event in item.events] for item in actual],
             [[101, 102, 103, 104], [102, 103, 104], [101, 104]],
         )
+
+    def test_prepared_evaluator_streams_scalar_equivalent_requests_causally(self):
+        frame = feature_frame()
+        events = events_for(frame)
+        bank = training_bank()
+        requests = (
+            FreshEventFilterRequest(events=events[:1], config=config()),
+            FreshEventFilterRequest(
+                events=events[:1],
+                config=config(
+                    variant_id="spread",
+                    spread_rank=0.8,
+                ),
+            ),
+        )
+        expected = enrich_and_filter_frozen_event_batch(
+            frame,
+            requests,
+            quantile_bank=bank,
+        )
+        malformed_future = frame.copy()
+        for column in ("2s_noise", "spread", "10s_mid_speed", "1s_arrival_rate"):
+            malformed_future.loc[1:, column] = float("inf")
+
+        with patch.object(
+            event_filter_module,
+            "_prepare_rows",
+            wraps=event_filter_module._prepare_rows,
+        ) as prepare_rows:
+            evaluator = FreshEventFilterBatchEvaluator(
+                malformed_future,
+                regime_definition=DEFINITION,
+                row_limit=1,
+            )
+            actual = tuple(
+                evaluator.enrich_and_filter(
+                    (request,),
+                    quantile_bank=bank,
+                )[0]
+                for request in requests
+            )
+
+        self.assertEqual(actual, expected)
+        self.assertEqual(prepare_rows.call_count, 1)
+        with self.assertRaisesRegex(ValueError, "outside the feature frame"):
+            evaluator.enrich_and_filter(
+                (
+                    FreshEventFilterRequest(
+                        events=events[1:2],
+                        config=config(),
+                    ),
+                ),
+                quantile_bank=bank,
+            )
 
     def test_batch_outputs_do_not_alias_metadata_between_requests(self):
         frame = feature_frame()

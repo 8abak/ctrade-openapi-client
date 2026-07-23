@@ -10,6 +10,8 @@ from datavis.research.fresh_entry_diagnostics import (
     EntrySchedulingConfig,
     FrozenSignalEvent,
     evaluate_frozen_entries,
+    evaluate_prepared_frozen_entries,
+    prepare_entry_diagnostic_tape,
 )
 from datavis.research.ticks import Tick
 
@@ -56,6 +58,40 @@ def settings(**overrides) -> EntryDiagnosticConfig:
 
 
 class FreshEntryDiagnosticTests(unittest.TestCase):
+    def assert_prepared_matches_scalar(
+        self,
+        points,
+        events,
+        *,
+        config,
+        boundary=None,
+        scheduling=None,
+        trusted=False,
+    ):
+        oracle = evaluate_frozen_entries(
+            points,
+            events,
+            config=config,
+            boundary=boundary,
+            scheduling=scheduling,
+            _trusted_validated_ticks=trusted,
+        )
+        prepared = prepare_entry_diagnostic_tape(
+            points,
+            _trusted_validated_ticks=trusted,
+        )
+        accelerated = evaluate_prepared_frozen_entries(
+            prepared,
+            events,
+            config=config,
+            boundary=boundary,
+            scheduling=scheduling,
+        )
+        # Every nested frozen dataclass and mapping must compare equal, not just
+        # aggregate counts or selected P&L fields.
+        self.assertEqual(accelerated, oracle)
+        return prepared, accelerated
+
     def test_long_uses_ask_entry_bid_value_and_all_explicit_costs(self):
         points = [
             quote(0, 0, 100.0, 100.2),
@@ -467,6 +503,251 @@ class FreshEntryDiagnosticTests(unittest.TestCase):
                 (),
                 config=settings(),
                 _trusted_validated_ticks=True,
+            )
+
+    def test_prepared_matches_scalar_across_latency_lag_gap_and_scheduling(self):
+        points = (
+            quote(0, 0, 100.0, 100.2),
+            quote(1, 0, 100.0, 100.2),
+            quote(2, 50, 100.1, 100.3),
+            quote(3, 70, 100.6, 100.8),
+            quote(4, 500, 99.4, 99.6),
+            quote(5, 2_000, 100.8, 101.0),
+            quote(6, 2_050, 101.1, 101.3),
+            quote(7, 3_000, 101.2, 101.4),
+        )
+        cases = (
+            (
+                "equal-timestamp-fill",
+                (event(points, 0, "long", case="equal"),),
+                settings(diagnostic_horizon_ms=500),
+                EntrySchedulingConfig(),
+            ),
+            (
+                "exact-ready-and-lag",
+                (event(points, 1, "long"), event(points, 2, "short")),
+                settings(
+                    entry_latency_ms=50,
+                    maximum_entry_lag_ms=0,
+                    diagnostic_horizon_ms=400,
+                ),
+                EntrySchedulingConfig(),
+            ),
+            (
+                "lag-expiry-precedes-fill",
+                (event(points, 2, "long"),),
+                settings(
+                    entry_latency_ms=1,
+                    maximum_entry_lag_ms=5,
+                    diagnostic_horizon_ms=400,
+                ),
+                EntrySchedulingConfig(),
+            ),
+            (
+                "gap-precedes-fill",
+                (event(points, 4, "short"),),
+                settings(
+                    maximum_intertick_gap_ms=1_000,
+                    diagnostic_horizon_ms=500,
+                ),
+                EntrySchedulingConfig(),
+            ),
+            (
+                "non-overlap-and-cooldown",
+                (
+                    event(points, 0, "long"),
+                    event(points, 1, "short"),
+                    event(points, 3, "long"),
+                    event(points, 4, "short"),
+                    event(points, 5, "long"),
+                ),
+                settings(
+                    maximum_intertick_gap_ms=5_000,
+                    diagnostic_horizon_ms=400,
+                ),
+                EntrySchedulingConfig(mode="non_overlapping", cooldown_ms=100),
+            ),
+        )
+        for name, events, config, scheduling in cases:
+            with self.subTest(name=name):
+                prepared, result = self.assert_prepared_matches_scalar(
+                    points,
+                    events,
+                    config=config,
+                    scheduling=scheduling,
+                    trusted=True,
+                )
+                self.assertIs(prepared.ticks, points)
+                self.assertEqual(prepared.tick_count, len(points))
+                self.assertEqual(result.event_count, len(events))
+
+    def test_prepared_matches_scalar_at_boundaries_and_strict_sixty_seconds(self):
+        points = (
+            quote(0, 0, 100.0, 100.2),
+            quote(1, 1, 100.0, 100.2),
+            quote(2, 59_999, 100.5, 100.7),
+            quote(3, 60_001, 101.0, 101.2),
+            quote(4, 60_002, 101.1, 101.3),
+        )
+        config = settings(
+            maximum_intertick_gap_ms=60_000,
+            diagnostic_horizon_ms=60_000,
+            entry_slippage_per_unit=0.0,
+            exit_slippage_per_unit=0.0,
+            entry_commission_per_unit=0.01,
+            exit_commission_per_unit=0.01,
+            profit_barrier_net_per_unit=0.25,
+            loss_barrier_net_per_unit=0.15,
+        )
+        _, strict = self.assert_prepared_matches_scalar(
+            points,
+            (event(points, 0, "long"),),
+            config=config,
+        )
+        diagnostic = strict.diagnostics[0]
+        self.assertEqual(diagnostic.time_to_cost_coverage_ms, 59_998.0)
+        self.assertTrue(diagnostic.cost_covered_by_60s)
+        self.assertEqual(diagnostic.observed_quote_count, 2)
+        self.assertNotEqual(diagnostic.cost_coverage_tick_id, 4)
+
+        boundaries = (
+            DiagnosticBoundary(
+                start=BASE,
+                end=BASE + timedelta(milliseconds=30_000),
+                name="fold",
+                end_reason="fold_end",
+                input_complete_through_end=True,
+            ),
+            DiagnosticBoundary(
+                start=BASE + timedelta(milliseconds=1),
+                end=BASE + timedelta(milliseconds=60_002),
+                name="session",
+                end_reason="session_end",
+                input_complete_through_end=True,
+            ),
+            DiagnosticBoundary(
+                start=BASE,
+                end=BASE + timedelta(milliseconds=1),
+                name="fill-cutoff",
+                end_reason="boundary_end",
+                input_complete_through_end=True,
+            ),
+        )
+        for boundary in boundaries:
+            with self.subTest(boundary=boundary.name):
+                self.assert_prepared_matches_scalar(
+                    points,
+                    (event(points, 0, "long"), event(points, 1, "short")),
+                    config=config,
+                    boundary=boundary,
+                )
+
+    def test_prepared_preserves_duplicate_quote_rows_as_volume(self):
+        # These are four distinct rows with identical time and prices.  Their
+        # IDs define executable order; none may be deduplicated.
+        points = (
+            quote(0, 0, 100.0, 100.2),
+            quote(1, 0, 100.0, 100.2),
+            quote(2, 0, 100.0, 100.2),
+            quote(3, 0, 100.0, 100.2),
+            quote(4, 500, 100.5, 100.7),
+            quote(5, 1_000, 999.0, 999.2),
+        )
+        config = settings(
+            diagnostic_horizon_ms=1_000,
+            maximum_intertick_gap_ms=1_000,
+            profit_barrier_net_per_unit=0.1,
+            loss_barrier_net_per_unit=0.1,
+        )
+        _, result = self.assert_prepared_matches_scalar(
+            points,
+            (event(points, 0, "long", duplicate_volume=4),),
+            config=config,
+            trusted=True,
+        )
+        diagnostic = result.diagnostics[0]
+        self.assertEqual(diagnostic.fill_tick_id, 2)
+        self.assertEqual(diagnostic.observed_quote_count, 4)
+        self.assertEqual(diagnostic.cost_coverage_tick_id, 5)
+        self.assertEqual(diagnostic.first_barrier_hit, "loss")
+        self.assertEqual(diagnostic.first_barrier_hit_tick_id, 2)
+
+    def test_prepared_matches_scalar_for_bid_ask_coverage_and_barrier_order(self):
+        points = (
+            quote(0, 0, 100.0, 100.2),
+            quote(1, 10, 100.0, 100.2),
+            quote(2, 20, 99.4, 99.6),
+            quote(3, 30, 101.0, 101.2),
+            quote(4, 40, 100.1, 100.3),
+            quote(5, 50, 99.0, 99.2),
+            quote(6, 1_010, 200.0, 200.2),
+        )
+        config = settings(
+            diagnostic_horizon_ms=1_000,
+            entry_slippage_per_unit=0.03,
+            exit_slippage_per_unit=0.02,
+            entry_commission_per_unit=0.01,
+            exit_commission_per_unit=0.01,
+            profit_barrier_net_per_unit=0.5,
+            loss_barrier_net_per_unit=0.5,
+        )
+        _, result = self.assert_prepared_matches_scalar(
+            points,
+            (
+                event(points, 0, "long", direction="long"),
+                event(points, 3, "short", direction="short"),
+            ),
+            config=config,
+        )
+        self.assertEqual(result.diagnostics[0].first_barrier_hit, "loss")
+        self.assertEqual(result.diagnostics[1].first_barrier_hit, "profit")
+        self.assertTrue(
+            all(item.cost_coverage_timestamp is not None for item in result.diagnostics)
+        )
+
+    def test_prepared_factory_keeps_validation_and_is_reusable(self):
+        points = (
+            quote(0, 0, 100.0, 100.2),
+            quote(1, 100, 100.1, 100.3),
+            quote(2, 200, 100.4, 100.6),
+        )
+        prepared = prepare_entry_diagnostic_tape(points)
+        for config in (
+            settings(diagnostic_horizon_ms=100),
+            settings(
+                diagnostic_horizon_ms=200,
+                maximum_intertick_gap_ms=50,
+            ),
+        ):
+            self.assertEqual(
+                evaluate_prepared_frozen_entries(
+                    prepared,
+                    (event(points, 0, "long"),),
+                    config=config,
+                ),
+                evaluate_frozen_entries(
+                    points,
+                    (event(points, 0, "long"),),
+                    config=config,
+                ),
+            )
+
+        malformed = (
+            Tick(id=2, timestamp=BASE, bid=100.0, ask=100.2),
+            Tick(id=1, timestamp=BASE, bid=100.0, ask=100.2),
+        )
+        with self.assertRaisesRegex(ValueError, r"\(timestamp, id\)"):
+            prepare_entry_diagnostic_tape(malformed)
+        with self.assertRaisesRegex(TypeError, "validated tick tuple"):
+            prepare_entry_diagnostic_tape(
+                list(points),
+                _trusted_validated_ticks=True,
+            )
+        with self.assertRaisesRegex(TypeError, "PreparedEntryDiagnosticTape"):
+            evaluate_prepared_frozen_entries(
+                points,
+                (),
+                config=settings(),
             )
 
 

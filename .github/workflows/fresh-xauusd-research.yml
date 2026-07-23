@@ -31,7 +31,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           expected_ref="refs/heads/codex/xauusd-fresh-walkforward"
-          expected_marker="fresh-xauusd-run-2026-07-22-v16-run14-root-member-fix"
+          expected_marker="fresh-xauusd-run-2026-07-23-v17-v3-bounded-memory"
           if [[ "${FRESH_GITHUB_REF}" != "${expected_ref}" ]]; then
             printf 'refusing research run from unexpected ref: %s\n' \
               "${FRESH_GITHUB_REF}" >&2
@@ -43,24 +43,24 @@ jobs:
             exit 1
           fi
 
-      - name: Download the immutable run-14 recovery artifact
+      - name: Download the immutable terminal run-16 artifact
         uses: actions/download-artifact@v4
         with:
-          name: fresh-xauusd-29881509856-1
-          path: ${{ runner.temp }}/fresh-xauusd-run14
+          name: fresh-xauusd-29918347818-1
+          path: ${{ runner.temp }}/fresh-xauusd-run16
           github-token: ${{ github.token }}
-          run-id: 29881509856
+          run-id: 29918347818
 
-      - name: Verify the immutable run-14 archive
+      - name: Verify the immutable terminal run-16 archive
         shell: bash
         run: |
           set -Eeuo pipefail
-          archive="${RUNNER_TEMP}/fresh-xauusd-run14/fresh-xauusd-29881509856-1.tgz"
-          expected="f3755595fca5f7b9978531824913c241ff69815d6e2cb06ee9bcfd35c4938687"
+          archive="${RUNNER_TEMP}/fresh-xauusd-run16/fresh-xauusd-29918347818-1.tgz"
+          expected="59cca29ee5536b9c2dccb07c4c3c029f75e558bf8d468fff7a0f261338fdc830"
           [[ -f "${archive}" && ! -L "${archive}" ]]
           actual="$(sha256sum -- "${archive}" | awk '{print $1}')"
           if [[ "${actual}" != "${expected}" ]]; then
-            printf 'run-14 recovery archive digest changed\n' >&2
+            printf 'terminal run-16 archive digest changed\n' >&2
             exit 1
           fi
 
@@ -76,7 +76,7 @@ jobs:
           FRESH_SHA: ${{ github.sha }}
           FRESH_RUN_ID: ${{ github.run_id }}
           FRESH_RUN_ATTEMPT: ${{ github.run_attempt }}
-          RUN14_ARCHIVE: ${{ runner.temp }}/fresh-xauusd-run14/fresh-xauusd-29881509856-1.tgz
+          RUN16_ARCHIVE: ${{ runner.temp }}/fresh-xauusd-run16/fresh-xauusd-29918347818-1.tgz
         run: |
           set -uo pipefail
           umask 077
@@ -114,11 +114,11 @@ jobs:
               ;;
           esac
           archive_remote="${transfer_directory}/${archive_name}"
-          recovery_archive_remote="${transfer_directory}/run14-recovery.tgz"
+          restart_archive_remote="${transfer_directory}/run16-restart.tgz"
 
           if ! scp "${scp_options[@]}" \
-            "${RUN14_ARCHIVE}" \
-            "${EC2_USER}@${EC2_HOST}:${recovery_archive_remote}"; then
+            "${RUN16_ARCHIVE}" \
+            "${EC2_USER}@${EC2_HOST}:${restart_archive_remote}"; then
             rm -f "${key_path}"
             exit 1
           fi
@@ -130,7 +130,7 @@ jobs:
             "${FRESH_SHA}" \
             "${FRESH_RUN_ID}" \
             "${FRESH_RUN_ATTEMPT}" \
-            "${recovery_archive_remote}" \
+            "${restart_archive_remote}" \
             "${archive_remote}" <<'REMOTE'
           set -Eeuo pipefail
           umask 077
@@ -138,9 +138,9 @@ jobs:
           sha="$2"
           run_id="$3"
           attempt="$4"
-          recovery_archive="$5"
+          restart_archive="$5"
           archive="$6"
-          transfer_directory="$(dirname -- "${recovery_archive}")"
+          transfer_directory="$(dirname -- "${restart_archive}")"
           production_repo="/home/ec2-user/cTrade"
 
           if [[ "$(dirname -- "${archive}")" != "${transfer_directory}" ||
@@ -164,7 +164,7 @@ jobs:
             [[ -d "${candidate}" ]] || return 0
             resolved="$(readlink -f -- "${candidate}")"
             case "${resolved}" in
-              /tmp/fresh-xauusd-worktree.*|/tmp/fresh-xauusd-output.*|/tmp/fresh-xauusd-recovery.*|/tmp/fresh-xauusd-transfer.*)
+              /tmp/fresh-xauusd-worktree.*|/tmp/fresh-xauusd-output.*|/tmp/fresh-xauusd-restart.*|/tmp/fresh-xauusd-transfer.*)
                 rm -rf -- "${resolved}"
                 ;;
               *)
@@ -206,13 +206,13 @@ jobs:
           for stale_directory in \
             /tmp/fresh-xauusd-worktree.* \
             /tmp/fresh-xauusd-output.* \
-            /tmp/fresh-xauusd-recovery.*; do
+            /tmp/fresh-xauusd-restart.*; do
             remove_scoped_directory "${stale_directory}"
           done
           for stale_file in \
             /tmp/fresh-xauusd-run.*.log \
             /tmp/fresh-xauusd-*.tgz; do
-            if [[ "${stale_file}" == "${recovery_archive}" ]]; then
+            if [[ "${stale_file}" == "${restart_archive}" ]]; then
               continue
             fi
             remove_scoped_file "${stale_file}"
@@ -222,10 +222,10 @@ jobs:
           worktree="$(mktemp -d /tmp/fresh-xauusd-worktree.XXXXXX)"
           output="$(mktemp -d /tmp/fresh-xauusd-output.XXXXXX)"
           log_path="$(mktemp /tmp/fresh-xauusd-run.XXXXXX.log)"
-          recovery_directory="$(mktemp -d /tmp/fresh-xauusd-recovery.XXXXXX)"
+          restart_directory="$(mktemp -d /tmp/fresh-xauusd-restart.XXXXXX)"
           durable_state_root="/home/ec2-user/.local/state/datavis/fresh-xauusd-research-v2"
 
-          python3 - "${recovery_archive}" "${recovery_directory}" <<'PY'
+          python3 - "${restart_archive}" "${restart_directory}" <<'PY'
           import hashlib
           import os
           import pathlib
@@ -234,13 +234,13 @@ jobs:
 
           archive = pathlib.Path(sys.argv[1]).resolve()
           destination = pathlib.Path(sys.argv[2]).resolve()
-          expected_archive = "f3755595fca5f7b9978531824913c241ff69815d6e2cb06ee9bcfd35c4938687"
+          expected_archive = "59cca29ee5536b9c2dccb07c4c3c029f75e558bf8d468fff7a0f261338fdc830"
           digest = hashlib.sha256()
           with archive.open("rb") as handle:
               for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                   digest.update(chunk)
           if digest.hexdigest() != expected_archive:
-              raise SystemExit("remote run-14 archive digest changed")
+              raise SystemExit("remote terminal run-16 archive digest changed")
           allowed = {
               "fresh_corpus_manifest_v1.json",
               "fresh_entry_bank_v1.json",
@@ -248,11 +248,15 @@ jobs:
               "fresh_implementation_manifest_v1.json",
               "fresh_preregistration_v2.json",
               "fresh_quantile_bank_v1.json",
+              "fresh_recovery_contract_v1.json",
+              "fresh_recovery_implementation_manifest_v1.json",
               "fresh_research_state_binding_v1.json",
               "fresh_source_inventory_v1.json",
               "fresh_split_manifest_v2.json",
               "fresh_threshold_domain_preflight_v1.json",
               "remote-exit-status.txt",
+              "run14_remote-exit-status.txt",
+              "run14_server-run.log",
               "server-run.log",
           }
           with tarfile.open(archive, "r:gz") as bundle:
@@ -262,7 +266,7 @@ jobs:
               for member in members:
                   if member.name == ".":
                       if root_directory_seen or not member.isdir():
-                          raise SystemExit("unsafe run-14 archive root member")
+                          raise SystemExit("unsafe run-16 archive root member")
                       root_directory_seen = True
                       continue
                   name = member.name[2:] if member.name.startswith("./") else member.name
@@ -272,17 +276,17 @@ jobs:
                       or not member.isfile()
                       or name != pathlib.PurePosixPath(name).name
                   ):
-                      raise SystemExit("unsafe run-14 archive member")
+                      raise SystemExit("unsafe run-16 archive member")
                   normalized.append((name, member))
               names = [name for name, _ in normalized]
               if not root_directory_seen:
-                  raise SystemExit("run-14 archive root member changed")
+                  raise SystemExit("run-16 archive root member changed")
               if set(names) != allowed or len(names) != len(allowed):
-                  raise SystemExit("run-14 archive member set changed")
+                  raise SystemExit("run-16 archive member set changed")
               for name, member in normalized:
                   source = bundle.extractfile(member)
                   if source is None:
-                      raise SystemExit("run-14 archive member is unreadable")
+                      raise SystemExit("run-16 archive member is unreadable")
                   target = destination / name
                   descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                   with os.fdopen(descriptor, "wb") as output:
@@ -382,7 +386,7 @@ jobs:
           }
 
           snapshot_durable_research_state() {
-            binding_path="${output}/fresh_research_state_binding_v1.json"
+            binding_path="${output}/fresh_research_state_binding_v2.json"
             if [[ -L "${binding_path}" ]]; then
               printf 'refusing symlink research state binding: %s\n' \
                 "${binding_path}" >&2
@@ -410,17 +414,6 @@ jobs:
             status="$?"
             trap - EXIT
             set +e
-            binding_path="${output}/fresh_research_state_binding_v1.json"
-            if [[ "${status}" -ne 0 && -x "${research_python:-}" && -f "${binding_path}" ]]; then
-              ledger_source="$(
-                binding_value "${binding_path}" experimentLedgerPath
-              )"
-              if [[ -n "${ledger_source}" ]]; then
-                "${research_python}" -m datavis.research.fresh_recovery \
-                  --finalize-interrupted-ledger "${ledger_source}" \
-                  --exit-status "${status}" || status=1
-              fi
-            fi
             if [[ -f "${log_path}" ]]; then
               cp "${log_path}" "${output}/server-run.log"
             fi
@@ -485,7 +478,7 @@ jobs:
               "${worktree}" || remove_scoped_directory "${worktree}"
             git -C "${production_repo}" worktree prune
             remove_scoped_directory "${output}"
-            remove_scoped_directory "${recovery_directory}"
+            remove_scoped_directory "${restart_directory}"
             remove_scoped_file "${log_path}"
             exit "${status}"
           }
@@ -521,7 +514,7 @@ jobs:
             --repository-root "${worktree}" \
             --output-dir "${output}" \
             --research-state-dir "${durable_state_root}" \
-            --resume-artifact-dir "${recovery_directory}" \
+            --restart-artifact-dir "${restart_directory}" \
             --execute 2>&1 | tee "${log_path}"
           research_status="${PIPESTATUS[0]}"
           set -e

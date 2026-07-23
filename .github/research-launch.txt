@@ -1,1 +1,1 @@
-fresh-xauusd-run-2026-07-22-v16-run14-root-member-fix
+fresh-xauusd-run-2026-07-23-v17-v3-bounded-memory

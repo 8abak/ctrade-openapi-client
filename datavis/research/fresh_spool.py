@@ -10,6 +10,7 @@ identifier can never become a path.
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 import pickle
 import secrets
@@ -35,6 +36,104 @@ T = TypeVar("T")
 
 SPOOL_DIRECTORY_PREFIX = ".fresh-entry-spool-"
 _RECORD_LENGTH = struct.Struct(">Q")
+_STREAM_CHUNK_BYTES = 64 * 1024
+
+
+def _write_all(destination, payload: bytes) -> None:
+    view = memoryview(payload)
+    offset = 0
+    while offset < len(view):
+        written = destination.write(view[offset:])
+        if not isinstance(written, int) or written <= 0:
+            raise OSError("short write while streaming an object spool record")
+        offset += written
+
+
+class _CompressedPickleWriter:
+    """Pickler sink that writes one zlib stream without whole-object buffers."""
+
+    __slots__ = ("_compressor", "_destination", "_finished", "compressed_bytes")
+
+    def __init__(self, destination) -> None:
+        self._compressor = zlib.compressobj(level=1)
+        self._destination = destination
+        self._finished = False
+        self.compressed_bytes = 0
+
+    def write(self, payload: bytes) -> int:
+        if self._finished:
+            raise ValueError("compressed pickle writer is already finished")
+        compressed = self._compressor.compress(payload)
+        if compressed:
+            _write_all(self._destination, compressed)
+            self.compressed_bytes += len(compressed)
+        return len(payload)
+
+    def finish(self) -> int:
+        if self._finished:
+            raise ValueError("compressed pickle writer is already finished")
+        compressed = self._compressor.flush()
+        if compressed:
+            _write_all(self._destination, compressed)
+            self.compressed_bytes += len(compressed)
+        self._finished = True
+        return self.compressed_bytes
+
+
+class _BoundedZlibReader(io.RawIOBase):
+    """Expose exactly one length-framed zlib record as a streaming reader."""
+
+    def __init__(self, source, compressed_bytes: int) -> None:
+        super().__init__()
+        self._source = source
+        self._remaining = compressed_bytes
+        self._decompressor = zlib.decompressobj()
+        self._unconsumed = b""
+        self._finished = False
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, target) -> int:
+        if self._finished:
+            return 0
+        view = memoryview(target).cast("B")
+        if not view:
+            return 0
+
+        while True:
+            if self._unconsumed:
+                compressed = self._unconsumed
+                self._unconsumed = b""
+            elif self._remaining:
+                requested = min(_STREAM_CHUNK_BYTES, self._remaining)
+                compressed = self._source.read(requested)
+                if len(compressed) != requested:
+                    raise EOFError("compressed object spool record ended early")
+                self._remaining -= requested
+            else:
+                if not self._decompressor.eof:
+                    raise zlib.error("incomplete compressed object spool record")
+                self._finished = True
+                return 0
+
+            output = self._decompressor.decompress(
+                compressed,
+                max_length=len(view),
+            )
+            self._unconsumed = self._decompressor.unconsumed_tail
+            if self._decompressor.unused_data:
+                raise zlib.error("compressed object spool record has trailing bytes")
+            if output:
+                view[: len(output)] = output
+                return len(output)
+            if self._decompressor.eof:
+                if self._unconsumed or self._remaining:
+                    raise zlib.error(
+                        "compressed object spool record has trailing bytes"
+                    )
+                self._finished = True
+                return 0
 
 
 class SpoolStateError(RuntimeError):
@@ -141,17 +240,29 @@ class KeyedObjectSpool(Generic[T]):
         if key not in self._filenames:
             self.register_key(key)
 
-        # Serialise before opening the stream.  The byte payload, and therefore
-        # every reference held by Pickler, becomes unreachable when this call
-        # returns; the spool stores only the key metadata below.
-        serialized = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
-        payload = zlib.compress(serialized, level=1)
-        record = _RECORD_LENGTH.pack(len(payload)) + payload
         path = self.directory / self._filenames[key]
-        with path.open("ab") as destination:
-            written = destination.write(record)
-        if written != len(record):
-            raise OSError("short write while appending to object spool")
+        with path.open("r+b") as destination:
+            destination.seek(0, os.SEEK_END)
+            record_start = destination.tell()
+            try:
+                _write_all(destination, _RECORD_LENGTH.pack(0))
+                writer = _CompressedPickleWriter(destination)
+                pickle.Pickler(
+                    writer,
+                    protocol=pickle.HIGHEST_PROTOCOL,
+                ).dump(value)
+                compressed_bytes = writer.finish()
+                record_end = destination.tell()
+                destination.seek(record_start)
+                _write_all(
+                    destination,
+                    _RECORD_LENGTH.pack(compressed_bytes),
+                )
+                destination.seek(record_end)
+            except BaseException:
+                destination.seek(record_start)
+                destination.truncate()
+                raise
         self._object_counts[key] += 1
 
     @contextmanager
@@ -228,14 +339,23 @@ class KeyedObjectSpool(Generic[T]):
                         f"key {key!r} ended before object {ordinal + 1}"
                     )
                 size = _RECORD_LENGTH.unpack(header)[0]
-                compressed = source.read(size)
-                if len(compressed) != size:
-                    raise SpoolCorruptionError(
-                        f"key {key!r} ended inside object {ordinal + 1}"
-                    )
                 try:
-                    value = pickle.loads(zlib.decompress(compressed))
-                except (pickle.PickleError, zlib.error) as error:
+                    raw = _BoundedZlibReader(source, size)
+                    with io.BufferedReader(
+                        raw,
+                        buffer_size=_STREAM_CHUNK_BYTES,
+                    ) as buffered:
+                        unpickler = pickle.Unpickler(buffered)
+                        value = unpickler.load()
+                        try:
+                            unpickler.load()
+                        except EOFError:
+                            pass
+                        else:
+                            raise pickle.UnpicklingError(
+                                "record contains more than one pickle"
+                            )
+                except (EOFError, pickle.PickleError, zlib.error) as error:
                     raise SpoolCorruptionError(
                         f"key {key!r} object {ordinal + 1} is corrupt"
                     ) from error

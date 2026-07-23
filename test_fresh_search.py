@@ -377,6 +377,214 @@ class FreshSearchTests(unittest.TestCase):
         engine.run_walk_forward_3()
         engine.run_validation()
 
+    def test_frozen_discovery_imports_only_definitions_into_a_new_ledger(self):
+        harness = _Harness()
+        threshold_bank = {
+            "velocity": {"q80": 1.25},
+            "source": "immutable-predecessor-definition",
+        }
+        expected_threshold_sha256 = canonical_hash(threshold_bank)
+        specs = _entry_specs()
+        batch_calls: list[tuple[str, ...]] = []
+
+        def score_new_study_batch(candidates, context):
+            self.assertEqual(context.stage, "discovery")
+            self.assertEqual(context.training_roles, ("discovery",))
+            self.assertEqual(context.evaluation_roles, ("discovery",))
+            batch_calls.append(
+                tuple(candidate.candidate_id for candidate in candidates)
+            )
+            return {
+                candidate.candidate_id: CandidateEvaluation(
+                    identity_sha256=candidate.entry_sha256,
+                    passed=True,
+                    metrics={
+                        "generation": "new-study-evaluation",
+                        "entryEdge": (
+                            2.0 if candidate.candidate_id == "entry-b" else 1.0
+                        ),
+                    },
+                    leakage_checks={"priorOutcomesImported": False},
+                    score=(
+                        2.0 if candidate.candidate_id == "entry-b" else 1.0
+                    ),
+                )
+                for candidate in candidates
+            }
+
+        callbacks = replace(
+            harness.callbacks(),
+            generate_signals=lambda *_: (_ for _ in ()).throw(
+                AssertionError("frozen discovery must use the registered batch")
+            ),
+            score_entries_batch=score_new_study_batch,
+        )
+        engine = FreshChronologicalSearch(
+            split_manifest=_split_manifest(),
+            ledger_path=self.ledger,
+            budgets=BUDGETS,
+            callbacks=callbacks,
+            preregistration_sha256="b" * 64,
+        )
+
+        result = engine.run_frozen_discovery(
+            threshold_bank=threshold_bank,
+            entry_specs=specs,
+        )
+
+        self.assertEqual(harness.threshold_calls, 0)
+        self.assertEqual(harness.builder_calls, 0)
+        self.assertEqual(batch_calls, [("entry-a", "entry-b")])
+        self.assertEqual(result.evaluated_ids, ("entry-a", "entry-b"))
+        self.assertEqual(result.promoted_ids, ("entry-b", "entry-a"))
+        self.assertEqual(result.ledger_record_numbers, (1, 2, 3, 4, 5))
+        self.assertEqual(engine.consumed_roles, ("discovery",))
+        self.assertEqual(
+            tuple(candidate.candidate_id for candidate in engine.entry_candidates),
+            ("entry-b", "entry-a"),
+        )
+        self.assertTrue(
+            all(
+                candidate.threshold_bank_sha256 == expected_threshold_sha256
+                for candidate in engine.entry_candidates
+            )
+        )
+
+        # The imported definitions are detached before any later caller mutation.
+        threshold_bank["velocity"]["q80"] = 99.0
+        specs[0].config["velocityQuantile"] = 0.1
+        frozen_a = next(
+            candidate
+            for candidate in engine.entry_candidates
+            if candidate.candidate_id == "entry-a"
+        )
+        self.assertEqual(frozen_a.config, {"velocityQuantile": 0.8})
+        self.assertEqual(
+            frozen_a.threshold_bank_sha256,
+            expected_threshold_sha256,
+        )
+
+        records = [
+            json.loads(line) for line in self.ledger.read_text().splitlines()
+        ]
+        self.assertEqual(
+            [record.get("recordKind", "candidate-evaluation") for record in records],
+            [
+                "stage-window-access",
+                "batch-window-access",
+                "batch-window-access",
+                "candidate-evaluation",
+                "candidate-evaluation",
+            ],
+        )
+        self.assertEqual(
+            [record["status"] for record in records],
+            [
+                "window_access_started",
+                "batch_access_started",
+                "batch_access_completed",
+                "passed",
+                "passed",
+            ],
+        )
+        self.assertEqual(
+            records[1]["parameters"]["candidateIds"],
+            ["entry-a", "entry-b"],
+        )
+        self.assertEqual(
+            records[1]["parameters"]["candidateSha256"],
+            [records[3]["identitySha256"], records[4]["identitySha256"]],
+        )
+        self.assertEqual(
+            [record["candidateId"] for record in records[3:]],
+            ["entry-a", "entry-b"],
+        )
+        self.assertTrue(
+            all(
+                record["metrics"]["generation"] == "new-study-evaluation"
+                and record["leakageChecks"]["priorOutcomesImported"] is False
+                for record in records[3:]
+            )
+        )
+        self.assertFalse(
+            any(
+                record.get("recordKind") == "infrastructure-resume"
+                for record in records
+            )
+        )
+
+        # A completed predecessor ledger cannot be reused as a "new" study.
+        with self.assertRaisesRegex(
+            ValueError,
+            "fresh search requires an empty experiment ledger",
+        ):
+            FreshChronologicalSearch(
+                split_manifest=_split_manifest(),
+                ledger_path=self.ledger,
+                budgets=BUDGETS,
+                callbacks=callbacks,
+                preregistration_sha256="b" * 64,
+            )
+
+    def test_frozen_discovery_enforces_distinct_and_per_family_budgets(self):
+        third_spec = EntryCandidateSpec(
+            candidate_id="entry-c",
+            family="trend-acceleration",
+            config={"velocityQuantile": 0.95},
+            entry_variant="onset-c",
+        )
+        threshold_bank = {"velocity": {"q80": 1.25}}
+
+        for name, budgets, expected_message in (
+            (
+                "distinct",
+                BUDGETS,
+                "discovery candidate budget exceeded",
+            ),
+            (
+                "per-family",
+                replace(
+                    BUDGETS,
+                    discovery_distinct_candidates=3,
+                    discovery_per_family_maximum=2,
+                ),
+                "discovery per-family candidate budget exceeded",
+            ),
+        ):
+            with self.subTest(name=name):
+                harness = _Harness()
+                batch_calls: list[tuple[str, ...]] = []
+
+                def unexpected_batch(candidates, context):
+                    batch_calls.append(
+                        tuple(candidate.candidate_id for candidate in candidates)
+                    )
+                    return _successful_entry_batch(candidates, context)
+
+                ledger = self.managed_path(f"{name}-frozen-ledger.jsonl")
+                engine = FreshChronologicalSearch(
+                    split_manifest=_split_manifest(),
+                    ledger_path=ledger,
+                    budgets=budgets,
+                    callbacks=replace(
+                        harness.callbacks(),
+                        score_entries_batch=unexpected_batch,
+                    ),
+                )
+                with self.assertRaisesRegex(ValueError, expected_message):
+                    engine.run_frozen_discovery(
+                        threshold_bank=threshold_bank,
+                        entry_specs=(*_entry_specs(), third_spec),
+                    )
+                self.assertEqual(batch_calls, [])
+                self.assertEqual(engine.stage, FreshSearchStage.FAILED)
+                records = [
+                    json.loads(line) for line in ledger.read_text().splitlines()
+                ]
+                self.assertEqual(len(records), 1)
+                self.assertEqual(records[0]["recordKind"], "stage-window-access")
+                self.assertEqual(records[0]["status"], "window_access_started")
+
     def test_complete_path_is_chronological_frozen_and_audited(self):
         engine, harness = self.engine()
         discovery = engine.run_discovery()

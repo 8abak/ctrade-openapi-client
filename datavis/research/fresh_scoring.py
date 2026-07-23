@@ -1782,10 +1782,10 @@ def scoring_config_from_preregistration(
     # scoring module.  Validation also verifies the document's source bindings
     # and canonical hash before any threshold is trusted.
     from datavis.research.fresh_preregistration import (  # noqa: PLC0415
-        validate_fresh_preregistration_v2,
+        validate_fresh_preregistration,
     )
 
-    validate_fresh_preregistration_v2(
+    validate_fresh_preregistration(
         preregistration,
         verify_current_implementation_files=verify_current_implementation_files,
     )
