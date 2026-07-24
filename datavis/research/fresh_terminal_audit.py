@@ -355,15 +355,22 @@ FROZEN_V5_IMPLEMENTATION_FILE_SHA256 = {
 }
 FROZEN_LOCAL_RUNTIME_CLOSURE_SHA256 = {
     **FROZEN_V5_IMPLEMENTATION_FILE_SHA256,
+    # The immutable implementation manifest was authored from a Windows
+    # checkout. The detached production worktree was created by Git on Linux;
+    # these two text blobs therefore differ only by CRLF-to-LF checkout
+    # normalization. Pin the bytes that the remote Python process executed.
+    "datavis/db.py": (
+        "7f3c8dc45ceed968ec4c935752ba85b3b172fb538fb1ff63de4baa1fcec48999"
+    ),
     "datavis/__init__.py": (
-        "702648ad2cbc9a47b8e91b801c90855066e2a94de52fdaecb057bb8e02fc2e07"
+        "9bbe2d85ef0b6c651f607da9b43eda0c7ab9e9bb2e2383badc67e3cc154faf6f"
     ),
     "datavis/research/fresh_recovery.py": (
         "7e84e485157f671bf5df1b2514a3a98ce0b3242440756078a6d7a295863d757c"
     ),
 }
 FROZEN_LOCAL_RUNTIME_CLOSURE_MANIFEST_SHA256 = (
-    "86511918f8aad8eace17695c82223aa6264b36a9ad08eadf9fa419500a32ce88"
+    "495bac1575f17f11c54be8c184f40434b0de4c9cf46025e6fd3dd2072b95f017"
 )
 
 
