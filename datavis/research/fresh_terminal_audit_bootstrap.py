@@ -46,7 +46,7 @@ SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 # completed independent review.  A CLI override would let the file attest
 # itself and is deliberately not supported.
 FROZEN_AUDITOR_SHA256: str | None = (
-    "502be931a532fb0a22ba05d8251dd2553775f2f44dd565450836f8c26ed2344e"
+    "ec9c3791fd7da33a495623021463f39dc332150c5880d2742a3fc18847e7ad00"
 )
 
 FROZEN_RUNTIME_CLOSURE_SHA256 = {
@@ -57,10 +57,10 @@ FROZEN_RUNTIME_CLOSURE_SHA256 = {
         "592b06c6fafc7272ae1ea5fbcd348924d316a8591caa85ea59b3a91f206b5a59"
     ),
     "datavis/__init__.py": (
-        "702648ad2cbc9a47b8e91b801c90855066e2a94de52fdaecb057bb8e02fc2e07"
+        "9bbe2d85ef0b6c651f607da9b43eda0c7ab9e9bb2e2383badc67e3cc154faf6f"
     ),
     "datavis/db.py": (
-        "e26524b82902441a2750311ad5ac5e6c31cb1e6140f2e9770470b058eebc3330"
+        "7f3c8dc45ceed968ec4c935752ba85b3b172fb538fb1ff63de4baa1fcec48999"
     ),
     "datavis/research/__init__.py": (
         "0f729be715d82bf228511059f74fe074cbddab93f8e5d7794d2671a57b0c5fe3"
@@ -154,7 +154,7 @@ FROZEN_RUNTIME_CLOSURE_SHA256 = {
     ),
 }
 FROZEN_RUNTIME_CLOSURE_MANIFEST_SHA256 = (
-    "86511918f8aad8eace17695c82223aa6264b36a9ad08eadf9fa419500a32ce88"
+    "495bac1575f17f11c54be8c184f40434b0de4c9cf46025e6fd3dd2072b95f017"
 )
 
 CANONICAL_PYTHON_IMPLEMENTATION = "cpython"
