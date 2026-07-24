@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import random
 import unittest
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+from datavis.research.fresh_numeric_spool import FloatSeriesSpool
 from datavis.research.fresh_preregistration import (
     FRESH_V2_WINDOW_POLICY,
     build_fresh_implementation_manifest,
@@ -17,6 +19,7 @@ from datavis.research.fresh_scoring import (
     BalancedScoreSpecification,
     CandidateRankRecord,
     ChronologicalGateItem,
+    EntryDiagnosticSessionScorer,
     EntryMetricConfig,
     EntryPromotionThresholds,
     FullStrategyThresholds,
@@ -293,6 +296,91 @@ class EntryMetricTests(unittest.TestCase):
                 dimensions=DIMENSIONS,
                 evaluated_sessions=("d1",),
             )
+
+    def test_streaming_session_scorer_is_exactly_materialized_equivalent(self):
+        rng = random.Random(20260725)
+        anchors = tuple(f"d{index}" for index in range(1, 9))
+        sessions = []
+        combined_diagnostics = []
+        combined_rejections = []
+        offset = 0
+        for session_index, anchor in enumerate(anchors):
+            local_diagnostics = []
+            local_rejections = []
+            event_count = 0 if session_index == 0 else rng.randrange(8, 32)
+            for position in range(event_count):
+                side = rng.choice(("long", "short"))
+                if rng.random() < 0.22:
+                    selected = rejection(
+                        position,
+                        anchor,
+                        side,
+                        reason=rng.choice(
+                            (
+                                "maximum_entry_lag_exceeded",
+                                "intertick_gap_before_fill",
+                            )
+                        ),
+                    )
+                    local_rejections.append(selected)
+                    combined_rejections.append(
+                        SimpleNamespace(
+                            **{
+                                **vars(selected),
+                                "event_position": offset + position,
+                            }
+                        )
+                    )
+                    continue
+                coverage_ms = rng.choice(
+                    (None, 0.0, 500.0, 1_000.0, 12_000.0, 59_999.0)
+                )
+                selected = diagnostic(
+                    position,
+                    anchor,
+                    side,
+                    coverage_ms=coverage_ms,
+                    barrier=rng.choice((None, "profit", "loss")),
+                    censored=rng.random() < 0.15,
+                    session=rng.choice(("tokyo", "london", "new_york")),
+                    regime=rng.choice(("slow", "fast", "wide")),
+                )
+                local_diagnostics.append(selected)
+                combined_diagnostics.append(
+                    SimpleNamespace(
+                        **{
+                            **vars(selected),
+                            "event_position": offset + position,
+                        }
+                    )
+                )
+            sessions.append(
+                diagnostic_result(local_diagnostics, local_rejections)
+            )
+            offset += event_count
+
+        expected = score_entry_diagnostics(
+            diagnostic_result(combined_diagnostics, combined_rejections),
+            config=entry_metric_config(),
+            dimensions=DIMENSIONS,
+            evaluated_sessions=anchors,
+        )
+        with FloatSeriesSpool(
+            Path(__file__).resolve().parent,
+            maximum_bytes=64 * 1024 * 1024,
+        ) as values:
+            scorer = EntryDiagnosticSessionScorer(
+                config=entry_metric_config(),
+                dimensions=DIMENSIONS,
+                evaluated_sessions=anchors,
+                values=values,
+                key_prefix="randomized",
+            )
+            for anchor, result in zip(anchors, sessions):
+                scorer.add_session(result, session_anchor=anchor)
+            actual = scorer.finish()
+
+        self.assertEqual(actual, expected)
 
 
 class TradeMetricTests(unittest.TestCase):
