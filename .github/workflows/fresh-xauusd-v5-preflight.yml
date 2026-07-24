@@ -37,13 +37,13 @@ jobs:
         run: |
           set -Eeuo pipefail
           expected_ref="refs/heads/codex/xauusd-fresh-walkforward"
-          expected_marker="fresh-xauusd-v5-lifecycle-preflight-2026-07-24-r6"
+          expected_marker="fresh-xauusd-v5-lifecycle-preflight-2026-07-24-r7"
           [[ "${FRESH_GITHUB_REF}" == "${expected_ref}" ]]
           [[ "$(git rev-parse HEAD)" == "${FRESH_GITHUB_SHA}" ]]
           cmp -s -- .github/research-v5-preflight.txt \
             <(printf '%s\n' "${expected_marker}")
           printf '%s  %s\n' \
-            "bd3d6cdfefefe8c36a96c69b8288f2f186c4127f932030427f235ea6da0d38fe" \
+            "bd08194866bc817555b7b25e9d30634c8d0912e4fff74f55e81be516e1a1fa0c" \
             "datavis/research/fresh_terminal_audit_bootstrap.py" |
             sha256sum --check --strict -
           bash -n -- .github/scripts/fresh-xauusd-v5-controller.sh
@@ -137,13 +137,13 @@ jobs:
           (
             cd "${frozen_root}"
             printf '%s  %s\n' \
-              "502be931a532fb0a22ba05d8251dd2553775f2f44dd565450836f8c26ed2344e" \
+              "ec9c3791fd7da33a495623021463f39dc332150c5880d2742a3fc18847e7ad00" \
               "datavis/research/fresh_terminal_audit.py" \
-              "bd3d6cdfefefe8c36a96c69b8288f2f186c4127f932030427f235ea6da0d38fe" \
+              "bd08194866bc817555b7b25e9d30634c8d0912e4fff74f55e81be516e1a1fa0c" \
               "datavis/research/fresh_terminal_audit_bootstrap.py" \
-              "41aa4186b260e0cbf1bddb98c1af81a37a90451b9a097b57a6eb124b166ffbd8" \
+              "dafaf04f16d3001f8053dea67655459551bd37671391363af5be59f13af15663" \
               "test_fresh_terminal_audit.py" \
-              "4ff54a89f799cf5b2f447245d94c850083d00afc0e29eca94bb52eb20d3e0605" \
+              "0583c0b9a914f2d810d775ecc45b0a0593fb96170dd342a0ab0d9a170da4784b" \
               "test_fresh_terminal_audit_bootstrap.py" |
               sha256sum --check --strict -
             python -m py_compile "${files[@]}"
