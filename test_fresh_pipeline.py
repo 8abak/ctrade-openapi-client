@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import random
 import shutil
 import unittest
 import uuid
@@ -18,12 +19,15 @@ from datavis.research.fresh_pipeline import (
     BASELINE_MINIMUM_UPLIFT,
     SESSION_CLOSE_SAFETY_MS,
     RegisteredFreshResearchPipeline,
+    _StreamingEntryEdgeReducer,
     _EntryRuntime,
+    _baseline_coverage_summary,
     _baseline_events,
     _bound_discovery_session_count,
     _cluster_entry_edge,
     _diagnose,
     _entry_barrier_value,
+    _entry_edge_summary,
     _parameter_neighbourhood_audit,
     _replay_session,
     _research_state_binding,
@@ -34,6 +38,10 @@ from datavis.research.fresh_pipeline import (
     _snapshot_new_file,
     _strongest_record,
     run_registered_fresh_research,
+)
+from datavis.research.fresh_numeric_spool import (
+    NUMERIC_SPOOL_DIRECTORY_PREFIX,
+    FloatSeriesSpool,
 )
 from datavis.research.fresh_entry_diagnostics import (
     EntryDiagnosticRejection,
@@ -312,6 +320,7 @@ class FreshPipelineTests(unittest.TestCase):
         pipeline.spool_directory = output
         pipeline.spool_maximum_bytes = 8 * 1024 * 1024
         pipeline.event_spool_maximum_bytes = 4 * 1024 * 1024
+        pipeline.numeric_spool_maximum_bytes = 8 * 1024 * 1024
         pipeline.quantile_bank = SimpleNamespace(bank_sha256="9" * 64)
         pipeline.regime_definition = FreshRegimeDefinition(
             volatility_column="volatility",
@@ -990,6 +999,85 @@ class FreshPipelineTests(unittest.TestCase):
         self.assertGreater(first["10"]["upliftInterval"][0], 0.0)
         self.assertGreater(first["30"]["upliftInterval"][0], 0.0)
 
+    def test_streaming_entry_edge_is_exactly_randomized_materialized_equivalent(
+        self,
+    ):
+        rng = random.Random(20260725)
+        candidate_results = []
+        baseline_results = []
+        timestamp = broker_session_bounds("2026-01-02").start_utc
+        tick_id = 1
+        for session_index in range(12):
+            candidate_diagnostics = []
+            baseline_diagnostics = []
+            candidate_count = 0 if session_index == 0 else rng.randrange(1, 25)
+            baseline_count = rng.randrange(2, 12)
+            for label, count, destination in (
+                ("candidate", candidate_count, candidate_diagnostics),
+                ("baseline", baseline_count, baseline_diagnostics),
+            ):
+                for position in range(count):
+                    event = FrozenSignalEvent(
+                        tick_index=position,
+                        tick_id=tick_id,
+                        timestamp=timestamp + timedelta(milliseconds=tick_id),
+                        side=rng.choice(("long", "short")),
+                        metadata={
+                            "candidate_id": label,
+                            "context": self._entry_context(
+                                f"2026-01-{session_index + 2:02d}"
+                            ),
+                        },
+                    )
+                    tick_id += 1
+                    destination.append(
+                        self._filled_diagnostic(
+                            position,
+                            event,
+                            rng.choice(("profit", "loss", "censored")),
+                        )
+                    )
+            candidate_results.append(
+                FreshEntryDiagnosticsResult(
+                    diagnostics=tuple(candidate_diagnostics),
+                    rejections=(),
+                    rejected_reason_counts={},
+                    event_count=len(candidate_diagnostics),
+                )
+            )
+            baseline_results.append(
+                FreshEntryDiagnosticsResult(
+                    diagnostics=tuple(baseline_diagnostics),
+                    rejections=(),
+                    rejected_reason_counts={},
+                    event_count=len(baseline_diagnostics),
+                )
+            )
+
+        seed_text = "randomized-exact-edge"
+        expected = _entry_edge_summary(
+            candidate_results,
+            baseline_results,
+            seed_text=seed_text,
+        )
+        with FloatSeriesSpool(
+            self._spool_test_output(),
+            maximum_bytes=64 * 1024 * 1024,
+        ) as values:
+            reducer = _StreamingEntryEdgeReducer(
+                values=values,
+                key_prefix="edge",
+                seed_text=seed_text,
+            )
+            for candidate, baseline in zip(candidate_results, baseline_results):
+                reducer.add_session(
+                    candidate,
+                    _baseline_coverage_summary(baseline),
+                )
+            actual = reducer.finish()
+
+        self.assertEqual(actual, expected)
+
     def test_baseline_is_stratified_and_excludes_session_close_buffer(self):
         bounds = broker_session_bounds("2026-01-02")
         inside = bounds.end_utc - pd.Timedelta(milliseconds=SESSION_CLOSE_SAFETY_MS + 1)
@@ -1112,11 +1200,30 @@ class FreshPipelineTests(unittest.TestCase):
 
         _AuditedPipelineSpool.instances = []
         spooled_observed = []
+        numeric_spool_caps = []
+
+        def bounded_numeric_spool(parent_directory, *, maximum_bytes):
+            numeric_spool_caps.append(maximum_bytes)
+            return FloatSeriesSpool(
+                parent_directory,
+                maximum_bytes=maximum_bytes,
+            )
+
         with (
             self._synthetic_entry_dependencies(spooled_observed),
             patch(
                 "datavis.research.fresh_pipeline.KeyedObjectSpool",
                 _AuditedPipelineSpool,
+            ),
+            patch(
+                "datavis.research.fresh_pipeline.FloatSeriesSpool",
+                side_effect=bounded_numeric_spool,
+            ),
+            patch(
+                "datavis.research.fresh_pipeline.combine_entry_diagnostics",
+                side_effect=AssertionError(
+                    "production spooled scoring materialized diagnostics"
+                ),
             ),
         ):
             spooled = pipeline.score_entries_batch(candidates, context)
@@ -1145,6 +1252,10 @@ class FreshPipelineTests(unittest.TestCase):
 
         self.assertEqual(promoted(spooled), promoted(materialized))
         self.assertEqual(promoted(spooled), ("active",))
+        self.assertEqual(
+            numeric_spool_caps,
+            [pipeline.numeric_spool_maximum_bytes] * len(candidates),
+        )
         active_metrics = spooled["active"].metrics["entry"]["overall"]
         empty_metrics = spooled["empty"].metrics["entry"]["overall"]
         self.assertEqual(active_metrics["signal_count"], 4)
@@ -1168,10 +1279,9 @@ class FreshPipelineTests(unittest.TestCase):
         self.assertEqual(
             spool.loaded_keys,
             [
+                pipeline._baseline_spool_key("all"),
                 pipeline._candidate_spool_key("active"),
-                pipeline._baseline_spool_key("all"),
                 pipeline._candidate_spool_key("empty"),
-                pipeline._baseline_spool_key("all"),
             ],
         )
         self.assertTrue(
@@ -1400,9 +1510,9 @@ class FreshPipelineTests(unittest.TestCase):
                 "datavis.research.fresh_pipeline.KeyedObjectSpool",
                 _AuditedPipelineSpool,
             ),
-            patch.object(
-                pipeline,
-                "_entry_provisional_evaluation",
+            patch(
+                "datavis.research.fresh_pipeline."
+                "EntryDiagnosticSessionScorer.add_session",
                 side_effect=_InjectedPipelineFailure("scoring failed"),
             ),
         ):
@@ -1417,6 +1527,12 @@ class FreshPipelineTests(unittest.TestCase):
             )
         )
         self.assertEqual(self._spool_directories(pipeline.output), ())
+        self.assertEqual(
+            tuple(
+                pipeline.output.glob(f"{NUMERIC_SPOOL_DIRECTORY_PREFIX}*")
+            ),
+            (),
+        )
 
     def test_spooled_pipeline_cleans_up_after_serialization_failure(self):
         pipeline, _runtimes, candidates, context = self._synthetic_entry_pipeline()
