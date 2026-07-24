@@ -39,6 +39,36 @@ on:
           - "60"
           - "180"
           - "350"
+  workflow_call:
+    inputs:
+      launch_run_id:
+        description: Exact successful recovery-launch GitHub run ID
+        required: true
+        type: string
+      launch_run_attempt:
+        description: Exact recovery-launch run attempt
+        required: true
+        type: string
+      launch_commit_sha:
+        description: Exact 40-character recovery-launch commit SHA
+        required: true
+        type: string
+      launch_artifact_id:
+        description: Exact recovery-launch receipt artifact ID
+        required: true
+        type: string
+      launch_artifact_size:
+        description: Exact recovery-launch receipt artifact byte size
+        required: true
+        type: string
+      launch_artifact_digest:
+        description: Exact sha256 recovery-launch artifact digest
+        required: true
+        type: string
+      wait_minutes:
+        description: Read-only wait before returning active
+        required: true
+        type: string
 
 concurrency:
   group: fresh-xauusd-v5-recovery-adoption-${{ inputs.launch_run_id }}-${{ inputs.launch_run_attempt }}
