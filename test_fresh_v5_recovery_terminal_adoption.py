@@ -583,15 +583,31 @@ class RecoveryWorkflowTests(unittest.TestCase):
                 "192c9661393571a5b64730665191914ed682890a"
                 "fc91ee271057999f49d64683"
             ),
-            "wait_minutes": "0",
         }
         for name, value in expected.items():
-            self.assertIn(f'{name}: "{value}"', trigger)
+            self.assertEqual(trigger.count(f'{name}: "{value}"'), 2)
+        self.assertIn("  watch_350:", trigger)
+        self.assertIn("  watch_180:", trigger)
+        self.assertIn("    needs: watch_350", trigger)
+        self.assertIn(
+            "if: needs.watch_350.outputs.ready != 'true'",
+            trigger,
+        )
+        self.assertIn('wait_minutes: "350"', trigger)
+        self.assertIn('wait_minutes: "180"', trigger)
+        self.assertIn(
+            "value: ${{ jobs.adopt.outputs.ready }}",
+            workflow,
+        )
+        self.assertIn(
+            "ready: ${{ steps.adoption.outputs.ready }}",
+            workflow,
+        )
         self.assertEqual(
             TRIGGER_MARKER.read_text(encoding="utf-8"),
             (
                 "fresh-xauusd-v5-recovery-adoption-"
-                "30132173254-attempt-1-probe-0-v2\n"
+                "30132173254-attempt-1-watch-350-180-v1\n"
             ),
         )
 
