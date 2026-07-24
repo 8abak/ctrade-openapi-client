@@ -1,0 +1,419 @@
+name: Fresh XAUUSD v5 sealed terminal audit
+
+on:
+  push:
+    branches:
+      - codex/xauusd-fresh-walkforward
+    paths:
+      - .github/research-v5-terminal-audit.txt
+
+concurrency:
+  group: fresh-xauusd-v5-terminal-audit
+  cancel-in-progress: false
+
+env:
+  AUDIT_ARMED: "true"
+  ADOPTION_RUN_ID: "30101048443"
+  ADOPTION_RUN_ATTEMPT: "1"
+  ADOPTION_COMMIT: "c730fd0a2c66426f995ac43f1d50035cf94265ff"
+  ADOPTION_JOB_ID: "89506876763"
+  ADOPTION_ARTIFACT_ID: "8608015979"
+  ADOPTION_ARTIFACT_NAME: "fresh-xauusd-v5-terminal-adopted-30101048443-1"
+  ADOPTION_ARTIFACT_SIZE: "127602"
+  ADOPTION_ARTIFACT_DIGEST: "sha256:6ded0fc6a44e312a9d786991b093913783ce7a2c1d5afa56b58fcf0fbdb824f3"
+  ADOPTION_WORKFLOW_BLOB: "f646926cd44fc5bd470d2571fc3bfa64a8d35ff9"
+  ADOPTION_MARKER_BLOB: "6a3a850c7017cd6b520ef908df83cb9e303d0748"
+  ADOPTION_READER_BLOB: "80f2f45cf76522ab77519b99bdfcf9106dc69627"
+  ADOPTION_TEST_BLOB: "70f3fa090223289f1bb9bf58fa43323b0e36a015"
+  SEALED_PREFLIGHT_COMMIT: 8b37ebee8c145080ea8dc7e27557a1aaa73300b5
+  SEALED_BOOTSTRAP_SHA256: bd08194866bc817555b7b25e9d30634c8d0912e4fff74f55e81be516e1a1fa0c
+  AUDIT_INPUT_HELPER_SHA256: e430f607c008bf8ba9a944f925c885d170b7bcfa53372cb4146dbf4e947a48f2
+
+jobs:
+  audit:
+    name: Audit one externally pinned terminal adoption artifact
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out reviewed audit definition
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Refuse unreviewed or incomplete audit trigger
+        shell: bash
+        env:
+          AUDIT_REPOSITORY: ${{ github.repository }}
+          AUDIT_REF: ${{ github.ref }}
+          AUDIT_SHA: ${{ github.sha }}
+          AUDIT_EVENT: ${{ github.event_name }}
+        run: |
+          set -Eeuo pipefail
+          if [[ "${AUDIT_ARMED}" != "true" ]]; then
+            printf 'sealed terminal audit has not been armed\n' >&2
+            exit 1
+          fi
+          values=(
+            "${ADOPTION_RUN_ID}"
+            "${ADOPTION_RUN_ATTEMPT}"
+            "${ADOPTION_COMMIT}"
+            "${ADOPTION_JOB_ID}"
+            "${ADOPTION_ARTIFACT_ID}"
+            "${ADOPTION_ARTIFACT_NAME}"
+            "${ADOPTION_ARTIFACT_SIZE}"
+            "${ADOPTION_ARTIFACT_DIGEST}"
+            "${ADOPTION_WORKFLOW_BLOB}"
+            "${ADOPTION_MARKER_BLOB}"
+            "${ADOPTION_READER_BLOB}"
+            "${ADOPTION_TEST_BLOB}"
+            "${AUDIT_INPUT_HELPER_SHA256}"
+          )
+          for value in "${values[@]}"; do
+            if [[ "${value}" == __FILL_* || -z "${value}" ]]; then
+              printf 'sealed terminal audit still contains a placeholder\n' >&2
+              exit 1
+            fi
+          done
+          [[ "${AUDIT_REPOSITORY}" == "8abak/ctrade-openapi-client" ]]
+          [[ "${AUDIT_REF}" == \
+            "refs/heads/codex/xauusd-fresh-walkforward" ]]
+          [[ "${AUDIT_EVENT}" == "push" ]]
+          [[ "$(git rev-parse HEAD)" == "${AUDIT_SHA}" ]]
+          [[ "${ADOPTION_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${ADOPTION_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${ADOPTION_JOB_ID}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${ADOPTION_ARTIFACT_ID}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${ADOPTION_ARTIFACT_SIZE}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${ADOPTION_COMMIT}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${ADOPTION_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${ADOPTION_WORKFLOW_BLOB}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${ADOPTION_MARKER_BLOB}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${ADOPTION_READER_BLOB}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${ADOPTION_TEST_BLOB}" =~ ^[0-9a-f]{40}$ ]]
+          expected_name="fresh-xauusd-v5-terminal-adopted-${ADOPTION_RUN_ID}-${ADOPTION_RUN_ATTEMPT}"
+          [[ "${ADOPTION_ARTIFACT_NAME}" == "${expected_name}" ]]
+          expected_marker="fresh-xauusd-v5-terminal-audit-${ADOPTION_RUN_ID}-${ADOPTION_RUN_ATTEMPT}-${ADOPTION_ARTIFACT_ID}-r1"
+          cmp -s -- .github/research-v5-terminal-audit.txt \
+            <(printf '%s\n' "${expected_marker}")
+          printf '%s  %s\n' \
+            "${AUDIT_INPUT_HELPER_SHA256}" \
+            ".github/scripts/fresh-xauusd-v5-terminal-audit-input.py" |
+            sha256sum --check --strict -
+
+      - name: Set up exact CPython series
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+          check-latest: false
+          cache: ""
+
+      - name: Read exact attempt metadata before download
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          api_root="https://api.github.com/repos/${GH_REPOSITORY}"
+          before="${RUNNER_TEMP}/fresh-v5-audit-api-before"
+          normalized="${RUNNER_TEMP}/fresh-v5-external-adoption-before.json"
+          [[ ! -e "${before}" && ! -e "${normalized}" ]]
+          mkdir -- "${before}"
+          request() {
+            local endpoint="$1"
+            local destination="$2"
+            [[ ! -e "${destination}" ]]
+            curl \
+              --fail \
+              --silent \
+              --show-error \
+              --location \
+              --proto '=https' \
+              --tlsv1.2 \
+              --max-filesize 4194304 \
+              --remove-on-error \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "${api_root}/${endpoint}" \
+              --output "${destination}"
+          }
+          request \
+            "actions/artifacts/${ADOPTION_ARTIFACT_ID}" \
+            "${before}/artifact.json"
+          request \
+            "actions/runs/${ADOPTION_RUN_ID}/attempts/${ADOPTION_RUN_ATTEMPT}" \
+            "${before}/run.json"
+          request \
+            "actions/runs/${ADOPTION_RUN_ID}/artifacts?name=${ADOPTION_ARTIFACT_NAME}&per_page=100" \
+            "${before}/listing.json"
+          request \
+            "actions/runs/${ADOPTION_RUN_ID}/attempts/${ADOPTION_RUN_ATTEMPT}/jobs?per_page=100" \
+            "${before}/jobs.json"
+          python -I -B \
+            .github/scripts/fresh-xauusd-v5-terminal-audit-input.py \
+            validate-api \
+            "${before}/artifact.json" \
+            "${before}/run.json" \
+            "${before}/listing.json" \
+            "${before}/jobs.json" \
+            "${normalized}" \
+            --artifact-id "${ADOPTION_ARTIFACT_ID}" \
+            --artifact-name "${ADOPTION_ARTIFACT_NAME}" \
+            --artifact-size "${ADOPTION_ARTIFACT_SIZE}" \
+            --artifact-digest "${ADOPTION_ARTIFACT_DIGEST}" \
+            --run-id "${ADOPTION_RUN_ID}" \
+            --run-attempt "${ADOPTION_RUN_ATTEMPT}" \
+            --commit "${ADOPTION_COMMIT}" \
+            --job-id "${ADOPTION_JOB_ID}"
+
+      - name: Download and seal exact raw artifact ZIP
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          archive="${RUNNER_TEMP}/fresh-v5-terminal-adoption.zip"
+          [[ ! -e "${archive}" ]]
+          curl \
+            --fail \
+            --silent \
+            --show-error \
+            --location \
+            --proto '=https' \
+            --tlsv1.2 \
+            --max-filesize "${ADOPTION_ARTIFACT_SIZE}" \
+            --remove-on-error \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GH_REPOSITORY}/actions/artifacts/${ADOPTION_ARTIFACT_ID}/zip" \
+            --output "${archive}"
+          python -I -B - "${archive}" \
+            "${ADOPTION_ARTIFACT_SIZE}" \
+            "${ADOPTION_ARTIFACT_DIGEST}" <<'PY'
+          import hashlib
+          import os
+          from pathlib import Path
+          import stat
+          import sys
+
+          path = Path(sys.argv[1])
+          expected_size = int(sys.argv[2])
+          expected_digest = sys.argv[3]
+          descriptor = os.open(
+              path,
+              os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+          )
+          digest = hashlib.sha256()
+          total = 0
+          try:
+              metadata = os.fstat(descriptor)
+              if (
+                  not stat.S_ISREG(metadata.st_mode)
+                  or metadata.st_size != expected_size
+              ):
+                  raise SystemExit("downloaded artifact size changed")
+              with os.fdopen(descriptor, "rb", closefd=False) as handle:
+                  for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                      total += len(chunk)
+                      digest.update(chunk)
+          finally:
+              os.close(descriptor)
+          if total != expected_size:
+              raise SystemExit("downloaded artifact changed while hashing")
+          if f"sha256:{digest.hexdigest()}" != expected_digest:
+              raise SystemExit("downloaded artifact digest changed")
+          PY
+
+      - name: Re-read exact attempt metadata after download
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          api_root="https://api.github.com/repos/${GH_REPOSITORY}"
+          after="${RUNNER_TEMP}/fresh-v5-audit-api-after"
+          normalized="${RUNNER_TEMP}/fresh-v5-external-adoption-after.json"
+          [[ ! -e "${after}" && ! -e "${normalized}" ]]
+          mkdir -- "${after}"
+          request() {
+            local endpoint="$1"
+            local destination="$2"
+            [[ ! -e "${destination}" ]]
+            curl \
+              --fail \
+              --silent \
+              --show-error \
+              --location \
+              --proto '=https' \
+              --tlsv1.2 \
+              --max-filesize 4194304 \
+              --remove-on-error \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "${api_root}/${endpoint}" \
+              --output "${destination}"
+          }
+          request \
+            "actions/artifacts/${ADOPTION_ARTIFACT_ID}" \
+            "${after}/artifact.json"
+          request \
+            "actions/runs/${ADOPTION_RUN_ID}/attempts/${ADOPTION_RUN_ATTEMPT}" \
+            "${after}/run.json"
+          request \
+            "actions/runs/${ADOPTION_RUN_ID}/artifacts?name=${ADOPTION_ARTIFACT_NAME}&per_page=100" \
+            "${after}/listing.json"
+          request \
+            "actions/runs/${ADOPTION_RUN_ID}/attempts/${ADOPTION_RUN_ATTEMPT}/jobs?per_page=100" \
+            "${after}/jobs.json"
+          python -I -B \
+            .github/scripts/fresh-xauusd-v5-terminal-audit-input.py \
+            validate-api \
+            "${after}/artifact.json" \
+            "${after}/run.json" \
+            "${after}/listing.json" \
+            "${after}/jobs.json" \
+            "${normalized}" \
+            --artifact-id "${ADOPTION_ARTIFACT_ID}" \
+            --artifact-name "${ADOPTION_ARTIFACT_NAME}" \
+            --artifact-size "${ADOPTION_ARTIFACT_SIZE}" \
+            --artifact-digest "${ADOPTION_ARTIFACT_DIGEST}" \
+            --run-id "${ADOPTION_RUN_ID}" \
+            --run-attempt "${ADOPTION_RUN_ATTEMPT}" \
+            --commit "${ADOPTION_COMMIT}" \
+            --job-id "${ADOPTION_JOB_ID}"
+          cmp -s -- \
+            "${RUNNER_TEMP}/fresh-v5-external-adoption-before.json" \
+            "${normalized}"
+
+      - name: Verify exact adopter source blobs
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ env.ADOPTION_COMMIT }}
+          path: exact-adoption-source
+          persist-credentials: false
+
+      - name: Bind adopter run to reviewed source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source="${GITHUB_WORKSPACE}/exact-adoption-source"
+          [[ "$(git -C "${source}" rev-parse HEAD)" == \
+            "${ADOPTION_COMMIT}" ]]
+          paths=(
+            ".github/workflows/fresh-xauusd-v5-terminal-adoption.yml"
+            ".github/research-v5-adoption-launch.txt"
+            ".github/scripts/fresh-xauusd-v5-terminal-reader.py"
+            "test_fresh_v5_terminal_adoption.py"
+          )
+          blobs=(
+            "${ADOPTION_WORKFLOW_BLOB}"
+            "${ADOPTION_MARKER_BLOB}"
+            "${ADOPTION_READER_BLOB}"
+            "${ADOPTION_TEST_BLOB}"
+          )
+          for index in "${!paths[@]}"; do
+            path="${paths[${index}]}"
+            file="${source}/${path}"
+            [[ -f "${file}" && ! -L "${file}" ]]
+            [[ "$(git -C "${source}" rev-parse "HEAD:${path}")" == \
+              "${blobs[${index}]}" ]]
+          done
+
+      - name: Safely extract exact four-file bundle
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bundle="${RUNNER_TEMP}/fresh-v5-terminal-audit-bundle"
+          manifest="${RUNNER_TEMP}/fresh-v5-terminal-audit-input.json"
+          [[ ! -e "${bundle}" && ! -e "${manifest}" ]]
+          python -I -B \
+            .github/scripts/fresh-xauusd-v5-terminal-audit-input.py \
+            extract \
+            "${RUNNER_TEMP}/fresh-v5-terminal-adoption.zip" \
+            "${bundle}" \
+            "${RUNNER_TEMP}/fresh-v5-external-adoption-after.json" \
+            "${manifest}"
+
+      - name: Check out exact sealed preflight source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: 8b37ebee8c145080ea8dc7e27557a1aaa73300b5
+          path: sealed-audit-source
+          persist-credentials: false
+
+      - name: Verify exact sealed bootstrap bytes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sealed="${GITHUB_WORKSPACE}/sealed-audit-source"
+          bootstrap="${sealed}/datavis/research/fresh_terminal_audit_bootstrap.py"
+          [[ "$(git -C "${sealed}" rev-parse HEAD)" == \
+            "${SEALED_PREFLIGHT_COMMIT}" ]]
+          [[ -f "${bootstrap}" && ! -L "${bootstrap}" ]]
+          printf '%s  %s\n' \
+            "${SEALED_BOOTSTRAP_SHA256}" "${bootstrap}" |
+            sha256sum --check --strict -
+
+      - name: Install exact audit dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python -m pip install \
+            --disable-pip-version-check \
+            --no-cache-dir \
+            --only-binary=:all: \
+            numpy==2.0.2 \
+            pandas==2.2.3
+          python -m pip check
+
+      - name: Run sealed bootstrap once and save exact stdout JSON
+        shell: bash
+        env:
+          AUDIT_RUN_ID: ${{ github.run_id }}
+          AUDIT_RUN_ATTEMPT: ${{ github.run_attempt }}
+          AUDIT_COMMIT: ${{ github.sha }}
+          AUDIT_REF: ${{ github.ref }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          bundle="${RUNNER_TEMP}/fresh-v5-terminal-audit-bundle"
+          bootstrap="${GITHUB_WORKSPACE}/sealed-audit-source/datavis/research/fresh_terminal_audit_bootstrap.py"
+          receipt_directory="${GITHUB_WORKSPACE}/fresh-xauusd-v5-terminal-audit-receipt"
+          receipt="${receipt_directory}/fresh-xauusd-v5-terminal-audit-receipt.json"
+          provenance="${receipt_directory}/fresh-xauusd-v5-terminal-audit-provenance.json"
+          [[ ! -e "${receipt_directory}" ]]
+          mkdir -- "${receipt_directory}"
+          python -I -B "${bootstrap}" "${bundle}" > "${receipt}"
+          python -I -B \
+            .github/scripts/fresh-xauusd-v5-terminal-audit-input.py \
+            build-provenance \
+            "${receipt}" \
+            "${RUNNER_TEMP}/fresh-v5-external-adoption-after.json" \
+            "${RUNNER_TEMP}/fresh-v5-terminal-audit-input.json" \
+            "${provenance}" \
+            --audit-run-id "${AUDIT_RUN_ID}" \
+            --audit-run-attempt "${AUDIT_RUN_ATTEMPT}" \
+            --audit-commit "${AUDIT_COMMIT}" \
+            --audit-ref "${AUDIT_REF}"
+
+      - name: Upload immutable sealed audit receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fresh-xauusd-v5-terminal-audit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: fresh-xauusd-v5-terminal-audit-receipt
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
