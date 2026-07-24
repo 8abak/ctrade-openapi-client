@@ -585,7 +585,7 @@ def remote_probe(launch_b64: str, wait_seconds_value: str) -> int:
         wait_seconds = int(wait_seconds_value)
     except ValueError as error:
         raise AdoptionError("wait duration is not an integer") from error
-    if wait_seconds not in {0, 900, 3600, 10800}:
+    if wait_seconds not in {0, 900, 3600, 10800, 21000}:
         raise AdoptionError("wait duration was not explicitly allowlisted")
     deadline = time.monotonic() + wait_seconds
     while True:
