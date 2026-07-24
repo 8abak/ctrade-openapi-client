@@ -45,7 +45,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           expected_ref="refs/heads/codex/xauusd-fresh-walkforward"
-          expected_marker="fresh-xauusd-v5-terminal-adoption-30067832187-1-r2"
+          expected_marker="fresh-xauusd-v5-terminal-adoption-30067832187-1-r3"
           if [[ "${ADOPTION_GITHUB_REF}" != "${expected_ref}" ]]; then
             printf 'refusing adoption from unexpected ref: %s\n' \
               "${ADOPTION_GITHUB_REF}" >&2
@@ -60,7 +60,7 @@ jobs:
           printf '%s  %s\n' \
             "2411b871c61c5d144e974578fa75812cc710c32cda0aeb1adb59b21079ba9a81" \
             ".github/scripts/fresh-xauusd-v5-terminal-reader.py" \
-            "96ccb370cecb75ec71855a7644d2ff56ab8f27f847cf5329a13aff23ed570f76" \
+            "3fbd78780139adf6b26ed015c83ede66edf57e7717a75d83c89e55f65209e7b1" \
             "test_fresh_v5_terminal_adoption.py" |
             sha256sum --check --strict -
           python3 -B -m unittest test_fresh_v5_terminal_adoption
