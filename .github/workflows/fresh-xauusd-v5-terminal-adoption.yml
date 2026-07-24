@@ -28,7 +28,7 @@ jobs:
   adopt:
     name: Retrieve one terminal archive without changing preserved remote state
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 360
     permissions:
       actions: read
       contents: read
@@ -45,7 +45,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           expected_ref="refs/heads/codex/xauusd-fresh-walkforward"
-          expected_marker="fresh-xauusd-v5-terminal-adoption-30067832187-1"
+          expected_marker="fresh-xauusd-v5-terminal-adoption-30067832187-1-r2"
           if [[ "${ADOPTION_GITHUB_REF}" != "${expected_ref}" ]]; then
             printf 'refusing adoption from unexpected ref: %s\n' \
               "${ADOPTION_GITHUB_REF}" >&2
@@ -58,9 +58,9 @@ jobs:
           fi
           git merge-base --is-ancestor "${V5_LAUNCH_COMMIT}" HEAD
           printf '%s  %s\n' \
-            "7bd7daa0e327ac3aab06cb0666ed3d54ba1cc8e2b9568608d1a5963dabb0e00b" \
+            "2411b871c61c5d144e974578fa75812cc710c32cda0aeb1adb59b21079ba9a81" \
             ".github/scripts/fresh-xauusd-v5-terminal-reader.py" \
-            "6452b7337209389069906889f912878dcec2d769be6069cc0f0aeaeeb14fa5d7" \
+            "96ccb370cecb75ec71855a7644d2ff56ab8f27f847cf5329a13aff23ed570f76" \
             "test_fresh_v5_terminal_adoption.py" |
             sha256sum --check --strict -
           python3 -B -m unittest test_fresh_v5_terminal_adoption
@@ -286,7 +286,7 @@ jobs:
           EC2_USER: ${{ secrets.EC2_USER }}
           EC2_PORT: ${{ secrets.EC2_PORT || '22' }}
           EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
-          WAIT_MINUTES: "180"
+          WAIT_MINUTES: "350"
           ADOPTION_RUN_ID: ${{ github.run_id }}
           ADOPTION_RUN_ATTEMPT: ${{ github.run_attempt }}
           ADOPTION_COMMIT_SHA: ${{ github.sha }}
@@ -299,7 +299,7 @@ jobs:
           : "${EC2_PORT:?EC2_PORT is missing}"
           : "${EC2_SSH_KEY:?EC2_SSH_KEY is missing}"
           case "${WAIT_MINUTES}" in
-            0|15|60|180)
+            0|15|60|180|350)
               ;;
             *)
               printf 'wait duration was not explicitly allowlisted\n' >&2
