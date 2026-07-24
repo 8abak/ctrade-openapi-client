@@ -624,11 +624,11 @@ class FreshChronologicalSearch:
         recovery_audit: Mapping[str, Any],
         recovery_batch_result_path: str | Path,
     ) -> "FreshChronologicalSearch":
-        """Authorize one audited continuation of run 14's incomplete batch.
+        """Authorize one audited continuation of an exact incomplete batch.
 
         This is deliberately narrower than generic checkpointing.  It accepts
-        only the exact two-record terminal prefix produced when discovery was
-        OOM-killed before a single candidate result was recorded.
+        only a frozen two-record terminal prefix produced when discovery was
+        interrupted before a single candidate result was recorded.
         """
 
         selected_ledger = Path(ledger_path).expanduser()
