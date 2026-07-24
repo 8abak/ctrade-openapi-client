@@ -990,7 +990,29 @@ class FreshTerminalAuditTests(unittest.TestCase):
             expected,
             launch_worktree="/tmp/fresh-xauusd-worktree.E4Jrbc",
         )
-        audit._verify_local_frozen_scientific_runtime()
+
+        def canonical_linux_sha(path, *, maximum_bytes):
+            raw = path.read_bytes()
+            if len(raw) > maximum_bytes:
+                raise audit.FreshTerminalAuditError(
+                    "test source exceeded its byte bound"
+                )
+            return hashlib.sha256(raw.replace(b"\r\n", b"\n")).hexdigest()
+
+        with patch.object(
+            audit,
+            "_sha256_file",
+            side_effect=canonical_linux_sha,
+        ):
+            audit._verify_local_frozen_scientific_runtime()
+        self.assertEqual(
+            audit.FROZEN_V5_IMPLEMENTATION_FILE_SHA256["datavis/db.py"],
+            "e26524b82902441a2750311ad5ac5e6c31cb1e6140f2e9770470b058eebc3330",
+        )
+        self.assertEqual(
+            audit.FROZEN_LOCAL_RUNTIME_CLOSURE_SHA256["datavis/db.py"],
+            "7f3c8dc45ceed968ec4c935752ba85b3b172fb538fb1ff63de4baa1fcec48999",
+        )
 
         changed = copy.deepcopy(expected)
         changed["files"][0]["sha256"] = "0" * 64
