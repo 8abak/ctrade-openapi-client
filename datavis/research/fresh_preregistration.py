@@ -2298,11 +2298,19 @@ def authorize_registered_holdout(
             or recovery_batch_result_path is None
         ):
             raise PermissionError("holdout requires the complete sealed recovery proof")
-        from datavis.research.fresh_recovery import (
-            validate_run14_recovery_for_holdout,
-        )
+        contract_schema = infrastructure_recovery_contract.get("schema")
+        if contract_schema == "fresh-xauusd-run14-recovery-contract/v1":
+            from datavis.research.fresh_recovery import (
+                validate_run14_recovery_for_holdout as validate_recovery,
+            )
+        elif contract_schema == "fresh-xauusd-v5-recovery-contract/v1":
+            from datavis.research.fresh_recovery_v5 import (
+                validate_fresh_v5_recovery_for_holdout as validate_recovery,
+            )
+        else:
+            raise PermissionError("holdout recovery contract schema is unsupported")
 
-        recovery_proof = validate_run14_recovery_for_holdout(
+        recovery_proof = validate_recovery(
             records=records,
             preregistration=preregistration,
             preregistration_sha256=prereg_sha,
