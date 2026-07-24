@@ -37,7 +37,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           expected_ref="refs/heads/codex/xauusd-fresh-walkforward"
-          expected_marker="fresh-xauusd-v5-lifecycle-preflight-2026-07-25-r8"
+          expected_marker="fresh-xauusd-v5-lifecycle-preflight-2026-07-25-r9"
           [[ "${FRESH_GITHUB_REF}" == "${expected_ref}" ]]
           [[ "$(git rev-parse HEAD)" == "${FRESH_GITHUB_SHA}" ]]
           cmp -s -- .github/research-v5-preflight.txt \
@@ -100,10 +100,10 @@ jobs:
             .github/scripts/fresh-xauusd-v5-remote-monitor.py \
             .github/scripts/fresh-xauusd-v5-terminal-reader.py
           printf '%s\n' \
-            "fresh-xauusd-v5-read-only-monitor-source-30067832187-attempt-1-r2" \
+            "fresh-xauusd-v5-read-only-monitor-source-30067832187-attempt-1-r3" \
             > .github/research-v5-monitor.txt
           printf '%s\n' \
-            "fresh-xauusd-v5-terminal-adoption-30067832187-1-r2" \
+            "fresh-xauusd-v5-terminal-adoption-30067832187-1-r3" \
             > .github/research-v5-adoption-launch.txt
           fresh_test_modules=()
           for test_path in test_fresh_*.py; do
