@@ -569,7 +569,7 @@ class FloatSeriesSpool:
                         flushed_bytes = len(output_buffer) * _FLOAT_BYTES
                         self._temporary_bytes += flushed_bytes
                         accounted_output_bytes += flushed_bytes
-                        output_buffer.clear()
+                        del output_buffer[:]
                 if output_buffer:
                     _write_array(destination, output_buffer)
                     flushed_bytes = len(output_buffer) * _FLOAT_BYTES
@@ -675,7 +675,7 @@ class FloatSeriesSpool:
             if not existed and path.exists():
                 path.unlink()
             raise
-        buffer.clear()
+        del buffer[:]
 
     def _flush_all(self) -> None:
         for key in tuple(self._buffers):
