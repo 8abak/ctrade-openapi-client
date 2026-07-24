@@ -21,6 +21,7 @@ CONTROLLER_PATH = (
 WORKFLOW_PATH = (
     ROOT / ".github/workflows/fresh-xauusd-v5-recovery-detached-launch.yml"
 )
+MARKER_PATH = ROOT / ".github/research-v5-recovery-launch.txt"
 
 
 def _load_controller():
@@ -218,6 +219,25 @@ class FreshV5RecoveryOrchestrationTests(unittest.TestCase):
 
     def test_workflow_pins_outer_provenance_and_nested_member_hashes(self) -> None:
         source = WORKFLOW_PATH.read_text(encoding="utf-8")
+        self.assertEqual(
+            MARKER_PATH.read_text(encoding="utf-8"),
+            "fresh-xauusd-v5-discovery-recovery-attempt-1-transport-2\n",
+        )
+        self.assertIn(
+            '"fresh-xauusd-v5-discovery-recovery-attempt-1-transport-2")',
+            source,
+        )
+        self.assertIn(
+            ') | (\n'
+            '            cd "${bundle}"\n'
+            "            sha256sum --check --strict -\n"
+            "          )",
+            source,
+        )
+        self.assertNotIn(
+            ") | sha256sum --check --strict -",
+            source,
+        )
         required = (
             'ADOPTION_RUN_ID: "30101048443"',
             'ADOPTION_ARTIFACT_ID: "8608015979"',
