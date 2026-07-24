@@ -46,7 +46,7 @@ SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 # completed independent review.  A CLI override would let the file attest
 # itself and is deliberately not supported.
 FROZEN_AUDITOR_SHA256: str | None = (
-    "ec9c3791fd7da33a495623021463f39dc332150c5880d2742a3fc18847e7ad00"
+    "fa51cd73dde0e51d3854b6563f5fcdbb737aca70d8a86fbaaf87c543435c9050"
 )
 
 FROZEN_RUNTIME_CLOSURE_SHA256 = {
