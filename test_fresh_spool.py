@@ -131,6 +131,31 @@ class FreshSpoolTests(unittest.TestCase):
                     (RichPayload("collectable", (1, 2)),),
                 )
 
+    def test_stream_reader_releases_previous_record_before_next_unpickle(self):
+        with KeyedObjectSpool(self.parent) as spool:
+            spool.append("candidate", RichPayload("first", (1,)))
+            spool.append("candidate", RichPayload("second", (2,)))
+            with spool.load("candidate") as objects:
+                first = next(objects)
+                reference = weakref.ref(first)
+                del first
+                original_init = spool_module._BoundedZlibReader.__init__
+
+                def audited_init(reader, source, compressed_bytes):
+                    gc.collect()
+                    self.assertIsNone(reference())
+                    original_init(reader, source, compressed_bytes)
+
+                with patch.object(
+                    spool_module._BoundedZlibReader,
+                    "__init__",
+                    new=audited_init,
+                ):
+                    self.assertEqual(
+                        next(objects),
+                        RichPayload("second", (2,)),
+                    )
+
     def test_large_round_trip_never_uses_whole_object_buffer_helpers(self):
         payload = RichPayload("large", tuple(range(200_000)))
         with (
