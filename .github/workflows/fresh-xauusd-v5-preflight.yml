@@ -13,9 +13,9 @@ concurrency:
 
 jobs:
   preflight:
-    name: Validate v5 code and detached controller
+    name: Validate v5 code and detached lifecycle controls
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -29,16 +29,32 @@ jobs:
         run: |
           set -Eeuo pipefail
           expected_ref="refs/heads/codex/xauusd-fresh-walkforward"
-          expected_marker="fresh-xauusd-v5-detached-preflight-2026-07-24"
+          expected_marker="fresh-xauusd-v5-lifecycle-preflight-2026-07-24"
           [[ "${FRESH_GITHUB_REF}" == "${expected_ref}" ]]
           cmp -s -- .github/research-v5-preflight.txt \
             <(printf '%s\n' "${expected_marker}")
           bash -n -- .github/scripts/fresh-xauusd-v5-controller.sh
-          python3 -B .github/scripts/extract_workflow_run.py \
-            .github/workflows/fresh-xauusd-v5-detached-launch.yml \
-            "Launch detached v5 controller and obtain immutable receipt" \
-            > "${RUNNER_TEMP}/fresh-v5-detached-step.sh"
-          bash -n -- "${RUNNER_TEMP}/fresh-v5-detached-step.sh"
+          workflow_steps=(
+            ".github/workflows/fresh-xauusd-v5-detached-launch.yml|Launch detached v5 controller and obtain immutable receipt"
+            ".github/workflows/fresh-xauusd-v5-read-only-monitor.yml|Verify frozen monitor identity"
+            ".github/workflows/fresh-xauusd-v5-read-only-monitor.yml|Verify and extract immutable launch receipt artifact"
+            ".github/workflows/fresh-xauusd-v5-read-only-monitor.yml|Capture strictly read-only remote metadata"
+            ".github/workflows/fresh-xauusd-v5-read-only-monitor.yml|Seal immutable outcome-blind monitor receipt"
+            ".github/workflows/fresh-xauusd-v5-terminal-adoption.yml|Verify frozen adoption trigger identity"
+            ".github/workflows/fresh-xauusd-v5-terminal-adoption.yml|Verify immutable launch run and artifact metadata"
+            ".github/workflows/fresh-xauusd-v5-terminal-adoption.yml|Validate launch receipt and its controller source"
+            ".github/workflows/fresh-xauusd-v5-terminal-adoption.yml|Read terminal receipt and stream its exact archive"
+          )
+          index=0
+          for specification in "${workflow_steps[@]}"; do
+            workflow="${specification%%|*}"
+            step="${specification#*|}"
+            extracted="${RUNNER_TEMP}/fresh-v5-step-${index}.sh"
+            python3 -B .github/scripts/extract_workflow_run.py \
+              "${workflow}" "${step}" > "${extracted}"
+            bash -n -- "${extracted}"
+            index="$((index + 1))"
+          done
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -65,7 +81,10 @@ jobs:
             datavis/research/fresh_restart_v5.py \
             datavis/research/fresh_preregistration.py \
             datavis/research/fresh_pipeline.py \
-            datavis/research/fresh_pipeline_cli.py
+            datavis/research/fresh_pipeline_cli.py \
+            .github/scripts/fresh-xauusd-v5-monitor-controller.py \
+            .github/scripts/fresh-xauusd-v5-remote-monitor.py \
+            .github/scripts/fresh-xauusd-v5-terminal-reader.py
           fresh_test_modules=()
           for test_path in test_fresh_*.py; do
             fresh_test_modules+=("${test_path%.py}")
