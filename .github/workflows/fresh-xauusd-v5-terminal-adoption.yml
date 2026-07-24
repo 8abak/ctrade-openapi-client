@@ -1,0 +1,432 @@
+name: Fresh XAUUSD v5 terminal adoption
+
+on:
+  push:
+    branches:
+      - codex/xauusd-fresh-walkforward
+    paths:
+      - .github/research-v5-adoption-launch.txt
+
+concurrency:
+  group: fresh-xauusd-v5-terminal-adoption
+  cancel-in-progress: false
+
+env:
+  V5_LAUNCH_RUN_ID: "30067832187"
+  V5_LAUNCH_RUN_ATTEMPT: "1"
+  V5_LAUNCH_COMMIT: bc7c814876cc75a0fbe85ba824177ad8baccd5cf
+  V5_LAUNCH_BRANCH: codex/xauusd-fresh-walkforward
+  V5_LAUNCH_ARTIFACT_ID: "8586881858"
+  V5_LAUNCH_ARTIFACT_NAME: fresh-xauusd-detached-launch-30067832187-1
+  V5_LAUNCH_ARTIFACT_SIZE: "801"
+  V5_LAUNCH_ARTIFACT_DIGEST: sha256:86f6a8b06e0fde6a5223099a1eda4a9ce6e2f6fdd6248dbef91bbc4395936e1e
+  V5_LAUNCH_RECEIPT_SIZE: "1146"
+  V5_LAUNCH_RECEIPT_SHA256: c6e32cbbdaaa2b9d343eee2a2fc399804976a6493ad4f99776b5ad795c5c54a4
+  V5_CONTROLLER_SHA256: da57bce0f90890a8712edbb8cb9830054bfc5b2b3d544c2363420836b8b9ce3f
+
+jobs:
+  adopt:
+    name: Retrieve one terminal archive without changing preserved remote state
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out adoption definition
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify frozen adoption trigger identity
+        shell: bash
+        env:
+          ADOPTION_GITHUB_REF: ${{ github.ref }}
+        run: |
+          set -Eeuo pipefail
+          expected_ref="refs/heads/codex/xauusd-fresh-walkforward"
+          expected_marker="fresh-xauusd-v5-terminal-adoption-30067832187-1"
+          if [[ "${ADOPTION_GITHUB_REF}" != "${expected_ref}" ]]; then
+            printf 'refusing adoption from unexpected ref: %s\n' \
+              "${ADOPTION_GITHUB_REF}" >&2
+            exit 1
+          fi
+          if ! cmp -s -- .github/research-v5-adoption-launch.txt \
+            <(printf '%s\n' "${expected_marker}"); then
+            printf 'refusing adoption with an unexpected marker\n' >&2
+            exit 1
+          fi
+          git merge-base --is-ancestor "${V5_LAUNCH_COMMIT}" HEAD
+          printf '%s  %s\n' \
+            "7bd7daa0e327ac3aab06cb0666ed3d54ba1cc8e2b9568608d1a5963dabb0e00b" \
+            ".github/scripts/fresh-xauusd-v5-terminal-reader.py" \
+            "6452b7337209389069906889f912878dcec2d769be6069cc0f0aeaeeb14fa5d7" \
+            "test_fresh_v5_terminal_adoption.py" |
+            sha256sum --check --strict -
+          python3 -B -m unittest test_fresh_v5_terminal_adoption
+
+      - name: Check out exact detached-launch source
+        uses: actions/checkout@v4
+        with:
+          ref: bc7c814876cc75a0fbe85ba824177ad8baccd5cf
+          path: launch-source
+          persist-credentials: false
+
+      - name: Verify immutable launch run and artifact metadata
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -Eeuo pipefail
+          if [[ "${GH_REPOSITORY}" != "8abak/ctrade-openapi-client" ]]; then
+            printf 'refusing adoption in an unexpected repository\n' >&2
+            exit 1
+          fi
+          artifact_metadata="${RUNNER_TEMP}/fresh-v5-launch-artifact.json"
+          run_metadata="${RUNNER_TEMP}/fresh-v5-launch-run.json"
+          artifact_listing="${RUNNER_TEMP}/fresh-v5-launch-artifacts.json"
+          curl \
+            --fail \
+            --silent \
+            --show-error \
+            --location \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GH_REPOSITORY}/actions/artifacts/${V5_LAUNCH_ARTIFACT_ID}" \
+            > "${artifact_metadata}"
+          curl \
+            --fail \
+            --silent \
+            --show-error \
+            --location \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GH_REPOSITORY}/actions/runs/${V5_LAUNCH_RUN_ID}/attempts/${V5_LAUNCH_RUN_ATTEMPT}" \
+            > "${run_metadata}"
+          curl \
+            --fail \
+            --silent \
+            --show-error \
+            --location \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GH_REPOSITORY}/actions/runs/${V5_LAUNCH_RUN_ID}/artifacts?name=${V5_LAUNCH_ARTIFACT_NAME}&per_page=100" \
+            > "${artifact_listing}"
+          python3 -B - \
+            "${artifact_metadata}" "${run_metadata}" "${artifact_listing}" \
+            "${V5_LAUNCH_ARTIFACT_ID}" "${V5_LAUNCH_ARTIFACT_NAME}" \
+            "${V5_LAUNCH_ARTIFACT_SIZE}" "${V5_LAUNCH_ARTIFACT_DIGEST}" \
+            "${V5_LAUNCH_RUN_ID}" "${V5_LAUNCH_RUN_ATTEMPT}" \
+            "${V5_LAUNCH_COMMIT}" "${V5_LAUNCH_BRANCH}" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          (
+              artifact_path,
+              run_path,
+              listing_path,
+              artifact_id,
+              artifact_name,
+              artifact_size,
+              artifact_digest,
+              run_id,
+              run_attempt,
+              commit_sha,
+              branch,
+          ) = sys.argv[1:]
+          artifact = json.loads(Path(artifact_path).read_text(encoding="utf-8"))
+          producer = artifact.get("workflow_run")
+          expected_artifact = {
+              "id": int(artifact_id),
+              "name": artifact_name,
+              "size_in_bytes": int(artifact_size),
+              "digest": artifact_digest,
+              "expired": False,
+          }
+          for key, expected in expected_artifact.items():
+              if artifact.get(key) != expected:
+                  raise SystemExit(f"launch artifact {key} changed")
+          if (
+              not isinstance(producer, dict)
+              or producer.get("id") != int(run_id)
+              or producer.get("head_sha") != commit_sha
+              or producer.get("head_branch") != branch
+          ):
+              raise SystemExit("launch artifact producer identity changed")
+
+          run = json.loads(Path(run_path).read_text(encoding="utf-8"))
+          repository = run.get("repository")
+          head_repository = run.get("head_repository")
+          expected_run = {
+              "id": int(run_id),
+              "run_attempt": int(run_attempt),
+              "head_sha": commit_sha,
+              "head_branch": branch,
+              "status": "completed",
+              "conclusion": "success",
+          }
+          for key, expected in expected_run.items():
+              if run.get(key) != expected:
+                  raise SystemExit(f"detached launch run {key} changed")
+          if run.get("event") != "push":
+              raise SystemExit("detached launch trigger changed")
+          if (
+              run.get("path")
+              != ".github/workflows/fresh-xauusd-v5-detached-launch.yml"
+              or not isinstance(repository, dict)
+              or repository.get("full_name") != "8abak/ctrade-openapi-client"
+              or not isinstance(head_repository, dict)
+              or head_repository.get("full_name")
+              != "8abak/ctrade-openapi-client"
+          ):
+              raise SystemExit("detached launch repository or workflow changed")
+          listing = json.loads(
+              Path(listing_path).read_text(encoding="utf-8")
+          )
+          artifacts = listing.get("artifacts")
+          if (
+              listing.get("total_count") != 1
+              or not isinstance(artifacts, list)
+              or len(artifacts) != 1
+          ):
+              raise SystemExit("detached launch artifact listing changed")
+          listed = artifacts[0]
+          listed_producer = (
+              listed.get("workflow_run") if isinstance(listed, dict) else None
+          )
+          if (
+              not isinstance(listed, dict)
+              or any(
+                  listed.get(key) != expected
+                  for key, expected in expected_artifact.items()
+              )
+              or not isinstance(listed_producer, dict)
+              or listed_producer.get("id") != int(run_id)
+              or listed_producer.get("head_sha") != commit_sha
+              or listed_producer.get("head_branch") != branch
+          ):
+              raise SystemExit("listed launch artifact identity changed")
+          PY
+
+      - name: Download exact immutable launch receipt artifact
+        uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ env.V5_LAUNCH_ARTIFACT_ID }}
+          path: ${{ runner.temp }}/fresh-xauusd-v5-launch
+          github-token: ${{ github.token }}
+          run-id: ${{ env.V5_LAUNCH_RUN_ID }}
+          merge-multiple: true
+
+      - name: Validate launch receipt and its controller source
+        id: launch_receipt
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          receipt_directory="${RUNNER_TEMP}/fresh-xauusd-v5-launch"
+          receipt="${receipt_directory}/fresh-xauusd-v5-launch-receipt.json"
+          python3 -B - \
+            "${receipt_directory}" "${receipt}" \
+            "${V5_LAUNCH_RECEIPT_SIZE}" "${V5_LAUNCH_RECEIPT_SHA256}" <<'PY'
+          import hashlib
+          from pathlib import Path
+          import stat
+          import sys
+
+          directory = Path(sys.argv[1])
+          receipt = Path(sys.argv[2])
+          expected_size = int(sys.argv[3])
+          expected_sha256 = sys.argv[4]
+          entries = list(directory.iterdir())
+          if entries != [receipt]:
+              raise SystemExit("launch artifact does not contain exactly one receipt")
+          metadata = receipt.lstat()
+          if (
+              not stat.S_ISREG(metadata.st_mode)
+              or stat.S_ISLNK(metadata.st_mode)
+              or metadata.st_size != expected_size
+          ):
+              raise SystemExit("launch receipt is not the exact regular file")
+          digest = hashlib.sha256(receipt.read_bytes()).hexdigest()
+          if digest != expected_sha256:
+              raise SystemExit("launch receipt digest changed")
+          PY
+          reader=".github/scripts/fresh-xauusd-v5-terminal-reader.py"
+          python3 -B -m py_compile "${reader}"
+          python3 -B "${reader}" validate-launch "${receipt}"
+          receipt_controller_sha="$(
+            python3 -B "${reader}" controller-sha "${receipt}"
+          )"
+          launch_controller="launch-source/.github/scripts/fresh-xauusd-v5-controller.sh"
+          if [[ "$(git -C launch-source rev-parse HEAD)" != \
+            "${V5_LAUNCH_COMMIT}" ||
+            ! -f "${launch_controller}" || -L "${launch_controller}" ]]; then
+            printf 'checked-out launch controller source changed\n' >&2
+            exit 1
+          fi
+          source_controller_sha="$(
+            sha256sum -- "${launch_controller}" | awk '{print $1}'
+          )"
+          if [[ "${receipt_controller_sha}" != "${V5_CONTROLLER_SHA256}" ||
+            "${source_controller_sha}" != "${V5_CONTROLLER_SHA256}" ]]; then
+            printf 'launch receipt controller identity changed\n' >&2
+            exit 1
+          fi
+          printf 'path=%s\n' "${receipt}" >> "${GITHUB_OUTPUT}"
+
+      - name: Read terminal receipt and stream its exact archive
+        id: adoption
+        shell: bash
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          EC2_PORT: ${{ secrets.EC2_PORT || '22' }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          WAIT_MINUTES: "180"
+          ADOPTION_RUN_ID: ${{ github.run_id }}
+          ADOPTION_RUN_ATTEMPT: ${{ github.run_attempt }}
+          ADOPTION_COMMIT_SHA: ${{ github.sha }}
+          LAUNCH_RECEIPT: ${{ steps.launch_receipt.outputs.path }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          : "${EC2_HOST:?EC2_HOST is missing}"
+          : "${EC2_USER:?EC2_USER is missing}"
+          : "${EC2_PORT:?EC2_PORT is missing}"
+          : "${EC2_SSH_KEY:?EC2_SSH_KEY is missing}"
+          case "${WAIT_MINUTES}" in
+            0|15|60|180)
+              ;;
+            *)
+              printf 'wait duration was not explicitly allowlisted\n' >&2
+              exit 1
+              ;;
+          esac
+          if [[ "${EC2_PORT}" != "22" ]]; then
+            printf 'refusing an unpinned EC2 SSH port\n' >&2
+            exit 1
+          fi
+          if [[ "${EC2_USER}" != "ec2-user" ]]; then
+            printf 'refusing an unpinned EC2 SSH user\n' >&2
+            exit 1
+          fi
+          case "${EC2_HOST}" in
+            datavis.au|www.datavis.au|3.27.110.195|ec2-3-27-110-195.ap-southeast-2.compute.amazonaws.com)
+              ;;
+            *)
+              printf 'refusing an unpinned EC2 SSH host alias\n' >&2
+              exit 1
+              ;;
+          esac
+
+          key_path="${RUNNER_TEMP}/fresh-v5-adoption-key"
+          known_hosts="${GITHUB_WORKSPACE}/.github/ssh/fresh-xauusd-ec2-known-hosts"
+          reader="${GITHUB_WORKSPACE}/.github/scripts/fresh-xauusd-v5-terminal-reader.py"
+          terminal_partial="${RUNNER_TEMP}/fresh-xauusd-v5-terminal-receipt.partial"
+          bundle="${GITHUB_WORKSPACE}/fresh-xauusd-v5-terminal-adoption"
+          archive_name="fresh-xauusd-${V5_LAUNCH_RUN_ID}-${V5_LAUNCH_RUN_ATTEMPT}.tgz"
+          archive_partial="${RUNNER_TEMP}/${archive_name}.partial"
+          trap 'rm -f -- "${key_path}" "${terminal_partial}" "${archive_partial}"' EXIT
+          printf '%s\n' "${EC2_SSH_KEY}" > "${key_path}"
+          chmod 600 "${key_path}"
+          if [[ ! -f "${known_hosts}" || -L "${known_hosts}" ||
+            ! -f "${reader}" || -L "${reader}" ]]; then
+            printf 'adoption verifier inputs are not regular files\n' >&2
+            exit 1
+          fi
+          if [[ "$(
+            sha256sum -- "${known_hosts}" | awk '{print $1}'
+          )" != "1ae003bab02effdbae4e43d5c2d8b566b65464b380fd31a4fad8e457b37770c8" ]]; then
+            printf 'pinned EC2 known-hosts file changed\n' >&2
+            exit 1
+          fi
+          if [[ "$(
+            ssh-keygen -lf "${known_hosts}" -E sha256 |
+              awk 'NR == 1 {print $2}'
+          )" != "SHA256:K68UWpXSv0oN9sa2KuFl1Bk9RWgigQtzskL3srgQ3ns" ]]; then
+            printf 'pinned EC2 host key changed\n' >&2
+            exit 1
+          fi
+          ssh_options=(
+            -F /dev/null
+            -T
+            -i "${key_path}"
+            -p "${EC2_PORT}"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o PasswordAuthentication=no
+            -o KbdInteractiveAuthentication=no
+            -o HostKeyAlgorithms=ssh-ed25519
+            -o ClearAllForwardings=yes
+            -o PermitLocalCommand=no
+            -o RequestTTY=no
+            -o StrictHostKeyChecking=yes
+            -o UserKnownHostsFile="${known_hosts}"
+            -o GlobalKnownHostsFile=/dev/null
+            -o ConnectTimeout=15
+            -o ServerAliveInterval=30
+            -o ServerAliveCountMax=3
+          )
+          launch_receipt_b64="$(base64 -w0 -- "${LAUNCH_RECEIPT}")"
+          wait_seconds="$((10#${WAIT_MINUTES} * 60))"
+
+          set +e
+          ssh "${ssh_options[@]}" "${EC2_USER}@${EC2_HOST}" \
+            python3 -B - probe "${launch_receipt_b64}" "${wait_seconds}" \
+            < "${reader}" > "${terminal_partial}"
+          probe_status="$?"
+          set -e
+          if [[ "${probe_status}" -eq 75 ]]; then
+            rm -f -- "${terminal_partial}"
+            printf 'The sealed v5 study is still active; no remote state was changed.\n' \
+              >> "${GITHUB_STEP_SUMMARY}"
+            printf 'ready=false\n' >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          if [[ "${probe_status}" -ne 0 ]]; then
+            exit "${probe_status}"
+          fi
+
+          mkdir -- "${bundle}"
+          terminal="${bundle}/fresh-xauusd-v5-terminal-receipt.json"
+          mv -- "${terminal_partial}" "${terminal}"
+          terminal_receipt_b64="$(base64 -w0 -- "${terminal}")"
+          ssh "${ssh_options[@]}" "${EC2_USER}@${EC2_HOST}" \
+            python3 -B - stream \
+            "${launch_receipt_b64}" "${terminal_receipt_b64}" \
+            < "${reader}" > "${archive_partial}"
+          python3 -B "${reader}" verify-archive \
+            "${archive_partial}" "${terminal}"
+
+          archive="${bundle}/${archive_name}"
+          mv -- "${archive_partial}" "${archive}"
+          cp --no-clobber -- \
+            "${LAUNCH_RECEIPT}" \
+            "${bundle}/fresh-xauusd-v5-launch-receipt.json"
+          manifest="${bundle}/fresh-xauusd-v5-adoption-manifest.json"
+          python3 -B "${reader}" build-manifest \
+            "${manifest}" \
+            "${bundle}/fresh-xauusd-v5-launch-receipt.json" \
+            "${terminal}" \
+            "${archive}" \
+            "${V5_LAUNCH_ARTIFACT_ID}" \
+            "${V5_LAUNCH_ARTIFACT_DIGEST}" \
+            "${V5_LAUNCH_ARTIFACT_SIZE}" \
+            "${ADOPTION_RUN_ID}" \
+            "${ADOPTION_RUN_ATTEMPT}" \
+            "${ADOPTION_COMMIT_SHA}"
+          printf 'ready=true\n' >> "${GITHUB_OUTPUT}"
+          printf 'bundle=%s\n' "${bundle}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload one immutable terminal adoption artifact
+        if: steps.adoption.outputs.ready == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fresh-xauusd-v5-terminal-adopted-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.adoption.outputs.bundle }}
+          if-no-files-found: error
+          retention-days: 90
