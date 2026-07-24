@@ -18,6 +18,9 @@ from datavis.research.fresh_preregistration import (
     required_fresh_v5_implementation_files,
 )
 from datavis.research.fresh_protocol import canonical_hash
+from datavis.research.fresh_recovery_v5 import (
+    required_fresh_v5_recovery_implementation_files,
+)
 from datavis.research.fresh_search import StageRunResult
 
 
@@ -311,6 +314,31 @@ class FreshPipelineV5Tests(unittest.TestCase):
         )
         self.assertEqual(run.call_args.kwargs["scratch_directory"], "scratch")
 
+        with patch(
+            "datavis.research.fresh_pipeline_cli.run_registered_fresh_research",
+            return_value={"status": "complete", "holdoutOpened": False},
+        ) as resume:
+            self.assertEqual(
+                main(
+                    [
+                        "--output-dir",
+                        "output",
+                        "--scratch-dir",
+                        "scratch",
+                        "--resume-v5-artifact-dir",
+                        "v5-terminal",
+                        "--research-state-dir",
+                        "state",
+                        "--execute",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(
+            resume.call_args.kwargs["resume_v5_artifact_directory"],
+            "v5-terminal",
+        )
+
         with self.assertRaises(SystemExit):
             build_parser().parse_args(
                 [
@@ -318,8 +346,8 @@ class FreshPipelineV5Tests(unittest.TestCase):
                     "output",
                     "--restart-v4-artifact-dir",
                     "run17",
-                    "--restart-v5-artifact-dir",
-                    "run19",
+                    "--resume-v5-artifact-dir",
+                    "v5-terminal",
                 ]
             )
 
@@ -514,6 +542,237 @@ class FreshPipelineV5Tests(unittest.TestCase):
             summary["studyId"],
             "xauusd-fresh-causal-acceleration-v5",
         )
+        self.assertFalse(summary["holdoutOpened"])
+
+    def test_v5_same_lineage_recovery_uses_exact_state_and_generic_resume(
+        self,
+    ) -> None:
+        output = self._directory("recovery-output")
+        state = self._directory("recovery-state")
+        scratch = self._directory("recovery-scratch")
+        ledger = state / "v5" / "fresh_experiment_ledger_v1.jsonl"
+        ledger.parent.mkdir()
+        ledger.write_text("exact-v5-prefix\n", encoding="utf-8")
+        predecessor_ledger = state / "v4" / "fresh_experiment_ledger_v1.jsonl"
+        predecessor_ledger.parent.mkdir()
+        predecessor_ledger.write_text("terminal-v4\n", encoding="utf-8")
+        holdout = state / "holdout" / "fresh_holdout_authorization_v1.json"
+        holdout.parent.mkdir()
+        entry_bank_sha = "e" * 64
+        v5_ledger_sha = "5" * 64
+        predecessor_ledger_sha = "4" * 64
+        discovery_window = {
+            "role": "discovery",
+            "sessionAnchors": ["2026-01-02"],
+        }
+        split = {
+            "manifestSha256": "s" * 64,
+            "windows": {"discovery": discovery_window},
+        }
+        state_binding = {
+            "schema": "fresh-xauusd-durable-research-state/v4",
+            "studyId": "xauusd-fresh-causal-acceleration-v5",
+            "studyLineageSha256": "l" * 64,
+            "stateDirectory": str(state.resolve()),
+            "experimentLedgerPath": str(ledger.resolve()),
+            "predecessorExperimentLedgerPath": str(
+                predecessor_ledger.resolve()
+            ),
+            "holdoutAuthorizationRegistryPath": str(holdout.resolve()),
+        }
+        bundle_paths = {
+            name: ROOT / name
+            for name in (
+                "fresh_source_inventory_v1.json",
+                "fresh_corpus_manifest_v1.json",
+                "fresh_split_manifest_v2.json",
+                "fresh_research_state_binding_v4.json",
+                "fresh_implementation_manifest_v1.json",
+                "fresh_preregistration_v5.json",
+                "fresh_quantile_bank_v1.json",
+                "fresh_threshold_domain_preflight_v1.json",
+                "fresh_experiment_ledger_v1.jsonl",
+                "predecessor_fresh_experiment_ledger_v1.jsonl",
+                "predecessor_fresh_implementation_manifest_v1.json",
+                "predecessor_fresh_preregistration_v4.json",
+                "predecessor_fresh_research_state_binding_v3.json",
+                "server-run.log",
+                "remote-exit-status.txt",
+            )
+        }
+        preregistration = {
+            "preregistrationSha256": "p" * 64,
+            "infrastructureRestart": {"predecessorRunId": 30042880650},
+        }
+        original_implementation = {"manifestSha256": "o" * 64}
+        bundle = SimpleNamespace(
+            inventory={"inventorySha256": "i" * 64},
+            corpus={"corpusManifestSha256": "c" * 64},
+            split=split,
+            state_binding=state_binding,
+            implementation=original_implementation,
+            preregistration=preregistration,
+            quantile_bank={"bankSha256": "q" * 64},
+            threshold_preflight={
+                "allRegisteredThresholdDomainsResolved": True
+            },
+            paths=bundle_paths,
+        )
+        discovery_result = StageRunResult(
+            stage="discovery",
+            evaluated_ids=("candidate",),
+            promoted_ids=(),
+            ledger_record_numbers=(3,),
+            study_failed=True,
+        )
+        search = SimpleNamespace(
+            resume_discovery=MagicMock(return_value=discovery_result),
+            run_walk_forward_1=MagicMock(),
+            run_walk_forward_2=MagicMock(),
+            run_exit_search=MagicMock(),
+            run_walk_forward_3=MagicMock(),
+            run_validation=MagicMock(),
+            audit_records=(),
+        )
+        recovery_batch_path = output / "fresh_recovery_discovery_batch_v1.json"
+        resume_search = MagicMock(return_value=search)
+        build_entries = MagicMock(return_value=("entry-spec",))
+        pipeline = SimpleNamespace(
+            quantile_bank=None,
+            threshold_preflight=None,
+            stage_results=[],
+            recovery_contract=None,
+            recovery_implementation_manifest=None,
+            recovery_batch_result_path=None,
+            build_entry_candidates=build_entries,
+            resume_incomplete_discovery_search=resume_search,
+        )
+        recovery_manifest = {"manifestSha256": "r" * 64}
+        equivalence = {
+            "testModules": ["test_fresh_recovery_v5"],
+            "evidence": "sealed",
+        }
+        recovery_audit = {"schema": "fresh-xauusd-infrastructure-recovery/v1"}
+        recovery_contract = {
+            "schema": "fresh-xauusd-v5-recovery-contract/v1",
+            "recoveryContractSha256": "a" * 64,
+        }
+
+        def file_sha(path: Path) -> str:
+            selected = Path(path).resolve()
+            if selected == ledger.resolve():
+                return v5_ledger_sha
+            if selected == predecessor_ledger.resolve():
+                return predecessor_ledger_sha
+            if selected.name == "fresh_entry_bank_v1.json":
+                return entry_bank_sha
+            return "0" * 64
+
+        with (
+            patch(
+                "datavis.research.fresh_pipeline.load_fresh_v5_recovery_bundle",
+                return_value=bundle,
+            ) as load_bundle,
+            patch(
+                "datavis.research.fresh_pipeline._snapshot_new_file",
+            ),
+            patch(
+                "datavis.research.fresh_pipeline._file_sha256",
+                side_effect=file_sha,
+            ),
+            patch(
+                "datavis.research.fresh_pipeline.V5_LEDGER_SHA256",
+                v5_ledger_sha,
+            ),
+            patch(
+                "datavis.research.fresh_pipeline.RUN19_LEDGER_SHA256",
+                predecessor_ledger_sha,
+            ),
+            patch(
+                "datavis.research.fresh_pipeline.V5_ENTRY_BANK_FILE_SHA256",
+                entry_bank_sha,
+            ),
+            patch(
+                "datavis.research.fresh_pipeline."
+                "build_fresh_implementation_manifest",
+                return_value=recovery_manifest,
+            ) as build_manifest,
+            patch(
+                "datavis.research.fresh_pipeline."
+                "run_fresh_v5_recovery_equivalence_preflight",
+                return_value=equivalence,
+            ) as run_preflight,
+            patch(
+                "datavis.research.fresh_pipeline."
+                "build_fresh_v5_recovery_contract",
+                return_value=(recovery_audit, recovery_contract),
+            ) as build_contract,
+            patch(
+                "datavis.research.fresh_pipeline."
+                "fresh_quantile_bank_from_payload",
+                return_value="bound-quantile-bank",
+            ),
+            patch(
+                "datavis.research.fresh_pipeline."
+                "RegisteredFreshResearchPipeline",
+                return_value=pipeline,
+            ) as build_pipeline,
+        ):
+            summary = run_registered_fresh_research(
+                lambda: None,
+                repository_root=ROOT,
+                output_directory=output,
+                research_state_directory=state,
+                scratch_directory=scratch,
+                resume_v5_artifact_directory="v5-terminal",
+            )
+
+        load_bundle.assert_called_once_with("v5-terminal")
+        self.assertEqual(
+            build_manifest.call_args.kwargs["relative_paths"],
+            required_fresh_v5_recovery_implementation_files(),
+        )
+        run_preflight.assert_called_once_with(
+            ROOT.resolve(),
+            "v5-terminal",
+            recovery_implementation_manifest=recovery_manifest,
+        )
+        self.assertFalse(
+            build_pipeline.call_args.kwargs[
+                "verify_preregistration_implementation_files"
+            ]
+        )
+        build_entries.assert_called_once()
+        build_contract.assert_called_once_with(
+            bundle,
+            entry_specs=("entry-spec",),
+            recovery_implementation_manifest=recovery_manifest,
+            generated_entry_bank_path=output / "fresh_entry_bank_v1.json",
+            equivalence_evidence=equivalence,
+        )
+        resume_search.assert_called_once_with(
+            entry_specs=("entry-spec",),
+            recovery_audit=recovery_audit,
+            recovery_batch_result_path=recovery_batch_path,
+        )
+        search.resume_discovery.assert_called_once_with()
+        for operation in (
+            search.run_walk_forward_1,
+            search.run_walk_forward_2,
+            search.run_exit_search,
+            search.run_walk_forward_3,
+            search.run_validation,
+        ):
+            operation.assert_not_called()
+        self.assertIs(pipeline.recovery_contract, recovery_contract)
+        self.assertIs(
+            pipeline.recovery_implementation_manifest,
+            recovery_manifest,
+        )
+        self.assertTrue(summary["recoveryUsed"])
+        self.assertEqual(summary["recoveryVersion"], "v5-same-lineage")
+        self.assertEqual(summary["infrastructureRestartVersion"], 5)
+        self.assertEqual(summary["predecessorRunId"], 30042880650)
         self.assertFalse(summary["holdoutOpened"])
 
 
