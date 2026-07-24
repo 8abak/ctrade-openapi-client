@@ -22,6 +22,13 @@ jobs:
       - name: Check out proposed frozen code
         uses: actions/checkout@v4
 
+      - name: Check out exact scientific launch runtime
+        uses: actions/checkout@v4
+        with:
+          ref: bc7c814876cc75a0fbe85ba824177ad8baccd5cf
+          path: frozen-launch-source
+          persist-credentials: false
+
       - name: Verify preflight identity
         shell: bash
         env:
@@ -30,7 +37,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           expected_ref="refs/heads/codex/xauusd-fresh-walkforward"
-          expected_marker="fresh-xauusd-v5-lifecycle-preflight-2026-07-24-r5"
+          expected_marker="fresh-xauusd-v5-lifecycle-preflight-2026-07-24-r6"
           [[ "${FRESH_GITHUB_REF}" == "${expected_ref}" ]]
           [[ "$(git rev-parse HEAD)" == "${FRESH_GITHUB_SHA}" ]]
           cmp -s -- .github/research-v5-preflight.txt \
@@ -89,10 +96,6 @@ jobs:
             datavis/research/fresh_preregistration.py \
             datavis/research/fresh_pipeline.py \
             datavis/research/fresh_pipeline_cli.py \
-            datavis/research/fresh_terminal_audit.py \
-            datavis/research/fresh_terminal_audit_bootstrap.py \
-            test_fresh_terminal_audit.py \
-            test_fresh_terminal_audit_bootstrap.py \
             .github/scripts/fresh-xauusd-v5-monitor-controller.py \
             .github/scripts/fresh-xauusd-v5-remote-monitor.py \
             .github/scripts/fresh-xauusd-v5-terminal-reader.py
@@ -104,26 +107,64 @@ jobs:
             > .github/research-v5-adoption-launch.txt
           fresh_test_modules=()
           for test_path in test_fresh_*.py; do
+            case "${test_path}" in
+              test_fresh_terminal_audit.py|test_fresh_terminal_audit_bootstrap.py)
+                continue
+                ;;
+            esac
             fresh_test_modules+=("${test_path%.py}")
           done
           python -m unittest -v "${fresh_test_modules[@]}"
-          python -m ruff check \
-            datavis/research/fresh_terminal_audit.py \
-            datavis/research/fresh_terminal_audit_bootstrap.py \
-            test_fresh_terminal_audit.py \
-            test_fresh_terminal_audit_bootstrap.py
+
+      - name: Validate sealed auditor against exact launch runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          frozen_root="${GITHUB_WORKSPACE}/frozen-launch-source"
+          [[ "$(git -C "${frozen_root}" rev-parse HEAD)" == \
+            "bc7c814876cc75a0fbe85ba824177ad8baccd5cf" ]]
+          files=(
+            "datavis/research/fresh_terminal_audit.py"
+            "datavis/research/fresh_terminal_audit_bootstrap.py"
+            "test_fresh_terminal_audit.py"
+            "test_fresh_terminal_audit_bootstrap.py"
+          )
+          for relative in "${files[@]}"; do
+            [[ ! -e "${frozen_root}/${relative}" ]]
+            cp --no-clobber -- "${GITHUB_WORKSPACE}/${relative}" \
+              "${frozen_root}/${relative}"
+          done
+          (
+            cd "${frozen_root}"
+            printf '%s  %s\n' \
+              "502be931a532fb0a22ba05d8251dd2553775f2f44dd565450836f8c26ed2344e" \
+              "datavis/research/fresh_terminal_audit.py" \
+              "bd3d6cdfefefe8c36a96c69b8288f2f186c4127f932030427f235ea6da0d38fe" \
+              "datavis/research/fresh_terminal_audit_bootstrap.py" \
+              "41aa4186b260e0cbf1bddb98c1af81a37a90451b9a097b57a6eb124b166ffbd8" \
+              "test_fresh_terminal_audit.py" \
+              "4ff54a89f799cf5b2f447245d94c850083d00afc0e29eca94bb52eb20d3e0605" \
+              "test_fresh_terminal_audit_bootstrap.py" |
+              sha256sum --check --strict -
+            python -m py_compile "${files[@]}"
+            python -m unittest -v \
+              test_fresh_terminal_audit \
+              test_fresh_terminal_audit_bootstrap
+            python -m ruff check "${files[@]}"
+          )
 
       - name: Exercise the sealed audit bootstrap
         shell: bash
         run: |
           set -Eeuo pipefail
+          frozen_root="${GITHUB_WORKSPACE}/frozen-launch-source"
           probe="${RUNNER_TEMP}/fresh-v5-bootstrap-probe-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           [[ ! -e "${probe}" ]]
           status=0
           set +e
           output="$(
             python -I -B \
-              datavis/research/fresh_terminal_audit_bootstrap.py \
+              "${frozen_root}/datavis/research/fresh_terminal_audit_bootstrap.py" \
               "${probe}" 2>&1
           )"
           status="$?"
