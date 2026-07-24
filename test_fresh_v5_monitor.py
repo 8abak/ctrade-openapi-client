@@ -415,7 +415,7 @@ class StaticReadOnlyBoundaryTests(unittest.TestCase):
             MARKER_PATH.read_bytes(),
             (
                 b"fresh-xauusd-v5-read-only-monitor-source-"
-                b"30067832187-attempt-1\n"
+                b"30067832187-attempt-1-r2\n"
             ),
         )
 
