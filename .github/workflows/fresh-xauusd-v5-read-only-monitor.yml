@@ -1,0 +1,296 @@
+name: Fresh XAUUSD v5 read-only monitor
+
+on:
+  push:
+    branches:
+      - codex/xauusd-fresh-walkforward
+    paths:
+      - .github/research-v5-monitor.txt
+
+concurrency:
+  group: fresh-xauusd-v5-read-only-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    name: Seal outcome-blind process and filesystem metadata
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out reviewed monitor controller
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify frozen monitor identity
+        shell: bash
+        env:
+          MONITOR_REF: ${{ github.ref }}
+          MONITOR_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -Eeuo pipefail
+          expected_ref="refs/heads/codex/xauusd-fresh-walkforward"
+          expected_repository="8abak/ctrade-openapi-client"
+          expected_marker="$(
+            printf '%s\n' \
+              'fresh-xauusd-v5-read-only-monitor-source-30067832187-attempt-1'
+          )"
+          if [[ "${MONITOR_REF}" != "${expected_ref}" ||
+            "${MONITOR_REPOSITORY}" != "${expected_repository}" ]]; then
+            printf 'refusing monitor from an unexpected GitHub identity\n' >&2
+            exit 1
+          fi
+          if ! cmp -s -- .github/research-v5-monitor.txt \
+            <(printf '%s\n' "${expected_marker}"); then
+            printf 'refusing an unexpected v5 monitor marker\n' >&2
+            exit 1
+          fi
+          git merge-base --is-ancestor \
+            bc7c814876cc75a0fbe85ba824177ad8baccd5cf HEAD
+          files=(
+            .github/scripts/fresh-xauusd-v5-monitor-controller.py
+            .github/scripts/fresh-xauusd-v5-remote-monitor.py
+            .github/scripts/fresh-xauusd-v5-controller.sh
+            .github/ssh/fresh-xauusd-ec2-known-hosts
+          )
+          for path in "${files[@]}"; do
+            if [[ ! -f "${path}" || -L "${path}" ]]; then
+              printf 'monitor dependency is not a real regular file: %s\n' \
+                "${path}" >&2
+              exit 1
+            fi
+          done
+          if [[ "$(
+            sha256sum -- .github/scripts/fresh-xauusd-v5-controller.sh |
+              awk '{print $1}'
+          )" != \
+            da57bce0f90890a8712edbb8cb9830054bfc5b2b3d544c2363420836b8b9ce3f
+          ]]; then
+            printf 'detached controller source identity changed\n' >&2
+            exit 1
+          fi
+          python3 -B - \
+            .github/scripts/fresh-xauusd-v5-monitor-controller.py \
+            .github/scripts/fresh-xauusd-v5-remote-monitor.py <<'PY'
+          from pathlib import Path
+          import sys
+
+          for value in sys.argv[1:]:
+              path = Path(value)
+              compile(path.read_bytes(), str(path), "exec")
+          PY
+
+      - name: Verify and extract immutable launch receipt artifact
+        id: source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          : "${GH_TOKEN:?GitHub token is missing}"
+          if [[ "${GH_REPOSITORY}" != "8abak/ctrade-openapi-client" ]]; then
+            printf 'refusing an unexpected source repository\n' >&2
+            exit 1
+          fi
+          controller=".github/scripts/fresh-xauusd-v5-monitor-controller.py"
+          run_json="${RUNNER_TEMP}/fresh-v5-source-run.json"
+          artifacts_json="${RUNNER_TEMP}/fresh-v5-source-artifacts.json"
+          plan="${RUNNER_TEMP}/fresh-v5-source-plan.json"
+          archive="${RUNNER_TEMP}/fresh-v5-launch-artifact.zip"
+          receipt="${RUNNER_TEMP}/fresh-v5-launch-receipt.json"
+          api_headers=(
+            --header "Accept: application/vnd.github+json"
+            --header "Authorization: Bearer ${GH_TOKEN}"
+            --header "X-GitHub-Api-Version: 2022-11-28"
+          )
+          curl_options=(
+            --fail-with-body
+            --silent
+            --show-error
+            --proto '=https'
+            --tlsv1.2
+          )
+          ready=0
+          for _ in $(seq 1 30); do
+            if ! curl "${curl_options[@]}" "${api_headers[@]}" \
+              --output "${run_json}" \
+              "https://api.github.com/repos/${GH_REPOSITORY}/actions/runs/30067832187/attempts/1"; then
+              sleep 10
+              continue
+            fi
+            if ! curl "${curl_options[@]}" "${api_headers[@]}" \
+              --output "${artifacts_json}" \
+              "https://api.github.com/repos/${GH_REPOSITORY}/actions/runs/30067832187/artifacts?name=fresh-xauusd-detached-launch-30067832187-1&per_page=100"; then
+              sleep 10
+              continue
+            fi
+            if python3 -B "${controller}" resolve-source \
+              --run-json "${run_json}" \
+              --artifacts-json "${artifacts_json}" \
+              > "${plan}.candidate"; then
+              mv -- "${plan}.candidate" "${plan}"
+              ready=1
+              break
+            fi
+            rm -f -- "${plan}.candidate"
+            sleep 10
+          done
+          if [[ "${ready}" -ne 1 ]]; then
+            printf 'immutable source launch artifact was not available\n' >&2
+            exit 1
+          fi
+          curl "${curl_options[@]}" "${api_headers[@]}" \
+            --location \
+            --proto-redir '=https' \
+            --max-filesize 1048576 \
+            --output "${archive}" \
+            "https://api.github.com/repos/${GH_REPOSITORY}/actions/artifacts/8586881858/zip"
+          python3 -B "${controller}" verify-launch \
+            --plan "${plan}" \
+            --archive "${archive}" \
+            --receipt-output "${receipt}"
+          printf 'plan=%s\n' "${plan}" >> "${GITHUB_OUTPUT}"
+          printf 'receipt=%s\n' "${receipt}" >> "${GITHUB_OUTPUT}"
+
+      - name: Capture strictly read-only remote metadata
+        id: snapshot
+        shell: bash
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          EC2_PORT: ${{ secrets.EC2_PORT || '22' }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          SOURCE_RECEIPT: ${{ steps.source.outputs.receipt }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          : "${EC2_HOST:?EC2 host is missing}"
+          : "${EC2_USER:?EC2 user is missing}"
+          : "${EC2_PORT:?EC2 port is missing}"
+          : "${EC2_SSH_KEY:?EC2 SSH key is missing}"
+          if [[ "${EC2_USER}" != "ec2-user" ||
+            "${EC2_PORT}" != "22" ]]; then
+            printf 'refusing an unpinned EC2 login identity\n' >&2
+            exit 1
+          fi
+          case "${EC2_HOST}" in
+            datavis.au|www.datavis.au|3.27.110.195|ec2-3-27-110-195.ap-southeast-2.compute.amazonaws.com)
+              ;;
+            *)
+              printf 'refusing an unpinned EC2 host alias\n' >&2
+              exit 1
+              ;;
+          esac
+
+          key_path="${RUNNER_TEMP}/fresh-v5-monitor-key"
+          known_hosts="${GITHUB_WORKSPACE}/.github/ssh/fresh-xauusd-ec2-known-hosts"
+          local_controller=".github/scripts/fresh-xauusd-v5-monitor-controller.py"
+          remote_controller=".github/scripts/fresh-xauusd-v5-remote-monitor.py"
+          snapshot="${RUNNER_TEMP}/fresh-v5-runtime-metadata.json"
+          printf '%s\n' "${EC2_SSH_KEY}" > "${key_path}"
+          chmod 600 "${key_path}"
+          trap 'rm -f -- "${key_path}"' EXIT
+
+          expected_known_host="$(
+            printf '%s\n' \
+              'datavis.au,www.datavis.au,3.27.110.195,ec2-3-27-110-195.ap-southeast-2.compute.amazonaws.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJaLbSMHMPiqscPzaqqsOoa41AKxQseBtEWVngSLj6nk'
+          )"
+          if ! cmp -s -- "${known_hosts}" \
+            <(printf '%s\n' "${expected_known_host}") ||
+            [[ "$(
+              sha256sum -- "${known_hosts}" | awk '{print $1}'
+            )" != \
+              1ae003bab02effdbae4e43d5c2d8b566b65464b380fd31a4fad8e457b37770c8
+            ]] ||
+            [[ "$(wc -l < "${known_hosts}")" -ne 1 ]] ||
+            [[ "$(
+              ssh-keygen -lf "${known_hosts}" -E sha256 |
+                awk 'NR == 1 {print $2}'
+            )" != \
+              SHA256:K68UWpXSv0oN9sa2KuFl1Bk9RWgigQtzskL3srgQ3ns
+            ]]; then
+            printf 'pinned EC2 known-host identity changed\n' >&2
+            exit 1
+          fi
+
+          mapfile -t remote_arguments < <(
+            python3 -B "${local_controller}" remote-args \
+              --receipt "${SOURCE_RECEIPT}"
+          )
+          if [[ "${#remote_arguments[@]}" -ne 18 ]]; then
+            printf 'sealed remote argument vector changed\n' >&2
+            exit 1
+          fi
+          ssh_options=(
+            -F /dev/null
+            -T
+            -i "${key_path}"
+            -p "${EC2_PORT}"
+            -o BatchMode=yes
+            -o PasswordAuthentication=no
+            -o KbdInteractiveAuthentication=no
+            -o NumberOfPasswordPrompts=0
+            -o IdentitiesOnly=yes
+            -o ClearAllForwardings=yes
+            -o ForwardAgent=no
+            -o PermitLocalCommand=no
+            -o RequestTTY=no
+            -o StrictHostKeyChecking=yes
+            -o HostKeyAlgorithms=ssh-ed25519
+            -o CheckHostIP=yes
+            -o VerifyHostKeyDNS=no
+            -o UpdateHostKeys=no
+            -o UserKnownHostsFile="${known_hosts}"
+            -o GlobalKnownHostsFile=/dev/null
+            -o ConnectTimeout=15
+            -o LogLevel=ERROR
+          )
+          ssh "${ssh_options[@]}" "${EC2_USER}@${EC2_HOST}" \
+            python3 -B - "${remote_arguments[@]}" \
+            < "${remote_controller}" \
+            > "${snapshot}"
+          printf 'snapshot=%s\n' "${snapshot}" >> "${GITHUB_OUTPUT}"
+
+      - name: Seal immutable outcome-blind monitor receipt
+        id: seal
+        shell: bash
+        env:
+          SOURCE_PLAN: ${{ steps.source.outputs.plan }}
+          SOURCE_RECEIPT: ${{ steps.source.outputs.receipt }}
+          REMOTE_SNAPSHOT: ${{ steps.snapshot.outputs.snapshot }}
+          MONITOR_RUN_ID: ${{ github.run_id }}
+          MONITOR_RUN_ATTEMPT: ${{ github.run_attempt }}
+          MONITOR_COMMIT: ${{ github.sha }}
+          MONITOR_BRANCH: ${{ github.ref_name }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          receipt="${GITHUB_WORKSPACE}/fresh-xauusd-v5-monitor-receipt.json"
+          python3 -B \
+            .github/scripts/fresh-xauusd-v5-monitor-controller.py seal \
+            --plan "${SOURCE_PLAN}" \
+            --launch-receipt "${SOURCE_RECEIPT}" \
+            --snapshot "${REMOTE_SNAPSHOT}" \
+            --monitor-run-id "${MONITOR_RUN_ID}" \
+            --monitor-attempt "${MONITOR_RUN_ATTEMPT}" \
+            --monitor-commit "${MONITOR_COMMIT}" \
+            --monitor-branch "${MONITOR_BRANCH}" \
+            --output "${receipt}"
+          printf 'receipt=%s\n' "${receipt}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload immutable read-only monitor receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: fresh-xauusd-v5-read-only-monitor-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.seal.outputs.receipt }}
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 9
+          overwrite: false
+          include-hidden-files: false
