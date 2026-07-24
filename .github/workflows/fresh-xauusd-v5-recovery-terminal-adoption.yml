@@ -69,6 +69,10 @@ on:
         description: Read-only wait before returning active
         required: true
         type: string
+    outputs:
+      ready:
+        description: Whether a terminal recovery archive was adopted
+        value: ${{ jobs.adopt.outputs.ready }}
 
 concurrency:
   group: fresh-xauusd-v5-recovery-adoption-${{ inputs.launch_run_id }}-${{ inputs.launch_run_attempt }}
@@ -79,6 +83,8 @@ jobs:
     name: Read-only recovery terminal adoption
     runs-on: ubuntu-24.04
     timeout-minutes: 360
+    outputs:
+      ready: ${{ steps.adoption.outputs.ready }}
     permissions:
       actions: read
       contents: read
