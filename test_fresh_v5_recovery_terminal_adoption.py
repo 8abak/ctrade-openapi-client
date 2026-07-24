@@ -27,6 +27,14 @@ WORKFLOW = (
     / ".github/workflows/"
     "fresh-xauusd-v5-recovery-terminal-adoption.yml"
 )
+TRIGGER_WORKFLOW = (
+    ROOT
+    / ".github/workflows/"
+    "fresh-xauusd-v5-recovery-terminal-adoption-trigger.yml"
+)
+TRIGGER_MARKER = (
+    ROOT / ".github/research-v5-recovery-adoption-launch.txt"
+)
 ORIGINAL_READER = (
     ROOT / ".github/scripts/fresh-xauusd-v5-terminal-reader.py"
 )
@@ -532,6 +540,58 @@ class RecoveryWorkflowTests(unittest.TestCase):
         self.assertNotIn(
             "fresh-xauusd-v5-recovery-terminal-adoption",
             ORIGINAL_WORKFLOW.read_text(encoding="utf-8"),
+        )
+
+    def test_branch_push_trigger_calls_same_read_only_workflow(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        trigger = TRIGGER_WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("workflow_call:", workflow)
+        for input_name in (
+            "launch_run_id",
+            "launch_run_attempt",
+            "launch_commit_sha",
+            "launch_artifact_id",
+            "launch_artifact_size",
+            "launch_artifact_digest",
+            "wait_minutes",
+        ):
+            self.assertGreaterEqual(workflow.count(f"      {input_name}:"), 2)
+        self.assertIn(
+            "branches:\n      - codex/xauusd-fresh-walkforward",
+            trigger,
+        )
+        self.assertIn(
+            "- .github/research-v5-recovery-adoption-launch.txt",
+            trigger,
+        )
+        self.assertIn(
+            "uses: ./.github/workflows/"
+            "fresh-xauusd-v5-recovery-terminal-adoption.yml",
+            trigger,
+        )
+        expected = {
+            "launch_run_id": "30132173254",
+            "launch_run_attempt": "1",
+            "launch_commit_sha": (
+                "72784c36b00223ca166b3f0d904ab4c93db7dcc1"
+            ),
+            "launch_artifact_id": "8611513967",
+            "launch_artifact_size": "911",
+            "launch_artifact_digest": (
+                "sha256:"
+                "192c9661393571a5b64730665191914ed682890a"
+                "fc91ee271057999f49d64683"
+            ),
+            "wait_minutes": "0",
+        }
+        for name, value in expected.items():
+            self.assertIn(f'{name}: "{value}"', trigger)
+        self.assertEqual(
+            TRIGGER_MARKER.read_text(encoding="utf-8"),
+            (
+                "fresh-xauusd-v5-recovery-adoption-"
+                "30132173254-attempt-1-probe-0-v1\n"
+            ),
         )
 
 
