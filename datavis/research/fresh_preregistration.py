@@ -49,12 +49,18 @@ from datavis.research.fresh_restart_v4 import (
     RUN17_SCIENTIFIC_SPECIFICATION_SHA256,
     canonical_fresh_v4_restart_provenance,
 )
+from datavis.research.fresh_restart_v5 import (
+    FRESH_V5_STUDY_ID,
+    RUN19_SCIENTIFIC_SPECIFICATION_SHA256,
+    canonical_fresh_v5_restart_provenance,
+)
 from datavis.research.fresh_sessions import SessionAuditConfig
 
 
 PREREGISTRATION_SCHEMA = "fresh-xauusd-acceleration-preregistration/v2"
 PREREGISTRATION_V3_SCHEMA = "fresh-xauusd-acceleration-preregistration/v3"
 PREREGISTRATION_V4_SCHEMA = "fresh-xauusd-acceleration-preregistration/v4"
+PREREGISTRATION_V5_SCHEMA = "fresh-xauusd-acceleration-preregistration/v5"
 IMPLEMENTATION_MANIFEST_SCHEMA = "fresh-xauusd-implementation-manifest/v1"
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _ROLE_ORDER = (
@@ -110,6 +116,12 @@ _V4_REQUIRED_IMPLEMENTATION_FILES = frozenset(
         "datavis/research/fresh_restart_v4.py",
     }
 )
+_V5_REQUIRED_IMPLEMENTATION_FILES = frozenset(
+    {
+        *_V4_REQUIRED_IMPLEMENTATION_FILES,
+        "datavis/research/fresh_restart_v5.py",
+    }
+)
 
 
 def required_fresh_implementation_files() -> tuple[str, ...]:
@@ -126,6 +138,19 @@ def required_fresh_v4_implementation_files() -> tuple[str, ...]:
             {
                 *_REQUIRED_IMPLEMENTATION_FILES,
                 *_V4_REQUIRED_IMPLEMENTATION_FILES,
+            }
+        )
+    )
+
+
+def required_fresh_v5_implementation_files() -> tuple[str, ...]:
+    """Return every implementation file that a v5 manifest must bind."""
+
+    return tuple(
+        sorted(
+            {
+                *_REQUIRED_IMPLEMENTATION_FILES,
+                *_V5_REQUIRED_IMPLEMENTATION_FILES,
             }
         )
     )
@@ -1213,6 +1238,15 @@ def fresh_v4_scientific_specification_sha256() -> str:
     return digest
 
 
+def fresh_v5_scientific_specification_sha256() -> str:
+    """Return the unchanged scientific identity inherited by the v5 study."""
+
+    digest = fresh_v4_scientific_specification_sha256()
+    if digest != RUN19_SCIENTIFIC_SPECIFICATION_SHA256:
+        raise RuntimeError("v5 scientific specification differs from v4")
+    return digest
+
+
 def _canonical_v3_restart_provenance(
     provenance: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -1368,6 +1402,24 @@ def _canonical_v4_restart_provenance(
     return copy.deepcopy(expected)
 
 
+def _canonical_v5_restart_provenance(
+    provenance: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Require the exact immutable Run 19 restart provenance."""
+
+    if not isinstance(provenance, Mapping):
+        raise ValueError("v5 infrastructure restart provenance must be a mapping")
+    expected = canonical_fresh_v5_restart_provenance()
+    if dict(provenance) != expected:
+        raise ValueError("v5 infrastructure restart provenance changed")
+    if (
+        expected.get("scientificSpecificationSha256")
+        != fresh_v5_scientific_specification_sha256()
+    ):
+        raise RuntimeError("v5 restart provenance scientific identity changed")
+    return copy.deepcopy(expected)
+
+
 def _preregistration_v3_body(
     source_bindings: Mapping[str, Any],
     restart_provenance: Mapping[str, Any],
@@ -1415,6 +1467,32 @@ def _preregistration_v4_body(
         "thresholdOrCandidateRetuningPermitted": False,
     }
     body["infrastructureRestart"] = _canonical_v4_restart_provenance(
+        restart_provenance
+    )
+    return body
+
+
+def _preregistration_v5_body(
+    source_bindings: Mapping[str, Any],
+    restart_provenance: Mapping[str, Any],
+) -> dict[str, Any]:
+    body = _preregistration_body(source_bindings)
+    body["schema"] = PREREGISTRATION_V5_SCHEMA
+    body["studyId"] = FRESH_V5_STUDY_ID
+    body["outcomeBlindDeclaration"] = {
+        "strategyThresholdsFitted": True,
+        "thresholdsInheritedByteForByte": True,
+        "thresholdSource": (
+            "immutable v2 discovery quantile bank fitted before candidate "
+            "outcomes existed"
+        ),
+        "candidateOutcomeRecordCountAvailableToBuilder": 0,
+        "partialCandidateResultsRecovered": False,
+        "tickPriceValuesRequiredByBuilder": False,
+        "holdoutOutcomeAccessed": False,
+        "thresholdOrCandidateRetuningPermitted": False,
+    }
+    body["infrastructureRestart"] = _canonical_v5_restart_provenance(
         restart_provenance
     )
     return body
@@ -1537,6 +1615,40 @@ def build_fresh_preregistration_v4(
     if not _V4_REQUIRED_IMPLEMENTATION_FILES.issubset(implementation_paths):
         raise ValueError("v4 implementation manifest omits restart or spool code")
     body = _preregistration_v4_body(
+        v2["sourceBindings"],
+        infrastructure_restart_provenance,
+    )
+    return {**body, "preregistrationSha256": canonical_hash(body)}
+
+
+def build_fresh_preregistration_v5(
+    *,
+    split_manifest: Mapping[str, Any],
+    corpus_manifest_sha256: str,
+    protocol_code_identifier: str,
+    implementation_manifest: Mapping[str, Any],
+    experiment_ledger_path: str | Path,
+    holdout_authorization_registry_path: str | Path,
+    infrastructure_restart_provenance: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the full-recompute v5 study from exact terminal Run 19 evidence."""
+
+    v2 = build_fresh_preregistration_v2(
+        split_manifest=split_manifest,
+        corpus_manifest_sha256=corpus_manifest_sha256,
+        protocol_code_identifier=protocol_code_identifier,
+        implementation_manifest=implementation_manifest,
+        experiment_ledger_path=experiment_ledger_path,
+        holdout_authorization_registry_path=holdout_authorization_registry_path,
+    )
+    implementation_paths = {
+        str(item["path"])
+        for item in implementation_manifest.get("files", ())
+        if isinstance(item, Mapping) and "path" in item
+    }
+    if not _V5_REQUIRED_IMPLEMENTATION_FILES.issubset(implementation_paths):
+        raise ValueError("v5 implementation manifest omits restart or spool code")
+    body = _preregistration_v5_body(
         v2["sourceBindings"],
         infrastructure_restart_provenance,
     )
@@ -1754,12 +1866,71 @@ def validate_fresh_preregistration_v4(
     return claimed
 
 
+def validate_fresh_preregistration_v5(
+    preregistration: Mapping[str, Any],
+    *,
+    verify_current_implementation_files: bool = True,
+) -> str:
+    """Return the v5 digest or reject changed science or Run 19 provenance."""
+
+    if not isinstance(preregistration, Mapping):
+        raise ValueError("preregistration must be a mapping")
+    body = copy.deepcopy(dict(preregistration))
+    claimed = _sha256(
+        str(body.pop("preregistrationSha256", "")),
+        "preregistrationSha256",
+    )
+    if body.get("schema") != PREREGISTRATION_V5_SCHEMA:
+        raise ValueError("unsupported v5 preregistration schema")
+    if body.get("studyId") != FRESH_V5_STUDY_ID:
+        raise ValueError("v5 study identity changed")
+    if canonical_hash(body) != claimed:
+        raise ValueError("preregistration hash does not match its contents")
+    restart = body.pop("infrastructureRestart", None)
+    if restart != _canonical_v5_restart_provenance(restart):
+        raise ValueError("v5 infrastructure restart provenance is not canonical")
+    source = body.get("sourceBindings")
+    manifest = (
+        source.get("implementationManifest")
+        if isinstance(source, Mapping)
+        else None
+    )
+    manifest_files = (
+        manifest.get("files", ()) if isinstance(manifest, Mapping) else ()
+    )
+    implementation_paths = {
+        str(item["path"])
+        for item in manifest_files
+        if isinstance(item, Mapping) and "path" in item
+    }
+    if not _V5_REQUIRED_IMPLEMENTATION_FILES.issubset(implementation_paths):
+        raise ValueError("v5 implementation manifest omits restart or spool code")
+
+    # V5 changes only the terminal infrastructure lineage. All trading,
+    # execution, gate, and holdout rules remain the exact canonical v2-v4
+    # scientific document.
+    body["schema"] = PREREGISTRATION_SCHEMA
+    body["studyId"] = "xauusd-fresh-causal-acceleration-v2"
+    body["outcomeBlindDeclaration"] = _preregistration_body({})[
+        "outcomeBlindDeclaration"
+    ]
+    synthetic_v2 = {
+        **body,
+        "preregistrationSha256": canonical_hash(body),
+    }
+    validate_fresh_preregistration_v2(
+        synthetic_v2,
+        verify_current_implementation_files=verify_current_implementation_files,
+    )
+    return claimed
+
+
 def validate_fresh_preregistration(
     preregistration: Mapping[str, Any],
     *,
     verify_current_implementation_files: bool = True,
 ) -> str:
-    """Validate the immutable v2 lineage or an explicit v3/v4 study."""
+    """Validate the immutable v2 lineage or an explicit v3/v4/v5 study."""
 
     schema = (
         preregistration.get("schema")
@@ -1782,6 +1953,13 @@ def validate_fresh_preregistration(
         )
     if schema == PREREGISTRATION_V4_SCHEMA:
         return validate_fresh_preregistration_v4(
+            preregistration,
+            verify_current_implementation_files=(
+                verify_current_implementation_files
+            ),
+        )
+    if schema == PREREGISTRATION_V5_SCHEMA:
+        return validate_fresh_preregistration_v5(
             preregistration,
             verify_current_implementation_files=(
                 verify_current_implementation_files
@@ -2246,24 +2424,29 @@ __all__ = [
     "PREREGISTRATION_SCHEMA",
     "PREREGISTRATION_V3_SCHEMA",
     "PREREGISTRATION_V4_SCHEMA",
+    "PREREGISTRATION_V5_SCHEMA",
     "authorize_registered_holdout",
     "build_fresh_implementation_manifest",
     "build_fresh_preregistration_v2",
     "build_fresh_preregistration_v3",
     "build_fresh_preregistration_v4",
+    "build_fresh_preregistration_v5",
     "entry_barrier_diagnostic_configs_from_preregistration",
     "entry_diagnostic_configs_from_preregistration",
     "feature_configs_from_preregistration",
     "fresh_v3_scientific_specification_sha256",
     "fresh_v4_scientific_specification_sha256",
+    "fresh_v5_scientific_specification_sha256",
     "required_fresh_implementation_files",
     "required_fresh_v4_implementation_files",
+    "required_fresh_v5_implementation_files",
     "replay_execution_configs_from_preregistration",
     "replay_execution_config_for_candidate",
     "session_audit_config_from_preregistration",
     "validate_fresh_preregistration_v2",
     "validate_fresh_preregistration_v3",
     "validate_fresh_preregistration_v4",
+    "validate_fresh_preregistration_v5",
     "validate_fresh_preregistration",
     "validate_fresh_implementation_manifest",
 ]
