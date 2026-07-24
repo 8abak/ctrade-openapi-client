@@ -1,0 +1,73 @@
+name: Fresh XAUUSD v5 detached preflight
+
+on:
+  push:
+    branches:
+      - codex/xauusd-fresh-walkforward
+    paths:
+      - .github/research-v5-preflight.txt
+
+concurrency:
+  group: fresh-xauusd-v5-detached-preflight
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Validate v5 code and detached controller
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out proposed frozen code
+        uses: actions/checkout@v4
+
+      - name: Verify preflight identity
+        shell: bash
+        env:
+          FRESH_GITHUB_REF: ${{ github.ref }}
+        run: |
+          set -Eeuo pipefail
+          expected_ref="refs/heads/codex/xauusd-fresh-walkforward"
+          expected_marker="fresh-xauusd-v5-detached-preflight-2026-07-24"
+          [[ "${FRESH_GITHUB_REF}" == "${expected_ref}" ]]
+          cmp -s -- .github/research-v5-preflight.txt \
+            <(printf '%s\n' "${expected_marker}")
+          bash -n -- .github/scripts/fresh-xauusd-v5-controller.sh
+          python3 -B .github/scripts/extract_workflow_run.py \
+            .github/workflows/fresh-xauusd-v5-detached-launch.yml \
+            "Launch detached v5 controller and obtain immutable receipt" \
+            > "${RUNNER_TEMP}/fresh-v5-detached-step.sh"
+          bash -n -- "${RUNNER_TEMP}/fresh-v5-detached-step.sh"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install pinned research test dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python -m pip install \
+            --disable-pip-version-check \
+            --no-cache-dir \
+            numpy==2.0.2 \
+            pandas==2.2.3 \
+            psycopg2-binary==2.9.10 \
+            python-dotenv==1.1.1
+
+      - name: Compile and test the frozen research stack
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python -m py_compile \
+            datavis/research/fresh_restart_v5.py \
+            datavis/research/fresh_preregistration.py \
+            datavis/research/fresh_pipeline.py \
+            datavis/research/fresh_pipeline_cli.py
+          fresh_test_modules=()
+          for test_path in test_fresh_*.py; do
+            fresh_test_modules+=("${test_path%.py}")
+          done
+          python -m unittest "${fresh_test_modules[@]}"
