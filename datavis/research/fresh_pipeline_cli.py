@@ -41,6 +41,13 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     lineage.add_argument(
+        "--resume-v5-artifact-dir",
+        help=(
+            "exact extracted adopted V5 terminal directory for the sole "
+            "same-lineage discovery continuation"
+        ),
+    )
+    lineage.add_argument(
         "--restart-artifact-dir",
         help=(
             "exact extracted run-16 artifact directory that proves eligibility "
@@ -88,6 +95,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         scratch_directory=arguments.scratch_dir,
         progress=_progress,
         resume_artifact_directory=arguments.resume_artifact_dir,
+        resume_v5_artifact_directory=arguments.resume_v5_artifact_dir,
         infrastructure_restart_artifact_directory=(
             arguments.restart_artifact_dir
         ),
