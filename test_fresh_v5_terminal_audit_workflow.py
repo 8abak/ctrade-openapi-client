@@ -433,7 +433,7 @@ class ReceiptAndWorkflowTests(unittest.TestCase):
                 "fresh-xauusd-v5-terminal-audit-"
                 f"{values['ADOPTION_RUN_ID']}-"
                 f"{values['ADOPTION_RUN_ATTEMPT']}-"
-                f"{values['ADOPTION_ARTIFACT_ID']}-r1\n"
+                f"{values['ADOPTION_ARTIFACT_ID']}-r2\n"
             )
             if MARKER_PATH.exists():
                 self.assertEqual(
