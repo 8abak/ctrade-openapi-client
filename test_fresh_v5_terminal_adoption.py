@@ -195,7 +195,7 @@ class FreshV5TerminalAdoptionTests(unittest.TestCase):
     def test_marker_and_host_key_are_exact(self) -> None:
         self.assertEqual(
             MARKER.read_text(encoding="utf-8"),
-            "fresh-xauusd-v5-terminal-adoption-30067832187-1-r2\n",
+            "fresh-xauusd-v5-terminal-adoption-30067832187-1-r3\n",
         )
         self.assertEqual(
             KNOWN_HOSTS.read_text(encoding="utf-8"),
