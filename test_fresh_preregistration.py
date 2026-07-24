@@ -7,6 +7,7 @@ import uuid
 from dataclasses import asdict
 from datetime import date, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 from datavis.research.fresh_preregistration import (
     FRESH_V2_WINDOW_POLICY,
@@ -724,6 +725,155 @@ class FreshPreregistrationTests(unittest.TestCase):
                 validation_record_number=validation["recordNumber"],
                 explicit_holdout_authorization=True,
             )
+
+    def test_holdout_dispatches_only_the_exact_v5_recovery_contract(self):
+        token = uuid.uuid4().hex
+        ledger_path = TEST_ARTIFACTS / f"{token}-v5-recovery-ledger.jsonl"
+        registry_path = TEST_ARTIFACTS / f"{token}-v5-recovery-authorization.json"
+        self.addCleanup(ledger_path.unlink, missing_ok=True)
+        self.addCleanup(
+            ledger_path.with_name(ledger_path.name + ".lock").unlink,
+            missing_ok=True,
+        )
+        self.addCleanup(registry_path.unlink, missing_ok=True)
+        split, prereg = preregistration(
+            ledger_path=ledger_path,
+            registry_path=registry_path,
+        )
+        strategy_sha = "c" * 64
+        append_fresh_record(
+            ledger_path,
+            {
+                "recordKind": "infrastructure-resume",
+                "candidateId": "protocol-infrastructure-resume::resume_authorized",
+                "family": "protocol-infrastructure-recovery",
+                "stage": "discovery",
+                "trainingWindow": "discovery",
+                "evaluationWindow": "discovery",
+                "parameters": {
+                    "kind": "fresh-v5-infrastructure-recovery",
+                    "status": "resume_authorized",
+                },
+                "entryVariant": "infrastructure-resume",
+                "exitVariant": "infrastructure-resume",
+                "metrics": {},
+                "status": "resume_authorized",
+                "leakageChecks": {},
+                "role": "discovery",
+                "outcomesRevealed": True,
+                "gatePassed": False,
+                "preregistrationSha256": prereg["preregistrationSha256"],
+            },
+        )
+        append_fresh_record(
+            ledger_path, batch_access_evidence(prereg, "walk_forward_3")
+        )
+        walk_forward_3 = append_fresh_record(
+            ledger_path,
+            passed_evidence(prereg, strategy_sha, "walk_forward_3"),
+        )
+        append_fresh_record(
+            ledger_path, batch_access_evidence(prereg, "validation")
+        )
+        validation = append_fresh_record(
+            ledger_path,
+            passed_evidence(prereg, strategy_sha, "validation"),
+        )
+        expected_proof = {
+            "schema": "fresh-xauusd-v5-recovery-holdout-proof/v1",
+            "validated": True,
+        }
+        contract = {"schema": "fresh-xauusd-v5-recovery-contract/v1"}
+        recovery_manifest = {"manifestSha256": "d" * 64}
+        sealed_batch_path = TEST_ARTIFACTS / f"{token}-sealed-batch.json"
+
+        with patch(
+            "datavis.research.fresh_recovery_v5."
+            "validate_fresh_v5_recovery_for_holdout",
+            return_value=expected_proof,
+        ) as validate:
+            authorization = authorize_registered_holdout(
+                preregistration=prereg,
+                split_manifest=split,
+                frozen_strategy_sha256=strategy_sha,
+                walk_forward_3_record_number=walk_forward_3["recordNumber"],
+                validation_record_number=validation["recordNumber"],
+                explicit_holdout_authorization=True,
+                infrastructure_recovery_contract=contract,
+                recovery_implementation_manifest=recovery_manifest,
+                recovery_batch_result_path=sealed_batch_path,
+            )
+
+        self.assertEqual(
+            authorization["infrastructureRecoveryProof"],
+            expected_proof,
+        )
+        validate.assert_called_once()
+        self.assertEqual(validate.call_args.kwargs["records"][-1]["role"], "validation")
+        self.assertIs(
+            validate.call_args.kwargs["recovery_contract"],
+            contract,
+        )
+        self.assertIs(
+            validate.call_args.kwargs["recovery_implementation_manifest"],
+            recovery_manifest,
+        )
+        self.assertEqual(
+            validate.call_args.kwargs["sealed_batch_result_path"],
+            sealed_batch_path,
+        )
+
+    def test_holdout_rejects_unknown_recovery_contract_schema(self):
+        token = uuid.uuid4().hex
+        ledger_path = TEST_ARTIFACTS / f"{token}-unknown-recovery-ledger.jsonl"
+        registry_path = TEST_ARTIFACTS / f"{token}-unknown-recovery-auth.json"
+        self.addCleanup(ledger_path.unlink, missing_ok=True)
+        self.addCleanup(
+            ledger_path.with_name(ledger_path.name + ".lock").unlink,
+            missing_ok=True,
+        )
+        self.addCleanup(registry_path.unlink, missing_ok=True)
+        split, prereg = preregistration(
+            ledger_path=ledger_path,
+            registry_path=registry_path,
+        )
+        strategy_sha = "c" * 64
+        append_fresh_record(
+            ledger_path,
+            {
+                **batch_access_evidence(prereg, "discovery"),
+                "recordKind": "infrastructure-resume",
+            },
+        )
+        walk_forward_3 = append_fresh_record(
+            ledger_path,
+            passed_evidence(prereg, strategy_sha, "walk_forward_3"),
+        )
+        validation = append_fresh_record(
+            ledger_path,
+            passed_evidence(prereg, strategy_sha, "validation"),
+        )
+
+        with self.assertRaisesRegex(
+            PermissionError,
+            "contract schema is unsupported",
+        ):
+            authorize_registered_holdout(
+                preregistration=prereg,
+                split_manifest=split,
+                frozen_strategy_sha256=strategy_sha,
+                walk_forward_3_record_number=walk_forward_3["recordNumber"],
+                validation_record_number=validation["recordNumber"],
+                explicit_holdout_authorization=True,
+                infrastructure_recovery_contract={
+                    "schema": "fresh-xauusd-unknown-recovery/v1"
+                },
+                recovery_implementation_manifest={
+                    "manifestSha256": "d" * 64
+                },
+                recovery_batch_result_path=TEST_ARTIFACTS / "unused.json",
+            )
+        self.assertFalse(registry_path.exists())
 
 
 if __name__ == "__main__":
