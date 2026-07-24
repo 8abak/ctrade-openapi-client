@@ -221,10 +221,10 @@ class FreshV5RecoveryOrchestrationTests(unittest.TestCase):
         source = WORKFLOW_PATH.read_text(encoding="utf-8")
         self.assertEqual(
             MARKER_PATH.read_text(encoding="utf-8"),
-            "fresh-xauusd-v5-discovery-recovery-attempt-1-transport-2\n",
+            "fresh-xauusd-v5-discovery-recovery-attempt-1-transport-3\n",
         )
         self.assertIn(
-            '"fresh-xauusd-v5-discovery-recovery-attempt-1-transport-2")',
+            '"fresh-xauusd-v5-discovery-recovery-attempt-1-transport-3")',
             source,
         )
         self.assertIn(
