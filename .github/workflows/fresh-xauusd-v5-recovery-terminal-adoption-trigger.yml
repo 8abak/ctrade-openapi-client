@@ -1,0 +1,27 @@
+name: Fresh XAUUSD v5 recovery adoption trigger
+
+on:
+  push:
+    branches:
+      - codex/xauusd-fresh-walkforward
+    paths:
+      - .github/research-v5-recovery-adoption-launch.txt
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  adopt:
+    uses: ./.github/workflows/fresh-xauusd-v5-recovery-terminal-adoption.yml
+    permissions:
+      actions: read
+      contents: read
+    with:
+      launch_run_id: "30132173254"
+      launch_run_attempt: "1"
+      launch_commit_sha: "72784c36b00223ca166b3f0d904ab4c93db7dcc1"
+      launch_artifact_id: "8611513967"
+      launch_artifact_size: "911"
+      launch_artifact_digest: "sha256:192c9661393571a5b64730665191914ed682890afc91ee271057999f49d64683"
+      wait_minutes: "0"
