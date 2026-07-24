@@ -21,6 +21,8 @@ from datetime import date, datetime
 from statistics import median
 from typing import Any, Iterable, Mapping, Sequence
 
+from datavis.research.fresh_numeric_spool import FloatSeriesSpool
+
 
 REQUIRED_COVERAGE_CHECKPOINTS_SECONDS = (1, 2, 5, 10, 20, 30, 60)
 BALANCED_COMPONENT_NAMES = (
@@ -760,6 +762,360 @@ def _coverage_successes(
     if censor_reason == "":
         raise ValueError("censored diagnostic must have a non-empty reason")
     return successes, coverage_ms, barrier_success, censor_reason
+
+
+@dataclass(frozen=True, slots=True)
+class _StreamingFill:
+    coverage_successes: tuple[tuple[int, bool], ...]
+    coverage_ms: float | None
+    censored: bool
+    barrier: str | None
+    barrier_success: bool
+    censor_reason: str | None
+
+
+class _StreamingEntryMetricAccumulator:
+    """Exact sufficient statistics for one entry-score slice."""
+
+    __slots__ = (
+        "_active_days",
+        "_barrier_loss_first_count",
+        "_barrier_no_hit_count",
+        "_barrier_profit_first_count",
+        "_censor_reasons",
+        "_censored_count",
+        "_coverage_counts",
+        "_filled_count",
+        "_key",
+        "_rejected_count",
+        "_rejection_reasons",
+        "_signal_count",
+        "_values",
+    )
+
+    def __init__(
+        self,
+        values: FloatSeriesSpool,
+        *,
+        key: str,
+        config: EntryMetricConfig,
+    ) -> None:
+        self._values = values
+        self._key = key
+        self._signal_count = 0
+        self._filled_count = 0
+        self._rejected_count = 0
+        self._censored_count = 0
+        self._coverage_counts = {
+            checkpoint: 0 for checkpoint in config.coverage_checkpoints_seconds
+        }
+        self._barrier_profit_first_count = 0
+        self._barrier_loss_first_count = 0
+        self._barrier_no_hit_count = 0
+        self._rejection_reasons: Counter[str] = Counter()
+        self._censor_reasons: Counter[str] = Counter()
+        self._active_days: set[str] = set()
+
+    def add_fill(
+        self,
+        *,
+        day: str,
+        values: _StreamingFill,
+        config: EntryMetricConfig,
+    ) -> None:
+        self._signal_count += 1
+        self._filled_count += 1
+        self._active_days.add(day)
+        if values.censored:
+            self._censored_count += 1
+            assert values.censor_reason is not None
+            self._censor_reasons[values.censor_reason] += 1
+        restricted = (
+            values.coverage_ms
+            if values.coverage_ms is not None and not values.censored
+            else float(config.restricted_uncovered_milliseconds)
+        )
+        self._values.append(f"{self._key}\x00restricted", restricted)
+        if values.coverage_ms is not None and not values.censored:
+            self._values.append(f"{self._key}\x00covered", values.coverage_ms)
+        for checkpoint, success in values.coverage_successes:
+            self._coverage_counts[checkpoint] += int(success)
+        if values.barrier_success:
+            self._barrier_profit_first_count += 1
+        elif values.barrier == "loss":
+            self._barrier_loss_first_count += 1
+        else:
+            self._barrier_no_hit_count += 1
+
+    def add_rejection(self, reason: str) -> None:
+        self._signal_count += 1
+        self._rejected_count += 1
+        self._rejection_reasons[reason] += 1
+
+    def finish(
+        self,
+        *,
+        config: EntryMetricConfig,
+        evaluated_sessions: tuple[str, ...],
+    ) -> EntryMetrics:
+        evaluated_set = set(evaluated_sessions)
+        if not self._active_days <= evaluated_set:
+            outside = sorted(self._active_days - evaluated_set)
+            raise ValueError(f"filled entries refer to unevaluated sessions: {outside}")
+        fill_count = self._filled_count
+        signal_count = self._signal_count
+        evaluated_count = len(evaluated_sessions)
+        return EntryMetrics(
+            signal_count=signal_count,
+            filled_count=fill_count,
+            rejected_count=self._rejected_count,
+            censored_count=self._censored_count,
+            fill_rate=fill_count / signal_count if signal_count else None,
+            censored_fraction=(
+                self._censored_count / fill_count if fill_count else None
+            ),
+            coverage_probabilities=tuple(
+                (
+                    checkpoint,
+                    self._coverage_counts[checkpoint] / fill_count
+                    if fill_count
+                    else None,
+                )
+                for checkpoint in config.coverage_checkpoints_seconds
+            ),
+            restricted_median_coverage_milliseconds=self._values.median(
+                f"{self._key}\x00restricted"
+            ),
+            median_covered_time_milliseconds=self._values.median(
+                f"{self._key}\x00covered"
+            ),
+            barrier_profit_first_count=self._barrier_profit_first_count,
+            barrier_loss_first_count=self._barrier_loss_first_count,
+            barrier_no_hit_count=self._barrier_no_hit_count,
+            barrier_profit_first_rate=(
+                self._barrier_profit_first_count / fill_count
+                if fill_count
+                else None
+            ),
+            rejection_reason_counts=tuple(sorted(self._rejection_reasons.items())),
+            censor_reason_counts=tuple(sorted(self._censor_reasons.items())),
+            evaluated_session_count=evaluated_count,
+            active_session_count=len(self._active_days),
+            active_session_fraction=(
+                len(self._active_days) / evaluated_count if evaluated_count else None
+            ),
+            profit_barrier_net_per_unit=float(config.profit_barrier_net_per_unit),
+            loss_barrier_net_per_unit=float(config.loss_barrier_net_per_unit),
+        )
+
+
+def _iter_streaming_entry_rows(
+    result: Any,
+    dimensions: SliceDimensions,
+) -> Iterable[tuple[bool, Any, str, str, str, str]]:
+    """Validate and yield one session without constructing observation objects."""
+
+    diagnostics = _as_sequence(_get(result, "diagnostics"), "diagnostics")
+    rejections = _as_sequence(_get(result, "rejections"), "rejections")
+    event_count = _non_negative_integer(_get(result, "event_count"), "event_count")
+    if event_count != len(diagnostics) + len(rejections):
+        raise ValueError("event_count must equal filled plus rejected entries")
+    seen = bytearray(event_count)
+    seen_count = 0
+    calculated_reasons: Counter[str] = Counter()
+    for is_fill, items in ((True, diagnostics), (False, rejections)):
+        for item in items:
+            position = _non_negative_integer(
+                _get(item, "event_position"), "event_position"
+            )
+            if position >= event_count:
+                raise ValueError("event positions must cover exactly range(event_count)")
+            if seen[position]:
+                raise ValueError(f"duplicate event_position {position}")
+            seen[position] = 1
+            seen_count += 1
+            event = _get(item, "event")
+            day, side, market_session, regime = _event_dimensions(event, dimensions)
+            if not is_fill:
+                calculated_reasons[str(_get(item, "reason"))] += 1
+            yield is_fill, item, day, side, market_session, regime
+    if seen_count != event_count:
+        raise ValueError("event positions must cover exactly range(event_count)")
+
+    reported_reasons = _as_mapping(
+        _get(result, "rejected_reason_counts"), "rejected_reason_counts"
+    )
+    normalized_reported: dict[str, int] = {}
+    for reason, count in reported_reasons.items():
+        if not isinstance(reason, str) or not reason:
+            raise ValueError("rejection reason keys must be non-empty strings")
+        normalized_reported[reason] = _non_negative_integer(
+            count, f"rejection count for {reason!r}"
+        )
+    if dict(calculated_reasons) != normalized_reported:
+        raise ValueError("rejected_reason_counts does not match rejection records")
+
+
+class EntryDiagnosticSessionScorer:
+    """Incrementally reproduce :func:`score_entry_diagnostics` exactly.
+
+    One complete per-session result is consumed and released at a time.  Only
+    counters, categorical labels, and disk-backed float series survive between
+    sessions.
+    """
+
+    def __init__(
+        self,
+        *,
+        config: EntryMetricConfig,
+        dimensions: SliceDimensions,
+        evaluated_sessions: Sequence[Any],
+        values: FloatSeriesSpool,
+        key_prefix: str,
+    ) -> None:
+        if not isinstance(config, EntryMetricConfig):
+            raise ValueError("config must be EntryMetricConfig")
+        if not isinstance(dimensions, SliceDimensions):
+            raise ValueError("dimensions must be SliceDimensions")
+        if not isinstance(values, FloatSeriesSpool):
+            raise TypeError("values must be a FloatSeriesSpool")
+        if not isinstance(key_prefix, str) or not key_prefix:
+            raise ValueError("key_prefix must be a non-empty string")
+        self._config = config
+        self._dimensions = dimensions
+        self._sessions = _evaluated_session_labels(evaluated_sessions)
+        self._session_position = 0
+        self._values = values
+        self._prefix = key_prefix
+        self._finished = False
+        self._overall = self._new_accumulator("overall", "all")
+        self._by_day: dict[str, _StreamingEntryMetricAccumulator] = {}
+        self._by_side: dict[str, _StreamingEntryMetricAccumulator] = {}
+        self._by_market_session: dict[
+            str, _StreamingEntryMetricAccumulator
+        ] = {}
+        self._by_regime: dict[str, _StreamingEntryMetricAccumulator] = {}
+
+    def _new_accumulator(
+        self, dimension: str, label: str
+    ) -> _StreamingEntryMetricAccumulator:
+        return _StreamingEntryMetricAccumulator(
+            self._values,
+            key=f"{self._prefix}\x00{dimension}\x00{label}",
+            config=self._config,
+        )
+
+    def _selected_accumulator(
+        self,
+        group: dict[str, _StreamingEntryMetricAccumulator],
+        dimension: str,
+        label: str,
+    ) -> _StreamingEntryMetricAccumulator:
+        selected = group.get(label)
+        if selected is None:
+            selected = self._new_accumulator(dimension, label)
+            group[label] = selected
+        return selected
+
+    def add_session(self, result: Any, *, session_anchor: Any) -> None:
+        if self._finished:
+            raise RuntimeError("entry diagnostic session scorer is already finished")
+        if self._session_position >= len(self._sessions):
+            raise ValueError("received more diagnostic sessions than registered")
+        anchor = _label(session_anchor)
+        expected = self._sessions[self._session_position]
+        if anchor != expected:
+            raise ValueError(
+                f"diagnostic session order changed: expected {expected!r}, got {anchor!r}"
+            )
+        evaluated_set = set(self._sessions)
+        for (
+            is_fill,
+            item,
+            day,
+            side,
+            market_session,
+            regime,
+        ) in _iter_streaming_entry_rows(result, self._dimensions):
+            if day not in evaluated_set:
+                if is_fill:
+                    raise ValueError(
+                        f"filled entries refer to unevaluated sessions: {[day]}"
+                    )
+                raise ValueError("rejected entries refer to an unevaluated session")
+            accumulators = (
+                self._overall,
+                self._selected_accumulator(self._by_day, "day", day),
+                self._selected_accumulator(self._by_side, "side", side),
+                self._selected_accumulator(
+                    self._by_market_session,
+                    "market-session",
+                    market_session,
+                ),
+                self._selected_accumulator(self._by_regime, "regime", regime),
+            )
+            if is_fill:
+                successes, coverage_ms, barrier_success, censor_reason = (
+                    _coverage_successes(item, self._config)
+                )
+                fill = _StreamingFill(
+                    coverage_successes=tuple(successes.items()),
+                    coverage_ms=coverage_ms,
+                    censored=bool(_get(item, "censored")),
+                    barrier=_get(item, "first_barrier_hit"),
+                    barrier_success=barrier_success,
+                    censor_reason=censor_reason,
+                )
+                for accumulator in accumulators:
+                    accumulator.add_fill(
+                        day=day,
+                        values=fill,
+                        config=self._config,
+                    )
+            else:
+                reason = str(_get(item, "reason"))
+                for accumulator in accumulators:
+                    accumulator.add_rejection(reason)
+        self._session_position += 1
+
+    def finish(self) -> EntryScoreReport:
+        if self._finished:
+            raise RuntimeError("entry diagnostic session scorer is already finished")
+        if self._session_position != len(self._sessions):
+            raise ValueError("diagnostic session inventory is incomplete")
+        self._finished = True
+        for label in self._sessions:
+            self._selected_accumulator(self._by_day, "day", label)
+
+        def finish_group(
+            group: Mapping[str, _StreamingEntryMetricAccumulator],
+            *,
+            day_slices: bool,
+        ) -> tuple[tuple[str, EntryMetrics], ...]:
+            return tuple(
+                (
+                    label,
+                    accumulator.finish(
+                        config=self._config,
+                        evaluated_sessions=(label,) if day_slices else self._sessions,
+                    ),
+                )
+                for label, accumulator in sorted(group.items())
+            )
+
+        return EntryScoreReport(
+            overall=self._overall.finish(
+                config=self._config,
+                evaluated_sessions=self._sessions,
+            ),
+            by_day=finish_group(self._by_day, day_slices=True),
+            by_side=finish_group(self._by_side, day_slices=False),
+            by_market_session=finish_group(
+                self._by_market_session,
+                day_slices=False,
+            ),
+            by_regime=finish_group(self._by_regime, day_slices=False),
+        )
 
 
 def _compute_entry_metrics(
@@ -1995,6 +2351,7 @@ __all__ = [
     "EntryMetricConfig",
     "EntryMetrics",
     "EntryPromotionThresholds",
+    "EntryDiagnosticSessionScorer",
     "EntryScoreReport",
     "FullStrategyThresholds",
     "GateCheck",
