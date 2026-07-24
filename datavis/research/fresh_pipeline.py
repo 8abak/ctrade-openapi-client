@@ -1,4 +1,2038 @@
- spool,
+"""Registered end-to-end runner for the fresh causal XAUUSD study.
+
+This module is intentionally a thin composition layer.  All price features,
+signals, fills, diagnostics, exits, scoring, split locks, and holdout locks are
+implemented in the separately tested ``fresh_*`` modules.  The runner streams
+one frozen broker session at a time and never materialises a cross-session tick
+frame.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import os
+import tempfile
+from collections import Counter, defaultdict
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass
+from datetime import timedelta
+from pathlib import Path
+from statistics import median
+from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
+
+import numpy as np
+import pandas as pd
+
+from datavis.research.fresh_bootstrap import (
+    build_fresh_source_bootstrap,
+    registered_fresh_bootstrap_config,
+    write_fresh_source_bootstrap,
+)
+from datavis.research.fresh_candidate_grid import (
+    FRESH_CANDIDATE_QUANTILE_RANKS,
+    FreshCandidate,
+    FreshCandidateGrid,
+    build_fresh_candidate_grid,
+    fresh_candidate_quantile_measurements,
+)
+from datavis.research.fresh_decisions import (
+    BoundDecisionFeatureRows,
+    FrozenSignalDecisionSource,
+)
+from datavis.research.fresh_entry_diagnostics import (
+    DiagnosticBoundary,
+    EntrySchedulingConfig,
+    FreshEntryDiagnosticsResult,
+    FrozenSignalEvent,
+    PreparedEntryDiagnosticTape,
+    evaluate_frozen_entries,
+    evaluate_prepared_frozen_entries,
+    prepare_entry_diagnostic_tape,
+)
+from datavis.research.fresh_event_filters import (
+    FRESH_REGIME_QUINTILE_RANKS,
+    EventFilterVariantSource,
+    FreshEventFilterBatchEvaluator,
+    FreshEventFilterConfig,
+    FreshEventFilterRequest,
+    FreshEventFilterVariantBank,
+    FreshRegimeDefinition,
+    derive_bounded_post_discovery_variant_bank,
+    enrich_and_filter_frozen_event_batch,
+    fresh_event_filter_config_fingerprint,
+    fresh_regime_quantile_measurements,
+)
+from datavis.research.fresh_exit_grid import (
+    FRESH_EXIT_QUANTILE_RANKS,
+    FRESH_EXIT_VOLATILITY_COLUMN,
+    FreshExitVariant,
+    build_fresh_exit_grid,
+    fresh_exit_quantile_measurements,
+)
+from datavis.research.fresh_exits import (
+    BoundVolatilityRows,
+    FreshProtectiveExitPolicy,
+)
+from datavis.research.fresh_feature_bank import (
+    FreshFeatureBankConfig,
+    FreshFeatureBankOutputSelection,
+    FreshKalmanBankMember,
+    NamedFeatureFamily,
+    compute_fresh_feature_bank,
+)
+from datavis.research.fresh_preregistration import (
+    authorize_registered_holdout,
+    build_fresh_implementation_manifest,
+    build_fresh_preregistration_v2,
+    build_fresh_preregistration_v3,
+    build_fresh_preregistration_v4,
+    build_fresh_preregistration_v5,
+    entry_barrier_diagnostic_configs_from_preregistration,
+    feature_configs_from_preregistration,
+    fresh_v3_scientific_specification_sha256,
+    fresh_v4_scientific_specification_sha256,
+    fresh_v5_scientific_specification_sha256,
+    replay_execution_configs_from_preregistration,
+    required_fresh_implementation_files,
+    required_fresh_v4_implementation_files,
+    required_fresh_v5_implementation_files,
+)
+from datavis.research.fresh_restart import (
+    FRESH_V3_STUDY_ID,
+    RUN16_LEDGER_SHA256,
+    RUN16_PREDECESSOR_PREREGISTRATION_SHA256,
+    load_fresh_v3_restart_bundle,
+)
+from datavis.research.fresh_restart_v4 import (
+    FRESH_V4_STUDY_ID,
+    RUN17_LEDGER_SHA256,
+    RUN17_PREREGISTRATION_SHA256,
+    RUN17_STUDY_LINEAGE_SHA256,
+    canonical_fresh_v4_study_lineage,
+    load_fresh_v4_restart_bundle,
+)
+from datavis.research.fresh_restart_v5 import (
+    FRESH_V5_STUDY_ID,
+    RUN19_LEDGER_SHA256,
+    RUN19_PREREGISTRATION_SHA256,
+    RUN19_STUDY_LINEAGE_SHA256,
+    RUN19_V5_STUDY_LINEAGE_SHA256,
+    canonical_fresh_v5_study_lineage,
+    load_fresh_v5_restart_bundle,
+)
+from datavis.research.fresh_recovery import (
+    RUN14_ENTRY_BANK_FILE_SHA256,
+    RUN14_LEDGER_SHA256,
+    RUN14_RUN_ID,
+    build_run14_recovery_contract,
+    load_run14_recovery_bundle,
+    run_run14_recovery_equivalence_preflight,
+)
+from datavis.research.fresh_recovery_v5 import (
+    V5_ENTRY_BANK_FILE_SHA256,
+    V5_LEDGER_SHA256,
+    V5_ORIGINAL_GITHUB_RUN_ID,
+    build_fresh_v5_recovery_contract,
+    load_fresh_v5_recovery_bundle,
+    required_fresh_v5_recovery_implementation_files,
+    run_fresh_v5_recovery_equivalence_preflight,
+)
+from datavis.research.fresh_protocol import canonical_hash
+from datavis.research.fresh_replay import (
+    ReplayBoundary,
+    _prepare_replay_tape,
+    run_fresh_replay,
+)
+from datavis.research.fresh_numeric_spool import FloatSeriesSpool
+from datavis.research.fresh_scoring import (
+    EntryDiagnosticSessionScorer,
+    EntryScoreReport,
+    GateResult,
+    SliceDimensions,
+    TradeScoreReport,
+    build_candidate_scorecard,
+    evaluate_entry_gate,
+    score_entry_diagnostics,
+    score_trade_records,
+    scoring_config_from_preregistration,
+)
+from datavis.research.fresh_search import (
+    CandidateEvaluation,
+    EntryCandidateSpec,
+    EvaluationContext,
+    FreshChronologicalSearch,
+    FreshSearchBudgets,
+    FreshSearchCallbacks,
+    FrozenEntryCandidate,
+    FrozenResearchWindow,
+    FrozenStrategyCandidate,
+    StageRunResult,
+    StrategyCandidateSpec,
+)
+from datavis.research.fresh_session_eval import (
+    FreshDbSessionSource,
+    FreshSessionTape,
+    combine_entry_diagnostics,
+    decision_feature_rows,
+    volatility_rows,
+)
+from datavis.research.fresh_signals import (
+    FreshSignalConfig,
+    generate_frozen_signal_events,
+    iter_frozen_signal_event_groups,
+    signal_required_columns,
+)
+from datavis.research.fresh_spool import KeyedObjectSpool
+from datavis.research.fresh_thresholds import (
+    FreshQuantileBank,
+    FreshQuantileBankConfig,
+    QuantileMeasurementSpec,
+    SessionBalancedQuantileFitter,
+    fresh_quantile_bank_from_payload,
+    fresh_quantile_bank_payload,
+)
+
+
+FRESH_PIPELINE_SCHEMA = "fresh-xauusd-chronological-run/v1"
+REFERENCE_SCENARIO_ID = "reference-provisional"
+BASELINE_EVENTS_PER_SIDE_PER_SESSION = 200
+BASELINE_MINIMUM_UPLIFT = 0.02
+BASELINE_CLUSTER_CONFIDENCE = 0.90
+BASELINE_BOOTSTRAP_REPLICATES = 2_000
+SESSION_CLOSE_SAFETY_MS = 62_000
+FRESH_SPOOL_MAXIMUM_BYTES = 8 * 1024 * 1024 * 1024
+FRESH_EVENT_SPOOL_MAXIMUM_BYTES = 1 * 1024 * 1024 * 1024
+FRESH_NUMERIC_SPOOL_MAXIMUM_BYTES = 4 * 1024 * 1024 * 1024
+LATER_SENSITIVITY_STAGES = frozenset(("walk_forward_3", "validation", "holdout"))
+FRESH_V3_STUDY_LINEAGE_SHA256 = (
+    "d4f356999d55e2c66f502897c6b696a7f376a1bc5c4fd997f627bafb82805f52"
+)
+
+ProgressCallback = Callable[[Mapping[str, Any]], None]
+
+
+@dataclass(frozen=True, slots=True)
+class _EntryRuntime:
+    candidate_id: str
+    family: str
+    source: FreshCandidate
+    event_filter: FreshEventFilterConfig
+    entry_variant: str
+    robustness_group: str
+
+
+@dataclass(frozen=True, slots=True)
+class _EntryEdgeSummary:
+    expected_barrier_pnl_per_fill: float | None
+    median_mae_before_coverage: float | None
+    median_mfe_horizon: float | None
+    p90_restricted_coverage_ms: float | None
+    failure_to_cover_60s: float | None
+    coverage_10_cluster_interval: tuple[float, float] | None
+    coverage_30_cluster_interval: tuple[float, float] | None
+    baseline_coverage_10: float | None
+    baseline_coverage_30: float | None
+    uplift_10: float | None
+    uplift_30: float | None
+    uplift_10_cluster_interval: tuple[float, float] | None
+    uplift_30_cluster_interval: tuple[float, float] | None
+    baseline_gate_passed: bool
+
+
+def _parameter_neighbourhood_audit(
+    members: Sequence[tuple[str, float, bool, float | None, float | None, str]],
+    *,
+    minimum_valid_neighbor_fraction: float,
+    minimum_positive_expectancy_neighbor_fraction: float,
+    minimum_neighbor_expectancy_retention: float,
+    maximum_absolute_coverage_30_drop: float | None,
+) -> dict[str, Any]:
+    """Evaluate one center plus its two registered adjacent rank variants."""
+
+    selected = tuple(members)
+    offsets = tuple(sorted(item[1] for item in selected))
+    if offsets != (-0.05, 0.0, 0.05):
+        raise ValueError(
+            "a parameter neighbourhood must contain rank offsets -0.05, 0, 0.05"
+        )
+    center = next(item for item in selected if item[1] == 0.0)
+    neighbors = tuple(item for item in selected if item[1] != 0.0)
+    valid_fraction = sum(item[2] for item in neighbors) / len(neighbors)
+    positive_fraction = sum(
+        item[3] is not None and item[3] > 0.0 for item in neighbors
+    ) / len(neighbors)
+    neighbor_expectancies = [
+        float(item[3]) for item in neighbors if item[3] is not None
+    ]
+    center_expectancy = center[3]
+    retention = (
+        float(min(neighbor_expectancies) / center_expectancy)
+        if len(neighbor_expectancies) == len(neighbors)
+        and center_expectancy is not None
+        and center_expectancy > 0.0
+        else None
+    )
+    neighbor_coverages = [float(item[4]) for item in neighbors if item[4] is not None]
+    center_coverage = center[4]
+    parameter_signatures = tuple(item[5] for item in selected)
+    parameters_distinct = len(set(parameter_signatures)) == len(parameter_signaos.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
+        0o600,
+    )
+    with os.fdopen(descriptor, "wb", closefd=True) as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _ordered_specs(
+    groups: Iterable[Iterable[QuantileMeasurementSpec]],
+) -> tuple[QuantileMeasurementSpec, ...]:
+    by_name: dict[str, QuantileMeasurementSpec] = {}
+    for group in groups:
+        for spec in group:
+            existing = by_name.get(spec.name)
+            if existing is not None and existing != spec:
+                raise ValueError(f"quantile measurement {spec.name!r} is ambiguous")
+            by_name[spec.name] = spec
+    return tuple(by_name[name] for name in sorted(by_name))
+
+
+def _context_anchors(context: EvaluationContext) -> tuple[str, ...]:
+    selected: list[str] = []
+    by_role = {window.role: window for window in context.windows}
+    for role in context.evaluation_roles:
+        window = by_role.get(role)
+        if window is None:
+            raise ValueError(f"evaluation context is missing role {role!r}")
+        selected.extend(window.session_anchors)
+    if not selected or tuple(selected) != tuple(sorted(selected)):
+        raise ValueError("evaluation sessions must be non-empty and chronological")
+    return tuple(selected)
+
+
+def _events_by_candidate(
+    events: Iterable[FrozenSignalEvent],
+) -> dict[str, tuple[FrozenSignalEvent, ...]]:
+    grouped: dict[str, list[FrozenSignalEvent]] = defaultdict(list)
+    for event in events:
+        identifier = event.metadata.get("candidate_id")
+        if not isinstance(identifier, str) or not identifier:
+            raise ValueError("every signal event must identify its source candidate")
+        grouped[identifier].append(event)
+    return {key: tuple(value) for key, value in grouped.items()}
+
+
+def _before_close(
+    events: Iterable[FrozenSignalEvent], tape: FreshSessionTape
+) -> tuple[FrozenSignalEvent, ...]:
+    cutoff = tape.bounds.end_utc - timedelta(milliseconds=SESSION_CLOSE_SAFETY_MS)
+    return tuple(event for event in events if event.timestamp < cutoff)
+
+
+def _baseline_events(
+    frame: pd.DataFrame,
+    tape: FreshSessionTape,
+    *,
+    maximum_per_side: int = BASELINE_EVENTS_PER_SIDE_PER_SESSION,
+) -> tuple[FrozenSignalEvent, ...]:
+    if maximum_per_side <= 0:
+        raise ValueError("maximum_per_side must be positive")
+    ready = frame["feature_ready"].to_numpy(dtype=bool, copy=False)
+    gaps = frame["gap_detected"].to_numpy(dtype=bool, copy=False)
+    timestamps = pd.to_datetime(frame["timestamp"], utc=True)
+    cutoff = tape.bounds.end_utc - timedelta(milliseconds=SESSION_CLOSE_SAFETY_MS)
+    usable = np.flatnonzero(
+        ready
+        & ~gaps
+        & (timestamps < pd.Timestamp(cutoff)).to_numpy(dtype=bool, copy=False)
+    )
+    if usable.size > maximum_per_side:
+        positions = np.linspace(0, usable.size - 1, maximum_per_side, dtype=int)
+        usable = usable[np.unique(positions)]
+    tick_ids = frame["tick_id"].to_numpy(copy=False)
+    raw_timestamps = frame["timestamp"].to_numpy(copy=False)
+    output: list[FrozenSignalEvent] = []
+    for index in usable.tolist():
+        timestamp = pd.Timestamp(raw_timestamps[index]).to_pydatetime()
+        for side in ("long", "short"):
+            output.append(
+                FrozenSignalEvent(
+                    tick_index=int(index),
+                    tick_id=int(tick_ids[index]),
+                    timestamp=timestamp,
+                    side=side,
+                    metadata={
+                        "candidate_id": "eligible-tick-direction-baseline",
+                        "family": "eligible-tick-baseline",
+                        "sampling": "uniform-index-stratified-by-session-and-side",
+                    },
+                )
+            )
+    return tuple(output)
+
+
+def _diagnose(
+    tape: FreshSessionTape,
+    events: Sequence[FrozenSignalEvent],
+    *,
+    config: Any,
+    prepared_tape: PreparedEntryDiagnosticTape | None = None,
+) -> FreshEntryDiagnosticsResult:
+    if not isinstance(tape, FreshSessionTape):
+        raise TypeError("trusted diagnostics require a FreshSessionTape")
+    boundary = DiagnosticBoundary(
+        start=tape.bounds.start_utc,
+        end=tape.bounds.end_utc,
+        name=tape.anchor,
+        end_reason="session_end",
+        input_complete_through_end=True,
+    )
+    scheduling = EntrySchedulingConfig(mode="independent", cooldown_ms=0)
+    if prepared_tape is None:
+        return evaluate_frozen_entries(
+            tape.ticks,
+            events,
+            config=config,
+            boundary=boundary,
+            scheduling=scheduling,
+            _trusted_validated_ticks=True,
+        )
+    if (
+        not isinstance(prepared_tape, PreparedEntryDiagnosticTape)
+        or prepared_tape.ticks is not tape.ticks
+    ):
+        raise TypeError(
+            "prepared diagnostics must be bound to the same FreshSessionTape tuple"
+        )
+    return evaluate_prepared_frozen_entries(
+        prepared_tape,
+        events,
+        config=config,
+        boundary=boundary,
+        scheduling=scheduling,
+    )
+
+
+def _replay_session(
+    tape: FreshSessionTape,
+    decisions: Any,
+    *,
+    config: Any,
+    prepared_replay_tape: Any,
+) -> Any:
+    if not isinstance(tape, FreshSessionTape):
+        raise TypeError("trusted replay requires a FreshSessionTape")
+    return run_fresh_replay(
+        tape.ticks,
+        decisions,
+        config=config,
+        boundary=ReplayBoundary(
+            start=tape.bounds.start_utc,
+            end=tape.bounds.end_utc,
+            name=tape.anchor,
+            input_complete_through_end=True,
+        ),
+        _trusted_validated_ticks=True,
+        _prepared_replay_tape=prepared_replay_tape,
+    )
+
+
+def _coverage_count(
+    result: FreshEntryDiagnosticsResult, checkpoint: int, side: str | None = None
+) -> tuple[int, int]:
+    attribute = f"cost_covered_by_{checkpoint}s"
+    selected = [
+        item for item in result.diagnostics if side is None or item.event.side == side
+    ]
+    return (
+        sum(not item.censored and bool(getattr(item, attribute)) for item in selected),
+        len(selected),
+    )
+
+
+def _entry_barrier_value(item: Any) -> float:
+    """Return the registered equal-barrier outcome with censors as failures."""
+
+    if item.censored:
+        return 0.0
+    if item.first_barrier_hit == "profit":
+        return 0.25
+    if item.first_barrier_hit == "loss":
+        return -0.25
+    return 0.0
+
+
+def _restricted_coverage_ms(item: Any) -> float:
+    """Assign the full diagnostic horizon to censors and uncovered fills."""
+
+    if item.censored or item.time_to_cost_coverage_ms is None:
+        return 60_000.0
+    return float(item.time_to_cost_coverage_ms)
+
+
+def _scenario_ids_for_stage(
+    execution_ids: Sequence[str],
+    required_stress_ids: Sequence[str],
+    *,
+    stage: str,
+) -> tuple[str, ...]:
+    """Use selection scenarios in research and report all sensitivities later."""
+
+    registered = tuple(execution_ids)
+    if len(registered) != len(set(registered)):
+        raise ValueError("execution scenario ids must be unique")
+    core = (REFERENCE_SCENARIO_ID, *tuple(required_stress_ids))
+    if len(core) != len(set(core)) or any(item not in registered for item in core):
+        raise ValueError("reference and required stress scenarios must be registered")
+    if stage in LATER_SENSITIVITY_STAGES:
+        return registered
+    return core
+
+
+def _derive_event_filter_bank(
+    bank: FreshQuantileBank,
+    grid: FreshCandidateGrid,
+    regime_definition: FreshRegimeDefinition,
+) -> FreshEventFilterVariantBank:
+    """Build the complete outcome-blind filter expansion used by preflight and search."""
+
+    family_counts = Counter(item.family for item in grid.candidates)
+    return derive_bounded_post_discovery_variant_bank(
+        bank,
+        regime_definition=regime_definition,
+        source_candidates=tuple(
+            EventFilterVariantSource(
+                candidate_id=item.config.candidate_id,
+                family=item.family,
+                robustness_group=item.neighbourhood_id,
+            )
+            for item in grid.candidates
+        ),
+        already_registered_candidate_count=len(grid.candidates),
+        registered_family_counts=family_counts,
+        requested_additional_candidates=240 - len(grid.candidates),
+    )
+
+
+def _research_state_binding(
+    state_directory: str | Path,
+    split_manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Derive durable ledger and holdout-lock paths from frozen window identity."""
+
+    state_root = Path(state_directory).expanduser().resolve()
+    claimed_split_sha = split_manifest.get("manifestSha256")
+    if not isinstance(claimed_split_sha, str):
+        raise ValueError("split manifest has no SHA-256 identity")
+    split_body = {
+        key: value for key, value in split_manifest.items() if key != "manifestSha256"
+    }
+    if canonical_hash(split_body) != claimed_split_sha:
+        raise ValueError("split manifest hash is invalid")
+    windows = split_manifest.get("windows")
+    if not isinstance(windows, Mapping) or not isinstance(
+        windows.get("holdout"), Mapping
+    ):
+        raise ValueError("split manifest has no holdout window")
+    role_order = (
+        "discovery",
+        "walk_forward_1",
+        "walk_forward_2",
+        "walk_forward_3",
+        "validation",
+        "holdout",
+    )
+    if set(windows) != set(role_order) or any(
+        not isinstance(windows[role], Mapping) for role in role_order
+    ):
+        raise ValueError("split manifest does not contain every research window")
+    research_window_set_sha = canonical_hash(
+        [canonical_hash(windows[role]) for role in role_order]
+    )
+    holdout_window_sha = canonical_hash(windows["holdout"])
+    study_directory = state_root / "studies" / research_window_set_sha
+    ledger_path = study_directory / "fresh_experiment_ledger_v1.jsonl"
+    holdout_path = (
+        state_root
+        / "holdouts"
+        / holdout_window_sha
+        / "fresh_holdout_authorization_v1.json"
+    )
+    return {
+        "schema": "fresh-xauusd-durable-research-state/v1",
+        "studyId": "xauusd-fresh-causal-acceleration-v2",
+        "splitManifestSha256": claimed_split_sha,
+        "researchWindowSetSha256": research_window_set_sha,
+        "holdoutWindowSha256": holdout_window_sha,
+        "stateDirectory": str(state_root),
+        "experimentLedgerPath": str(ledger_path),
+        "holdoutAuthorizationRegistryPath": str(holdout_path),
+    }
+
+
+def _research_state_binding_v3(
+    state_directory: str | Path,
+    split_manifest: Mapping[str, Any],
+    restart_provenance: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Create a separate v3 ledger while retaining the global holdout lock."""
+
+    predecessor = _research_state_binding(state_directory, split_manifest)
+    if (
+        restart_provenance.get("predecessorLedgerSha256")
+        != RUN16_LEDGER_SHA256
+        or restart_provenance.get("predecessorPreregistrationSha256")
+        != RUN16_PREDECESSOR_PREREGISTRATION_SHA256
+        or restart_provenance.get("predecessorLineageTerminal") is not True
+        or restart_provenance.get("candidateOutcomeRecordCount") != 0
+        or restart_provenance.get("transientCandidateComputationsRecovered")
+        is not False
+        or restart_provenance.get("batchResultSealed") is not False
+    ):
+        raise PermissionError("v3 restart provenance is not terminal and outcome-free")
+    scientific_sha = fresh_v3_scientific_specification_sha256()
+    lineage_body = {
+        "schema": "fresh-xauusd-study-lineage/v1",
+        "studyId": FRESH_V3_STUDY_ID,
+        "predecessorStudyId": predecessor["studyId"],
+        "predecessorPreregistrationSha256": (
+            RUN16_PREDECESSOR_PREREGISTRATION_SHA256
+        ),
+        "predecessorTerminalLedgerSha256": RUN16_LEDGER_SHA256,
+        "splitManifestSha256": predecessor["splitManifestSha256"],
+        "researchWindowSetSha256": predecessor["researchWindowSetSha256"],
+        "scientificSpecificationSha256": scientific_sha,
+    }
+    lineage_sha = canonical_hash(lineage_body)
+    if lineage_sha != FRESH_V3_STUDY_LINEAGE_SHA256:
+        raise RuntimeError("v3 study-lineage identity changed")
+    state_root = Path(state_directory).expanduser().resolve()
+    study_directory = (
+        state_root
+        / "studies"
+        / predecessor["researchWindowSetSha256"]
+        / "lineages"
+        / lineage_sha
+    )
+    return {
+        "schema": "fresh-xauusd-durable-research-state/v2",
+        **{
+            key: value
+            for key, value in lineage_body.items()
+            if key != "schema"
+        },
+        "studyLineage": lineage_body,
+        "studyLineageSha256": lineage_sha,
+        "holdoutWindowSha256": predecessor["holdoutWindowSha256"],
+        "stateDirectory": str(state_root),
+        "predecessorExperimentLedgerPath": predecessor[
+            "experimentLedgerPath"
+        ],
+        "experimentLedgerPath": str(
+            study_directory / "fresh_experiment_ledger_v1.jsonl"
+        ),
+        "holdoutAuthorizationRegistryPath": predecessor[
+            "holdoutAuthorizationRegistryPath"
+        ],
+    }
+
+
+def _research_state_binding_v4(
+    state_directory: str | Path,
+    split_manifest: Mapping[str, Any],
+    restart_provenance: Mapping[str, Any],
+    predecessor_state_binding: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Create a separate v4 ledger while retaining the global holdout lock."""
+
+    predecessor = _research_state_binding(state_directory, split_manifest)
+    restart_policy = restart_provenance.get("restartPolicy")
+    if (
+        restart_provenance.get("studyId") != FRESH_V4_STUDY_ID
+        or restart_provenance.get("studyLineageSha256")
+        != RUN17_STUDY_LINEAGE_SHA256
+        or restart_provenance.get("predecessorLedgerSha256")
+        != RUN17_LEDGER_SHA256
+        or restart_provenance.get("predecessorPreregistrationSha256")
+        != RUN17_PREREGISTRATION_SHA256
+        or restart_provenance.get("predecessorLineageTerminal") is not True
+        or restart_provenance.get("candidateOutcomeRecordCount") != 0
+        or restart_provenance.get("laterWindowOutcomeRecordCount") != 0
+        or restart_provenance.get("transientSpoolsRecovered") is not False
+        or restart_provenance.get("transientCandidateComputationsRecovered")
+        is not False
+        or restart_provenance.get("partialCandidateResultsImported") is not False
+        or restart_provenance.get("batchResultSealed") is not False
+        or not isinstance(restart_policy, Mapping)
+        or restart_policy.get("recomputeFromDiscoverySessionOrdinal") != 1
+        or restart_policy.get("discardTransientSpools") is not True
+        or restart_policy.get("discardPartialCandidateComputations") is not True
+        or restart_policy.get("importCandidateResults") is not False
+    ):
+        raise PermissionError("v4 restart provenance is not terminal and outcome-free")
+
+    lineage_body = canonical_fresh_v4_study_lineage()
+    scientific_sha = fresh_v4_scientific_specification_sha256()
+    if (
+        lineage_body["splitManifestSha256"]
+        != predecessor["splitManifestSha256"]
+        or lineage_body["researchWindowSetSha256"]
+        != predecessor["researchWindowSetSha256"]
+        or lineage_body["scientificSpecificationSha256"] != scientific_sha
+        or canonical_hash(lineage_body) != RUN17_STUDY_LINEAGE_SHA256
+    ):
+        raise RuntimeError("v4 study-lineage identity changed")
+
+    state_root = Path(state_directory).expanduser().resolve()
+    pinned_state_directory = predecessor_state_binding.get("stateDirectory")
+    if (
+        predecessor_state_binding.get("schema")
+        != "fresh-xauusd-durable-research-state/v2"
+        or predecessor_state_binding.get("studyId")
+        != "xauusd-fresh-causal-acceleration-v3"
+        or predecessor_state_binding.get("studyLineageSha256")
+        != FRESH_V3_STUDY_LINEAGE_SHA256
+        or predecessor_state_binding.get("splitManifestSha256")
+        != predecessor["splitManifestSha256"]
+        or predecessor_state_binding.get("researchWindowSetSha256")
+        != predecessor["researchWindowSetSha256"]
+        or predecessor_state_binding.get("holdoutWindowSha256")
+        != predecessor["holdoutWindowSha256"]
+        or not isinstance(pinned_state_directory, str)
+        or Path(pinned_state_directory).expanduser().resolve() != state_root
+    ):
+        raise PermissionError(
+            "v4 durable state is not the exact terminal v3 state root"
+        )
+    lineage_root = (
+        state_root
+        / "studies"
+        / predecessor["researchWindowSetSha256"]
+        / "lineages"
+    )
+    predecessor_ledger = (
+        lineage_root
+        / FRESH_V3_STUDY_LINEAGE_SHA256
+        / "fresh_experiment_ledger_v1.jsonl"
+    )
+    predecessor_ledger_binding = predecessor_state_binding.get(
+        "experimentLedgerPath"
+    )
+    holdout_binding = predecessor_state_binding.get(
+        "holdoutAuthorizationRegistryPath"
+    )
+    if (
+        not isinstance(predecessor_ledger_binding, str)
+        or Path(predecessor_ledger_binding).expanduser().resolve()
+        != predecessor_ledger
+        or not isinstance(holdout_binding, str)
+        or Path(holdout_binding).expanduser().resolve()
+        != Path(
+            predecessor["holdoutAuthorizationRegistryPath"]
+        ).expanduser().resolve()
+    ):
+        raise PermissionError(
+            "v4 predecessor ledger or global holdout lock binding changed"
+        )
+    study_directory = lineage_root / RUN17_STUDY_LINEAGE_SHA256
+    return {
+        "schema": "fresh-xauusd-durable-research-state/v3",
+        **{
+            key: value
+            for key, value in lineage_body.items()
+            if key != "schema"
+        },
+        "studyLineage": lineage_body,
+        "studyLineageSha256": RUN17_STUDY_LINEAGE_SHA256,
+        "holdoutWindowSha256": predecessor["holdoutWindowSha256"],
+        "stateDirectory": str(state_root),
+        "predecessorExperimentLedgerPath": str(predecessor_ledger),
+        "experimentLedgerPath": str(
+            study_directory / "fresh_experiment_ledger_v1.jsonl"
+        ),
+        "holdoutAuthorizationRegistryPath": predecessor[
+            "holdoutAuthorizationRegistryPath"
+        ],
+    }
+
+
+def _research_state_binding_v5(
+    state_directory: str | Path,
+    split_manifest: Mapping[str, Any],
+    restart_provenance: Mapping[str, Any],
+    predecessor_state_binding: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Create a separate v5 ledger while retaining the global holdout lock."""
+
+    predecessor = _research_state_binding(state_directory, split_manifest)
+    restart_policy = restart_provenance.get("restartPolicy")
+    if (
+        restart_provenance.get("studyId") != FRESH_V5_STUDY_ID
+        or restart_provenance.get("studyLineageSha256")
+        != RUN19_V5_STUDY_LINEAGE_SHA256
+        or restart_provenance.get("predecessorLedgerSha256")
+        != RUN19_LEDGER_SHA256
+        or restart_provenance.get("predecessorPreregistrationSha256")
+        != RUN19_PREREGISTRATION_SHA256
+        or restart_provenance.get("predecessorLineageTerminal") is not True
+        or restart_provenance.get("candidateOutcomeRecordCount") != 0
+        or restart_provenance.get("laterWindowOutcomeRecordCount") != 0
+        or restart_provenance.get("transientSpoolsRecovered") is not False
+        or restart_provenance.get("transientCandidateComputationsRecovered")
+        is not False
+        or restart_provenance.get("partialCandidateResultsImported") is not False
+        or restart_provenance.get("batchResultSealed") is not False
+        or not isinstance(restart_policy, Mapping)
+        or restart_policy.get("recomputeFromDiscoverySessionOrdinal") != 1
+        or restart_policy.get("discardTransientSpools") is not True
+        or restart_policy.get("discardPartialCandidateComputations") is not True
+        or restart_policy.get("importCandidateResults") is not False
+    ):
+        raise PermissionError("v5 restart provenance is not terminal and outcome-free")
+
+    lineage_body = canonical_fresh_v5_study_lineage()
+    scientific_sha = fresh_v5_scientific_specification_sha256()
+    if (
+        lineage_body["splitManifestSha256"]
+        != predecessor["splitManifestSha256"]
+        or lineage_body["researchWindowSetSha256"]
+        != predecessor["researchWindowSetSha256"]
+        or lineage_body["scientificSpecificationSha256"] != scientific_sha
+        or canonical_hash(lineage_body) != RUN19_V5_STUDY_LINEAGE_SHA256
+    ):
+        raise RuntimeError("v5 study-lineage identity changed")
+
+    state_root = Path(state_directory).expanduser().resolve()
+    pinned_state_directory = predecessor_state_binding.get("stateDirectory")
+    if (
+        predecessor_state_binding.get("schema")
+        != "fresh-xauusd-durable-research-state/v3"
+        or predecessor_state_binding.get("studyId") != FRESH_V4_STUDY_ID
+        or predecessor_state_binding.get("studyLineageSha256")
+        != RUN19_STUDY_LINEAGE_SHA256
+        or predecessor_state_binding.get("splitManifestSha256")
+        != predecessor["splitManifestSha256"]
+        or predecessor_state_binding.get("researchWindowSetSha256")
+        != predecessor["researchWindowSetSha256"]
+        or predecessor_state_binding.get("holdoutWindowSha256")
+        != predecessor["holdoutWindowSha256"]
+        or not isinstance(pinned_state_directory, str)
+        or Path(pinned_state_directory).expanduser().resolve() != state_root
+    ):
+        raise PermissionError(
+            "v5 durable state is not the exact terminal v4 state root"
+        )
+    lineage_root = (
+        state_root
+        / "studies"
+        / predecessor["researchWindowSetSha256"]
+        / "lineages"
+    )
+    predecessor_ledger = (
+        lineage_root
+        / RUN19_STUDY_LINEAGE_SHA256
+        / "fresh_experiment_ledger_v1.jsonl"
+    )
+    predecessor_ledger_binding = predecessor_state_binding.get(
+        "experimentLedgerPath"
+    )
+    holdout_binding = predecessor_state_binding.get(
+        "holdoutAuthorizationRegistryPath"
+    )
+    if (
+        not isinstance(predecessor_ledger_binding, str)
+        or Path(predecessor_ledger_binding).expanduser().resolve()
+        != predecessor_ledger
+        or not isinstance(holdout_binding, str)
+        or Path(holdout_binding).expanduser().resolve()
+        != Path(
+            predecessor["holdoutAuthorizationRegistryPath"]
+        ).expanduser().resolve()
+    ):
+        raise PermissionError(
+            "v5 predecessor ledger or global holdout lock binding changed"
+        )
+    study_directory = lineage_root / RUN19_V5_STUDY_LINEAGE_SHA256
+    return {
+        "schema": "fresh-xauusd-durable-research-state/v4",
+        **{
+            key: value
+            for key, value in lineage_body.items()
+            if key != "schema"
+        },
+        "studyLineage": lineage_body,
+        "studyLineageSha256": RUN19_V5_STUDY_LINEAGE_SHA256,
+        "holdoutWindowSha256": predecessor["holdoutWindowSha256"],
+        "stateDirectory": str(state_root),
+        "predecessorExperimentLedgerPath": str(predecessor_ledger),
+        "experimentLedgerPath": str(
+            study_directory / "fresh_experiment_ledger_v1.jsonl"
+        ),
+        "holdoutAuthorizationRegistryPath": predecessor[
+            "holdoutAuthorizationRegistryPath"
+        ],
+    }
+
+
+def _snapshot_new_file(source: Path, destination: Path) -> None:
+    """Copy one durable audit file into the artifact set without overwriting."""
+
+    if not source.is_file():
+        raise FileNotFoundError(source)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".fresh-snapshot-",
+        suffix=".tmp",
+        dir=destination.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        with (
+            source.open("rb") as reader,
+            os.fdopen(descriptor, "wb", closefd=True) as writer,
+        ):
+            descriptor = -1
+            while True:
+                chunk = reader.read(1024 * 1024)
+                if not chunk:
+                    break
+                writer.write(chunk)
+            writer.flush()
+            os.fsync(writer.fileno())
+        os.link(temporary, destination)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+
+
+def _cluster_entry_edge(
+    candidate_results: Sequence[FreshEntryDiagnosticsResult],
+    baseline_results: Sequence[FreshEntryDiagnosticsResult],
+    *,
+    seed_text: str,
+) -> dict[str, Any]:
+    if len(candidate_results) != len(baseline_results) or not candidate_results:
+        raise ValueError("candidate and baseline sessions must align")
+    rows: list[dict[str, float]] = []
+    for candidate, baseline in zip(candidate_results, baseline_results):
+        row: dict[str, float] = {}
+        for checkpoint in (10, 30):
+            successes, count = _coverage_count(candidate, checkpoint)
+            expected = 0.0
+            expected_count = 0
+            for side in ("long", "short"):
+                base_success, base_count = _coverage_count(baseline, checkpoint, side)
+                _, candidate_side_count = _coverage_count(candidate, checkpoint, side)
+                if candidate_side_count and base_count:
+                    expected += candidate_side_count * base_success / base_count
+                    expected_count += candidate_side_count
+            row[f"success{checkpoint}"] = float(successes)
+            row[f"count{checkpoint}"] = float(count)
+            row[f"baselineExpected{checkpoint}"] = expected
+            row[f"baselineCount{checkpoint}"] = float(expected_count)
+        rows.append(row)
+    return _cluster_entry_edge_rows(rows, seed_text=seed_text)
+
+
+def _cluster_entry_edge_rows(
+    rows: Sequence[Mapping[str, float]],
+    *,
+    seed_text: str,
+) -> dict[str, Any]:
+    """Run the frozen session bootstrap over already reduced exact counts."""
+
+    digest = hashlib.sha256(seed_text.encode("utf-8")).digest()
+    rng = np.random.default_rng(int.from_bytes(digest[:8], "big"))
+    samples: dict[int, list[tuple[float, float]]] = {10: [], 30: []}
+    size = len(rows)
+    for _ in range(BASELINE_BOOTSTRAP_REPLICATES):
+        selected = rng.integers(0, size, size=size)
+        for checkpoint in (10, 30):
+            count = sum(rows[index][f"count{checkpoint}"] for index in selected)
+            baseline_count = sum(
+                rows[index][f"baselineCount{checkpoint}"] for index in selected
+            )
+            if count <= 0.0 or baseline_count <= 0.0:
+                continue
+            coverage = (
+                sum(rows[index][f"success{checkpoint}"] for index in selected) / count
+            )
+            baseline = (
+                sum(rows[index][f"baselineExpected{checkpoint}"] for index in selected)
+                / baseline_count
+            )
+            samples[checkpoint].append((coverage, coverage - baseline))
+
+    alpha = (1.0 - BASELINE_CLUSTER_CONFIDENCE) / 2.0
+    output: dict[str, Any] = {}
+    for checkpoint in (10, 30):
+        count = sum(row[f"count{checkpoint}"] for row in rows)
+        success = sum(row[f"success{checkpoint}"] for row in rows)
+        baseline_count = sum(row[f"baselineCount{checkpoint}"] for row in rows)
+        expected = sum(row[f"baselineExpected{checkpoint}"] for row in rows)
+        coverage = success / count if count else None
+        baseline = expected / baseline_count if baseline_count else None
+        uplift = (
+            coverage - baseline
+            if coverage is not None and baseline is not None
+            else None
+        )
+        draws = samples[checkpoint]
+        coverage_interval = (
+            tuple(
+                float(value)
+                for value in np.quantile(
+                    np.asarray([item[0] for item in draws]),
+                    (alpha, 1.0 - alpha),
+                    method="linear",
+                )
+            )
+            if draws
+            else None
+        )
+        uplift_interval = (
+            tuple(
+                float(value)
+                for value in np.quantile(
+                    np.asarray([item[1] for item in draws]),
+                    (alpha, 1.0 - alpha),
+                    method="linear",
+                )
+            )
+            if draws
+            else None
+        )
+        output[str(checkpoint)] = {
+            "coverage": coverage,
+            "coverageInterval": coverage_interval,
+            "baseline": baseline,
+            "uplift": uplift,
+            "upliftInterval": uplift_interval,
+        }
+    return output
+
+
+def _entry_edge_summary(
+    candidate_results: Sequence[FreshEntryDiagnosticsResult],
+    baseline_results: Sequence[FreshEntryDiagnosticsResult],
+    *,
+    seed_text: str,
+) -> _EntryEdgeSummary:
+    combined = combine_entry_diagnostics(tuple(candidate_results))
+    fills = combined.diagnostics
+    barrier_values = [_entry_barrier_value(item) for item in fills]
+    restricted = [_restricted_coverage_ms(item) for item in fills]
+    clustered = _cluster_entry_edge(
+        candidate_results, baseline_results, seed_text=seed_text
+    )
+    ten = clustered["10"]
+    thirty = clustered["30"]
+    uplift_10_interval = ten["upliftInterval"]
+    uplift_30_interval = thirty["upliftInterval"]
+    baseline_gate = bool(
+        ten["uplift"] is not None
+        and thirty["uplift"] is not None
+        and ten["uplift"] >= BASELINE_MINIMUM_UPLIFT
+        and thirty["uplift"] >= BASELINE_MINIMUM_UPLIFT
+        and uplift_10_interval is not None
+        and uplift_30_interval is not None
+        and uplift_10_interval[0] > 0.0
+        and uplift_30_interval[0] > 0.0
+    )
+    covered_60, count_60 = _coverage_count(combined, 60)
+    return _EntryEdgeSummary(
+        expected_barrier_pnl_per_fill=(
+            float(math.fsum(barrier_values) / len(barrier_values))
+            if barrier_values
+            else None
+        ),
+        median_mae_before_coverage=(
+            float(median(item.mae_before_coverage_per_unit for item in fills))
+            if fills
+            else None
+        ),
+        median_mfe_horizon=(
+            float(median(item.mfe_horizon_per_unit for item in fills))
+            if fills
+            else None
+        ),
+        p90_restricted_coverage_ms=(
+            float(np.quantile(np.asarray(restricted), 0.90, method="linear"))
+            if restricted
+            else None
+        ),
+        failure_to_cover_60s=(1.0 - covered_60 / count_60 if count_60 else None),
+        coverage_10_cluster_interval=ten["coverageInterval"],
+        coverage_30_cluster_interval=thirty["coverageInterval"],
+        baseline_coverage_10=ten["baseline"],
+        baseline_coverage_30=thirty["baseline"],
+        uplift_10=ten["uplift"],
+        uplift_30=thirty["uplift"],
+        uplift_10_cluster_interval=uplift_10_interval,
+        uplift_30_cluster_interval=uplift_30_interval,
+        baseline_gate_passed=baseline_gate,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _BaselineCoverageSummary:
+    counts: Mapping[tuple[int, str], tuple[int, int]]
+
+    def coverage(self, checkpoint: int, side: str) -> tuple[int, int]:
+        return self.counts[(checkpoint, side)]
+
+
+def _baseline_coverage_summary(
+    result: FreshEntryDiagnosticsResult,
+) -> _BaselineCoverageSummary:
+    counts: dict[tuple[int, str], list[int]] = {
+        (checkpoint, side): [0, 0]
+        for checkpoint in (10, 30)
+        for side in ("long", "short")
+    }
+    for item in result.diagnostics:
+        side = item.event.side
+        for checkpoint in (10, 30):
+            selected = counts[(checkpoint, side)]
+            selected[1] += 1
+            selected[0] += int(
+                not item.censored
+                and bool(getattr(item, f"cost_covered_by_{checkpoint}s"))
+            )
+    return _BaselineCoverageSummary(
+        counts={key: (value[0], value[1]) for key, value in counts.items()}
+    )
+
+
+class _StreamingEntryEdgeReducer:
+    """Reproduce the registered entry-edge summary one full session at a time."""
+
+    def __init__(
+        self,
+        *,
+        values: FloatSeriesSpool,
+        key_prefix: str,
+        seed_text: str,
+    ) -> None:
+        self._values = values
+        self._prefix = key_prefix
+        self._seed_text = seed_text
+        self._rows: list[dict[str, float]] = []
+        self._fill_count = 0
+        self._covered_60 = 0
+        self._finished = False
+
+    def _key(self, name: str) -> str:
+        return f"{self._prefix}\x00{name}"
+
+    def add_session(
+        self,
+        candidate: FreshEntryDiagnosticsResult,
+        baseline: _BaselineCoverageSummary,
+    ) -> None:
+        if self._finished:
+            raise RuntimeError("streaming entry-edge reducer is already finished")
+        row: dict[str, float] = {}
+        success = {10: 0, 30: 0}
+        side_counts = {
+            (checkpoint, side): 0
+            for checkpoint in (10, 30)
+            for side in ("long", "short")
+        }
+        for item in candidate.diagnostics:
+            self._fill_count += 1
+            self._values.append(self._key("barrier"), _entry_barrier_value(item))
+            self._values.append(
+                self._key("mae"),
+                float(item.mae_before_coverage_per_unit),
+            )
+            self._values.append(
+                self._key("mfe"),
+                float(item.mfe_horizon_per_unit),
+            )
+            self._values.append(
+                self._key("restricted"),
+                _restricted_coverage_ms(item),
+            )
+            self._covered_60 += int(
+                not item.censored and bool(item.cost_covered_by_60s)
+            )
+            for checkpoint in (10, 30):
+                side_counts[(checkpoint, item.event.side)] += 1
+                success[checkpoint] += int(
+                    not item.censored
+                    and bool(getattr(item, f"cost_covered_by_{checkpoint}s"))
+                )
+
+        count = len(candidate.diagnostics)
+        for checkpoint in (10, 30):
+            expected = 0.0
+            expected_count = 0
+            for side in ("long", "short"):
+                base_success, base_count = baseline.coverage(checkpoint, side)
+                candidate_side_count = side_counts[(checkpoint, side)]
+                if candidate_side_count and base_count:
+                    expected += candidate_side_count * base_success / base_count
+                    expected_count += candidate_side_count
+            row[f"success{checkpoint}"] = float(success[checkpoint])
+            row[f"count{checkpoint}"] = float(count)
+            row[f"baselineExpected{checkpoint}"] = expected
+            row[f"baselineCount{checkpoint}"] = float(expected_count)
+        self._rows.append(row)
+
+    def finish(self) -> _EntryEdgeSummary:
+        if self._finished:
+            raise RuntimeError("streaming entry-edge reducer is already finished")
+        self._finished = True
+        clustered = _cluster_entry_edge_rows(
+            self._rows,
+            seed_text=self._seed_text,
+        )
+        ten = clustered["10"]
+        thirty = clustered["30"]
+        uplift_10_interval = ten["upliftInterval"]
+        uplift_30_interval = thirty["upliftInterval"]
+        baseline_gate = bool(
+            ten["uplift"] is not None
+            and thirty["uplift"] is not None
+            and ten["uplift"] >= BASELINE_MINIMUM_UPLIFT
+            and thirty["uplift"] >= BASELINE_MINIMUM_UPLIFT
+            and uplift_10_interval is not None
+            and uplift_30_interval is not None
+            and uplift_10_interval[0] > 0.0
+            and uplift_30_interval[0] > 0.0
+        )
+        return _EntryEdgeSummary(
+            expected_barrier_pnl_per_fill=(
+                float(
+                    math.fsum(self._values.values(self._key("barrier")))
+                    / self._fill_count
+                )
+                if self._fill_count
+                else None
+            ),
+            median_mae_before_coverage=self._values.median(self._key("mae")),
+            median_mfe_horizon=self._values.median(self._key("mfe")),
+            p90_restricted_coverage_ms=self._values.quantile(
+                self._key("restricted"),
+                0.90,
+            ),
+            failure_to_cover_60s=(
+                1.0 - self._covered_60 / self._fill_count
+                if self._fill_count
+                else None
+            ),
+            coverage_10_cluster_interval=ten["coverageInterval"],
+            coverage_30_cluster_interval=thirty["coverageInterval"],
+            baseline_coverage_10=ten["baseline"],
+            baseline_coverage_30=thirty["baseline"],
+            uplift_10=ten["uplift"],
+            uplift_30=thirty["uplift"],
+            uplift_10_cluster_interval=uplift_10_interval,
+            uplift_30_cluster_interval=uplift_30_interval,
+            baseline_gate_passed=baseline_gate,
+        )
+
+
+def _entry_rank_score(report: EntryScoreReport, edge: _EntryEdgeSummary) -> float:
+    metrics = report.overall
+    coverage_10 = metrics.coverage_probability(10) or 0.0
+    coverage_30 = metrics.coverage_probability(30) or 0.0
+    coverage_60 = metrics.coverage_probability(60) or 0.0
+    barrier = metrics.barrier_profit_first_rate or 0.0
+    speed = (
+        1.0 - min(metrics.restricted_median_coverage_milliseconds / 60_000.0, 1.0)
+        if metrics.restricted_median_coverage_milliseconds is not None
+        else 0.0
+    )
+    fill = metrics.fill_rate or 0.0
+    active = metrics.active_session_fraction or 0.0
+    mae = abs(edge.median_mae_before_coverage or 0.0)
+    mae_quality = 1.0 / (1.0 + mae)
+    return float(
+        0.25 * coverage_10
+        + 0.25 * coverage_30
+        + 0.10 * coverage_60
+        + 0.15 * barrier
+        + 0.10 * speed
+        + 0.05 * fill
+        + 0.05 * active
+        + 0.05 * mae_quality
+    )
+
+
+def _compact_entry_slices(report: EntryScoreReport) -> dict[str, Any]:
+    def compact(items: Sequence[tuple[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {
+                "label": label,
+                "filledCount": metrics.filled_count,
+                "coverage10": metrics.coverage_probability(10),
+                "coverage30": metrics.coverage_probability(30),
+                "coverage60": metrics.coverage_probability(60),
+                "barrierProfitFirstRate": metrics.barrier_profit_first_rate,
+            }
+            for label, metrics in items
+        ]
+
+    return {
+        "overall": asdict(report.overall),
+        "byDay": compact(report.by_day),
+        "bySide": compact(report.by_side),
+        "byMarketSession": compact(report.by_market_session),
+        "byRegime": compact(report.by_regime),
+    }
+
+
+def _compact_trade_slices(report: TradeScoreReport) -> dict[str, Any]:
+    def compact(items: Sequence[tuple[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {
+                "label": label,
+                "tradeCount": metrics.trade_count,
+                "winRate": metrics.win_rate,
+                "netPnl": metrics.net_pnl,
+                "expectancy": metrics.expectancy,
+                "profitFactor": metrics.profit_factor,
+                "maximumDrawdown": metrics.maximum_drawdown,
+            }
+            for label, metrics in items
+        ]
+
+    return {
+        "overall": asdict(report.overall),
+        "byDay": compact(report.by_day),
+        "bySide": compact(report.by_side),
+        "byMarketSession": compact(report.by_market_session),
+        "byRegime": compact(report.by_regime),
+    }
+
+
+def _bound_discovery_session_count(preregistration: Mapping[str, Any]) -> int:
+    policy = preregistration.get("chronologicalWindowPolicy")
+    if not isinstance(policy, Mapping):
+        raise ValueError("preregistration has no chronological window policy")
+    count = policy.get("discovery_sessions")
+    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+        raise ValueError("preregistration has an invalid discovery-session count")
+    return count
+
+
+class RegisteredFreshResearchPipeline:
+    """Compose the frozen study and expose callbacks to the protocol engine."""
+
+    def __init__(
+        self,
+        *,
+        repository_root: str | Path,
+        output_directory: str | Path,
+        spool_directory: str | Path,
+        spool_maximum_bytes: int,
+        connection_context_factory: Any,
+        corpus_manifest: Mapping[str, Any],
+        split_manifest: Mapping[str, Any],
+        preregistration: Mapping[str, Any],
+        progress: ProgressCallback | None = None,
+        verify_preregistration_implementation_files: bool = True,
+    ) -> None:
+        self.repository_root = Path(repository_root).resolve()
+        self.output = Path(output_directory).resolve()
+        self.spool_directory = Path(spool_directory).resolve()
+        if (
+            not isinstance(spool_maximum_bytes, int)
+            or isinstance(spool_maximum_bytes, bool)
+            or spool_maximum_bytes <= 0
+        ):
+            raise ValueError("spool_maximum_bytes must be a positive integer")
+        self.spool_maximum_bytes = spool_maximum_bytes
+        self.event_spool_maximum_bytes = min(
+            spool_maximum_bytes,
+            FRESH_EVENT_SPOOL_MAXIMUM_BYTES,
+        )
+        self.numeric_spool_maximum_bytes = min(
+            spool_maximum_bytes,
+            FRESH_NUMERIC_SPOOL_MAXIMUM_BYTES,
+        )
+        self.corpus_manifest = dict(corpus_manifest)
+        self.split_manifest = dict(split_manifest)
+        self.preregistration = dict(preregistration)
+        self.progress = progress
+        self.verify_preregistration_implementation_files = (
+            verify_preregistration_implementation_files
+        )
+        self.regime_definition = FreshRegimeDefinition(
+            volatility_column="1s_bollinger_std",
+            spread_column="spread",
+            trend_column="10s_mid_speed",
+            arrival_column="1s_arrival_rate",
+        )
+        bootstrap = registered_fresh_bootstrap_config()
+        self.source = FreshDbSessionSource(
+            connection_context_factory=connection_context_factory,
+            data_config=bootstrap.data_config,
+            corpus_manifest=self.corpus_manifest,
+        )
+        feature_configs = feature_configs_from_preregistration(
+            self.preregistration,
+            verify_current_implementation_files=(
+                self.verify_preregistration_implementation_files
+            ),
+        )
+        models = self.preregistration["features"]["kalmanModelBank"]
+        if len(feature_configs) != len(models):
+            raise ValueError("registered Kalman model bank is inconsistent")
+        self.members = tuple(
+            FreshKalmanBankMember(model_id=str(model["id"]), feature_config=config)
+            for model, config in zip(models, feature_configs)
+        )
+        self.model_ids = tuple(member.model_id for member in self.members)
+        self.scoring = scoring_config_from_preregistration(
+            self.preregistration,
+            verify_current_implementation_files=(
+                self.verify_preregistration_implementation_files
+            ),
+        )
+        barrier_configs = entry_barrier_diagnostic_configs_from_preregistration(
+            self.preregistration,
+            scenario_id=REFERENCE_SCENARIO_ID,
+            verify_current_implementation_files=(
+                self.verify_preregistration_implementation_files
+            ),
+        )
+        self.entry_diagnostic_config = barrier_configs[
+            f"{REFERENCE_SCENARIO_ID}:profit-0.25:loss-0.25"
+        ]
+        self.executions = replay_execution_configs_from_preregistration(
+            self.preregistration,
+            verify_current_implementation_files=(
+                self.verify_preregistration_implementation_files
+            ),
+        )
+        scenario_policy = self.preregistration["execution"]["scenarioEvaluationPolicy"]
+        self.exit_search_scenario_ids = tuple(
+            str(item) for item in scenario_policy["exitSearchScenarioIds"]
+        )
+        self.later_full_scenario_ids = tuple(
+            str(item) for item in scenario_policy["laterFullStrategyScenarioIds"]
+        )
+        registered_scenarios = tuple(self.executions)
+        expected_exit_search = _scenario_ids_for_stage(
+            registered_scenarios,
+            self.scoring.required_stress_scenario_ids,
+            stage="exit_search",
+        )
+        expected_later = _scenario_ids_for_stage(
+            registered_scenarios,
+            self.scoring.required_stress_scenario_ids,
+            stage="validation",
+        )
+        hard_gate_ids = tuple(
+            str(item) for item in scenario_policy["hardGateScenarioIds"]
+        )
+        sensitivity_ids = tuple(
+            str(item) for item in scenario_policy["sensitivityOnlyScenarioIds"]
+        )
+        diagnostic_ids = tuple(
+            str(item) for item in scenario_policy["diagnosticOnlyScenarioIds"]
+        )
+        extras = tuple(
+            item for item in expected_later if item not in expected_exit_search
+        )
+        if (
+            self.exit_search_scenario_ids != expected_exit_search
+            or self.later_full_scenario_ids != expected_later
+            or hard_gate_ids != expected_exit_search
+            or len((*sensitivity_ids, *diagnostic_ids))
+            != len(set((*sensitivity_ids, *diagnostic_ids)))
+            or set((*sensitivity_ids, *diagnostic_ids)) != set(extras)
+        ):
+            raise ValueError(
+                "registered execution scenario evaluation policy is inconsistent"
+            )
+        self.dimensions = SliceDimensions(
+            day_metadata_path="context.day",
+            market_session_metadata_path="context.marketSession",
+            regime_metadata_path="context.regime",
+        )
+        self.quantile_bank: FreshQuantileBank | None = None
+        self.threshold_preflight: dict[str, Any] | None = None
+        self.entry_runtime: dict[str, _EntryRuntime] = {}
+        self.exit_runtime: dict[str, FreshExitVariant] = {}
+        self.stage_results: list[StageRunResult] = []
+        self.recovery_contract: Mapping[str, Any] | None = None
+        self.recovery_implementation_manifest: Mapping[str, Any] | None = None
+        self.recovery_batch_result_path: Path | None = None
+
+    def _emit(self, **payload: Any) -> None:
+        if self.progress is not None:
+            self.progress(payload)
+
+    def _features(self, tape: FreshSessionTape, columns: Iterable[str]) -> pd.DataFrame:
+        selected = tuple(dict.fromkeys(str(column) for column in columns))
+        family = NamedFeatureFamily("pipeline", selected)
+        config = FreshFeatureBankConfig(
+            members=self.members,
+            output_selection=FreshFeatureBankOutputSelection(
+                include_all_columns=False,
+                candidate_families=(family,),
+                selected_candidate_families=("pipeline",),
+            ),
+        )
+        return compute_fresh_feature_bank(tape.ticks, config=config)
+
+    def fit_thresholds(self, context: EvaluationContext) -> Mapping[str, Any]:
+        anchors = _context_anchors(context)
+        expected_count = _bound_discovery_session_count(self.preregistration)
+        if context.stage != "discovery" or len(anchors) != expected_count:
+            raise PermissionError("thresholds may be fitted only on discovery")
+        measurements = _ordered_specs(
+            (
+                fresh_candidate_quantile_measurements(kalman_model_ids=self.model_ids),
+                fresh_exit_quantile_measurements(),
+                fresh_regime_quantile_measurements(self.regime_definition),
+            )
+        )
+        ranks = tuple(
+            sorted(
+                set(FRESH_CANDIDATE_QUANTILE_RANKS)
+                | set(FRESH_EXIT_QUANTILE_RANKS)
+                | set(FRESH_REGIME_QUINTILE_RANKS)
+            )
+        )
+        fitter = SessionBalancedQuantileFitter(
+            measurements=measurements,
+            config=FreshQuantileBankConfig(
+                ranks=ranks,
+                minimum_finite_values_per_session=1_000,
+                minimum_eligible_sessions=40,
+            ),
+        )
+        columns = tuple(dict.fromkeys(spec.column for spec in measurements))
+        for ordinal, anchor in enumerate(anchors, start=1):
+            tape = self.source.load_session(anchor)
+            frame = self._features(tape, columns)
+            fitter.add_session(anchor, frame)
+            self._emit(
+                stage="threshold_fit",
+                sessionOrdinal=ordinal,
+                sessionCount=len(anchors),
+                sessionAnchor=anchor,
+            )
+            del frame, tape
+        bank = fitter.freeze()
+        self.quantile_bank = bank
+        payload = fresh_quantile_bank_payload(bank)
+        _write_new_json(self.output / "fresh_quantile_bank_v1.json", payload)
+        entry_grid = build_fresh_candidate_grid(bank, kalman_model_ids=self.model_ids)
+        filter_bank = _derive_event_filter_bank(
+            bank, entry_grid, self.regime_definition
+        )
+        exit_grid = build_fresh_exit_grid(bank, execution_configs=self.executions)
+        preflight = {
+            "schema": "fresh-xauusd-threshold-domain-preflight/v1",
+            "quantileBankSha256": bank.bank_sha256,
+            "candidateGridSha256": entry_grid.grid_sha256,
+            "baseCandidateCount": len(entry_grid.candidates),
+            "eventFilterVariantBankSha256": filter_bank.variant_bank_sha256,
+            "eventFilterVariantCount": len(filter_bank.variants),
+            "totalRuntimeEntryCount": filter_bank.total_candidate_count,
+            "exitGridSha256": exit_grid.grid_sha256,
+            "exitVariantCount": len(exit_grid.variants),
+            "executionScenariosSha256": exit_grid.execution_scenarios_sha256,
+            "allRegisteredThresholdDomainsResolved": True,
+        }
+        if preflight["totalRuntimeEntryCount"] != 240:
+            raise ValueError("threshold preflight did not resolve 240 entry candidates")
+        self.threshold_preflight = preflight
+        _write_new_json(
+            self.output / "fresh_threshold_domain_preflight_v1.json",
+            preflight,
+        )
+        return payload
+
+    def build_entry_candidates(
+        self, payload: Mapping[str, Any], context: EvaluationContext
+    ) -> Iterable[EntryCandidateSpec]:
+        if context.stage != "discovery":
+            raise PermissionError("entry grid may be built only in discovery")
+        bank = fresh_quantile_bank_from_payload(payload)
+        self.quantile_bank = bank
+        grid = build_fresh_candidate_grid(bank, kalman_model_ids=self.model_ids)
+        base_filter = FreshEventFilterConfig(
+            variant_id="all-unfiltered",
+            regime_definition=self.regime_definition,
+            activity_filter="all",
+            spread_ceiling_rank=None,
+            volatility_floor_rank=None,
+        )
+        variants = _derive_event_filter_bank(bank, grid, self.regime_definition)
+        preflight = self.threshold_preflight
+        if preflight is None or any(
+            (
+                preflight["quantileBankSha256"] != bank.bank_sha256,
+                preflight["candidateGridSha256"] != grid.grid_sha256,
+                preflight["eventFilterVariantBankSha256"]
+                != variants.variant_bank_sha256,
+                preflight["totalRuntimeEntryCount"] != variants.total_candidate_count,
+            )
+        ):
+            raise RuntimeError("runtime entry bank differs from threshold preflight")
+        by_source = {item.config.candidate_id: item for item in grid.candidates}
+        runtimes: list[_EntryRuntime] = []
+        for item in grid.candidates:
+            runtimes.append(
+                _EntryRuntime(
+                    candidate_id=item.config.candidate_id,
+                    family=item.family,
+                    source=item,
+                    event_filter=base_filter,
+                    entry_variant="base-all-market",
+                    robustness_group=f"{item.neighbourhood_id}::all-unfiltered",
+                )
+            )
+        for variant in variants.variants:
+            source = by_source[variant.source_candidate_id]
+            runtimes.append(
+                _EntryRuntime(
+                    candidate_id=variant.candidate_id,
+                    family=variant.family,
+                    source=source,
+                    event_filter=variant.filter_config,
+                    entry_variant=f"event-filter:{variant.filter_config.variant_id}",
+                    robustness_group=(
+                        f"{source.neighbourhood_id}::{variant.filter_config.variant_id}"
+                    ),
+                )
+            )
+        if len(runtimes) != 240:
+            raise AssertionError("the frozen entry bank must contain 240 candidates")
+        self.entry_runtime = {item.candidate_id: item for item in runtimes}
+        artifact = {
+            "schema": "fresh-xauusd-runtime-entry-bank/v1",
+            "quantileBankSha256": bank.bank_sha256,
+            "candidateGridSha256": grid.grid_sha256,
+            "filterVariantBankSha256": variants.variant_bank_sha256,
+            "candidateCount": len(runtimes),
+            "candidates": [
+                {
+                    "candidateId": item.candidate_id,
+                    "family": item.family,
+                    "sourceCandidateId": item.source.config.candidate_id,
+                    "sourceConfig": asdict(item.source.config),
+                    "sourceConfigSha256": item.source.config_sha256,
+                    "eventFilter": asdict(item.event_filter),
+                    "eventFilterSha256": fresh_event_filter_config_fingerprint(
+                        item.event_filter, bank
+                    ),
+                    "entryVariant": item.entry_variant,
+                    "robustnessGroup": item.robustness_group,
+                }
+                for item in runtimes
+            ],
+        }
+        _write_new_json(self.output / "fresh_entry_bank_v1.json", artifact)
+        for item in runtimes:
+            yield EntryCandidateSpec(
+                candidate_id=item.candidate_id,
+                family=item.family,
+                config={
+                    "schema": "fresh-xauusd-entry-runtime/v1",
+                    "sourceCandidateId": item.source.config.candidate_id,
+                    "sourceSignalConfig": asdict(item.source.config),
+                    "sourceSignalConfigSha256": item.source.config_sha256,
+                    "eventFilter": asdict(item.event_filter),
+                    "eventFilterSha256": fresh_event_filter_config_fingerprint(
+                        item.event_filter, bank
+                    ),
+                    "robustnessGroup": item.robustness_group,
+                    "quantileBankSha256": bank.bank_sha256,
+                    "sessionCloseSafetyMilliseconds": SESSION_CLOSE_SAFETY_MS,
+                    "baseline": {
+                        "eventsPerSidePerSession": (
+                            BASELINE_EVENTS_PER_SIDE_PER_SESSION
+                        ),
+                        "minimumCoverageUplift": BASELINE_MINIMUM_UPLIFT,
+                        "clusterConfidence": BASELINE_CLUSTER_CONFIDENCE,
+                        "bootstrapReplicates": BASELINE_BOOTSTRAP_REPLICATES,
+                    },
+                },
+                entry_variant=item.entry_variant,
+            )
+
+    def _entry_session_batch_materialized(
+        self,
+        runtimes: Sequence[_EntryRuntime],
+        anchors: Sequence[str],
+        *,
+        stage: str,
+    ) -> tuple[
+        dict[str, list[FreshEntryDiagnosticsResult]],
+        dict[str, list[FreshEntryDiagnosticsResult]],
+    ]:
+        """Materialized reference implementation retained for equivalence tests."""
+
+        if self.quantile_bank is None:
+            raise RuntimeError("quantile bank has not been frozen")
+        source_configs: dict[str, FreshSignalConfig] = {}
+        for runtime in runtimes:
+            source_configs[runtime.source.config.candidate_id] = runtime.source.config
+        columns = list(
+            dict.fromkeys(
+                column
+                for config in source_configs.values()
+                for column in signal_required_columns(config)
+            )
+        )
+        columns.extend(
+            spec.column
+            for spec in fresh_regime_quantile_measurements(self.regime_definition)
+        )
+        candidate_results: dict[str, list[FreshEntryDiagnosticsResult]] = {
+            item.candidate_id: [] for item in runtimes
+        }
+        filters: dict[str, FreshEventFilterConfig] = {}
+        for item in runtimes:
+            fingerprint = fresh_event_filter_config_fingerprint(
+                item.event_filter, self.quantile_bank
+            )
+            filters[fingerprint] = item.event_filter
+        baseline_results: dict[str, list[FreshEntryDiagnosticsResult]] = {
+            fingerprint: [] for fingerprint in filters
+        }
+        for ordinal, anchor in enumerate(anchors, start=1):
+            tape = self.source.load_session(anchor)
+            frame = self._features(tape, columns)
+            raw_events = generate_frozen_signal_events(
+                frame, configs=tuple(source_configs.values()), engine="batch"
+            )
+            grouped = _events_by_candidate(raw_events)
+            raw_baseline = _baseline_events(frame, tape)
+            filter_items = tuple(filters.items())
+            filter_requests = tuple(
+                FreshEventFilterRequest(raw_baseline, event_filter)
+                for _, event_filter in filter_items
+            )
+            runtime_requests = tuple(
+                FreshEventFilterRequest(
+                    grouped.get(runtime.source.config.candidate_id, ()),
+                    runtime.event_filter,
+                )
+                for runtime in runtimes
+            )
+            filtered_batch = enrich_and_filter_frozen_event_batch(
+                frame,
+                (*filter_requests, *runtime_requests),
+                quantile_bank=self.quantile_bank,
+            )
+            filter_results = filtered_batch[: len(filter_requests)]
+            runtime_results = filtered_batch[len(filter_requests) :]
+            for (fingerprint, _), filtered in zip(filter_items, filter_results):
+                baseline_results[fingerprint].append(
+                    _diagnose(
+                        tape,
+                        _before_close(filtered.events, tape),
+                        config=self.entry_diagnostic_config,
+                    )
+                )
+            for runtime, filtered in zip(runtimes, runtime_results):
+                candidate_results[runtime.candidate_id].append(
+                    _diagnose(
+                        tape,
+                        _before_close(filtered.events, tape),
+                        config=self.entry_diagnostic_config,
+                    )
+                )
+            self._emit(
+                stage=stage,
+                sessionOrdinal=ordinal,
+                sessionCount=len(anchors),
+                sessionAnchor=anchor,
+            )
+            del frame, tape, raw_events, grouped, raw_baseline
+        expanded_baselines: dict[str, list[FreshEntryDiagnosticsResult]] = {}
+        for runtime in runtimes:
+            fingerprint = fresh_event_filter_config_fingerprint(
+                runtime.event_filter, self.quantile_bank
+            )
+            expanded_baselines[runtime.candidate_id] = baseline_results[fingerprint]
+        return candidate_results, expanded_baselines
+
+    @staticmethod
+    def _candidate_spool_key(candidate_id: str) -> str:
+        return f"candidate\x00{candidate_id}"
+
+    @staticmethod
+    def _baseline_spool_key(filter_sha256: str) -> str:
+        return f"baseline\x00{filter_sha256}"
+
+    @staticmethod
+    def _source_event_spool_key(candidate_id: str) -> str:
+        return f"source-events\x00{candidate_id}"
+
+    def _append_entry_session_to_spool(
+        self,
+        *,
+        spool: KeyedObjectSpool[FreshEntryDiagnosticsResult],
+        anchor: str,
+        ordinal: int,
+        session_count: int,
+        stage: str,
+        columns: Sequence[str],
+        source_configs: Sequence[FreshSignalConfig],
+        filter_items: Sequence[tuple[str, FreshEventFilterConfig]],
+        runtimes: Sequence[_EntryRuntime],
+    ) -> None:
+        """Process one complete session without returning a live session object."""
+
+        if self.quantile_bank is None:
+            raise RuntimeError("quantile bank has not been frozen")
+        tape = self.source.load_session(anchor)
+        frame = self._features(tape, columns)
+        prepared_diagnostics = prepare_entry_diagnostic_tape(
+            tape.ticks,
+            _trusted_validated_ticks=True,
+        )
+        raw_baseline = _baseline_events(frame, tape)
+        runtimes_by_source: dict[str, list[_EntryRuntime]] = defaultdict(list)
+        for runtime in runtimes:
+            runtimes_by_source[runtime.source.config.candidate_id].append(runtime)
+
+        # Raw signal events must all be generated before the shared causal row
+        # limit is known.  Spill one source at a time, then enrich and diagnose
+        # only one filtered result at a time.  This preserves the exact scalar
+        # outputs while avoiding a live graph containing every candidate.
+        with KeyedObjectSpool[tuple[FrozenSignalEvent, ...]](
+            spool.directory,
+            maximum_bytes=self.event_spool_maximum_bytes,
+        ) as event_spool:
+            source_ids = tuple(config.candidate_id for config in source_configs)
+            for source_id in source_ids:
+                event_spool.register_key(self._source_event_spool_key(source_id))
+
+            latest_event_index = max(
+                (event.tick_index for event in raw_baseline),
+                default=-1,
+            )
+            generated_source_ids: list[str] = []
+            source_iterator = iter_frozen_signal_event_groups(
+                frame,
+                configs=tuple(source_configs),
+                engine="batch",
+            )
+            try:
+                while True:
+                    try:
+                        source_group = next(source_iterator)
+                    except StopIteration:
+                        break
+                    source_id, source_events = source_group
+                    if source_id not in runtimes_by_source:
+                        raise RuntimeError(
+                            "generated an unregistered signal source"
+                        )
+                    generated_source_ids.append(source_id)
+                    event_spool.append(
+                        self._source_event_spool_key(source_id),
+                        source_events,
+                    )
+                    if source_events:
+                        latest_event_index = max(
+                            latest_event_index,
+                            max(event.tick_index for event in source_events),
+                        )
+                    # Release the yielded tuple before asking the producer to
+                    # allocate the next source group.
+                    del source_group, source_events, source_id
+            finally:
+                source_iterator.close()
+            del source_iterator
+            if tuple(generated_source_ids) != source_ids:
+                raise RuntimeError("signal source generation inventory changed")
+            if any(count != 1 for _, count in event_spool.inventory):
+                raise RuntimeError("signal source event spool inventory is incomplete")
+
+            evaluator = FreshEventFilterBatchEvaluator(
+                frame,
+                regime_definition=self.regime_definition,
+                row_limit=latest_event_index + 1,
+            )
+            for fingerprint, event_filter in filter_items:
+                (filtered,) = evaluator.enrich_and_filter(
+                    (FreshEventFilterRequest(raw_baseline, event_filter),),
+                    quantile_bank=self.quantile_bank,
+                )
+                diagnostic = _diagnose(
+                    tape,
+                    _before_close(filtered.events, tape),
+                    config=self.entry_diagnostic_config,
+                    prepared_tape=prepared_diagnostics,
+                )
+                spool.append(
+                    self._baseline_spool_key(fingerprint),
+                    diagnostic,
+                )
+                del filtered, diagnostic
+
+            for source_id in source_ids:
+                with event_spool.load(
+                    self._source_event_spool_key(source_id)
+                ) as loaded:
+                    source_events = next(loaded)
+                    try:
+                        next(loaded)
+                    except StopIteration:
+                        pass
+                    else:  # pragma: no cover - guarded by the inventory check
+                        raise RuntimeError(
+                            "signal source event spool contains extra groups"
+                        )
+                for runtime in runtimes_by_source[source_id]:
+                    (filtered,) = evaluator.enrich_and_filter(
+                        (
+                            FreshEventFilterRequest(
+                                source_events,
+                                runtime.event_filter,
+                            ),
+                        ),
+                        quantile_bank=self.quantile_bank,
+                    )
+                    diagnostic = _diagnose(
+                        tape,
+                        _before_close(filtered.events, tape),
+                        config=self.entry_diagnostic_config,
+                        prepared_tape=prepared_diagnostics,
+                    )
+                    spool.append(
+                        self._candidate_spool_key(runtime.candidate_id),
+                        diagnostic,
+                    )
+                    del filtered, diagnostic
+                del source_events
+        self._emit(
+            stage=stage,
+            sessionOrdinal=ordinal,
+            sessionCount=session_count,
+            sessionAnchor=anchor,
+        )
+
+    @contextmanager
+    def _entry_session_spool(
+        self,
+        runtimes: Sequence[_EntryRuntime],
+        anchors: Sequence[str],
+        *,
+        stage: str,
+    ) -> Iterator[
+        tuple[
+            KeyedObjectSpool[FreshEntryDiagnosticsResult],
+            Mapping[str, str],
+        ]
+    ]:
+        """Spill every session result, retaining no cross-session event graph."""
+
+        if self.quantile_bank is None:
+            raise RuntimeError("quantile bank has not been frozen")
+        source_configs: dict[str, FreshSignalConfig] = {}
+        filters: dict[str, FreshEventFilterConfig] = {}
+        baseline_by_candidate: dict[str, str] = {}
+        for runtime in runtimes:
+            source_configs[runtime.source.config.candidate_id] = runtime.source.config
+            fingerprint = fresh_event_filter_config_fingerprint(
+                runtime.event_filter, self.quantile_bank
+            )
+            filters[fingerprint] = runtime.event_filter
+            baseline_by_candidate[runtime.candidate_id] = fingerprint
+        columns = list(
+            dict.fromkeys(
+                column
+                for config in source_configs.values()
+                for column in signal_required_columns(config)
+            )
+        )
+        columns.extend(
+            spec.column
+            for spec in fresh_regime_quantile_measurements(self.regime_definition)
+        )
+        filter_items = tuple(filters.items())
+        with KeyedObjectSpool[FreshEntryDiagnosticsResult](
+            self.spool_directory,
+            maximum_bytes=self.spool_maximum_bytes,
+        ) as spool:
+            for runtime in runtimes:
+                spool.register_key(self._candidate_spool_key(runtime.candidate_id))
+            for fingerprint, _ in filter_items:
+                spool.register_key(self._baseline_spool_key(fingerprint))
+            for ordinal, anchor in enumerate(anchors, start=1):
+                self._append_entry_session_to_spool(
+                    spool=spool,
+                    anchor=anchor,
+                    ordinal=ordinal,
+                    session_count=len(anchors),
+                    stage=stage,
+                    columns=columns,
+                    source_configs=tuple(source_configs.values()),
+                    filter_items=filter_items,
+                    runtimes=runtimes,
+                )
+            expected_count = len(anchors)
+            if any(count != expected_count for _, count in spool.inventory):
+                raise RuntimeError("entry spool session inventory is incomplete")
+            yield spool, baseline_by_candidate
+
+    def _entry_provisional_evaluation(
+        self,
+        *,
+        candidate: FrozenEntryCandidate,
+        context: EvaluationContext,
+        anchors: Sequence[str],
+        session_results: Sequence[FreshEntryDiagnosticsResult],
+        baseline_results: Sequence[FreshEntryDiagnosticsResult],
+    ) -> tuple[EntryScoreReport, GateResult, _EntryEdgeSummary]:
+        combined = combine_entry_diagnostics(tuple(session_results))
+        report = score_entry_diagnostics(
+            combined,
+            config=self.scoring.entry_metrics,
+            dimensions=self.dimensions,
+            evaluated_sessions=anchors,
+        )
+        gate = evaluate_entry_gate(
+            report.overall,
+            minimum_sample=self.scoring.minimum_sample,
+            thresholds=self.scoring.entry_gate,
+        )
+        edge = _entry_edge_summary(
+            session_results,
+            baseline_results,
+            seed_text=(
+                f"{context.stage}:{candidate.entry_sha256}:"
+                f"{canonical_hash(list(anchors))}"
+            ),
+        )
+        return report, gate, edge
+
+    def score_entries_batch(
+        self,
+        candidates: tuple[FrozenEntryCandidate, ...],
+        context: EvaluationContext,
+    ) -> Mapping[str, CandidateEvaluation]:
+        anchors = _context_anchors(context)
+        runtimes = tuple(self.entry_runtime[item.candidate_id] for item in candidates)
+        provisional: dict[
+            str, tuple[EntryScoreReport, GateResult, _EntryEdgeSummary]
+        ] = {}
+        with self._entry_session_spool(runtimes, anchors, stage=context.stage) as (
+            spool,
             baseline_by_candidate,
         ):
             baseline_summaries: dict[
