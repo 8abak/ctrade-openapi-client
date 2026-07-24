@@ -704,4 +704,3 @@ if __name__ == "__main__":
     except AdoptionError as error:
         print(f"run19-adoption-error: {error}", file=sys.stderr, flush=True)
         raise SystemExit(1)
-
