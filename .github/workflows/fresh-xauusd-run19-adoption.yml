@@ -6,7 +6,6 @@ on:
       - codex/xauusd-fresh-walkforward
     paths:
       - .github/research-adoption-launch.txt
-  workflow_dispatch:
 
 concurrency:
   group: fresh-xauusd-run19-adoption
@@ -45,6 +44,12 @@ jobs:
             exit 1
           fi
           git merge-base --is-ancestor "${launch_sha}" HEAD
+          printf '%s  %s\n' \
+            "d3653edfe2c8bb9c3cb04c09978a01c6dda1865b97b9c26d52d50955c1ca16c7" \
+            "datavis/research/fresh_run19_adoption.py" \
+            "91caec37dfd4c93c19880ab16011df7f62d25d6d007ddd3707ab026a6aec76e2" \
+            "test_fresh_run19_adoption.py" |
+            sha256sum --check --strict -
           python3 -m unittest test_fresh_run19_adoption
           python3 -m py_compile \
             datavis/research/fresh_run19_adoption.py
