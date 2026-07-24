@@ -103,9 +103,11 @@ def validate_scoped_paths(values: list[str]) -> dict[str, PurePosixPath]:
         "terminalArchive",
         "serverLog",
     )
+    if len(values) != len(names):
+        fail("sealed path vector has the wrong length")
     paths = {
         name: canonical_path(value, name)
-        for name, value in zip(names, values, strict=True)
+        for name, value in zip(names, values)
     }
     tmp_patterns = {
         "worktree": r"fresh-xauusd-worktree\.[A-Za-z0-9]{6}",
