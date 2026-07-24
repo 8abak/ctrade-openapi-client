@@ -277,7 +277,82 @@ def _parameter_neighbourhood_audit(
     neighbor_coverages = [float(item[4]) for item in neighbors if item[4] is not None]
     center_coverage = center[4]
     parameter_signatures = tuple(item[5] for item in selected)
-    parameters_distinct = len(set(parameter_signatures)) == len(parameter_signaos.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
+    parameters_distinct = len(set(parameter_signatures)) == len(parameter_signatures)
+    coverage_required = maximum_absolute_coverage_30_drop is not None
+    coverage_drop = (
+        max(abs(value - center_coverage) for value in neighbor_coverages)
+        if coverage_required
+        and len(neighbor_coverages) == len(neighbors)
+        and center_coverage is not None
+        else None
+    )
+    checks = {
+        "centerHardGatePassed": center[2],
+        "validNeighborFractionPassed": (
+            valid_fraction >= minimum_valid_neighbor_fraction
+        ),
+        "positiveExpectancyNeighborFractionPassed": (
+            positive_fraction >= minimum_positive_expectancy_neighbor_fraction
+        ),
+        "minimumExpectancyRetentionPassed": (
+            retention is not None and retention >= minimum_neighbor_expectancy_retention
+        ),
+        "parametersDistinctAcrossRanks": parameters_distinct,
+        "coverage30DropPassed": (
+            not coverage_required
+            or (
+                coverage_drop is not None
+                and maximum_absolute_coverage_30_drop is not None
+                and coverage_drop <= maximum_absolute_coverage_30_drop
+            )
+        ),
+    }
+    return {
+        "centerCandidateId": center[0],
+        "evaluatedCount": len(selected),
+        "adjacentNeighborCount": len(neighbors),
+        "validNeighborFraction": valid_fraction,
+        "minimumValidNeighborFraction": minimum_valid_neighbor_fraction,
+        "positiveExpectancyNeighborFraction": positive_fraction,
+        "minimumPositiveExpectancyNeighborFraction": (
+            minimum_positive_expectancy_neighbor_fraction
+        ),
+        "centerExpectancy": center_expectancy,
+        "minimumNeighborExpectancy": (
+            float(min(neighbor_expectancies))
+            if len(neighbor_expectancies) == len(neighbors)
+            else None
+        ),
+        "minimumNeighborExpectancyRetention": retention,
+        "requiredMinimumNeighborExpectancyRetention": (
+            minimum_neighbor_expectancy_retention
+        ),
+        "centerCoverage30": center_coverage,
+        "coverage30DropRequired": coverage_required,
+        "maximumAbsoluteCoverage30Drop": coverage_drop,
+        "maximumAllowedAbsoluteCoverage30Drop": (maximum_absolute_coverage_30_drop),
+        "checks": checks,
+        "passed": all(checks.values()),
+    }
+
+
+def _write_new_json(path: Path, payload: Mapping[str, Any]) -> None:
+    if path.exists() or path.is_symlink():
+        raise FileExistsError(f"refusing to overwrite immutable artifact: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = (
+        json.dumps(
+            dict(payload),
+            ensure_ascii=True,
+            allow_nan=False,
+            sort_keys=True,
+            indent=2,
+        )
+        + "\n"
+    ).encode("utf-8")
+    descriptor = os.open(
+        path,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
         0o600,
     )
     with os.fdopen(descriptor, "wb", closefd=True) as handle:
