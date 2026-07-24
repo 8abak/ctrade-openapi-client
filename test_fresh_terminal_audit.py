@@ -361,7 +361,7 @@ class FreshTerminalAuditTests(unittest.TestCase):
                 audit._canonical_compact_bytes(terminal),
             )
 
-    def test_adoption_is_pinned_to_only_the_accepted_r1_r2_executions(self) -> None:
+    def test_adoption_is_pinned_to_only_the_accepted_executions(self) -> None:
         launch = _launch_receipt()
         archive_name = (
             f"fresh-xauusd-{audit.FROZEN_RUN_ID}-{audit.FROZEN_RUN_ATTEMPT}.tgz"
@@ -371,46 +371,98 @@ class FreshTerminalAuditTests(unittest.TestCase):
             "fresh-xauusd-v5-terminal-receipt.json": (20, "b" * 64),
             archive_name: (30, "c" * 64),
         }
-        adoption_run, adoption_attempt, adoption_commit = next(
-            iter(audit.FROZEN_ADOPTION_EXECUTIONS)
+        expected_executions = frozenset(
+            (
+                (
+                    30069405297,
+                    1,
+                    "0e03f568d6db68e0b31ebda126ab03b61d445154",
+                ),
+                (
+                    30070331273,
+                    1,
+                    "a6c76e4bd50750c4c1f468bdd232fd1fd7e3090d",
+                ),
+                (
+                    30101048443,
+                    1,
+                    "c730fd0a2c66426f995ac43f1d50035cf94265ff",
+                ),
+            )
         )
-        manifest = {
-            "schema": audit.ADOPTION_SCHEMA,
-            "source": {
-                "githubRunId": audit.FROZEN_RUN_ID,
-                "githubRunAttempt": audit.FROZEN_RUN_ATTEMPT,
-                "commitSha": audit.FROZEN_RUN_COMMIT,
-                "launchArtifactId": audit.FROZEN_LAUNCH_ARTIFACT_ID,
-                "launchArtifactDigest": audit.FROZEN_LAUNCH_ARTIFACT_DIGEST,
-                "launchArtifactSize": audit.FROZEN_LAUNCH_ARTIFACT_SIZE,
-            },
-            "adoption": {
-                "githubRunId": adoption_run,
-                "githubRunAttempt": adoption_attempt,
-                "commitSha": adoption_commit,
-                "remoteMutation": False,
-            },
-            "members": [
-                {"name": name, "size": size, "sha256": sha}
-                for name, (size, sha) in identities.items()
-            ],
-        }
-        raw = audit._canonical_compact_bytes(manifest)
-        audit._verify_adoption_manifest(raw, manifest, identities, launch)
-
-        changed = copy.deepcopy(manifest)
-        changed["adoption"]["githubRunId"] += 99
-        with self.assertRaisesRegex(
-            audit.FreshTerminalAuditError,
-            "not pinned",
+        self.assertEqual(audit.FROZEN_ADOPTION_EXECUTIONS, expected_executions)
+        manifests = []
+        for adoption_run, adoption_attempt, adoption_commit in sorted(
+            expected_executions
         ):
+            manifest = {
+                "schema": audit.ADOPTION_SCHEMA,
+                "source": {
+                    "githubRunId": audit.FROZEN_RUN_ID,
+                    "githubRunAttempt": audit.FROZEN_RUN_ATTEMPT,
+                    "commitSha": audit.FROZEN_RUN_COMMIT,
+                    "launchArtifactId": audit.FROZEN_LAUNCH_ARTIFACT_ID,
+                    "launchArtifactDigest": audit.FROZEN_LAUNCH_ARTIFACT_DIGEST,
+                    "launchArtifactSize": audit.FROZEN_LAUNCH_ARTIFACT_SIZE,
+                },
+                "adoption": {
+                    "githubRunId": adoption_run,
+                    "githubRunAttempt": adoption_attempt,
+                    "commitSha": adoption_commit,
+                    "remoteMutation": False,
+                },
+                "members": [
+                    {"name": name, "size": size, "sha256": sha}
+                    for name, (size, sha) in identities.items()
+                ],
+            }
+            raw = audit._canonical_compact_bytes(manifest)
             audit._verify_adoption_manifest(
-                audit._canonical_compact_bytes(changed),
-                changed,
+                raw,
+                manifest,
                 identities,
                 launch,
             )
-        type_confused = copy.deepcopy(manifest)
+            manifests.append(manifest)
+
+        rejected_mutations = {
+            "run": ("githubRunId", 30101048542),
+            "attempt": ("githubRunAttempt", 2),
+            "commit": ("commitSha", "f" * 40),
+            "chimera": (
+                "commitSha",
+                "a6c76e4bd50750c4c1f468bdd232fd1fd7e3090d",
+            ),
+        }
+        for label, (field, value) in rejected_mutations.items():
+            with self.subTest(label=label):
+                changed = copy.deepcopy(manifests[-1])
+                changed["adoption"][field] = value
+                with self.assertRaisesRegex(
+                    audit.FreshTerminalAuditError,
+                    "not pinned",
+                ):
+                    audit._verify_adoption_manifest(
+                        audit._canonical_compact_bytes(changed),
+                        changed,
+                        identities,
+                        launch,
+                    )
+
+        remote_mutation = copy.deepcopy(manifests[-1])
+        remote_mutation["adoption"]["remoteMutation"] = True
+        with self.assertRaisesRegex(
+            audit.FreshTerminalAuditError,
+            "execution identity",
+        ):
+            audit._verify_adoption_manifest(
+                audit._canonical_compact_bytes(remote_mutation),
+                remote_mutation,
+                identities,
+                launch,
+            )
+
+        type_confused = copy.deepcopy(manifests[-1])
         type_confused["source"]["githubRunAttempt"] = True
         with self.assertRaisesRegex(
             audit.FreshTerminalAuditError,
