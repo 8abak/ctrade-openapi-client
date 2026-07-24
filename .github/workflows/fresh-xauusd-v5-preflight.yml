@@ -26,13 +26,19 @@ jobs:
         shell: bash
         env:
           FRESH_GITHUB_REF: ${{ github.ref }}
+          FRESH_GITHUB_SHA: ${{ github.sha }}
         run: |
           set -Eeuo pipefail
           expected_ref="refs/heads/codex/xauusd-fresh-walkforward"
-          expected_marker="fresh-xauusd-v5-lifecycle-preflight-2026-07-24-r4"
+          expected_marker="fresh-xauusd-v5-lifecycle-preflight-2026-07-24-r5"
           [[ "${FRESH_GITHUB_REF}" == "${expected_ref}" ]]
+          [[ "$(git rev-parse HEAD)" == "${FRESH_GITHUB_SHA}" ]]
           cmp -s -- .github/research-v5-preflight.txt \
             <(printf '%s\n' "${expected_marker}")
+          printf '%s  %s\n' \
+            "bd3d6cdfefefe8c36a96c69b8288f2f186c4127f932030427f235ea6da0d38fe" \
+            "datavis/research/fresh_terminal_audit_bootstrap.py" |
+            sha256sum --check --strict -
           bash -n -- .github/scripts/fresh-xauusd-v5-controller.sh
           workflow_steps=(
             ".github/workflows/fresh-xauusd-v5-detached-launch.yml|Launch detached v5 controller and obtain immutable receipt"
@@ -71,7 +77,8 @@ jobs:
             numpy==2.0.2 \
             pandas==2.2.3 \
             psycopg2-binary==2.9.10 \
-            python-dotenv==1.1.1
+            python-dotenv==1.1.1 \
+            ruff==0.12.2
 
       - name: Compile and test the frozen research stack
         shell: bash
@@ -82,6 +89,10 @@ jobs:
             datavis/research/fresh_preregistration.py \
             datavis/research/fresh_pipeline.py \
             datavis/research/fresh_pipeline_cli.py \
+            datavis/research/fresh_terminal_audit.py \
+            datavis/research/fresh_terminal_audit_bootstrap.py \
+            test_fresh_terminal_audit.py \
+            test_fresh_terminal_audit_bootstrap.py \
             .github/scripts/fresh-xauusd-v5-monitor-controller.py \
             .github/scripts/fresh-xauusd-v5-remote-monitor.py \
             .github/scripts/fresh-xauusd-v5-terminal-reader.py
@@ -95,4 +106,29 @@ jobs:
           for test_path in test_fresh_*.py; do
             fresh_test_modules+=("${test_path%.py}")
           done
-          python -m unittest "${fresh_test_modules[@]}"
+          python -m unittest -v "${fresh_test_modules[@]}"
+          python -m ruff check \
+            datavis/research/fresh_terminal_audit.py \
+            datavis/research/fresh_terminal_audit_bootstrap.py \
+            test_fresh_terminal_audit.py \
+            test_fresh_terminal_audit_bootstrap.py
+
+      - name: Exercise the sealed audit bootstrap
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          probe="${RUNNER_TEMP}/fresh-v5-bootstrap-probe-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          [[ ! -e "${probe}" ]]
+          status=0
+          set +e
+          output="$(
+            python -I -B \
+              datavis/research/fresh_terminal_audit_bootstrap.py \
+              "${probe}" 2>&1
+          )"
+          status="$?"
+          set -e
+          [[ "${status}" -eq 1 ]]
+          expected="FreshTerminalAuditError: adoption bundle is not a directory"
+          [[ "${output}" == *"${expected}"* ]]
+          [[ "${output}" != *"terminal audit bootstrap rejected execution"* ]]
