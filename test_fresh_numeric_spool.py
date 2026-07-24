@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from array import array as NativeArray
 import math
 import random
 import statistics
@@ -79,6 +80,44 @@ class FreshNumericSpoolTests(unittest.TestCase):
             self.assertEqual(
                 spool.median("many"),
                 float(np.median(np.asarray(values))),
+            )
+
+    def test_python311_array_without_clear_supports_flush_and_merge(self):
+        class Python311Array(NativeArray):
+            clear = None
+
+        def python311_array(typecode, initializer=()):
+            return Python311Array(typecode, initializer)
+
+        values = (9.0, -0.0, 7.0, 0.0, 5.0, -0.0, 3.0, 0.0, 1.0)
+        with (
+            patch(
+                "datavis.research.fresh_numeric_spool.array",
+                new=python311_array,
+            ),
+            patch(
+                "datavis.research.fresh_numeric_spool._BUFFER_VALUES",
+                1,
+            ),
+            patch(
+                "datavis.research.fresh_numeric_spool._SORT_RUN_VALUES",
+                1,
+            ),
+            patch(
+                "datavis.research.fresh_numeric_spool._MERGE_FAN_IN",
+                2,
+            ),
+            FloatSeriesSpool(
+                self.parent,
+                maximum_bytes=_TEST_MAXIMUM_BYTES,
+            ) as spool,
+        ):
+            for value in values:
+                spool.append("series", value)
+            self.assertEqual(tuple(spool.values("series")), values)
+            self.assertEqual(
+                spool.median("series"),
+                float(statistics.median(values)),
             )
 
     def test_invalid_values_probabilities_and_lifecycle_are_rejected(self):
