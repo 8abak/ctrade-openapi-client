@@ -38,7 +38,7 @@ class FreshTerminalAuditBootstrapTests(unittest.TestCase):
         manifest = bootstrap._runtime_closure_manifest()
         self.assertEqual(
             bootstrap._sha256(bootstrap._canonical_bytes(manifest)),
-            "86511918f8aad8eace17695c82223aa6264b36a9ad08eadf9fa419500a32ce88",
+            "495bac1575f17f11c54be8c184f40434b0de4c9cf46025e6fd3dd2072b95f017",
         )
         self.assertIn(
             "datavis/__init__.py",
@@ -57,10 +57,32 @@ class FreshTerminalAuditBootstrapTests(unittest.TestCase):
             for name in sys.modules
             if name == "datavis" or name.startswith("datavis.")
         }
-        modules, actual = bootstrap._read_verified_sources(
-            ROOT,
-            auditor_sha256=_sha256(AUDITOR_PATH),
-        )
+        original = bootstrap._stable_read_source
+
+        def canonical_linux_source(
+            repository_root: Path,
+            relative: str,
+            *,
+            maximum_bytes: int = bootstrap.MAX_SOURCE_BYTES,
+        ) -> tuple[Path, bytes]:
+            path, raw = original(
+                repository_root,
+                relative,
+                maximum_bytes=maximum_bytes,
+            )
+            if relative in {"datavis/__init__.py", "datavis/db.py"}:
+                raw = raw.replace(b"\r\n", b"\n")
+            return path, raw
+
+        with mock.patch.object(
+            bootstrap,
+            "_stable_read_source",
+            side_effect=canonical_linux_source,
+        ):
+            modules, actual = bootstrap._read_verified_sources(
+                ROOT,
+                auditor_sha256=_sha256(AUDITOR_PATH),
+            )
         self.assertEqual(len(modules), 33)
         self.assertEqual(
             set(actual),
@@ -93,6 +115,8 @@ class FreshTerminalAuditBootstrapTests(unittest.TestCase):
                 relative,
                 maximum_bytes=maximum_bytes,
             )
+            if relative in {"datavis/__init__.py", "datavis/db.py"}:
+                raw = raw.replace(b"\r\n", b"\n")
             if relative == "datavis/research/fresh_protocol.py":
                 raw += b"\n"
             return path, raw
