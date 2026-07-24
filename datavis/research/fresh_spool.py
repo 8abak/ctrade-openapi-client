@@ -432,7 +432,15 @@ class KeyedObjectSpool(Generic[T]):
                     raise SpoolCorruptionError(
                         f"key {key!r} object {ordinal + 1} is corrupt"
                     ) from error
+                # The unpickler memo retains every reconstructed object.  It is
+                # no longer needed after the one-record integrity check.
+                del unpickler
                 yield value
+                # A suspended generator otherwise keeps the just-yielded object
+                # alive while the caller asks for, and starts unpickling, the
+                # next record.  Drop that reference before the next allocation
+                # so a streaming consumer has at most one full record live.
+                del value
             if source.read(1):
                 raise SpoolCorruptionError(
                     f"key {key!r} contains bytes outside its inventory"
