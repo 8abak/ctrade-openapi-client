@@ -88,13 +88,16 @@ from datavis.research.fresh_preregistration import (
     build_fresh_preregistration_v2,
     build_fresh_preregistration_v3,
     build_fresh_preregistration_v4,
+    build_fresh_preregistration_v5,
     entry_barrier_diagnostic_configs_from_preregistration,
     feature_configs_from_preregistration,
     fresh_v3_scientific_specification_sha256,
     fresh_v4_scientific_specification_sha256,
+    fresh_v5_scientific_specification_sha256,
     replay_execution_configs_from_preregistration,
     required_fresh_implementation_files,
     required_fresh_v4_implementation_files,
+    required_fresh_v5_implementation_files,
 )
 from datavis.research.fresh_restart import (
     FRESH_V3_STUDY_ID,
@@ -109,6 +112,15 @@ from datavis.research.fresh_restart_v4 import (
     RUN17_STUDY_LINEAGE_SHA256,
     canonical_fresh_v4_study_lineage,
     load_fresh_v4_restart_bundle,
+)
+from datavis.research.fresh_restart_v5 import (
+    FRESH_V5_STUDY_ID,
+    RUN19_LEDGER_SHA256,
+    RUN19_PREREGISTRATION_SHA256,
+    RUN19_STUDY_LINEAGE_SHA256,
+    RUN19_V5_STUDY_LINEAGE_SHA256,
+    canonical_fresh_v5_study_lineage,
+    load_fresh_v5_restart_bundle,
 )
 from datavis.research.fresh_recovery import (
     RUN14_ENTRY_BANK_FILE_SHA256,
@@ -805,6 +817,124 @@ def _research_state_binding_v4(
         },
         "studyLineage": lineage_body,
         "studyLineageSha256": RUN17_STUDY_LINEAGE_SHA256,
+        "holdoutWindowSha256": predecessor["holdoutWindowSha256"],
+        "stateDirectory": str(state_root),
+        "predecessorExperimentLedgerPath": str(predecessor_ledger),
+        "experimentLedgerPath": str(
+            study_directory / "fresh_experiment_ledger_v1.jsonl"
+        ),
+        "holdoutAuthorizationRegistryPath": predecessor[
+            "holdoutAuthorizationRegistryPath"
+        ],
+    }
+
+
+def _research_state_binding_v5(
+    state_directory: str | Path,
+    split_manifest: Mapping[str, Any],
+    restart_provenance: Mapping[str, Any],
+    predecessor_state_binding: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Create a separate v5 ledger while retaining the global holdout lock."""
+
+    predecessor = _research_state_binding(state_directory, split_manifest)
+    restart_policy = restart_provenance.get("restartPolicy")
+    if (
+        restart_provenance.get("studyId") != FRESH_V5_STUDY_ID
+        or restart_provenance.get("studyLineageSha256")
+        != RUN19_V5_STUDY_LINEAGE_SHA256
+        or restart_provenance.get("predecessorLedgerSha256")
+        != RUN19_LEDGER_SHA256
+        or restart_provenance.get("predecessorPreregistrationSha256")
+        != RUN19_PREREGISTRATION_SHA256
+        or restart_provenance.get("predecessorLineageTerminal") is not True
+        or restart_provenance.get("candidateOutcomeRecordCount") != 0
+        or restart_provenance.get("laterWindowOutcomeRecordCount") != 0
+        or restart_provenance.get("transientSpoolsRecovered") is not False
+        or restart_provenance.get("transientCandidateComputationsRecovered")
+        is not False
+        or restart_provenance.get("partialCandidateResultsImported") is not False
+        or restart_provenance.get("batchResultSealed") is not False
+        or not isinstance(restart_policy, Mapping)
+        or restart_policy.get("recomputeFromDiscoverySessionOrdinal") != 1
+        or restart_policy.get("discardTransientSpools") is not True
+        or restart_policy.get("discardPartialCandidateComputations") is not True
+        or restart_policy.get("importCandidateResults") is not False
+    ):
+        raise PermissionError("v5 restart provenance is not terminal and outcome-free")
+
+    lineage_body = canonical_fresh_v5_study_lineage()
+    scientific_sha = fresh_v5_scientific_specification_sha256()
+    if (
+        lineage_body["splitManifestSha256"]
+        != predecessor["splitManifestSha256"]
+        or lineage_body["researchWindowSetSha256"]
+        != predecessor["researchWindowSetSha256"]
+        or lineage_body["scientificSpecificationSha256"] != scientific_sha
+        or canonical_hash(lineage_body) != RUN19_V5_STUDY_LINEAGE_SHA256
+    ):
+        raise RuntimeError("v5 study-lineage identity changed")
+
+    state_root = Path(state_directory).expanduser().resolve()
+    pinned_state_directory = predecessor_state_binding.get("stateDirectory")
+    if (
+        predecessor_state_binding.get("schema")
+        != "fresh-xauusd-durable-research-state/v3"
+        or predecessor_state_binding.get("studyId") != FRESH_V4_STUDY_ID
+        or predecessor_state_binding.get("studyLineageSha256")
+        != RUN19_STUDY_LINEAGE_SHA256
+        or predecessor_state_binding.get("splitManifestSha256")
+        != predecessor["splitManifestSha256"]
+        or predecessor_state_binding.get("researchWindowSetSha256")
+        != predecessor["researchWindowSetSha256"]
+        or predecessor_state_binding.get("holdoutWindowSha256")
+        != predecessor["holdoutWindowSha256"]
+        or not isinstance(pinned_state_directory, str)
+        or Path(pinned_state_directory).expanduser().resolve() != state_root
+    ):
+        raise PermissionError(
+            "v5 durable state is not the exact terminal v4 state root"
+        )
+    lineage_root = (
+        state_root
+        / "studies"
+        / predecessor["researchWindowSetSha256"]
+        / "lineages"
+    )
+    predecessor_ledger = (
+        lineage_root
+        / RUN19_STUDY_LINEAGE_SHA256
+        / "fresh_experiment_ledger_v1.jsonl"
+    )
+    predecessor_ledger_binding = predecessor_state_binding.get(
+        "experimentLedgerPath"
+    )
+    holdout_binding = predecessor_state_binding.get(
+        "holdoutAuthorizationRegistryPath"
+    )
+    if (
+        not isinstance(predecessor_ledger_binding, str)
+        or Path(predecessor_ledger_binding).expanduser().resolve()
+        != predecessor_ledger
+        or not isinstance(holdout_binding, str)
+        or Path(holdout_binding).expanduser().resolve()
+        != Path(
+            predecessor["holdoutAuthorizationRegistryPath"]
+        ).expanduser().resolve()
+    ):
+        raise PermissionError(
+            "v5 predecessor ledger or global holdout lock binding changed"
+        )
+    study_directory = lineage_root / RUN19_V5_STUDY_LINEAGE_SHA256
+    return {
+        "schema": "fresh-xauusd-durable-research-state/v4",
+        **{
+            key: value
+            for key, value in lineage_body.items()
+            if key != "schema"
+        },
+        "studyLineage": lineage_body,
+        "studyLineageSha256": RUN19_V5_STUDY_LINEAGE_SHA256,
         "holdoutWindowSha256": predecessor["holdoutWindowSha256"],
         "stateDirectory": str(state_root),
         "predecessorExperimentLedgerPath": str(predecessor_ledger),
@@ -2645,8 +2775,9 @@ def run_registered_fresh_research(
     resume_artifact_directory: str | Path | None = None,
     infrastructure_restart_artifact_directory: str | Path | None = None,
     infrastructure_restart_v4_artifact_directory: str | Path | None = None,
+    infrastructure_restart_v5_artifact_directory: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Run v2, its sole recovery, or a separate preregistered v3/v4 study."""
+    """Run v2, its sole recovery, or a separate preregistered v3/v4/v5 study."""
 
     root = Path(repository_root).resolve()
     output_argument = Path(output_directory).expanduser()
@@ -2657,10 +2788,15 @@ def run_registered_fresh_research(
         else Path(scratch_directory).expanduser()
     )
     if (
-        infrastructure_restart_v4_artifact_directory is not None
+        (
+            infrastructure_restart_v4_artifact_directory is not None
+            or infrastructure_restart_v5_artifact_directory is not None
+        )
         and scratch_directory is None
     ):
-        raise ValueError("the v4 restart requires an explicit separate scratch")
+        raise ValueError(
+            "the v4/v5 restart requires an explicit separate scratch"
+        )
     for name, path in (
         ("output", output_argument),
         ("durable research state", state_argument),
@@ -2676,10 +2812,15 @@ def run_registered_fresh_research(
     if state_root == output or output in state_root.parents:
         raise ValueError("durable research state cannot be inside temporary output")
     if (
-        infrastructure_restart_v4_artifact_directory is not None
+        (
+            infrastructure_restart_v4_artifact_directory is not None
+            or infrastructure_restart_v5_artifact_directory is not None
+        )
         and scratch == output
     ):
-        raise ValueError("the v4 restart requires an explicit separate scratch")
+        raise ValueError(
+            "the v4/v5 restart requires an explicit separate scratch"
+        )
     if scratch != output and (
         scratch == state_root
         or scratch in state_root.parents
@@ -2699,7 +2840,8 @@ def run_registered_fresh_research(
     recovery_used = resume_artifact_directory is not None
     restart_used = infrastructure_restart_artifact_directory is not None
     restart_v4_used = infrastructure_restart_v4_artifact_directory is not None
-    if sum((recovery_used, restart_used, restart_v4_used)) > 1:
+    restart_v5_used = infrastructure_restart_v5_artifact_directory is not None
+    if sum((recovery_used, restart_used, restart_v4_used, restart_v5_used)) > 1:
         raise ValueError(
             "recovery and new-study restart modes are mutually exclusive"
         )
@@ -2708,6 +2850,7 @@ def run_registered_fresh_research(
     recovery_bundle = None
     restart_bundle = None
     restart_v4_bundle = None
+    restart_v5_bundle = None
     if recovery_used:
         recovery_bundle = load_run14_recovery_bundle(resume_artifact_directory)
         bootstrap = {
@@ -2715,6 +2858,24 @@ def run_registered_fresh_research(
             "corpus": recovery_bundle.corpus,
             "split": recovery_bundle.split,
         }
+    elif restart_v5_used:
+        restart_v5_bundle = load_fresh_v5_restart_bundle(
+            infrastructure_restart_v5_artifact_directory
+        )
+        bootstrap = {
+            "inventory": restart_v5_bundle.inventory,
+            "corpus": restart_v5_bundle.corpus,
+            "split": restart_v5_bundle.split,
+        }
+        for source_name, destination_name in (
+            ("fresh_source_inventory_v1.json", "fresh_source_inventory_v1.json"),
+            ("fresh_corpus_manifest_v1.json", "fresh_corpus_manifest_v1.json"),
+            ("fresh_split_manifest_v2.json", "fresh_split_manifest_v2.json"),
+        ):
+            _snapshot_new_file(
+                restart_v5_bundle.paths[source_name],
+                output / destination_name,
+            )
     elif restart_v4_used:
         restart_v4_bundle = load_fresh_v4_restart_bundle(
             infrastructure_restart_v4_artifact_directory
@@ -2760,7 +2921,14 @@ def run_registered_fresh_research(
         write_fresh_source_bootstrap(output, bootstrap)
 
     state_binding = (
-        _research_state_binding_v4(
+        _research_state_binding_v5(
+            state_root,
+            bootstrap["split"],
+            restart_v5_bundle.provenance,
+            restart_v5_bundle.predecessor_state_binding,
+        )
+        if restart_v5_bundle is not None
+        else _research_state_binding_v4(
             state_root,
             bootstrap["split"],
             restart_v4_bundle.provenance,
@@ -2784,17 +2952,27 @@ def run_registered_fresh_research(
         raise PermissionError("this frozen holdout window has already been consumed")
     ledger.parent.mkdir(parents=True, exist_ok=True)
     holdout_registry.parent.mkdir(parents=True, exist_ok=True)
-    if restart_bundle is not None or restart_v4_bundle is not None:
+    if (
+        restart_bundle is not None
+        or restart_v4_bundle is not None
+        or restart_v5_bundle is not None
+    ):
         predecessor_ledger = Path(
             state_binding["predecessorExperimentLedgerPath"]
         )
         expected_predecessor_ledger_sha = (
-            RUN17_LEDGER_SHA256
-            if restart_v4_bundle is not None
-            else RUN16_LEDGER_SHA256
+            RUN19_LEDGER_SHA256
+            if restart_v5_bundle is not None
+            else (
+                RUN17_LEDGER_SHA256
+                if restart_v4_bundle is not None
+                else RUN16_LEDGER_SHA256
+            )
         )
         predecessor_label = (
-            "v3" if restart_v4_bundle is not None else "v2"
+            "v4"
+            if restart_v5_bundle is not None
+            else ("v3" if restart_v4_bundle is not None else "v2")
         )
         if (
             predecessor_ledger.is_symlink()
@@ -2875,6 +3053,62 @@ def run_registered_fresh_research(
                     "evidenceSha256": canonical_hash(recovery_equivalence_evidence),
                 }
             )
+    elif restart_v5_bundle is not None:
+        if ledger.exists() and ledger.stat().st_size:
+            raise PermissionError(
+                "the v5 study lineage already has a durable experiment ledger"
+            )
+        _write_new_json(
+            output / "fresh_research_state_binding_v4.json",
+            state_binding,
+        )
+        for source_name, destination_name in (
+            (
+                "fresh_research_state_binding_v3.json",
+                "predecessor_fresh_research_state_binding_v3.json",
+            ),
+            (
+                "fresh_experiment_ledger_v1.jsonl",
+                "predecessor_fresh_experiment_ledger_v1.jsonl",
+            ),
+            (
+                "fresh_preregistration_v4.json",
+                "predecessor_fresh_preregistration_v4.json",
+            ),
+            (
+                "fresh_implementation_manifest_v1.json",
+                "predecessor_fresh_implementation_manifest_v1.json",
+            ),
+        ):
+            _snapshot_new_file(
+                restart_v5_bundle.paths[source_name],
+                output / destination_name,
+            )
+        implementation = build_fresh_implementation_manifest(
+            repository_root=root,
+            relative_paths=required_fresh_v5_implementation_files(),
+        )
+        _write_new_json(
+            output / "fresh_implementation_manifest_v1.json",
+            implementation,
+        )
+        preregistration = build_fresh_preregistration_v5(
+            split_manifest=bootstrap["split"],
+            corpus_manifest_sha256=str(
+                bootstrap["corpus"]["corpusManifestSha256"]
+            ),
+            protocol_code_identifier=(
+                "fresh-pipeline-v5:" + implementation["manifestSha256"]
+            ),
+            implementation_manifest=implementation,
+            experiment_ledger_path=ledger,
+            holdout_authorization_registry_path=holdout_registry,
+            infrastructure_restart_provenance=restart_v5_bundle.provenance,
+        )
+        _write_new_json(
+            output / "fresh_preregistration_v5.json",
+            preregistration,
+        )
     elif restart_v4_bundle is not None:
         if ledger.exists() and ledger.stat().st_size:
             raise PermissionError(
@@ -3090,6 +3324,67 @@ def run_registered_fresh_research(
             search.run_walk_forward_3,
             search.run_validation,
         )
+    elif restart_v5_bundle is not None:
+        for source_name, destination_name in (
+            ("fresh_quantile_bank_v1.json", "fresh_quantile_bank_v1.json"),
+            (
+                "fresh_threshold_domain_preflight_v1.json",
+                "fresh_threshold_domain_preflight_v1.json",
+            ),
+        ):
+            _snapshot_new_file(
+                restart_v5_bundle.paths[source_name],
+                output / destination_name,
+            )
+        pipeline.quantile_bank = fresh_quantile_bank_from_payload(
+            restart_v5_bundle.quantile_bank
+        )
+        pipeline.threshold_preflight = dict(
+            restart_v5_bundle.threshold_preflight
+        )
+        discovery_window = bootstrap["split"]["windows"]["discovery"]
+        restart_context = EvaluationContext(
+            stage="discovery",
+            training_roles=("discovery",),
+            evaluation_roles=("discovery",),
+            windows=(
+                FrozenResearchWindow(
+                    role="discovery",
+                    session_anchors=tuple(
+                        discovery_window["sessionAnchors"]
+                    ),
+                    window_sha256=canonical_hash(discovery_window),
+                ),
+            ),
+        )
+        entry_specs = tuple(
+            pipeline.build_entry_candidates(
+                restart_v5_bundle.quantile_bank,
+                restart_context,
+            )
+        )
+        entry_bank_path = output / "fresh_entry_bank_v1.json"
+        expected_entry_bank_sha = restart_v5_bundle.provenance[
+            "reusedOutcomeBlindInputs"
+        ]["fresh_entry_bank_v1.json"]
+        if _file_sha256(entry_bank_path) != expected_entry_bank_sha:
+            raise PermissionError("reconstructed v5 entry-bank bytes changed")
+        search = pipeline.build_search()
+
+        def run_v5_discovery() -> StageRunResult:
+            return search.run_frozen_discovery(
+                threshold_bank=restart_v5_bundle.quantile_bank,
+                entry_specs=entry_specs,
+            )
+
+        operations = (
+            run_v5_discovery,
+            search.run_walk_forward_1,
+            search.run_walk_forward_2,
+            search.run_exit_search,
+            search.run_walk_forward_3,
+            search.run_validation,
+        )
     elif restart_v4_bundle is not None:
         for source_name, destination_name in (
             ("fresh_quantile_bank_v1.json", "fresh_quantile_bank_v1.json"),
@@ -3283,17 +3578,25 @@ def run_registered_fresh_research(
             if recovery_manifest is not None
             else None
         ),
-        "infrastructureRestartUsed": restart_used or restart_v4_used,
+        "infrastructureRestartUsed": (
+            restart_used or restart_v4_used or restart_v5_used
+        ),
         "infrastructureRestartVersion": (
-            4 if restart_v4_used else (3 if restart_used else None)
+            5
+            if restart_v5_used
+            else (4 if restart_v4_used else (3 if restart_used else None))
         ),
         "predecessorRunId": (
-            restart_v4_bundle.provenance["predecessorRunId"]
-            if restart_v4_bundle is not None
+            restart_v5_bundle.provenance["predecessorRunId"]
+            if restart_v5_bundle is not None
             else (
-                restart_bundle.provenance["predecessorRunId"]
-                if restart_bundle is not None
-                else None
+                restart_v4_bundle.provenance["predecessorRunId"]
+                if restart_v4_bundle is not None
+                else (
+                    restart_bundle.provenance["predecessorRunId"]
+                    if restart_bundle is not None
+                    else None
+                )
             )
         ),
         "studyId": state_binding["studyId"],
