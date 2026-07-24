@@ -179,16 +179,8 @@ def regular_file_metadata(path: Path) -> os.stat_result:
 
 
 def descriptor_digest(path: Path) -> tuple[str, os.stat_result]:
-    flags = os.O_RDONLY | os.O_NOFOLLOW
-    descriptor = os.open(path, flags)
+    descriptor, before = open_regular_descriptor(path)
     try:
-        before = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(before.st_mode)
-            or before.st_uid != os.getuid()
-            or before.st_nlink != 1
-        ):
-            raise AdoptionError(f"unsafe digest source: {path}")
         digest = hashlib.sha256()
         while True:
             chunk = os.read(descriptor, 1024 * 1024)
@@ -211,6 +203,23 @@ def descriptor_digest(path: Path) -> tuple[str, os.stat_result]:
     ):
         raise AdoptionError(f"file changed while hashing: {path}")
     return digest.hexdigest(), after
+
+
+def open_regular_descriptor(path: Path) -> tuple[int, os.stat_result]:
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    descriptor = os.open(path, flags)
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_nlink != 1
+        ):
+            raise AdoptionError(f"unsafe open file descriptor: {path}")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor, metadata
 
 
 def validate_restart_archive(transfer: Path) -> None:
@@ -424,29 +433,47 @@ def same_process(identity: Optional[dict]) -> bool:
     )
 
 
-def validate_tar(path: Path) -> None:
+def validate_tar_descriptor(descriptor: int) -> None:
     count = 0
     expanded = 0
     seen = set()
-    with tarfile.open(path, "r:gz") as bundle:
-        for member in bundle:
-            count += 1
-            if count > MAX_TAR_MEMBERS:
-                raise AdoptionError("archive has too many members")
-            normalized = member.name.replace("\\", "/")
-            parts = [part for part in normalized.split("/") if part not in ("", ".")]
-            if normalized.startswith("/") or ".." in parts:
-                raise AdoptionError("archive contains an unsafe path")
-            key = "/".join(parts) or "."
-            if key in seen:
-                raise AdoptionError("archive contains a duplicate member")
-            seen.add(key)
-            if not (member.isdir() or member.isfile()):
-                raise AdoptionError("archive contains a non-file member")
-            if member.isfile():
-                expanded += member.size
-                if expanded > MAX_TAR_EXPANDED_BYTES:
-                    raise AdoptionError("archive expands beyond its bound")
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    duplicate = os.dup(descriptor)
+    try:
+        with os.fdopen(duplicate, "rb") as handle:
+            duplicate = -1
+            with tarfile.open(fileobj=handle, mode="r:gz") as bundle:
+                for member in bundle:
+                    count += 1
+                    if count > MAX_TAR_MEMBERS:
+                        raise AdoptionError("archive has too many members")
+                    normalized = member.name.replace("\\", "/")
+                    parts = [
+                        part
+                        for part in normalized.split("/")
+                        if part not in ("", ".")
+                    ]
+                    if normalized.startswith("/") or ".." in parts:
+                        raise AdoptionError("archive contains an unsafe path")
+                    key = "/".join(parts) or "."
+                    if key in seen:
+                        raise AdoptionError(
+                            "archive contains a duplicate member"
+                        )
+                    seen.add(key)
+                    if not (member.isdir() or member.isfile()):
+                        raise AdoptionError(
+                            "archive contains a non-file member"
+                        )
+                    if member.isfile():
+                        expanded += member.size
+                        if expanded > MAX_TAR_EXPANDED_BYTES:
+                            raise AdoptionError(
+                                "archive expands beyond its bound"
+                            )
+    finally:
+        if duplicate >= 0:
+            os.close(duplicate)
 
 
 def validate_final_archive(path: Path) -> dict:
@@ -456,24 +483,40 @@ def validate_final_archive(path: Path) -> dict:
         path.parent, "fresh-xauusd-transfer."
     )
     validate_restart_archive(transfer)
-    before = regular_file_metadata(path)
-    if before.st_size <= 0 or before.st_size > MAX_ARCHIVE_BYTES:
-        raise AdoptionError("final archive size is outside its bound")
-    digest, hashed = descriptor_digest(path)
-    validate_tar(path)
-    after = regular_file_metadata(path)
+    descriptor, before = open_regular_descriptor(path)
+    try:
+        path_before = regular_file_metadata(path)
+        if before.st_size <= 0 or before.st_size > MAX_ARCHIVE_BYTES:
+            raise AdoptionError("final archive size is outside its bound")
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+        hashed = os.fstat(descriptor)
+        validate_tar_descriptor(descriptor)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    path_after = regular_file_metadata(path)
     stable_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns")
     if any(
-        getattr(before, field) != getattr(hashed, field)
+        getattr(path_before, field) != getattr(before, field)
+        or getattr(before, field) != getattr(hashed, field)
         or getattr(hashed, field) != getattr(after, field)
+        or getattr(after, field) != getattr(path_after, field)
         for field in stable_fields
     ):
         raise AdoptionError("final archive changed during validation")
     return {
         "state": "ready",
         "archive": str(path),
-        "sha256": digest,
+        "sha256": digest.hexdigest(),
         "size": after.st_size,
+        "device": after.st_dev,
+        "inode": after.st_ino,
+        "mtimeNs": after.st_mtime_ns,
     }
 
 
@@ -599,10 +642,24 @@ def stream_archive(path_value: str, expected_sha256: str) -> int:
     if validated["sha256"] != expected_sha256:
         raise AdoptionError("requested archive digest does not match")
 
-    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    descriptor, before = open_regular_descriptor(path)
+    expected_identity = (
+        validated["device"],
+        validated["inode"],
+        validated["size"],
+        validated["mtimeNs"],
+    )
+    actual_identity = (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+    )
+    if actual_identity != expected_identity:
+        os.close(descriptor)
+        raise AdoptionError("archive inode changed before streaming")
     output = sys.stdout.buffer
     try:
-        before = os.fstat(descriptor)
         digest = hashlib.sha256()
         while True:
             chunk = os.read(descriptor, 1024 * 1024)
