@@ -53,7 +53,7 @@ jobs:
             "refs/heads/codex/xauusd-fresh-walkforward" ]]
           cmp -s -- .github/research-v5-recovery-launch.txt \
             <(printf '%s\n' \
-              "fresh-xauusd-v5-discovery-recovery-attempt-1-transport-2")
+              "fresh-xauusd-v5-discovery-recovery-attempt-1-transport-3")
           controller=".github/scripts/fresh-xauusd-v5-recovery-controller.py"
           helper=".github/scripts/fresh-xauusd-v5-terminal-audit-input.py"
           [[ -f "${controller}" && ! -L "${controller}" ]]
