@@ -37,7 +37,7 @@ jobs:
           expected_repository="8abak/ctrade-openapi-client"
           expected_marker="$(
             printf '%s\n' \
-              'fresh-xauusd-v5-read-only-monitor-source-30067832187-attempt-1'
+              'fresh-xauusd-v5-read-only-monitor-source-30067832187-attempt-1-r2'
           )"
           if [[ "${MONITOR_REF}" != "${expected_ref}" ||
             "${MONITOR_REPOSITORY}" != "${expected_repository}" ]]; then
