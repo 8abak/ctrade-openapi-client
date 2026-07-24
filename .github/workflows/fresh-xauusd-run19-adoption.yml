@@ -1,0 +1,211 @@
+name: Adopt surviving XAUUSD Run 19
+
+on:
+  push:
+    branches:
+      - codex/xauusd-fresh-walkforward
+    paths:
+      - .github/research-adoption-launch.txt
+  workflow_dispatch:
+
+concurrency:
+  group: fresh-xauusd-run19-adoption
+  cancel-in-progress: false
+
+jobs:
+  adopt:
+    name: Wait for and retrieve the original Run 19 archive
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the adoption controller
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify adoption identity and controller tests
+        shell: bash
+        env:
+          ADOPTION_GITHUB_REF: ${{ github.ref }}
+        run: |
+          set -Eeuo pipefail
+          expected_ref="refs/heads/codex/xauusd-fresh-walkforward"
+          expected_marker="fresh-xauusd-run19-adoption-v1"
+          launch_sha="48ef503cbb01d53629bd1156b5d95e1396b412fb"
+          if [[ "${ADOPTION_GITHUB_REF}" != "${expected_ref}" ]]; then
+            printf 'refusing adoption from unexpected ref: %s\n' \
+              "${ADOPTION_GITHUB_REF}" >&2
+            exit 1
+          fi
+          if ! cmp -s -- .github/research-adoption-launch.txt \
+            <(printf '%s\n' "${expected_marker}"); then
+            printf 'refusing adoption with an unexpected marker\n' >&2
+            exit 1
+          fi
+          git merge-base --is-ancestor "${launch_sha}" HEAD
+          python3 -m unittest test_fresh_run19_adoption
+          python3 -m py_compile \
+            datavis/research/fresh_run19_adoption.py
+
+      - name: Adopt and retrieve if terminal
+        id: adoption
+        shell: bash
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          EC2_PORT: ${{ secrets.EC2_PORT || '22' }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          : "${EC2_HOST:?EC2_HOST is missing}"
+          : "${EC2_USER:?EC2_USER is missing}"
+          : "${EC2_PORT:?EC2_PORT is missing}"
+          : "${EC2_SSH_KEY:?EC2_SSH_KEY is missing}"
+
+          key_path="${RUNNER_TEMP}/fresh-run19-adoption-key"
+          known_hosts="${RUNNER_TEMP}/fresh-run19-adoption-known-hosts"
+          status_path="${RUNNER_TEMP}/fresh-run19-adoption-status.jsonl"
+          archive_name="fresh-xauusd-30042880650-1.tgz"
+          archive_partial="${RUNNER_TEMP}/${archive_name}.partial"
+          archive_local="${GITHUB_WORKSPACE}/${archive_name}"
+          trap 'rm -f -- "${key_path}" "${known_hosts}" "${archive_partial}"' EXIT
+          printf '%s\n' "${EC2_SSH_KEY}" > "${key_path}"
+          chmod 600 "${key_path}"
+          ssh_options=(
+            -T
+            -i "${key_path}"
+            -p "${EC2_PORT}"
+            -o BatchMode=yes
+            -o PasswordAuthentication=no
+            -o KbdInteractiveAuthentication=no
+            -o ClearAllForwardings=yes
+            -o PermitLocalCommand=no
+            -o RequestTTY=no
+            -o StrictHostKeyChecking=accept-new
+            -o UserKnownHostsFile="${known_hosts}"
+            -o ConnectTimeout=15
+            -o ServerAliveInterval=30
+            -o ServerAliveCountMax=20
+          )
+
+          set +e
+          ssh "${ssh_options[@]}" "${EC2_USER}@${EC2_HOST}" \
+            python3 - wait 19500 \
+            < datavis/research/fresh_run19_adoption.py |
+            tee "${status_path}"
+          wait_status="${PIPESTATUS[0]}"
+          set -e
+          if [[ "${wait_status}" -eq 75 ]]; then
+            echo "ready=false" >> "${GITHUB_OUTPUT}"
+            echo "state=waiting" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          if [[ "${wait_status}" -eq 76 ]]; then
+            printf 'the original finalizer did not commit an archive; preserving remote state\n' >&2
+            exit 76
+          fi
+          if [[ "${wait_status}" -ne 0 ]]; then
+            exit "${wait_status}"
+          fi
+
+          mapfile -t terminal_fields < <(
+            python3 - "${status_path}" <<'PY'
+          import json
+          import pathlib
+          import re
+          import sys
+
+          lines = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+          if not lines:
+              raise SystemExit("adoption controller returned no status")
+          payload = json.loads(lines[-1])
+          archive = payload.get("archive")
+          digest = payload.get("sha256")
+          size = payload.get("size")
+          if payload.get("state") != "ready":
+              raise SystemExit("adoption controller did not return ready")
+          if not isinstance(archive, str) or not archive.startswith(
+              "/tmp/fresh-xauusd-transfer."
+          ) or not archive.endswith("/fresh-xauusd-30042880650-1.tgz"):
+              raise SystemExit("adoption controller returned an unsafe archive path")
+          if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+              raise SystemExit("adoption controller returned an invalid digest")
+          if not isinstance(size, int) or size <= 0 or size > 2 * 1024**3:
+              raise SystemExit("adoption controller returned an invalid archive size")
+          print(archive)
+          print(digest)
+          print(size)
+          PY
+          )
+          if [[ "${#terminal_fields[@]}" -ne 3 ]]; then
+            printf 'could not parse the terminal adoption record\n' >&2
+            exit 1
+          fi
+          archive_remote="${terminal_fields[0]}"
+          archive_sha256="${terminal_fields[1]}"
+          archive_size="${terminal_fields[2]}"
+
+          ssh "${ssh_options[@]}" "${EC2_USER}@${EC2_HOST}" \
+            python3 - stream "${archive_remote}" "${archive_sha256}" \
+            < datavis/research/fresh_run19_adoption.py \
+            > "${archive_partial}"
+          if [[ "$(stat -c '%s' -- "${archive_partial}")" != "${archive_size}" ]]; then
+            printf 'retrieved archive size changed\n' >&2
+            exit 1
+          fi
+          if [[ "$(sha256sum -- "${archive_partial}" | awk '{print $1}')" != \
+            "${archive_sha256}" ]]; then
+            printf 'retrieved archive digest changed\n' >&2
+            exit 1
+          fi
+          python3 - "${archive_partial}" <<'PY'
+          import pathlib
+          import sys
+          import tarfile
+
+          path = pathlib.Path(sys.argv[1])
+          seen = set()
+          count = 0
+          expanded = 0
+          with tarfile.open(path, "r:gz") as bundle:
+              for member in bundle:
+                  count += 1
+                  if count > 10000:
+                      raise SystemExit("retrieved archive has too many members")
+                  normalized = member.name.replace("\\", "/")
+                  parts = [
+                      part
+                      for part in normalized.split("/")
+                      if part not in ("", ".")
+                  ]
+                  if normalized.startswith("/") or ".." in parts:
+                      raise SystemExit("retrieved archive has an unsafe path")
+                  key = "/".join(parts) or "."
+                  if key in seen:
+                      raise SystemExit("retrieved archive has a duplicate member")
+                  seen.add(key)
+                  if not (member.isdir() or member.isfile()):
+                      raise SystemExit("retrieved archive has a non-file member")
+                  if member.isfile():
+                      expanded += member.size
+                      if expanded > 2 * 1024**3:
+                          raise SystemExit("retrieved archive expands beyond its bound")
+          PY
+          mv -- "${archive_partial}" "${archive_local}"
+          echo "ready=true" >> "${GITHUB_OUTPUT}"
+          echo "state=ready" >> "${GITHUB_OUTPUT}"
+          echo "archive=${archive_name}" >> "${GITHUB_OUTPUT}"
+          echo "sha256=${archive_sha256}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload adopted terminal archive
+        if: steps.adoption.outputs.ready == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fresh-xauusd-run19-adopted-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.adoption.outputs.archive }}
+          if-no-files-found: error
+          retention-days: 30
+
