@@ -569,6 +569,7 @@ class RecoveryWorkflowTests(unittest.TestCase):
             "fresh-xauusd-v5-recovery-terminal-adoption.yml",
             trigger,
         )
+        self.assertIn("    secrets: inherit", trigger)
         expected = {
             "launch_run_id": "30132173254",
             "launch_run_attempt": "1",
@@ -590,7 +591,7 @@ class RecoveryWorkflowTests(unittest.TestCase):
             TRIGGER_MARKER.read_text(encoding="utf-8"),
             (
                 "fresh-xauusd-v5-recovery-adoption-"
-                "30132173254-attempt-1-probe-0-v1\n"
+                "30132173254-attempt-1-probe-0-v2\n"
             ),
         )
 
