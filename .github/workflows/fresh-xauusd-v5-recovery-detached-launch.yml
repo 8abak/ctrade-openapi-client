@@ -1,0 +1,499 @@
+name: Fresh XAUUSD v5 one-shot recovery launch
+
+on:
+  push:
+    branches:
+      - codex/xauusd-fresh-walkforward
+    paths:
+      - .github/research-v5-recovery-launch.txt
+
+concurrency:
+  group: fresh-xauusd-v5-one-shot-recovery
+  cancel-in-progress: false
+
+env:
+  ADOPTION_RUN_ID: "30101048443"
+  ADOPTION_RUN_ATTEMPT: "1"
+  ADOPTION_COMMIT: "c730fd0a2c66426f995ac43f1d50035cf94265ff"
+  ADOPTION_JOB_ID: "89506876763"
+  ADOPTION_ARTIFACT_ID: "8608015979"
+  ADOPTION_ARTIFACT_NAME: "fresh-xauusd-v5-terminal-adopted-30101048443-1"
+  ADOPTION_ARTIFACT_SIZE: "127602"
+  ADOPTION_ARTIFACT_DIGEST: "sha256:6ded0fc6a44e312a9d786991b093913783ce7a2c1d5afa56b58fcf0fbdb824f3"
+  ADOPTION_WORKFLOW_BLOB: "f646926cd44fc5bd470d2571fc3bfa64a8d35ff9"
+  ADOPTION_MARKER_BLOB: "6a3a850c7017cd6b520ef908df83cb9e303d0748"
+  ADOPTION_READER_BLOB: "80f2f45cf76522ab77519b99bdfcf9106dc69627"
+  ADOPTION_TEST_BLOB: "70f3fa090223289f1bb9bf58fa43323b0e36a015"
+  AUDIT_INPUT_HELPER_SHA256: "8820a0bc9033f583005d89032cfbfae0b62107875a0645e6c18249194b07f830"
+  TERMINAL_ARCHIVE_NAME: "fresh-xauusd-30067832187-1.tgz"
+  TERMINAL_ARCHIVE_SIZE: "125470"
+  TERMINAL_ARCHIVE_SHA256: "397f687e897e45b4c6c41ed04000ecff8e048524ac9d117658b459b219d9ce3d"
+
+jobs:
+  launch:
+    name: Launch sole audited V5 recovery independently of GitHub runtime
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out reviewed recovery code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Verify recovery trigger and operational sources
+        shell: bash
+        env:
+          FRESH_REF: ${{ github.ref }}
+        run: |
+          set -Eeuo pipefail
+          [[ "${FRESH_REF}" == \
+            "refs/heads/codex/xauusd-fresh-walkforward" ]]
+          cmp -s -- .github/research-v5-recovery-launch.txt \
+            <(printf '%s\n' \
+              "fresh-xauusd-v5-discovery-recovery-attempt-1")
+          controller=".github/scripts/fresh-xauusd-v5-recovery-controller.py"
+          helper=".github/scripts/fresh-xauusd-v5-terminal-audit-input.py"
+          [[ -f "${controller}" && ! -L "${controller}" ]]
+          printf '%s  %s\n' "${AUDIT_INPUT_HELPER_SHA256}" "${helper}" |
+            sha256sum --check --strict -
+          python3 -B -m py_compile "${controller}"
+          python3 -B -m unittest test_fresh_v5_recovery_orchestration
+
+      - name: Read exact adoption metadata before download
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          api_root="https://api.github.com/repos/${GH_REPOSITORY}"
+          destination="${RUNNER_TEMP}/fresh-v5-recovery-api-before"
+          normalized="${RUNNER_TEMP}/fresh-v5-recovery-external-before.json"
+          [[ ! -e "${destination}" && ! -e "${normalized}" ]]
+          mkdir -- "${destination}"
+          request() {
+            local endpoint="$1"
+            local target="$2"
+            curl \
+              --fail --silent --show-error --location \
+              --proto '=https' --tlsv1.2 \
+              --max-filesize 4194304 --remove-on-error \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "${api_root}/${endpoint}" --output "${target}"
+          }
+          request "actions/artifacts/${ADOPTION_ARTIFACT_ID}" \
+            "${destination}/artifact.json"
+          request \
+            "actions/runs/${ADOPTION_RUN_ID}/attempts/${ADOPTION_RUN_ATTEMPT}" \
+            "${destination}/run.json"
+          request \
+            "actions/runs/${ADOPTION_RUN_ID}/artifacts?name=${ADOPTION_ARTIFACT_NAME}&per_page=100" \
+            "${destination}/listing.json"
+          request \
+            "actions/runs/${ADOPTION_RUN_ID}/attempts/${ADOPTION_RUN_ATTEMPT}/jobs?per_page=100" \
+            "${destination}/jobs.json"
+          python3 -I -B \
+            .github/scripts/fresh-xauusd-v5-terminal-audit-input.py \
+            validate-api \
+            "${destination}/artifact.json" \
+            "${destination}/run.json" \
+            "${destination}/listing.json" \
+            "${destination}/jobs.json" \
+            "${normalized}" \
+            --artifact-id "${ADOPTION_ARTIFACT_ID}" \
+            --artifact-name "${ADOPTION_ARTIFACT_NAME}" \
+            --artifact-size "${ADOPTION_ARTIFACT_SIZE}" \
+            --artifact-digest "${ADOPTION_ARTIFACT_DIGEST}" \
+            --run-id "${ADOPTION_RUN_ID}" \
+            --run-attempt "${ADOPTION_RUN_ATTEMPT}" \
+            --commit "${ADOPTION_COMMIT}" \
+            --job-id "${ADOPTION_JOB_ID}"
+
+      - name: Download exact raw adoption ZIP
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -Eeuo pipefail
+          archive="${RUNNER_TEMP}/fresh-v5-recovery-adoption.zip"
+          [[ ! -e "${archive}" ]]
+          curl \
+            --fail --silent --show-error --location \
+            --proto '=https' --tlsv1.2 \
+            --max-filesize "${ADOPTION_ARTIFACT_SIZE}" --remove-on-error \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GH_REPOSITORY}/actions/artifacts/${ADOPTION_ARTIFACT_ID}/zip" \
+            --output "${archive}"
+          [[ "$(stat -c '%s' -- "${archive}")" == \
+            "${ADOPTION_ARTIFACT_SIZE}" ]]
+          printf '%s  %s\n' \
+            "${ADOPTION_ARTIFACT_DIGEST#sha256:}" "${archive}" |
+            sha256sum --check --strict -
+
+      - name: Re-read exact adoption metadata after download
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          api_root="https://api.github.com/repos/${GH_REPOSITORY}"
+          destination="${RUNNER_TEMP}/fresh-v5-recovery-api-after"
+          normalized="${RUNNER_TEMP}/fresh-v5-recovery-external-after.json"
+          [[ ! -e "${destination}" && ! -e "${normalized}" ]]
+          mkdir -- "${destination}"
+          request() {
+            local endpoint="$1"
+            local target="$2"
+            curl \
+              --fail --silent --show-error --location \
+              --proto '=https' --tlsv1.2 \
+              --max-filesize 4194304 --remove-on-error \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "${api_root}/${endpoint}" --output "${target}"
+          }
+          request "actions/artifacts/${ADOPTION_ARTIFACT_ID}" \
+            "${destination}/artifact.json"
+          request \
+            "actions/runs/${ADOPTION_RUN_ID}/attempts/${ADOPTION_RUN_ATTEMPT}" \
+            "${destination}/run.json"
+          request \
+            "actions/runs/${ADOPTION_RUN_ID}/artifacts?name=${ADOPTION_ARTIFACT_NAME}&per_page=100" \
+            "${destination}/listing.json"
+          request \
+            "actions/runs/${ADOPTION_RUN_ID}/attempts/${ADOPTION_RUN_ATTEMPT}/jobs?per_page=100" \
+            "${destination}/jobs.json"
+          python3 -I -B \
+            .github/scripts/fresh-xauusd-v5-terminal-audit-input.py \
+            validate-api \
+            "${destination}/artifact.json" \
+            "${destination}/run.json" \
+            "${destination}/listing.json" \
+            "${destination}/jobs.json" \
+            "${normalized}" \
+            --artifact-id "${ADOPTION_ARTIFACT_ID}" \
+            --artifact-name "${ADOPTION_ARTIFACT_NAME}" \
+            --artifact-size "${ADOPTION_ARTIFACT_SIZE}" \
+            --artifact-digest "${ADOPTION_ARTIFACT_DIGEST}" \
+            --run-id "${ADOPTION_RUN_ID}" \
+            --run-attempt "${ADOPTION_RUN_ATTEMPT}" \
+            --commit "${ADOPTION_COMMIT}" \
+            --job-id "${ADOPTION_JOB_ID}"
+          cmp -s -- \
+            "${RUNNER_TEMP}/fresh-v5-recovery-external-before.json" \
+            "${normalized}"
+
+      - name: Verify exact adopter source blobs
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ env.ADOPTION_COMMIT }}
+          path: exact-v5-adoption-source
+          persist-credentials: false
+
+      - name: Bind exact adopter run to reviewed source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source="${GITHUB_WORKSPACE}/exact-v5-adoption-source"
+          [[ "$(git -C "${source}" rev-parse HEAD)" == \
+            "${ADOPTION_COMMIT}" ]]
+          paths=(
+            ".github/workflows/fresh-xauusd-v5-terminal-adoption.yml"
+            ".github/research-v5-adoption-launch.txt"
+            ".github/scripts/fresh-xauusd-v5-terminal-reader.py"
+            "test_fresh_v5_terminal_adoption.py"
+          )
+          blobs=(
+            "${ADOPTION_WORKFLOW_BLOB}"
+            "${ADOPTION_MARKER_BLOB}"
+            "${ADOPTION_READER_BLOB}"
+            "${ADOPTION_TEST_BLOB}"
+          )
+          for index in "${!paths[@]}"; do
+            [[ "$(git -C "${source}" rev-parse \
+              "HEAD:${paths[${index}]}")" == "${blobs[${index}]}" ]]
+          done
+
+      - name: Safely extract and pin exact four-member adoption bundle
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bundle="${RUNNER_TEMP}/fresh-v5-recovery-bundle"
+          manifest="${RUNNER_TEMP}/fresh-v5-recovery-input.json"
+          [[ ! -e "${bundle}" && ! -e "${manifest}" ]]
+          python3 -I -B \
+            .github/scripts/fresh-xauusd-v5-terminal-audit-input.py \
+            extract \
+            "${RUNNER_TEMP}/fresh-v5-recovery-adoption.zip" \
+            "${bundle}" \
+            "${RUNNER_TEMP}/fresh-v5-recovery-external-after.json" \
+            "${manifest}"
+          (
+            cd "${bundle}"
+            printf '%s  %s\n' \
+              "397f687e897e45b4c6c41ed04000ecff8e048524ac9d117658b459b219d9ce3d" \
+              "fresh-xauusd-30067832187-1.tgz"
+            printf '%s  %s\n' \
+              "7850a5ef41660c9192f4d5d57aedba1264101ebf4f6b93e3e0b043739092eee3" \
+              "fresh-xauusd-v5-adoption-manifest.json"
+            printf '%s  %s\n' \
+              "c6e32cbbdaaa2b9d343eee2a2fc399804976a6493ad4f99776b5ad795c5c54a4" \
+              "fresh-xauusd-v5-launch-receipt.json"
+            printf '%s  %s\n' \
+              "0b82d250c2c62115223d4d7696695fed337bbc64b3fcb1950cb04a3504d92531" \
+              "fresh-xauusd-v5-terminal-receipt.json"
+          ) | sha256sum --check --strict -
+          [[ "$(stat -c '%s' -- \
+            "${bundle}/${TERMINAL_ARCHIVE_NAME}")" == \
+            "${TERMINAL_ARCHIVE_SIZE}" ]]
+
+      - name: Launch detached one-shot recovery and obtain ready receipt
+        id: detached
+        shell: bash
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          EC2_PORT: ${{ secrets.EC2_PORT || '22' }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          FRESH_BRANCH: ${{ github.ref_name }}
+          FRESH_SHA: ${{ github.sha }}
+          FRESH_RUN_ID: ${{ github.run_id }}
+          FRESH_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          : "${EC2_HOST:?EC2_HOST is missing}"
+          : "${EC2_USER:?EC2_USER is missing}"
+          : "${EC2_PORT:?EC2_PORT is missing}"
+          : "${EC2_SSH_KEY:?EC2_SSH_KEY is missing}"
+          [[ "${EC2_PORT}" == "22" ]]
+          case "${EC2_HOST}" in
+            datavis.au|www.datavis.au|3.27.110.195|ec2-3-27-110-195.ap-southeast-2.compute.amazonaws.com)
+              ;;
+            *)
+              printf 'refusing unpinned EC2 host alias\n' >&2
+              exit 1
+              ;;
+          esac
+          key="${RUNNER_TEMP}/fresh-v5-recovery-key"
+          known_hosts=".github/ssh/fresh-xauusd-ec2-known-hosts"
+          controller=".github/scripts/fresh-xauusd-v5-recovery-controller.py"
+          input="${RUNNER_TEMP}/fresh-v5-recovery-bundle/${TERMINAL_ARCHIVE_NAME}"
+          receipt="${GITHUB_WORKSPACE}/fresh-xauusd-v5-recovery-launch-receipt.json"
+          controller_sha="$(sha256sum -- "${controller}" | awk '{print $1}')"
+          printf '%s\n' "${EC2_SSH_KEY}" > "${key}"
+          chmod 600 "${key}"
+          trap 'rm -f -- "${key}"' EXIT
+          [[ "$(ssh-keygen -lf "${known_hosts}" -E sha256 |
+            awk 'NR == 1 {print $2}')" == \
+            "SHA256:K68UWpXSv0oN9sa2KuFl1Bk9RWgigQtzskL3srgQ3ns" ]]
+          ssh_options=(
+            -T -i "${key}" -p "${EC2_PORT}"
+            -o BatchMode=yes
+            -o PasswordAuthentication=no
+            -o KbdInteractiveAuthentication=no
+            -o ClearAllForwardings=yes
+            -o PermitLocalCommand=no
+            -o RequestTTY=no
+            -o StrictHostKeyChecking=yes
+            -o UserKnownHostsFile="${known_hosts}"
+            -o GlobalKnownHostsFile=/dev/null
+            -o ConnectTimeout=15
+          )
+          scp_options=(
+            -i "${key}" -P "${EC2_PORT}"
+            -o BatchMode=yes
+            -o PasswordAuthentication=no
+            -o KbdInteractiveAuthentication=no
+            -o StrictHostKeyChecking=yes
+            -o UserKnownHostsFile="${known_hosts}"
+            -o GlobalKnownHostsFile=/dev/null
+          )
+          transfer="$(
+            ssh "${ssh_options[@]}" "${EC2_USER}@${EC2_HOST}" \
+              'umask 077; mktemp -d /tmp/fresh-xauusd-v5-recovery-transfer.XXXXXX'
+          )"
+          transfer="${transfer//$'\r'/}"
+          case "${transfer}" in
+            /tmp/fresh-xauusd-v5-recovery-transfer.*) ;;
+            *) printf 'unexpected recovery transfer path\n' >&2; exit 1 ;;
+          esac
+          remote_input="${transfer}/${TERMINAL_ARCHIVE_NAME}"
+          remote_controller="${transfer}/fresh-xauusd-v5-recovery-controller.py"
+          stdout="${transfer}/controller.stdout.log"
+          stderr="${transfer}/controller.stderr.log"
+          launch_root="/home/ec2-user/.local/state/datavis/fresh-xauusd-launch-v1"
+          artifact_root="/home/ec2-user/.local/state/datavis/fresh-xauusd-artifacts-v1"
+          prefix="v5-recovery-${FRESH_RUN_ID}-${FRESH_RUN_ATTEMPT}"
+          ready="${launch_root}/${prefix}.ready.json"
+          failure="${launch_root}/${prefix}.failure.json"
+          terminal_receipt="${launch_root}/${prefix}.terminal.json"
+          terminal_archive="${artifact_root}/${prefix}.tgz"
+          scp "${scp_options[@]}" "${input}" \
+            "${EC2_USER}@${EC2_HOST}:${remote_input}"
+          scp "${scp_options[@]}" "${controller}" \
+            "${EC2_USER}@${EC2_HOST}:${remote_controller}"
+          ssh "${ssh_options[@]}" "${EC2_USER}@${EC2_HOST}" \
+            bash -s -- \
+            "${remote_controller}" "${controller_sha}" "${remote_input}" \
+            "${terminal_archive}" "${ready}" "${failure}" \
+            "${terminal_receipt}" "${stdout}" "${stderr}" \
+            "${FRESH_BRANCH}" "${FRESH_SHA}" "${FRESH_RUN_ID}" \
+            "${FRESH_RUN_ATTEMPT}" <<'REMOTE'
+          set -Eeuo pipefail
+          controller="$1"
+          controller_sha="$2"
+          input="$3"
+          archive="$4"
+          ready="$5"
+          failure="$6"
+          terminal="$7"
+          stdout="$8"
+          stderr="$9"
+          branch="${10}"
+          commit="${11}"
+          run_id="${12}"
+          attempt="${13}"
+          [[ -f "${controller}" && ! -L "${controller}" ]]
+          [[ -f "${input}" && ! -L "${input}" ]]
+          [[ "$(sha256sum -- "${controller}" | awk '{print $1}')" == \
+            "${controller_sha}" ]]
+          [[ "$(stat -c '%s' -- "${input}")" == "125470" ]]
+          [[ "$(sha256sum -- "${input}" | awk '{print $1}')" == \
+            "397f687e897e45b4c6c41ed04000ecff8e048524ac9d117658b459b219d9ce3d" ]]
+          (
+            set -o noclobber
+            : > "${stdout}"
+            : > "${stderr}"
+          )
+          chmod 600 -- "${controller}" "${input}" "${stdout}" "${stderr}"
+          nohup setsid --fork \
+            python3 -I -B "${controller}" \
+            --branch "${branch}" \
+            --commit-sha "${commit}" \
+            --run-id "${run_id}" \
+            --run-attempt "${attempt}" \
+            --terminal-input "${input}" \
+            --terminal-archive "${archive}" \
+            --ready-receipt "${ready}" \
+            --failure-receipt "${failure}" \
+            --terminal-receipt "${terminal}" \
+            --expected-controller-sha256 "${controller_sha}" \
+            </dev/null >"${stdout}" 2>"${stderr}"
+          REMOTE
+          ssh "${ssh_options[@]}" "${EC2_USER}@${EC2_HOST}" \
+            bash -s -- "${ready}" "${failure}" "${terminal_receipt}" \
+            "${stdout}" "${stderr}" <<'REMOTE'
+          set -Eeuo pipefail
+          ready="$1"
+          failure="$2"
+          terminal="$3"
+          stdout="$4"
+          stderr="$5"
+          for _ in $(seq 1 180); do
+            if [[ -f "${failure}" && ! -L "${failure}" ]]; then
+              cat -- "${failure}" >&2
+              tail -n 100 -- "${stdout}" "${stderr}" >&2 || true
+              exit 1
+            fi
+            if [[ -f "${terminal}" && ! -L "${terminal}" ]]; then
+              cat -- "${terminal}" >&2
+              tail -n 100 -- "${stdout}" "${stderr}" >&2 || true
+              exit 1
+            fi
+            if [[ -f "${ready}" && ! -L "${ready}" ]]; then
+              cat -- "${ready}"
+              exit 0
+            fi
+            sleep 5
+          done
+          printf 'timed out waiting for V5 recovery ready receipt\n' >&2
+          tail -n 100 -- "${stdout}" "${stderr}" >&2 || true
+          exit 1
+          REMOTE
+          scp "${scp_options[@]}" \
+            "${EC2_USER}@${EC2_HOST}:${ready}" "${receipt}"
+          python3 -B - "${receipt}" "${controller_sha}" \
+            "${FRESH_SHA}" "${FRESH_RUN_ID}" "${FRESH_RUN_ATTEMPT}" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          path, controller, commit, run_id, attempt = sys.argv[1:]
+          payload = json.loads(Path(path).read_text(encoding="utf-8"))
+          expected = {
+              "schema": "fresh-xauusd-v5-recovery-detached-receipt/v1",
+              "kind": "launch_ready",
+              "status": "running",
+              "processExitStatus": None,
+              "githubRunId": int(run_id),
+              "githubRunAttempt": int(attempt),
+              "branch": "codex/xauusd-fresh-walkforward",
+              "commitSha": commit,
+              "studyLineageSha256": (
+                  "6377d53891675e02b645bf83b52b24b5ffb5a7b8cc76b701cd3450b2cecd7473"
+              ),
+              "recoveryAttemptId": "v5-discovery-recovery-attempt-1",
+              "sourceAdoptionRunId": 30101048443,
+              "sourceAdoptionArtifactId": 8608015979,
+              "sourceAdoptionArtifactDigest": (
+                  "sha256:"
+                  "6ded0fc6a44e312a9d786991b093913783ce7a2c1d5afa56b58fcf0fbdb824f3"
+              ),
+              "sourceTerminalArchiveSha256": (
+                  "397f687e897e45b4c6c41ed04000ecff8e048524ac9d117658b459b219d9ce3d"
+              ),
+              "controllerSha256": controller,
+              "terminalArchive": None,
+          }
+          for key, value in expected.items():
+              if payload.get(key) != value:
+                  raise SystemExit(f"recovery ready receipt changed: {key}")
+          if (
+              type(payload.get("controllerPid")) is not int
+              or type(payload.get("controllerStartTicks")) is not int
+              or type(payload.get("pipelinePid")) is not int
+              or type(payload.get("pipelineStartTicks")) is not int
+          ):
+              raise SystemExit("recovery ready process identity is incomplete")
+          paths = payload.get("paths")
+          if (
+              not isinstance(paths, dict)
+              or paths.get("state")
+              != "/home/ec2-user/.local/state/datavis/fresh-xauusd-research-v2"
+          ):
+              raise SystemExit("recovery ready path binding changed")
+          recovery = paths.get("recovery")
+          scratch = paths.get("scratch")
+          if (
+              not isinstance(recovery, str)
+              or not recovery.startswith("/tmp/fresh-xauusd-v5-recovery-input.")
+              or not isinstance(scratch, str)
+              or not scratch.startswith(
+                  "/home/ec2-user/.local/state/datavis/"
+                  "fresh-xauusd-v5-recovery-scratch-v1/attempt."
+              )
+          ):
+              raise SystemExit("recovery input or scratch path changed")
+          PY
+          printf 'receipt=%s\n' "${receipt}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload immutable recovery launch receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fresh-xauusd-v5-recovery-launch-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.detached.outputs.receipt }}
+          if-no-files-found: error
+          retention-days: 30
