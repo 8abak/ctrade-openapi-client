@@ -1,0 +1,510 @@
+name: Fresh XAUUSD v5 recovery terminal adoption
+
+on:
+  workflow_dispatch:
+    inputs:
+      launch_run_id:
+        description: Exact successful recovery-launch GitHub run ID
+        required: true
+        type: string
+      launch_run_attempt:
+        description: Exact recovery-launch run attempt
+        required: true
+        default: "1"
+        type: string
+      launch_commit_sha:
+        description: Exact 40-character recovery-launch commit SHA
+        required: true
+        type: string
+      launch_artifact_id:
+        description: Exact recovery-launch receipt artifact ID
+        required: true
+        type: string
+      launch_artifact_size:
+        description: Exact recovery-launch receipt artifact byte size
+        required: true
+        type: string
+      launch_artifact_digest:
+        description: Exact sha256 recovery-launch artifact digest
+        required: true
+        type: string
+      wait_minutes:
+        description: Read-only wait before returning active
+        required: true
+        default: "0"
+        type: choice
+        options:
+          - "0"
+          - "15"
+          - "60"
+          - "180"
+          - "350"
+
+concurrency:
+  group: fresh-xauusd-v5-recovery-adoption-${{ inputs.launch_run_id }}-${{ inputs.launch_run_attempt }}
+  cancel-in-progress: false
+
+jobs:
+  adopt:
+    name: Read-only recovery terminal adoption
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    permissions:
+      actions: read
+      contents: read
+    env:
+      REPOSITORY: 8abak/ctrade-openapi-client
+      RECOVERY_BRANCH: codex/xauusd-fresh-walkforward
+      RECOVERY_WORKFLOW_PATH: >-
+        .github/workflows/fresh-xauusd-v5-recovery-detached-launch.yml
+      LAUNCH_RUN_ID: ${{ inputs.launch_run_id }}
+      LAUNCH_RUN_ATTEMPT: ${{ inputs.launch_run_attempt }}
+      LAUNCH_COMMIT_SHA: ${{ inputs.launch_commit_sha }}
+      LAUNCH_ARTIFACT_ID: ${{ inputs.launch_artifact_id }}
+      LAUNCH_ARTIFACT_SIZE: ${{ inputs.launch_artifact_size }}
+      LAUNCH_ARTIFACT_DIGEST: ${{ inputs.launch_artifact_digest }}
+      WAIT_MINUTES: ${{ inputs.wait_minutes }}
+      READER_SHA256: 74d698a4f8109cb36fcaadabdb98d5e69afa608e1417adcfd51feccbaf4c5896
+      KNOWN_HOSTS_SHA256: >-
+        1ae003bab02effdbae4e43d5c2d8b566b65464b380fd31a4fad8e457b37770c8
+    steps:
+      - name: Check out reviewed adoption source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Validate dispatch identity and adoption source
+        shell: bash
+        env:
+          ADOPTION_SHA: ${{ github.sha }}
+          ADOPTION_REF: ${{ github.ref }}
+        run: |
+          set -Eeuo pipefail
+          [[ "${ADOPTION_REF}" == \
+            "refs/heads/codex/xauusd-fresh-walkforward" ]]
+          [[ "$(git rev-parse HEAD)" == "${ADOPTION_SHA}" ]]
+          [[ "${LAUNCH_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${LAUNCH_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${LAUNCH_ARTIFACT_ID}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${LAUNCH_ARTIFACT_SIZE}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${LAUNCH_COMMIT_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${LAUNCH_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          case "${WAIT_MINUTES}" in
+            0|15|60|180|350) ;;
+            *) printf 'wait duration is not allowlisted\n' >&2; exit 1 ;;
+          esac
+          reader=".github/scripts/fresh-xauusd-v5-recovery-terminal-reader.py"
+          test_file="test_fresh_v5_recovery_terminal_adoption.py"
+          [[ -f "${reader}" && ! -L "${reader}" ]]
+          [[ -f "${test_file}" && ! -L "${test_file}" ]]
+          [[ "$(sha256sum -- "${reader}" | awk '{print $1}')" == \
+            "${READER_SHA256}" ]]
+          python3 -B -m py_compile "${reader}"
+          python3 -B -m unittest test_fresh_v5_recovery_terminal_adoption
+
+      - name: Check out exact recovery launch source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.launch_commit_sha }}
+          path: recovery-launch-source
+          persist-credentials: false
+
+      - name: Read exact GitHub metadata before download
+        id: metadata
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          launch_name="fresh-xauusd-v5-recovery-launch-${LAUNCH_RUN_ID}-${LAUNCH_RUN_ATTEMPT}"
+          api_root="https://api.github.com/repos/${REPOSITORY}"
+          before="${RUNNER_TEMP}/fresh-v5-recovery-adoption-api-before"
+          mkdir -- "${before}"
+          request() {
+            local endpoint="$1"
+            local target="$2"
+            curl --fail-with-body --silent --show-error --location \
+              --proto '=https' --tlsv1.2 \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "${api_root}/${endpoint}" > "${target}"
+          }
+          request "actions/runs/${LAUNCH_RUN_ID}" "${before}/run.json"
+          request "actions/artifacts/${LAUNCH_ARTIFACT_ID}" \
+            "${before}/artifact.json"
+          request \
+            "actions/runs/${LAUNCH_RUN_ID}/artifacts?name=${launch_name}&per_page=100" \
+            "${before}/listing.json"
+          python3 -B - \
+            "${before}/run.json" \
+            "${before}/artifact.json" \
+            "${before}/listing.json" \
+            "${LAUNCH_RUN_ID}" \
+            "${LAUNCH_RUN_ATTEMPT}" \
+            "${LAUNCH_COMMIT_SHA}" \
+            "${LAUNCH_ARTIFACT_ID}" \
+            "${LAUNCH_ARTIFACT_SIZE}" \
+            "${LAUNCH_ARTIFACT_DIGEST}" \
+            "${launch_name}" \
+            "${RECOVERY_WORKFLOW_PATH}" \
+            "${RECOVERY_BRANCH}" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          (
+              run_path,
+              artifact_path,
+              listing_path,
+              run_id,
+              run_attempt,
+              commit_sha,
+              artifact_id,
+              artifact_size,
+              artifact_digest,
+              artifact_name,
+              workflow_path,
+              branch,
+          ) = sys.argv[1:]
+          run = json.loads(Path(run_path).read_text(encoding="utf-8"))
+          repository = run.get("repository")
+          head_repository = run.get("head_repository")
+          expected_run = {
+              "id": int(run_id),
+              "run_attempt": int(run_attempt),
+              "head_sha": commit_sha,
+              "head_branch": branch,
+              "event": "push",
+              "status": "completed",
+              "conclusion": "success",
+              "path": workflow_path,
+          }
+          for key, expected in expected_run.items():
+              if run.get(key) != expected:
+                  raise SystemExit(f"recovery launch run {key} changed")
+          if (
+              not isinstance(repository, dict)
+              or repository.get("full_name") != "8abak/ctrade-openapi-client"
+              or not isinstance(head_repository, dict)
+              or head_repository.get("full_name")
+              != "8abak/ctrade-openapi-client"
+          ):
+              raise SystemExit("recovery launch repository changed")
+
+          expected_artifact = {
+              "id": int(artifact_id),
+              "name": artifact_name,
+              "size_in_bytes": int(artifact_size),
+              "digest": artifact_digest,
+              "expired": False,
+          }
+          artifact = json.loads(
+              Path(artifact_path).read_text(encoding="utf-8")
+          )
+          producer = (
+              artifact.get("workflow_run")
+              if isinstance(artifact, dict)
+              else None
+          )
+          if (
+              not isinstance(artifact, dict)
+              or any(
+                  artifact.get(key) != expected
+                  for key, expected in expected_artifact.items()
+              )
+              or not isinstance(producer, dict)
+              or producer.get("id") != int(run_id)
+              or producer.get("head_sha") != commit_sha
+              or producer.get("head_branch") != branch
+          ):
+              raise SystemExit("recovery launch artifact identity changed")
+
+          listing = json.loads(
+              Path(listing_path).read_text(encoding="utf-8")
+          )
+          artifacts = listing.get("artifacts")
+          listed = (
+              artifacts[0]
+              if isinstance(artifacts, list) and len(artifacts) == 1
+              else None
+          )
+          listed_producer = (
+              listed.get("workflow_run")
+              if isinstance(listed, dict)
+              else None
+          )
+          if (
+              listing.get("total_count") != 1
+              or not isinstance(artifacts, list)
+              or len(artifacts) != 1
+              or not isinstance(listed, dict)
+              or any(
+                  listed.get(key) != expected
+                  for key, expected in expected_artifact.items()
+              )
+              or not isinstance(listed_producer, dict)
+              or listed_producer.get("id") != int(run_id)
+              or listed_producer.get("head_sha") != commit_sha
+              or listed_producer.get("head_branch") != branch
+          ):
+              raise SystemExit(
+                  "recovery launch artifact listing is not unique"
+              )
+          PY
+          printf 'directory=%s\n' "${before}" >> "${GITHUB_OUTPUT}"
+          printf 'name=%s\n' "${launch_name}" >> "${GITHUB_OUTPUT}"
+
+      - name: Download exact immutable recovery launch receipt
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ inputs.launch_artifact_id }}
+          path: ${{ runner.temp }}/fresh-xauusd-v5-recovery-launch
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.launch_run_id }}
+          merge-multiple: true
+
+      - name: Re-read GitHub metadata after download
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          api_root="https://api.github.com/repos/${REPOSITORY}"
+          before="${{ steps.metadata.outputs.directory }}"
+          launch_name="${{ steps.metadata.outputs.name }}"
+          after="${RUNNER_TEMP}/fresh-v5-recovery-adoption-api-after"
+          mkdir -- "${after}"
+          request() {
+            local endpoint="$1"
+            local target="$2"
+            curl --fail-with-body --silent --show-error --location \
+              --proto '=https' --tlsv1.2 \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "${api_root}/${endpoint}" > "${target}"
+          }
+          request "actions/runs/${LAUNCH_RUN_ID}" "${after}/run.json"
+          request "actions/artifacts/${LAUNCH_ARTIFACT_ID}" \
+            "${after}/artifact.json"
+          request \
+            "actions/runs/${LAUNCH_RUN_ID}/artifacts?name=${launch_name}&per_page=100" \
+            "${after}/listing.json"
+          python3 -B - "${before}" "${after}" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          before, after = (Path(item) for item in sys.argv[1:])
+          for name in ("run.json", "artifact.json", "listing.json"):
+              left = json.loads((before / name).read_text(encoding="utf-8"))
+              right = json.loads((after / name).read_text(encoding="utf-8"))
+              if left != right:
+                  raise SystemExit(
+                      f"recovery launch metadata changed during download: {name}"
+                  )
+          PY
+
+      - name: Validate exact recovery launch receipt
+        id: launch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          directory="${RUNNER_TEMP}/fresh-xauusd-v5-recovery-launch"
+          receipt="${directory}/fresh-xauusd-v5-recovery-launch-receipt.json"
+          python3 -B - "${directory}" "${receipt}" <<'PY'
+          from pathlib import Path
+          import stat
+          import sys
+
+          directory = Path(sys.argv[1])
+          receipt = Path(sys.argv[2])
+          entries = list(directory.iterdir())
+          if entries != [receipt]:
+              raise SystemExit(
+                  "recovery launch artifact must contain exactly one receipt"
+              )
+          metadata = receipt.lstat()
+          if (
+              not stat.S_ISREG(metadata.st_mode)
+              or stat.S_ISLNK(metadata.st_mode)
+              or metadata.st_size <= 0
+              or metadata.st_size > 65536
+          ):
+              raise SystemExit(
+                  "recovery launch receipt is not a bounded regular file"
+              )
+          PY
+          launch_head="$(
+            git -C recovery-launch-source rev-parse HEAD
+          )"
+          controller="recovery-launch-source/.github/scripts/fresh-xauusd-v5-recovery-controller.py"
+          if [[ "${launch_head}" != "${LAUNCH_COMMIT_SHA}" ||
+            ! -f "${controller}" || -L "${controller}" ]]; then
+            printf 'recovery launch source identity changed\n' >&2
+            exit 1
+          fi
+          controller_sha="$(
+            sha256sum -- "${controller}" | awk '{print $1}'
+          )"
+          reader=".github/scripts/fresh-xauusd-v5-recovery-terminal-reader.py"
+          python3 -B "${reader}" validate-launch \
+            "${receipt}" \
+            "${LAUNCH_RUN_ID}" \
+            "${LAUNCH_RUN_ATTEMPT}" \
+            "${LAUNCH_COMMIT_SHA}" \
+            "${controller_sha}"
+          printf 'path=%s\n' "${receipt}" >> "${GITHUB_OUTPUT}"
+
+      - name: Probe read-only and stream exact terminal archive
+        id: adoption
+        shell: bash
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          EC2_PORT: ${{ secrets.EC2_PORT || '22' }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          ADOPTION_RUN_ID: ${{ github.run_id }}
+          ADOPTION_RUN_ATTEMPT: ${{ github.run_attempt }}
+          ADOPTION_COMMIT_SHA: ${{ github.sha }}
+          LAUNCH_RECEIPT: ${{ steps.launch.outputs.path }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          : "${EC2_HOST:?EC2_HOST is missing}"
+          : "${EC2_USER:?EC2_USER is missing}"
+          : "${EC2_PORT:?EC2_PORT is missing}"
+          : "${EC2_SSH_KEY:?EC2_SSH_KEY is missing}"
+          [[ "${EC2_USER}" == "ec2-user" ]]
+          [[ "${EC2_PORT}" == "22" ]]
+          case "${EC2_HOST}" in
+            datavis.au|www.datavis.au|3.27.110.195|ec2-3-27-110-195.ap-southeast-2.compute.amazonaws.com)
+              ;;
+            *) printf 'refusing unpinned EC2 host alias\n' >&2; exit 1 ;;
+          esac
+          case "${WAIT_MINUTES}" in
+            0|15|60|180|350) ;;
+            *) printf 'wait duration is not allowlisted\n' >&2; exit 1 ;;
+          esac
+
+          key="${RUNNER_TEMP}/fresh-v5-recovery-adoption-key"
+          known_hosts=".github/ssh/fresh-xauusd-ec2-known-hosts"
+          reader=".github/scripts/fresh-xauusd-v5-recovery-terminal-reader.py"
+          terminal_partial="${RUNNER_TEMP}/fresh-xauusd-v5-recovery-terminal.partial"
+          archive_name="v5-recovery-${LAUNCH_RUN_ID}-${LAUNCH_RUN_ATTEMPT}.tgz"
+          archive_partial="${RUNNER_TEMP}/${archive_name}.partial"
+          bundle="${GITHUB_WORKSPACE}/fresh-xauusd-v5-recovery-terminal-adoption"
+          trap 'rm -f -- "${key}" "${terminal_partial}" "${archive_partial}"' EXIT
+          printf '%s\n' "${EC2_SSH_KEY}" > "${key}"
+          chmod 600 "${key}"
+          if [[ ! -f "${known_hosts}" || -L "${known_hosts}" ||
+            ! -f "${reader}" || -L "${reader}" ]]; then
+            printf 'recovery adoption verifier input changed\n' >&2
+            exit 1
+          fi
+          [[ "$(sha256sum -- "${known_hosts}" | awk '{print $1}')" == \
+            "${KNOWN_HOSTS_SHA256}" ]]
+          [[ "$(ssh-keygen -lf "${known_hosts}" -E sha256 |
+            awk 'NR == 1 {print $2}')" == \
+            "SHA256:K68UWpXSv0oN9sa2KuFl1Bk9RWgigQtzskL3srgQ3ns" ]]
+          ssh_options=(
+            -F /dev/null
+            -T
+            -i "${key}"
+            -p "${EC2_PORT}"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o PasswordAuthentication=no
+            -o KbdInteractiveAuthentication=no
+            -o HostKeyAlgorithms=ssh-ed25519
+            -o ClearAllForwardings=yes
+            -o PermitLocalCommand=no
+            -o RequestTTY=no
+            -o StrictHostKeyChecking=yes
+            -o UserKnownHostsFile="${known_hosts}"
+            -o GlobalKnownHostsFile=/dev/null
+            -o ConnectTimeout=15
+            -o ServerAliveInterval=30
+            -o ServerAliveCountMax=3
+          )
+          launch_b64="$(base64 -w0 -- "${LAUNCH_RECEIPT}")"
+          wait_seconds="$((10#${WAIT_MINUTES} * 60))"
+          set +e
+          ssh "${ssh_options[@]}" "${EC2_USER}@${EC2_HOST}" \
+            python3 -I -B - probe "${launch_b64}" "${wait_seconds}" \
+            < "${reader}" > "${terminal_partial}"
+          probe_status="$?"
+          set -e
+          if [[ "${probe_status}" -eq 75 ]]; then
+            rm -f -- "${terminal_partial}"
+            printf 'The sealed V5 recovery is still active; no remote state was changed.\n' \
+              >> "${GITHUB_STEP_SUMMARY}"
+            printf 'ready=false\n' >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          [[ "${probe_status}" -eq 0 ]]
+
+          mkdir -- "${bundle}"
+          terminal="${bundle}/fresh-xauusd-v5-recovery-terminal-receipt.json"
+          mv -- "${terminal_partial}" "${terminal}"
+          terminal_b64="$(base64 -w0 -- "${terminal}")"
+          ssh "${ssh_options[@]}" "${EC2_USER}@${EC2_HOST}" \
+            python3 -I -B - stream "${launch_b64}" "${terminal_b64}" \
+            < "${reader}" > "${archive_partial}"
+          python3 -B "${reader}" verify-archive \
+            "${archive_partial}" "${LAUNCH_RECEIPT}" "${terminal}"
+
+          archive="${bundle}/${archive_name}"
+          mv -- "${archive_partial}" "${archive}"
+          cp --no-clobber -- "${LAUNCH_RECEIPT}" \
+            "${bundle}/fresh-xauusd-v5-recovery-launch-receipt.json"
+          manifest="${bundle}/fresh-xauusd-v5-recovery-adoption-manifest.json"
+          python3 -B "${reader}" build-manifest \
+            "${manifest}" \
+            "${bundle}/fresh-xauusd-v5-recovery-launch-receipt.json" \
+            "${terminal}" \
+            "${archive}" \
+            "${LAUNCH_RUN_ID}" \
+            "${LAUNCH_RUN_ATTEMPT}" \
+            "${LAUNCH_COMMIT_SHA}" \
+            "${LAUNCH_ARTIFACT_ID}" \
+            "${LAUNCH_ARTIFACT_DIGEST}" \
+            "${LAUNCH_ARTIFACT_SIZE}" \
+            "${ADOPTION_RUN_ID}" \
+            "${ADOPTION_RUN_ATTEMPT}" \
+            "${ADOPTION_COMMIT_SHA}"
+          chmod 600 -- "${bundle}"/*
+          python3 -B - "${bundle}" <<'PY'
+          from pathlib import Path
+          import stat
+          import sys
+
+          bundle = Path(sys.argv[1])
+          entries = sorted(bundle.iterdir(), key=lambda path: path.name)
+          if len(entries) != 4:
+              raise SystemExit("recovery adoption bundle is not four members")
+          for path in entries:
+              metadata = path.lstat()
+              if (
+                  not stat.S_ISREG(metadata.st_mode)
+                  or stat.S_ISLNK(metadata.st_mode)
+              ):
+                  raise SystemExit(
+                      "recovery adoption member is not a regular file"
+                  )
+          PY
+          printf 'ready=true\n' >> "${GITHUB_OUTPUT}"
+          printf 'bundle=%s\n' "${bundle}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload immutable recovery terminal adoption
+        if: steps.adoption.outputs.ready == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: fresh-xauusd-v5-recovery-terminal-adopted-${{ inputs.launch_run_id }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.adoption.outputs.bundle }}
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: false
