@@ -54,6 +54,13 @@ def build_parser() -> argparse.ArgumentParser:
             "for the separately preregistered full-recompute v4 study"
         ),
     )
+    lineage.add_argument(
+        "--restart-v5-artifact-dir",
+        help=(
+            "exact extracted terminal run-19 artifact directory that proves "
+            "eligibility for the separate full-recompute v5 study"
+        ),
+    )
     return parser
 
 
@@ -86,6 +93,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
         infrastructure_restart_v4_artifact_directory=(
             arguments.restart_v4_artifact_dir
+        ),
+        infrastructure_restart_v5_artifact_directory=(
+            arguments.restart_v5_artifact_dir
         ),
     )
     print(
