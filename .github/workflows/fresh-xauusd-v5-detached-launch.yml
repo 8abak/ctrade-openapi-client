@@ -1,0 +1,596 @@
+name: Fresh XAUUSD v5 detached launch
+
+on:
+  push:
+    branches:
+      - codex/xauusd-fresh-walkforward
+    paths:
+      - .github/research-v5-launch.txt
+
+concurrency:
+  group: fresh-xauusd-v5-detached-launch
+  cancel-in-progress: false
+
+jobs:
+  launch:
+    name: Launch sealed v5 study independently of GitHub runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out frozen research code
+        uses: actions/checkout@v4
+
+      - name: Verify frozen v5 launch identity
+        shell: bash
+        env:
+          FRESH_GITHUB_REF: ${{ github.ref }}
+        run: |
+          set -Eeuo pipefail
+          expected_ref="refs/heads/codex/xauusd-fresh-walkforward"
+          expected_marker="fresh-xauusd-run-2026-07-24-v20-v5-detached"
+          if [[ "${FRESH_GITHUB_REF}" != "${expected_ref}" ]]; then
+            printf 'refusing v5 launch from unexpected ref: %s\n' \
+              "${FRESH_GITHUB_REF}" >&2
+            exit 1
+          fi
+          if ! cmp -s -- .github/research-v5-launch.txt \
+            <(printf '%s\n' "${expected_marker}"); then
+            printf 'refusing v5 launch with an unexpected marker\n' >&2
+            exit 1
+          fi
+          bash -n -- .github/scripts/fresh-xauusd-v5-controller.sh
+          python3 -B .github/scripts/extract_workflow_run.py \
+            .github/workflows/fresh-xauusd-v5-detached-launch.yml \
+            "Launch detached v5 controller and obtain immutable receipt" \
+            > "${RUNNER_TEMP}/fresh-v5-detached-step.sh"
+          bash -n -- "${RUNNER_TEMP}/fresh-v5-detached-step.sh"
+
+      - name: Verify immutable adopted Run 19 artifact metadata
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -Eeuo pipefail
+          metadata="${RUNNER_TEMP}/run19-artifact-metadata.json"
+          curl \
+            --fail \
+            --silent \
+            --show-error \
+            --location \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GH_REPOSITORY}/actions/artifacts/8585919266" \
+            > "${metadata}"
+          python3 -B - "${metadata}" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          workflow_run = payload.get("workflow_run")
+          expected = {
+              "id": 8585919266,
+              "name": "fresh-xauusd-run19-adopted-30065029441-1",
+              "expired": False,
+              "digest": (
+                  "sha256:"
+                  "7bd36760bda3fd4250be3221d144be4f3a4f0f7b94b7d445f5c1278796b33a1c"
+              ),
+          }
+          for key, value in expected.items():
+              if payload.get(key) != value:
+                  raise SystemExit(f"adopted Run 19 artifact {key} changed")
+          if (
+              not isinstance(workflow_run, dict)
+              or workflow_run.get("id") != 30065029441
+          ):
+              raise SystemExit("adopted Run 19 producer run changed")
+          PY
+
+      - name: Download immutable adopted Run 19 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: fresh-xauusd-run19-adopted-30065029441-1
+          path: ${{ runner.temp }}/fresh-xauusd-run19
+          github-token: ${{ github.token }}
+          run-id: 30065029441
+
+      - name: Verify exact adopted Run 19 terminal archive
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 -B - "${RUNNER_TEMP}/fresh-xauusd-run19" <<'PY'
+          import hashlib
+          from pathlib import Path
+          import stat
+          import sys
+
+          directory = Path(sys.argv[1])
+          entries = list(directory.iterdir())
+          if len(entries) != 1:
+              raise SystemExit("Run 19 download does not contain one member")
+          archive = entries[0]
+          metadata = archive.lstat()
+          if (
+              archive.name != "fresh-xauusd-30042880650-1.tgz"
+              or not stat.S_ISREG(metadata.st_mode)
+              or stat.S_ISLNK(metadata.st_mode)
+              or metadata.st_size != 125255
+          ):
+              raise SystemExit("Run 19 terminal archive identity changed")
+          digest = hashlib.sha256()
+          with archive.open("rb") as handle:
+              for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                  digest.update(chunk)
+          if (
+              digest.hexdigest()
+              != "f947348d892d1c996df15188c3221595066c019957f4dccf24697502d2d4fbf9"
+          ):
+              raise SystemExit("Run 19 terminal archive digest changed")
+          PY
+
+      - name: Launch detached v5 controller and obtain immutable receipt
+        id: detached
+        shell: bash
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          EC2_PORT: ${{ secrets.EC2_PORT || '22' }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          FRESH_BRANCH: ${{ github.ref_name }}
+          FRESH_SHA: ${{ github.sha }}
+          FRESH_RUN_ID: ${{ github.run_id }}
+          FRESH_RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN19_ARCHIVE: ${{ runner.temp }}/fresh-xauusd-run19/fresh-xauusd-30042880650-1.tgz
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          : "${EC2_HOST:?EC2_HOST is missing}"
+          : "${EC2_USER:?EC2_USER is missing}"
+          : "${EC2_PORT:?EC2_PORT is missing}"
+          : "${EC2_SSH_KEY:?EC2_SSH_KEY is missing}"
+          if [[ "${EC2_PORT}" != "22" ]]; then
+            printf 'refusing an unpinned EC2 SSH port\n' >&2
+            exit 1
+          fi
+          case "${EC2_HOST}" in
+            datavis.au|www.datavis.au|3.27.110.195|ec2-3-27-110-195.ap-southeast-2.compute.amazonaws.com)
+              ;;
+            *)
+              printf 'refusing an unpinned EC2 SSH host alias\n' >&2
+              exit 1
+              ;;
+          esac
+
+          key_path="${RUNNER_TEMP}/fresh-v5-launch-key"
+          known_hosts="${GITHUB_WORKSPACE}/.github/ssh/fresh-xauusd-ec2-known-hosts"
+          receipt_local="${GITHUB_WORKSPACE}/fresh-xauusd-v5-launch-receipt.json"
+          controller_local=".github/scripts/fresh-xauusd-v5-controller.sh"
+          controller_sha="$(sha256sum -- "${controller_local}" | awk '{print $1}')"
+          printf '%s\n' "${EC2_SSH_KEY}" > "${key_path}"
+          chmod 600 "${key_path}"
+          trap 'rm -f -- "${key_path}"' EXIT
+          [[ -f "${known_hosts}" && ! -L "${known_hosts}" ]]
+          if [[ "$(
+            ssh-keygen -lf "${known_hosts}" -E sha256 |
+              awk 'NR == 1 {print $2}'
+          )" != "SHA256:K68UWpXSv0oN9sa2KuFl1Bk9RWgigQtzskL3srgQ3ns" ]]; then
+            printf 'pinned EC2 host key changed\n' >&2
+            exit 1
+          fi
+          ssh_options=(
+            -T
+            -i "${key_path}"
+            -p "${EC2_PORT}"
+            -o BatchMode=yes
+            -o PasswordAuthentication=no
+            -o KbdInteractiveAuthentication=no
+            -o ClearAllForwardings=yes
+            -o PermitLocalCommand=no
+            -o RequestTTY=no
+            -o StrictHostKeyChecking=yes
+            -o UserKnownHostsFile="${known_hosts}"
+            -o GlobalKnownHostsFile=/dev/null
+            -o ConnectTimeout=15
+          )
+          scp_options=(
+            -i "${key_path}"
+            -P "${EC2_PORT}"
+            -o BatchMode=yes
+            -o PasswordAuthentication=no
+            -o KbdInteractiveAuthentication=no
+            -o StrictHostKeyChecking=yes
+            -o UserKnownHostsFile="${known_hosts}"
+            -o GlobalKnownHostsFile=/dev/null
+          )
+
+          transfer_directory="$(
+            ssh "${ssh_options[@]}" "${EC2_USER}@${EC2_HOST}" \
+              'umask 077; mktemp -d /tmp/fresh-xauusd-transfer.XXXXXX'
+          )"
+          transfer_directory="${transfer_directory//$'\r'/}"
+          case "${transfer_directory}" in
+            /tmp/fresh-xauusd-transfer.*)
+              ;;
+            *)
+              printf 'refusing unexpected transfer directory: %s\n' \
+                "${transfer_directory}" >&2
+              exit 1
+              ;;
+          esac
+
+          restart_remote="${transfer_directory}/run19-restart.tgz"
+          controller_remote="${transfer_directory}/fresh-xauusd-v5-controller.sh"
+          artifact_root="/home/ec2-user/.local/state/datavis/fresh-xauusd-artifacts-v1"
+          terminal_remote="${artifact_root}/fresh-xauusd-${FRESH_RUN_ID}-${FRESH_RUN_ATTEMPT}.tgz"
+          controller_stdout="${transfer_directory}/controller.stdout.log"
+          controller_stderr="${transfer_directory}/controller.stderr.log"
+          launch_root="/home/ec2-user/.local/state/datavis/fresh-xauusd-launch-v1"
+          receipt_name="v5-${FRESH_RUN_ID}-${FRESH_RUN_ATTEMPT}"
+          ready_remote="${launch_root}/${receipt_name}.ready.json"
+          failure_remote="${launch_root}/${receipt_name}.failure.json"
+          terminal_receipt_remote="${launch_root}/${receipt_name}.terminal.json"
+
+          scp "${scp_options[@]}" \
+            "${RUN19_ARCHIVE}" \
+            "${EC2_USER}@${EC2_HOST}:${restart_remote}"
+          scp "${scp_options[@]}" \
+            "${controller_local}" \
+            "${EC2_USER}@${EC2_HOST}:${controller_remote}"
+
+          ssh "${ssh_options[@]}" "${EC2_USER}@${EC2_HOST}" \
+            bash -s -- \
+            "${controller_remote}" \
+            "${controller_sha}" \
+            "${restart_remote}" \
+            "${terminal_remote}" \
+            "${controller_stdout}" \
+            "${controller_stderr}" \
+            "${FRESH_BRANCH}" \
+            "${FRESH_SHA}" \
+            "${FRESH_RUN_ID}" \
+            "${FRESH_RUN_ATTEMPT}" \
+            "${ready_remote}" \
+            "${failure_remote}" \
+            "${terminal_receipt_remote}" <<'REMOTE'
+          set -Eeuo pipefail
+          umask 077
+          controller="$1"
+          expected_controller_sha="$2"
+          restart_archive="$3"
+          terminal_archive="$4"
+          controller_stdout="$5"
+          controller_stderr="$6"
+          branch="$7"
+          commit_sha="$8"
+          run_id="$9"
+          attempt="${10}"
+          ready_receipt="${11}"
+          failure_receipt="${12}"
+          terminal_receipt="${13}"
+          transfer_directory="$(dirname -- "${controller}")"
+          transfer_resolved="$(readlink -f -- "${transfer_directory}")"
+          artifact_root="/home/ec2-user/.local/state/datavis/fresh-xauusd-artifacts-v1"
+          case "${transfer_resolved}" in
+            /tmp/fresh-xauusd-transfer.*)
+              ;;
+            *)
+              printf 'refusing unexpected transfer directory\n' >&2
+              exit 1
+              ;;
+          esac
+          if [[ -L "${transfer_directory}" || ! -d "${transfer_directory}" ||
+            "$(dirname -- "${restart_archive}")" != "${transfer_directory}" ||
+            "$(dirname -- "${terminal_archive}")" != "${artifact_root}" ||
+            ! -f "${controller}" || -L "${controller}" ||
+            ! -f "${restart_archive}" || -L "${restart_archive}" ]]; then
+            printf 'remote launch paths failed containment checks\n' >&2
+            exit 1
+          fi
+          if [[ "$(sha256sum -- "${controller}" | awk '{print $1}')" != \
+            "${expected_controller_sha}" ||
+            "$(sha256sum -- "${restart_archive}" | awk '{print $1}')" != \
+            "f947348d892d1c996df15188c3221595066c019957f4dccf24697502d2d4fbf9" ||
+            "$(stat -c '%s' -- "${restart_archive}")" != "125255" ]]; then
+            printf 'remote detached-launch input identity changed\n' >&2
+            exit 1
+          fi
+          command -v nohup >/dev/null
+          command -v setsid >/dev/null
+          if [[ -L "${artifact_root}" ]]; then
+            printf 'refusing symlink durable artifact root\n' >&2
+            exit 1
+          fi
+          mkdir -p -- "${artifact_root}"
+          chmod 700 -- "${artifact_root}"
+          if [[ "$(readlink -f -- "${artifact_root}")" != "${artifact_root}" ||
+            -e "${terminal_archive}" || -L "${terminal_archive}" ||
+            -e "${terminal_archive}.partial" ||
+            -L "${terminal_archive}.partial" ]]; then
+            printf 'durable terminal archive path is not new and scoped\n' >&2
+            exit 1
+          fi
+          (
+            set -o noclobber
+            : > "${controller_stdout}"
+            : > "${controller_stderr}"
+          )
+          chmod 600 -- "${controller}" "${controller_stdout}" "${controller_stderr}"
+          nohup setsid --fork \
+            bash --noprofile --norc "${controller}" \
+            "${branch}" "${commit_sha}" "${run_id}" "${attempt}" \
+            "${restart_archive}" "${terminal_archive}" \
+            "${expected_controller_sha}" \
+            "${ready_receipt}" "${failure_receipt}" "${terminal_receipt}" \
+            </dev/null \
+            >"${controller_stdout}" \
+            2>"${controller_stderr}"
+          REMOTE
+
+          ssh "${ssh_options[@]}" "${EC2_USER}@${EC2_HOST}" \
+            bash -s -- \
+            "${ready_remote}" \
+            "${failure_remote}" \
+            "${terminal_receipt_remote}" \
+            "${controller_stdout}" \
+            "${controller_stderr}" <<'REMOTE'
+          set -Eeuo pipefail
+          ready="$1"
+          failure="$2"
+          terminal="$3"
+          controller_stdout="$4"
+          controller_stderr="$5"
+          for _ in $(seq 1 180); do
+            if [[ -f "${failure}" && ! -L "${failure}" ]]; then
+              cat -- "${failure}" >&2
+              tail -n 100 -- "${controller_stdout}" >&2 || true
+              tail -n 100 -- "${controller_stderr}" >&2 || true
+              exit 1
+            fi
+            if [[ -f "${terminal}" && ! -L "${terminal}" ]]; then
+              cat -- "${terminal}" >&2
+              tail -n 100 -- "${controller_stdout}" >&2 || true
+              tail -n 100 -- "${controller_stderr}" >&2 || true
+              exit 1
+            fi
+            if [[ -f "${ready}" && ! -L "${ready}" ]]; then
+              python3 -B - "${ready}" "${terminal}" <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import stat
+          import sys
+
+          ready_path = Path(sys.argv[1])
+          terminal_path = Path(sys.argv[2])
+          descriptor = os.open(
+              ready_path,
+              os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+          )
+          try:
+              metadata = os.fstat(descriptor)
+              if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 65536:
+                  raise SystemExit("launch receipt is not a small regular file")
+              chunks = []
+              while True:
+                  chunk = os.read(descriptor, 65536)
+                  if not chunk:
+                      break
+                  chunks.append(chunk)
+          finally:
+              os.close(descriptor)
+          payload = json.loads(b"".join(chunks).decode("utf-8"))
+          if terminal_path.exists() or terminal_path.is_symlink():
+              raise SystemExit("pipeline became terminal before ready acceptance")
+
+          def process_identity(pid_key, start_key):
+              pid = payload.get(pid_key)
+              expected_start = payload.get(start_key)
+              if (
+                  not isinstance(pid, int)
+                  or pid <= 0
+                  or not isinstance(expected_start, int)
+                  or expected_start <= 0
+              ):
+                  raise SystemExit(f"invalid {pid_key} identity")
+              process = Path(f"/proc/{pid}")
+              raw_stat = (process / "stat").read_text(encoding="ascii")
+              fields = raw_stat.rsplit(") ", 1)[1].split()
+              if fields[0] in {"X", "Z"} or int(fields[19]) != expected_start:
+                  raise SystemExit(f"{pid_key} is no longer the recorded process")
+              status = {}
+              for line in (process / "status").read_text(
+                  encoding="ascii"
+              ).splitlines():
+                  key, separator, value = line.partition(":")
+                  if separator and key == "Uid":
+                      status[key] = [int(item) for item in value.split()]
+              if status.get("Uid", [])[:2] != [os.getuid(), os.geteuid()]:
+                  raise SystemExit(f"{pid_key} ownership changed")
+              command = [
+                  os.fsdecode(item)
+                  for item in (process / "cmdline").read_bytes().split(b"\0")
+                  if item
+              ]
+              return command
+
+          paths = payload.get("paths")
+          if not isinstance(paths, dict):
+              raise SystemExit("launch receipt paths are missing")
+          controller_command = process_identity(
+              "controllerPid", "controllerStartTicks"
+          )
+          pipeline_command = process_identity(
+              "pipelinePid", "pipelineStartTicks"
+          )
+          expected_controller = (
+              f"{paths.get('transfer')}/fresh-xauusd-v5-controller.sh"
+          )
+          if expected_controller not in controller_command:
+              raise SystemExit("controller command line changed")
+          if (
+              "--execute" not in pipeline_command
+              or not any(
+                  value == "-m"
+                  and index + 1 < len(pipeline_command)
+                  and pipeline_command[index + 1]
+                  == "datavis.research.fresh_pipeline_cli"
+                  for index, value in enumerate(pipeline_command)
+              )
+          ):
+              raise SystemExit("pipeline command line changed")
+
+          def option(name):
+              positions = [
+                  index
+                  for index, value in enumerate(pipeline_command)
+                  if value == name
+              ]
+              if len(positions) != 1 or positions[0] + 1 >= len(pipeline_command):
+                  raise SystemExit(f"pipeline option {name} changed")
+              return pipeline_command[positions[0] + 1]
+
+          expected_options = {
+              "--output-dir": paths.get("output"),
+              "--scratch-dir": paths.get("scratch"),
+              "--restart-v5-artifact-dir": paths.get("restart"),
+              "--research-state-dir": (
+                  "/home/ec2-user/.local/state/datavis/"
+                  "fresh-xauusd-research-v2"
+              ),
+          }
+          for name, value in expected_options.items():
+              if option(name) != value:
+                  raise SystemExit(f"pipeline option {name} binding changed")
+          if terminal_path.exists() or terminal_path.is_symlink():
+              raise SystemExit("pipeline became terminal during ready acceptance")
+          PY
+              cat -- "${ready}"
+              exit 0
+            fi
+            sleep 5
+          done
+          printf 'timed out waiting for detached launch receipt\n' >&2
+          tail -n 100 -- "${controller_stdout}" >&2 || true
+          tail -n 100 -- "${controller_stderr}" >&2 || true
+          exit 1
+          REMOTE
+
+          scp "${scp_options[@]}" \
+            "${EC2_USER}@${EC2_HOST}:${ready_remote}" \
+            "${receipt_local}"
+          python3 -B - \
+            "${receipt_local}" "${controller_sha}" \
+            "${FRESH_RUN_ID}" "${FRESH_RUN_ATTEMPT}" "${FRESH_SHA}" <<'PY'
+          import json
+          from pathlib import Path
+          from pathlib import PurePosixPath
+          import re
+          import sys
+
+          path, controller_sha, run_id, attempt, commit_sha = sys.argv[1:]
+          payload = json.loads(Path(path).read_text(encoding="utf-8"))
+          if (
+              payload.get("schema")
+              != "fresh-xauusd-detached-research-receipt/v1"
+              or payload.get("kind") != "launch_ready"
+              or payload.get("status") != "running"
+              or payload.get("processExitStatus") is not None
+              or payload.get("githubRunId") != int(run_id)
+              or payload.get("githubRunAttempt") != int(attempt)
+              or payload.get("branch")
+              != "codex/xauusd-fresh-walkforward"
+              or payload.get("commitSha") != commit_sha
+              or payload.get("controllerSha256") != controller_sha
+              or payload.get("studyLineageSha256")
+              != "6377d53891675e02b645bf83b52b24b5ffb5a7b8cc76b701cd3450b2cecd7473"
+              or payload.get("run19ArtifactId") != 8585919266
+              or payload.get("run19TerminalArchiveSha256")
+              != "f947348d892d1c996df15188c3221595066c019957f4dccf24697502d2d4fbf9"
+              or not isinstance(payload.get("controllerPid"), int)
+              or payload["controllerPid"] <= 0
+              or not isinstance(payload.get("controllerStartTicks"), int)
+              or payload["controllerStartTicks"] <= 0
+              or not isinstance(payload.get("pipelinePid"), int)
+              or payload["pipelinePid"] <= 0
+              or not isinstance(payload.get("pipelineStartTicks"), int)
+              or payload["pipelineStartTicks"] <= 0
+              or payload.get("terminalArchive") is not None
+          ):
+              raise SystemExit("detached launch receipt identity changed")
+          paths = payload.get("paths")
+          if not isinstance(paths, dict):
+              raise SystemExit("detached launch receipt has no paths")
+          parsed = {}
+          for key in (
+              "worktree",
+              "output",
+              "scratch",
+              "restart",
+              "transfer",
+              "terminalArchive",
+              "serverLog",
+          ):
+              value = paths.get(key)
+              if not isinstance(value, str):
+                  raise SystemExit(f"detached receipt path {key} changed")
+              parsed[key] = PurePosixPath(value)
+              if (
+                  not parsed[key].is_absolute()
+                  or ".." in parsed[key].parts
+                  or str(parsed[key]) != value
+              ):
+                  raise SystemExit(f"detached receipt path {key} is not canonical")
+
+          scoped_tmp = {
+              "worktree": r"fresh-xauusd-worktree\.[A-Za-z0-9]{6}",
+              "output": r"fresh-xauusd-output\.[A-Za-z0-9]{6}",
+              "restart": r"fresh-xauusd-restart\.[A-Za-z0-9]{6}",
+              "transfer": r"fresh-xauusd-transfer\.[A-Za-z0-9]{6}",
+              "serverLog": r"fresh-xauusd-run\.[A-Za-z0-9]{6}\.log",
+          }
+          for key, pattern in scoped_tmp.items():
+              if (
+                  parsed[key].parent != PurePosixPath("/tmp")
+                  or re.fullmatch(pattern, parsed[key].name) is None
+              ):
+                  raise SystemExit(f"detached receipt path {key} escaped scope")
+          scratch_parent = PurePosixPath(
+              "/home/ec2-user/.local/state/datavis/"
+              "fresh-xauusd-scratch-v1"
+          )
+          if (
+              parsed["scratch"].parent != scratch_parent
+              or re.fullmatch(
+                  rf"run\.{re.escape(run_id)}\.{re.escape(attempt)}\."
+                  r"[A-Za-z0-9]{6}",
+                  parsed["scratch"].name,
+              )
+              is None
+          ):
+              raise SystemExit("detached scratch receipt path changed")
+          artifact_parent = PurePosixPath(
+              "/home/ec2-user/.local/state/datavis/"
+              "fresh-xauusd-artifacts-v1"
+          )
+          if (
+              parsed["terminalArchive"].parent != artifact_parent
+              or parsed["terminalArchive"].name
+              != f"fresh-xauusd-{run_id}-{attempt}.tgz"
+          ):
+              raise SystemExit("detached terminal archive receipt path changed")
+          PY
+          printf 'receipt=%s\n' "${receipt_local}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload immutable detached launch receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: fresh-xauusd-detached-launch-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.detached.outputs.receipt }}
+          if-no-files-found: error
+          retention-days: 30
