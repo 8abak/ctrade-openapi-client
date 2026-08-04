@@ -1,0 +1,146 @@
+{
+  "schemaVersion": 1,
+  "indicator": "session-anchored equal-tick VWAP with expanding standard-deviation bands",
+  "formula": {
+    "price": "tick midpoint",
+    "weight": "one per tick",
+    "vwapProxy": "cumulative mean(mid)",
+    "stdev": "sqrt(cumulative mean(mid^2) - cumulative mean(mid)^2)",
+    "causal": true
+  },
+  "confirmation": "rising VWAP: touch/reclaim lower band plus bullish structure break; falling VWAP mirrors for short",
+  "bestConsistentConfigurations": [
+    {
+      "anchor": "broker_day",
+      "band_stdev": 0.0,
+      "slope_seconds": 60,
+      "side": "long",
+      "events_earlier": 34.0,
+      "events_later": 20.0,
+      "excellent_proxy_rate_earlier": 0.20588235294117646,
+      "excellent_proxy_rate_later": 0.2,
+      "minimum_rate": 0.2
+    },
+    {
+      "anchor": "utc_day",
+      "band_stdev": 0.5,
+      "slope_seconds": 900,
+      "side": "long",
+      "events_earlier": 13.0,
+      "events_later": 17.0,
+      "excellent_proxy_rate_earlier": 0.15384615384615385,
+      "excellent_proxy_rate_later": 0.17647058823529413,
+      "minimum_rate": 0.15384615384615385
+    },
+    {
+      "anchor": "utc_day",
+      "band_stdev": 0.0,
+      "slope_seconds": 900,
+      "side": "long",
+      "events_earlier": 49.0,
+      "events_later": 27.0,
+      "excellent_proxy_rate_earlier": 0.1836734693877551,
+      "excellent_proxy_rate_later": 0.14814814814814814,
+      "minimum_rate": 0.14814814814814814
+    },
+    {
+      "anchor": "broker_day",
+      "band_stdev": 0.0,
+      "slope_seconds": 300,
+      "side": "long",
+      "events_earlier": 35.0,
+      "events_later": 15.0,
+      "excellent_proxy_rate_earlier": 0.2,
+      "excellent_proxy_rate_later": 0.13333333333333333,
+      "minimum_rate": 0.13333333333333333
+    },
+    {
+      "anchor": "utc_day",
+      "band_stdev": 0.0,
+      "slope_seconds": 300,
+      "side": "long",
+      "events_earlier": 49.0,
+      "events_later": 32.0,
+      "excellent_proxy_rate_earlier": 0.16326530612244897,
+      "excellent_proxy_rate_later": 0.125,
+      "minimum_rate": 0.125
+    },
+    {
+      "anchor": "utc_day",
+      "band_stdev": 0.5,
+      "slope_seconds": 300,
+      "side": "long",
+      "events_earlier": 10.0,
+      "events_later": 9.0,
+      "excellent_proxy_rate_earlier": 0.2,
+      "excellent_proxy_rate_later": 0.1111111111111111,
+      "minimum_rate": 0.1111111111111111
+    },
+    {
+      "anchor": "utc_day",
+      "band_stdev": 0.0,
+      "slope_seconds": 300,
+      "side": "short",
+      "events_earlier": 43.0,
+      "events_later": 40.0,
+      "excellent_proxy_rate_earlier": 0.16279069767441862,
+      "excellent_proxy_rate_later": 0.1,
+      "minimum_rate": 0.1
+    },
+    {
+      "anchor": "utc_day",
+      "band_stdev": 0.0,
+      "slope_seconds": 60,
+      "side": "long",
+      "events_earlier": 46.0,
+      "events_later": 32.0,
+      "excellent_proxy_rate_earlier": 0.17391304347826086,
+      "excellent_proxy_rate_later": 0.09375,
+      "minimum_rate": 0.09375
+    },
+    {
+      "anchor": "broker_day",
+      "band_stdev": 0.0,
+      "slope_seconds": 900,
+      "side": "long",
+      "events_earlier": 38.0,
+      "events_later": 12.0,
+      "excellent_proxy_rate_earlier": 0.15789473684210525,
+      "excellent_proxy_rate_later": 0.08333333333333333,
+      "minimum_rate": 0.08333333333333333
+    },
+    {
+      "anchor": "utc_day",
+      "band_stdev": 0.0,
+      "slope_seconds": 900,
+      "side": "short",
+      "events_earlier": 30.0,
+      "events_later": 40.0,
+      "excellent_proxy_rate_earlier": 0.13333333333333333,
+      "excellent_proxy_rate_later": 0.075,
+      "minimum_rate": 0.075
+    },
+    {
+      "anchor": "broker_day",
+      "band_stdev": 0.0,
+      "slope_seconds": 60,
+      "side": "short",
+      "events_earlier": 41.0,
+      "events_later": 29.0,
+      "excellent_proxy_rate_earlier": 0.21951219512195122,
+      "excellent_proxy_rate_later": 0.06896551724137931,
+      "minimum_rate": 0.06896551724137931
+    },
+    {
+      "anchor": "broker_day",
+      "band_stdev": 0.0,
+      "slope_seconds": 900,
+      "side": "short",
+      "events_earlier": 31.0,
+      "events_later": 30.0,
+      "excellent_proxy_rate_earlier": 0.22580645161290322,
+      "excellent_proxy_rate_later": 0.06666666666666667,
+      "minimum_rate": 0.06666666666666667
+    }
+  ]
+}

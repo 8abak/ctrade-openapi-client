@@ -1,0 +1,227 @@
+{
+  "schemaVersion": 1,
+  "indicator": "rolling equal-tick VWAP and tick-weighted standard deviation",
+  "futureTicksUsedForIndicatorOrSelection": false,
+  "bestConsistentConfigurations": [
+    {
+      "window_minutes": 120,
+      "band_stdev": 1.5,
+      "slope_mode": "300",
+      "side": "long",
+      "events_earlier": 19.0,
+      "events_later": 12.0,
+      "excellent_proxy_rate_earlier": 0.15789473684210525,
+      "excellent_proxy_rate_later": 0.16666666666666666,
+      "minimum_rate": 0.15789473684210525
+    },
+    {
+      "window_minutes": 15,
+      "band_stdev": 2.0,
+      "slope_mode": "300",
+      "side": "short",
+      "events_earlier": 39.0,
+      "events_later": 22.0,
+      "excellent_proxy_rate_earlier": 0.15384615384615385,
+      "excellent_proxy_rate_later": 0.18181818181818182,
+      "minimum_rate": 0.15384615384615385
+    },
+    {
+      "window_minutes": 15,
+      "band_stdev": 1.0,
+      "slope_mode": "300",
+      "side": "long",
+      "events_earlier": 134.0,
+      "events_later": 52.0,
+      "excellent_proxy_rate_earlier": 0.16417910447761194,
+      "excellent_proxy_rate_later": 0.1346153846153846,
+      "minimum_rate": 0.1346153846153846
+    },
+    {
+      "window_minutes": 15,
+      "band_stdev": 1.5,
+      "slope_mode": "300",
+      "side": "long",
+      "events_earlier": 79.0,
+      "events_later": 43.0,
+      "excellent_proxy_rate_earlier": 0.12658227848101267,
+      "excellent_proxy_rate_later": 0.13953488372093023,
+      "minimum_rate": 0.12658227848101267
+    },
+    {
+      "window_minutes": 120,
+      "band_stdev": 0.5,
+      "slope_mode": "300",
+      "side": "long",
+      "events_earlier": 32.0,
+      "events_later": 20.0,
+      "excellent_proxy_rate_earlier": 0.125,
+      "excellent_proxy_rate_later": 0.15,
+      "minimum_rate": 0.125
+    },
+    {
+      "window_minutes": 30,
+      "band_stdev": 1.0,
+      "slope_mode": "60",
+      "side": "short",
+      "events_earlier": 48.0,
+      "events_later": 28.0,
+      "excellent_proxy_rate_earlier": 0.125,
+      "excellent_proxy_rate_later": 0.14285714285714285,
+      "minimum_rate": 0.125
+    },
+    {
+      "window_minutes": 15,
+      "band_stdev": 1.5,
+      "slope_mode": "60",
+      "side": "long",
+      "events_earlier": 37.0,
+      "events_later": 24.0,
+      "excellent_proxy_rate_earlier": 0.13513513513513514,
+      "excellent_proxy_rate_later": 0.125,
+      "minimum_rate": 0.125
+    },
+    {
+      "window_minutes": 30,
+      "band_stdev": 1.5,
+      "slope_mode": "both",
+      "side": "long",
+      "events_earlier": 17.0,
+      "events_later": 8.0,
+      "excellent_proxy_rate_earlier": 0.35294117647058826,
+      "excellent_proxy_rate_later": 0.125,
+      "minimum_rate": 0.125
+    },
+    {
+      "window_minutes": 15,
+      "band_stdev": 1.0,
+      "slope_mode": "both",
+      "side": "long",
+      "events_earlier": 79.0,
+      "events_later": 34.0,
+      "excellent_proxy_rate_earlier": 0.16455696202531644,
+      "excellent_proxy_rate_later": 0.11764705882352941,
+      "minimum_rate": 0.11764705882352941
+    },
+    {
+      "window_minutes": 30,
+      "band_stdev": 1.0,
+      "slope_mode": "both",
+      "side": "short",
+      "events_earlier": 43.0,
+      "events_later": 24.0,
+      "excellent_proxy_rate_earlier": 0.11627906976744186,
+      "excellent_proxy_rate_later": 0.16666666666666666,
+      "minimum_rate": 0.11627906976744186
+    },
+    {
+      "window_minutes": 30,
+      "band_stdev": 0.5,
+      "slope_mode": "both",
+      "side": "long",
+      "events_earlier": 62.0,
+      "events_later": 34.0,
+      "excellent_proxy_rate_earlier": 0.11290322580645161,
+      "excellent_proxy_rate_later": 0.11764705882352941,
+      "minimum_rate": 0.11290322580645161
+    },
+    {
+      "window_minutes": 15,
+      "band_stdev": 0.5,
+      "slope_mode": "60",
+      "side": "long",
+      "events_earlier": 134.0,
+      "events_later": 54.0,
+      "excellent_proxy_rate_earlier": 0.13432835820895522,
+      "excellent_proxy_rate_later": 0.1111111111111111,
+      "minimum_rate": 0.1111111111111111
+    },
+    {
+      "window_minutes": 30,
+      "band_stdev": 1.5,
+      "slope_mode": "60",
+      "side": "long",
+      "events_earlier": 17.0,
+      "events_later": 9.0,
+      "excellent_proxy_rate_earlier": 0.35294117647058826,
+      "excellent_proxy_rate_later": 0.1111111111111111,
+      "minimum_rate": 0.1111111111111111
+    },
+    {
+      "window_minutes": 15,
+      "band_stdev": 0.5,
+      "slope_mode": "both",
+      "side": "long",
+      "events_earlier": 119.0,
+      "events_later": 46.0,
+      "excellent_proxy_rate_earlier": 0.14285714285714285,
+      "excellent_proxy_rate_later": 0.10869565217391304,
+      "minimum_rate": 0.10869565217391304
+    },
+    {
+      "window_minutes": 120,
+      "band_stdev": 0.5,
+      "slope_mode": "both",
+      "side": "long",
+      "events_earlier": 28.0,
+      "events_later": 16.0,
+      "excellent_proxy_rate_earlier": 0.10714285714285714,
+      "excellent_proxy_rate_later": 0.125,
+      "minimum_rate": 0.10714285714285714
+    },
+    {
+      "window_minutes": 30,
+      "band_stdev": 1.0,
+      "slope_mode": "300",
+      "side": "long",
+      "events_earlier": 46.0,
+      "events_later": 28.0,
+      "excellent_proxy_rate_earlier": 0.21739130434782608,
+      "excellent_proxy_rate_later": 0.10714285714285714,
+      "minimum_rate": 0.10714285714285714
+    },
+    {
+      "window_minutes": 30,
+      "band_stdev": 0.5,
+      "slope_mode": "300",
+      "side": "long",
+      "events_earlier": 85.0,
+      "events_later": 46.0,
+      "excellent_proxy_rate_earlier": 0.10588235294117647,
+      "excellent_proxy_rate_later": 0.10869565217391304,
+      "minimum_rate": 0.10588235294117647
+    },
+    {
+      "window_minutes": 30,
+      "band_stdev": 1.5,
+      "slope_mode": "300",
+      "side": "short",
+      "events_earlier": 38.0,
+      "events_later": 17.0,
+      "excellent_proxy_rate_earlier": 0.10526315789473684,
+      "excellent_proxy_rate_later": 0.11764705882352941,
+      "minimum_rate": 0.10526315789473684
+    },
+    {
+      "window_minutes": 15,
+      "band_stdev": 1.0,
+      "slope_mode": "60",
+      "side": "long",
+      "events_earlier": 86.0,
+      "events_later": 38.0,
+      "excellent_proxy_rate_earlier": 0.1511627906976744,
+      "excellent_proxy_rate_later": 0.10526315789473684,
+      "minimum_rate": 0.10526315789473684
+    },
+    {
+      "window_minutes": 30,
+      "band_stdev": 1.0,
+      "slope_mode": "60",
+      "side": "long",
+      "events_earlier": 32.0,
+      "events_later": 19.0,
+      "excellent_proxy_rate_earlier": 0.21875,
+      "excellent_proxy_rate_later": 0.10526315789473684,
+      "minimum_rate": 0.10526315789473684
+    }
+  ]
+}

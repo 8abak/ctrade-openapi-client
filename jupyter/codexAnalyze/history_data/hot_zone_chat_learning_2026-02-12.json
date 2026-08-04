@@ -26,6 +26,22 @@
         "mae15": 0.12
       },
       "eligibleForPositiveTraining": true
+    },
+    {
+      "signalSequence": 2,
+      "signalId": "hot-zone-quote-reaction-long-31663473",
+      "signalTickId": 31663473,
+      "side": "long",
+      "rating": "false",
+      "userAccepted": true,
+      "userAssessment": "False.",
+      "selectionProvenance": {
+        "causallyGenerated": true,
+        "futureTicksUsedForSelection": false,
+        "chronologicalQueuePosition": 2
+      },
+      "lesson": "A flat quote average plus a noisy reclaim is insufficient. Require a clearly rising center line and support behavior at a defined standard-deviation band.",
+      "eligibleForNegativeTraining": true
     }
   ]
 }

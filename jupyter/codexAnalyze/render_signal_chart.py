@@ -22,12 +22,36 @@ def render(
     study_label: str = "retrospective micro discovery",
     provenance_label: str = "hindsight-selected for pattern study",
     overlay_quote_average: bool = False,
+    overlay_tick_vwap_bands: bool = False,
+    rolling_tick_vwap_minutes: int | None = None,
 ) -> Path:
     csv_path = REPO_ROOT / f"logs/sql_exports/ticks_XAUUSD_{day}.csv"
     ticks = pd.read_csv(csv_path, usecols=["id", "timestamp", "bid", "ask", "spread"])
     ticks["time"] = pd.to_datetime(ticks["timestamp"], format="mixed", utc=True)
     if overlay_quote_average:
         ticks["quote_average"] = ((ticks["bid"] + ticks["ask"]) / 2).expanding().mean()
+    if overlay_tick_vwap_bands:
+        midpoint = (ticks["bid"] + ticks["ask"]) / 2
+        anchor = ticks["time"].dt.floor("D")
+        count = ticks.groupby(anchor).cumcount() + 1
+        cumulative = midpoint.groupby(anchor).cumsum()
+        cumulative_square = (midpoint * midpoint).groupby(anchor).cumsum()
+        ticks["tick_vwap"] = cumulative / count
+        variance = (cumulative_square / count - ticks["tick_vwap"] ** 2).clip(lower=0)
+        ticks["tick_stdev"] = variance.pow(.5)
+        for multiplier in (.5, 1.0, 2.0):
+            key = str(multiplier).replace(".", "_")
+            ticks[f"upper_{key}"] = ticks["tick_vwap"] + multiplier * ticks["tick_stdev"]
+            ticks[f"lower_{key}"] = ticks["tick_vwap"] - multiplier * ticks["tick_stdev"]
+    if rolling_tick_vwap_minutes is not None:
+        indexed_mid = pd.Series(((ticks["bid"] + ticks["ask"]) / 2).to_numpy(), index=ticks["time"])
+        rolling = indexed_mid.rolling(f"{rolling_tick_vwap_minutes}min", min_periods=60)
+        ticks["rolling_tick_vwap"] = rolling.mean().to_numpy()
+        ticks["rolling_tick_stdev"] = rolling.std(ddof=0).to_numpy()
+        for multiplier in (1.0, 2.0):
+            key = str(multiplier).replace(".", "_")
+            ticks[f"rolling_upper_{key}"] = ticks["rolling_tick_vwap"] + multiplier * ticks["rolling_tick_stdev"]
+            ticks[f"rolling_lower_{key}"] = ticks["rolling_tick_vwap"] - multiplier * ticks["rolling_tick_stdev"]
     is_direct = direct_tick_id is not None
     if is_direct:
         if direct_side is None:
@@ -76,6 +100,23 @@ def render(
             view["local_time"], view["quote_average"], color="#d86cff", linewidth=1.35,
             linestyle=(0, (6, 3)), label="QUOTE AVG",
         )
+    if overlay_tick_vwap_bands:
+        ax.plot(view["local_time"], view["tick_vwap"], color="#d5dde5", linewidth=1.4, label="TICK VWAP")
+        band_styles = ((.5, 1.35, .95), (1.0, 1.0, .65), (2.0, .8, .42))
+        for multiplier, width, alpha in band_styles:
+            key = str(multiplier).replace(".", "_")
+            ax.plot(view["local_time"], view[f"upper_{key}"], color="#ff6666", linewidth=width, alpha=alpha)
+            ax.plot(view["local_time"], view[f"lower_{key}"], color="#54d98c", linewidth=width, alpha=alpha)
+        ax.plot([], [], color="#ff6666", linewidth=1.2, label="UPPER σ BANDS")
+        ax.plot([], [], color="#54d98c", linewidth=1.2, label="LOWER σ BANDS")
+    if rolling_tick_vwap_minutes is not None:
+        ax.plot(view["local_time"], view["rolling_tick_vwap"], color="#d5dde5", linewidth=1.5, label=f"{rolling_tick_vwap_minutes}m TICK VWAP")
+        for multiplier, width, alpha in ((1.0, 1.35, .95), (2.0, .9, .50)):
+            key = str(multiplier).replace(".", "_")
+            ax.plot(view["local_time"], view[f"rolling_upper_{key}"], color="#ff6666", linewidth=width, alpha=alpha)
+            ax.plot(view["local_time"], view[f"rolling_lower_{key}"], color="#54d98c", linewidth=width, alpha=alpha)
+        ax.plot([], [], color="#ff6666", linewidth=1.2, label="UPPER σ BANDS")
+        ax.plot([], [], color="#54d98c", linewidth=1.2, label="LOWER σ BANDS")
     ax.axvline(local_signal, color="#91a4b2", linestyle=(0, (4, 4)), linewidth=1.1)
     if not is_override:
         break_level = float(signal["features"]["break_level"])
@@ -144,6 +185,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--study-label", default="retrospective micro discovery")
     parser.add_argument("--provenance-label", default="hindsight-selected for pattern study")
     parser.add_argument("--overlay-quote-average", action="store_true")
+    parser.add_argument("--overlay-tick-vwap-bands", action="store_true")
+    parser.add_argument("--rolling-tick-vwap-minutes", type=int)
     return parser.parse_args()
 
 
@@ -153,5 +196,6 @@ if __name__ == "__main__":
         args.day, args.sequence, args.minutes_before, args.minutes_after,
         args.override_tick_id, args.override_side,
         args.direct_tick_id, args.direct_side, args.study_label, args.provenance_label,
-        args.overlay_quote_average,
+        args.overlay_quote_average, args.overlay_tick_vwap_bands,
+        args.rolling_tick_vwap_minutes,
     ))
