@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "day": "2026-02-12",
+  "family": "rolling 30-minute equal-tick VWAP with standard-deviation bands",
+  "scope": "entry detection only",
+  "decisions": [
+    {
+      "signalSequence": 1,
+      "signalId": "rolling-tick-vwap-band-long-31622081",
+      "signalTickId": 31622081,
+      "side": "long",
+      "rating": "good",
+      "userAccepted": true,
+      "userAssessment": "Good.",
+      "selectionProvenance": {
+        "causallyGenerated": true,
+        "futureTicksUsedForSelection": false,
+        "chronologicalQueuePosition": 1
+      },
+      "pattern": "rising rolling tick-VWAP, lower 1-sigma touch and reclaim, then bullish micro structure break",
+      "measuredAfterSelection": {
+        "spreadCoverMs": 2209,
+        "mfe5": 0.27,
+        "mae5": 0.22,
+        "mfe15": 0.91,
+        "mae15": 0.23
+      },
+      "eligibleForPositiveTraining": true,
+      "positiveClass": "good_not_excellent"
+    }
+  ]
+}
