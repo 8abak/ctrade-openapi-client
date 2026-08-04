@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-08-04T14:23:42.585033+00:00",
+  "rule": {
+    "maximumReversals": 1,
+    "secondLegSize": 2,
+    "acceptanceSecondsBeyondBand": 3,
+    "oppositeConfirmation": "causal 3-second first-flow break retained for 30 seconds, then band acceptance",
+    "reversalSearchSeconds": 60,
+    "recoverySearchSeconds": 300,
+    "costModel": "longs enter ask/exit bid; shorts enter bid/exit ask",
+    "scaleDown": "close one recovery unit as soon as combined executable P&L reaches zero"
+  },
+  "summary": {
+    "initial_candidates": 117,
+    "causal_reversals": 65,
+    "causal_reversal_rate": 0.5555555555555556,
+    "double_recovered_300s": 55,
+    "double_recovery_rate_300s": 0.8461538461538461,
+    "single_recovered_300s": 51,
+    "single_recovery_rate_300s": 0.7846153846153846,
+    "median_double_recovery_seconds": 17.647,
+    "median_initial_loss": -0.7699999999995271,
+    "median_max_adverse_before_scale_down": -2.2200000000002547,
+    "worst_max_adverse_before_scale_down": -24.9399999999996,
+    "mean_scaled_pnl_300": -1.271538461538512,
+    "periods": {
+      "earlier": {
+        "causal_reversals": 36,
+        "double_recovered_300s": 31,
+        "double_recovery_rate_300s": 0.8611111111111112,
+        "single_recovered_300s": 28,
+        "single_recovery_rate_300s": 0.7777777777777778,
+        "median_double_recovery_seconds": 17.864,
+        "median_initial_loss": -0.7649999999998727,
+        "median_max_adverse_before_scale_down": -2.2150000000001455,
+        "worst_max_adverse_before_scale_down": -24.9399999999996,
+        "mean_scaled_pnl_300": -1.3283333333332747
+      },
+      "later": {
+        "causal_reversals": 29,
+        "double_recovered_300s": 24,
+        "double_recovery_rate_300s": 0.8275862068965517,
+        "single_recovered_300s": 23,
+        "single_recovery_rate_300s": 0.7931034482758621,
+        "median_double_recovery_seconds": 15.869499999999999,
+        "median_initial_loss": -0.7899999999999636,
+        "median_max_adverse_before_scale_down": -2.349999999998545,
+        "worst_max_adverse_before_scale_down": -20.459999999999127,
+        "mean_scaled_pnl_300": -1.2010344827588064
+      }
+    },
+    "riskCaps": {
+      "3x_initial_loss": {
+        "recoveredBeforeCap": 33,
+        "recoveryRate": 0.5076923076923077,
+        "stoppedOrNotRecovered": 32
+      },
+      "5x_initial_loss": {
+        "recoveredBeforeCap": 44,
+        "recoveryRate": 0.676923076923077,
+        "stoppedOrNotRecovered": 21
+      },
+      "10x_initial_loss": {
+        "recoveredBeforeCap": 50,
+        "recoveryRate": 0.7692307692307693,
+        "stoppedOrNotRecovered": 15
+      }
+    }
+  }
+}

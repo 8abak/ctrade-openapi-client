@@ -27,6 +27,44 @@
       },
       "eligibleForPositiveTraining": true,
       "positiveClass": "good_not_excellent"
+    },
+    {
+      "signalSequence": 2,
+      "signalId": "rolling-tick-vwap-band-short-31625655",
+      "signalTickId": 31625655,
+      "side": "short",
+      "rating": "false",
+      "userAccepted": true,
+      "userAssessment": "False as an entry, although price visibly reacted to the upper band before accepting above it.",
+      "selectionProvenance": {
+        "causallyGenerated": true,
+        "futureTicksUsedForSelection": false,
+        "chronologicalQueuePosition": 2
+      },
+      "pattern": "declining rolling tick-VWAP, upper 1-sigma touch and bearish micro structure break that failed as price accepted above the band",
+      "measuredAfterSelection": {
+        "spreadCoverMs": 1494,
+        "mfe5": 0.2,
+        "mae5": 0.19,
+        "mfe15": 0.36,
+        "mae15": 0.19,
+        "mfe60": 0.5,
+        "mae60": 0.77
+      },
+      "eligibleForPositiveTraining": false,
+      "negativeClass": "failed_band_rejection",
+      "researchFollowUp": "Retain failed-band reversal as a causal research signal, but do not promote 2x recovery sizing.",
+      "measuredCausalReversal": {
+        "reversalTickId": 31625768,
+        "reversalSide": "long",
+        "secondsAfterInitialEntry": 56,
+        "initialRealizedLoss": -0.82,
+        "doubleRecoverySeconds": 14.26,
+        "singleRecoverySeconds": 48.97,
+        "maxAdverseBeforeDoubleRecovery": -1.74,
+        "scaledPnlAfter60Seconds": 0.75,
+        "scaledPnlAfter300Seconds": -0.96
+      }
     }
   ]
 }
