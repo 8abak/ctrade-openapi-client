@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "day": "2026-02-12",
+  "family": "expanding quote-average reaction plus causal micro structure confirmation",
+  "scope": "entry detection only",
+  "decisions": [
+    {
+      "signalSequence": 1,
+      "signalId": "hot-zone-quote-reaction-long-31628653",
+      "signalTickId": 31628653,
+      "side": "long",
+      "rating": "excellent",
+      "userAccepted": true,
+      "userAssessment": "Quite well performed trade.",
+      "selectionProvenance": {
+        "causallyGenerated": true,
+        "futureTicksUsedForSelection": false,
+        "chronologicalQueuePosition": 1
+      },
+      "pattern": "price reacts around the expanding quote-average, reclaims it, forms a higher low, and confirms with a bullish micro structure break",
+      "measuredAfterSelection": {
+        "spreadCoverMs": 453,
+        "mfe5": 0.68,
+        "mae5": 0.12,
+        "mfe15": 1.24,
+        "mae15": 0.12
+      },
+      "eligibleForPositiveTraining": true
+    }
+  ]
+}
