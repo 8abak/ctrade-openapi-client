@@ -9,7 +9,7 @@ import hot_zone_study as base
 
 
 WINDOW_MINUTES = (15, 30, 60, 120)
-BANDS = (0.5, 1.0, 1.5, 2.0)
+BANDS = (0.5, 1.0, 1.5, 2.0, 3.0)
 SLOPE_SECONDS = (60, 300)
 TOUCH_SECONDS = 30
 

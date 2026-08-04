@@ -1,0 +1,123 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-08-04T21:04:19.219471+00:00",
+  "futureTicksUsedForSelection": false,
+  "targetOutcomesUsedOnlyForAudit": true,
+  "hypothesis": "reaction entries at 1/2/3 sigma improve when five-minute VWAP tilt is material",
+  "frozenRule": {
+    "windowMinutes": 30,
+    "bandsStdev": [
+      1.0,
+      2.0,
+      3.0
+    ],
+    "eligibleReactionBandStdev": 1.0,
+    "minimumAbsoluteFiveMinuteTiltSigma": 0.35,
+    "maximumAbsoluteFiveMinuteTiltSigma": 0.5,
+    "minimumAbsoluteVwapSlopePriceUnitsPerMinute": 0.2,
+    "trigger": "band touch and reclaim/rejection plus causal structure shift",
+    "desiredMoveAudit": "2 and 3 executable XAUUSD price units within 300 seconds",
+    "otherBandsStatus": "2-sigma and 3-sigma are calculated and displayed but remain research-only due to small samples"
+  },
+  "frozenSummary": [
+    {
+      "band_stdev": 1.0,
+      "period": "earlier",
+      "events": 5,
+      "reach_2_units_300s_rate": 1.0,
+      "reach_3_units_300s_rate": 1.0,
+      "spread_cover_5s_rate": 0.4,
+      "median_mfe_60": 3.619999999999891,
+      "median_mae_60": 0.7200000000002547,
+      "mean_pnl_60": 2.583999999999832
+    },
+    {
+      "band_stdev": 1.0,
+      "period": "later",
+      "events": 6,
+      "reach_2_units_300s_rate": 0.8333333333333334,
+      "reach_3_units_300s_rate": 0.6666666666666666,
+      "spread_cover_5s_rate": 0.6666666666666666,
+      "median_mfe_60": 1.425000000000182,
+      "median_mae_60": 1.1099999999996726,
+      "mean_pnl_60": 0.3916666666665756
+    },
+    {
+      "band_stdev": 1.0,
+      "period": "all",
+      "events": 11,
+      "reach_2_units_300s_rate": 0.9090909090909091,
+      "reach_3_units_300s_rate": 0.8181818181818182,
+      "spread_cover_5s_rate": 0.5454545454545454,
+      "median_mfe_60": 1.5600000000004002,
+      "median_mae_60": 1.019999999999527,
+      "mean_pnl_60": 1.3881818181816923
+    },
+    {
+      "band_stdev": 2.0,
+      "period": "earlier",
+      "events": 0,
+      "reach_2_units_300s_rate": null,
+      "reach_3_units_300s_rate": null,
+      "spread_cover_5s_rate": null,
+      "median_mfe_60": null,
+      "median_mae_60": null,
+      "mean_pnl_60": null
+    },
+    {
+      "band_stdev": 2.0,
+      "period": "later",
+      "events": 0,
+      "reach_2_units_300s_rate": null,
+      "reach_3_units_300s_rate": null,
+      "spread_cover_5s_rate": null,
+      "median_mfe_60": null,
+      "median_mae_60": null,
+      "mean_pnl_60": null
+    },
+    {
+      "band_stdev": 2.0,
+      "period": "all",
+      "events": 0,
+      "reach_2_units_300s_rate": null,
+      "reach_3_units_300s_rate": null,
+      "spread_cover_5s_rate": null,
+      "median_mfe_60": null,
+      "median_mae_60": null,
+      "mean_pnl_60": null
+    },
+    {
+      "band_stdev": 3.0,
+      "period": "earlier",
+      "events": 0,
+      "reach_2_units_300s_rate": null,
+      "reach_3_units_300s_rate": null,
+      "spread_cover_5s_rate": null,
+      "median_mfe_60": null,
+      "median_mae_60": null,
+      "mean_pnl_60": null
+    },
+    {
+      "band_stdev": 3.0,
+      "period": "later",
+      "events": 0,
+      "reach_2_units_300s_rate": null,
+      "reach_3_units_300s_rate": null,
+      "spread_cover_5s_rate": null,
+      "median_mfe_60": null,
+      "median_mae_60": null,
+      "mean_pnl_60": null
+    },
+    {
+      "band_stdev": 3.0,
+      "period": "all",
+      "events": 0,
+      "reach_2_units_300s_rate": null,
+      "reach_3_units_300s_rate": null,
+      "spread_cover_5s_rate": null,
+      "median_mfe_60": null,
+      "median_mae_60": null,
+      "mean_pnl_60": null
+    }
+  ]
+}

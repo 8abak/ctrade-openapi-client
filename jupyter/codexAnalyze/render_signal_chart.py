@@ -48,7 +48,7 @@ def render(
         rolling = indexed_mid.rolling(f"{rolling_tick_vwap_minutes}min", min_periods=60)
         ticks["rolling_tick_vwap"] = rolling.mean().to_numpy()
         ticks["rolling_tick_stdev"] = rolling.std(ddof=0).to_numpy()
-        for multiplier in (1.0, 2.0):
+        for multiplier in (1.0, 2.0, 3.0):
             key = str(multiplier).replace(".", "_")
             ticks[f"rolling_upper_{key}"] = ticks["rolling_tick_vwap"] + multiplier * ticks["rolling_tick_stdev"]
             ticks[f"rolling_lower_{key}"] = ticks["rolling_tick_vwap"] - multiplier * ticks["rolling_tick_stdev"]
@@ -113,7 +113,7 @@ def render(
         ax.plot([], [], color="#54d98c", linewidth=1.2, label="LOWER σ BANDS")
     if rolling_tick_vwap_minutes is not None:
         ax.plot(view["local_time"], view["rolling_tick_vwap"], color="#d5dde5", linewidth=1.5, label=f"{rolling_tick_vwap_minutes}m TICK VWAP")
-        for multiplier, width, alpha in ((1.0, 1.35, .95), (2.0, .9, .50)):
+        for multiplier, width, alpha in ((1.0, 1.35, .95), (2.0, .9, .60), (3.0, .8, .42)):
             key = str(multiplier).replace(".", "_")
             ax.plot(view["local_time"], view[f"rolling_upper_{key}"], color="#ff6666", linewidth=width, alpha=alpha)
             ax.plot(view["local_time"], view[f"rolling_lower_{key}"], color="#54d98c", linewidth=width, alpha=alpha)

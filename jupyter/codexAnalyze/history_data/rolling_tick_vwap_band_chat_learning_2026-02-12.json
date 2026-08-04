@@ -65,6 +65,38 @@
         "scaledPnlAfter60Seconds": 0.75,
         "scaledPnlAfter300Seconds": -0.96
       }
+    },
+    {
+      "signalSequence": 3,
+      "signalId": "rolling-tick-vwap-band-long-31648786",
+      "signalTickId": 31648786,
+      "side": "long",
+      "rating": "false",
+      "userAccepted": true,
+      "userAssessment": "False. The VWAP was too close to flat; prioritize materially tilted VWAP and research continuation from 2-sigma toward 3-sigma.",
+      "selectionProvenance": {
+        "causallyGenerated": true,
+        "futureTicksUsedForSelection": false,
+        "chronologicalQueuePosition": 3
+      },
+      "pattern": "lower 1-sigma reclaim with positive but weak rolling VWAP tilt",
+      "measuredAtSelection": {
+        "vwapSlope60PerMinute": 0.06053192079252767,
+        "vwapSlope300PerMinute": 0.12699282553403463,
+        "tickStdev": 2.702991707635578,
+        "normalizedFiveMinuteTiltSigma": 0.2349101241425011
+      },
+      "measuredAfterSelection": {
+        "spreadCoverMs": 1004,
+        "mfe5": 0.53,
+        "mae5": 0.9,
+        "pnl5": -0.85,
+        "mfe15": 0.53,
+        "mae15": 1.15,
+        "pnl15": -1.07
+      },
+      "eligibleForPositiveTraining": false,
+      "negativeClass": "insufficient_vwap_tilt"
     }
   ]
 }
