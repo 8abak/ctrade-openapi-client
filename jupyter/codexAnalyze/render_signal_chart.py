@@ -60,6 +60,8 @@ def render(
         signal = {"sequence": sequence, "side": direct_side}
     else:
         signal_path = PROJECT_DIR / f"history_data/signals_{day}.json"
+        if not signal_path.exists():
+            signal_path = PROJECT_DIR / f"history_data/rolling_tick_vwap_band_signals_{day}.json"
         payload = json.loads(signal_path.read_text(encoding="utf-8"))
         signal = next(item for item in payload["signals"] if int(item["sequence"]) == sequence)
     selected_tick_id = direct_tick_id if is_direct else override_tick_id
@@ -118,7 +120,8 @@ def render(
         ax.plot([], [], color="#ff6666", linewidth=1.2, label="UPPER σ BANDS")
         ax.plot([], [], color="#54d98c", linewidth=1.2, label="LOWER σ BANDS")
     ax.axvline(local_signal, color="#91a4b2", linestyle=(0, (4, 4)), linewidth=1.1)
-    if not is_override:
+    is_vwap_signal = "active_band" in signal
+    if not is_override and "break_level" in signal.get("features", {}):
         break_level = float(signal["features"]["break_level"])
         ax.hlines(
             break_level,
@@ -138,15 +141,21 @@ def render(
         xy=(local_signal, marker_price), xytext=(8, 8 if signal["side"] == "long" else -18),
         textcoords="offset points", color=color, fontsize=9, weight="bold",
     )
+    pattern_label = (
+        "rolling VWAP-band structure trigger" if is_vwap_signal
+        else ("failed-retest micro trigger" if is_override else "first macro flow break")
+    )
     ax.set_title(
         f"XAUUSD · {day} · Signal {sequence}/{len(payload['signals'])} · "
-        f"{signal['side'].upper()} · {study_label if is_direct else ('failed-retest micro trigger' if is_override else 'first macro flow break')}",
+        f"{signal['side'].upper()} · {study_label if is_direct else pattern_label}",
         color="#dce7ef", fontsize=14, loc="left", pad=14,
     )
-    detail = (
-        (provenance_label if is_direct else "tick-level retest confirmation") if is_override
-        else f"rank {signal['score']*100:.1f} · scales {'+'.join(map(str, signal['features']['scales']))}s"
-    )
+    if is_vwap_signal:
+        detail = "causal selection; future path displayed only for review"
+    elif is_override:
+        detail = provenance_label if is_direct else "tick-level retest confirmation"
+    else:
+        detail = f"rank {signal['score']*100:.1f} · scales {'+'.join(map(str, signal['features']['scales']))}s"
     ax.text(
         1, 1.018,
         f"Sydney {local_signal:%d %b %H:%M:%S}  ·  {detail}",
