@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "day": "2026-02-11",
+  "mode": "retrospective_pattern_discovery",
+  "futureTicksUsedForCandidateMining": true,
+  "approvedCandidatesBecomeTrainingData": true,
+  "candidates": [
+    {
+      "sequence": 1,
+      "side": "short",
+      "hindsightSeedTickId": 31326420,
+      "studyEntryTickId": 31326421,
+      "status": "rejected",
+      "rating": "false",
+      "rejectionReason": "Untradeable price gap/discontinuity; no normally huntable path or executable intermediate prices.",
+      "proposedPattern": "stalled quote followed by one-sided bid withdrawal",
+      "observableAtEntry": {
+        "bid": 5036.52,
+        "ask": 5036.85,
+        "spread": 0.33,
+        "priorQuoteGapMs": 287,
+        "recentLongQuoteGapsMs": [1593, 2450, 1779],
+        "bidChange": -0.01,
+        "askChange": 0.0,
+        "spreadChange": 0.01
+      },
+      "measuredWithFutureTicks": {
+        "spreadCoverMs": 286,
+        "pnl1": 6.35,
+        "mfe1": 6.35,
+        "pnl5": 6.20,
+        "mfe5": 6.61,
+        "maximumAdverseMovement": 0.33
+      },
+      "userAccepted": false,
+      "eligibleForPositiveTraining": false,
+      "eligibleAsGapNegativeExample": true
+    },
+    {
+      "sequence": 2,
+      "side": "long",
+      "hindsightSeedTickId": 31335954,
+      "studyEntryTickId": 31335923,
+      "status": "awaiting_user_review",
+      "rating": null,
+      "proposedPattern": "micro W reversal: higher low, higher-high break, then executable hold",
+      "selectionRationale": "Entry is delayed until after the first upward jump. The new price level prints repeatedly and remains executable before the next acceleration.",
+      "observableAtEntry": {
+        "timestampSydney": "2026-02-11T11:17:51.299+11:00",
+        "bid": 5032.31,
+        "ask": 5032.65,
+        "spread": 0.34,
+        "structure": "The major micro-low near 5028 is followed by a rally, a higher low near 5030.13, and a break above the intervening high."
+      },
+      "continuityCheck": {
+        "passed": true,
+        "entryIsAfterInitialJump": true,
+        "quotesContinueAtEntryLevel": true,
+        "classification": "normally executable post-break hold, not an entry inside a price gap"
+      },
+      "measuredWithFutureTicks": {
+        "spreadCoverMs": 1887,
+        "pnl1": -0.28,
+        "mfe1": -0.28,
+        "pnl2": 0.04,
+        "mfe2": 0.04,
+        "pnl5": 1.09,
+        "mfe5": 1.09,
+        "pnl15": 6.86,
+        "mfe15": 7.07,
+        "maximumAdverseMovement15": 0.34
+      },
+      "provenance": "retrospective_hindsight_selected_for_pattern_discovery",
+      "userAccepted": null,
+      "eligibleForPositiveTraining": false
+    }
+  ]
+}
