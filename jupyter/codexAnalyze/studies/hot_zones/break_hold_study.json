@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "rule": {
+    "description": "cross a known level, hold beyond it for three quotes, enter on synchronized bid/ask movement",
+    "causal": true,
+    "holdQuotes": 3,
+    "armLookbackQuotes": 30,
+    "maximumCrossJump": 1.5,
+    "cooldownSecondsPerLevelAndSide": 180
+  },
+  "approvedFeb11EntryNearbyDetections": []
+}

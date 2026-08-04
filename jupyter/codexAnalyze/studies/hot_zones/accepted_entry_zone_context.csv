@@ -1,0 +1,9 @@
+day,tick_id,side,source,timestamp_utc,mid,zone_radius,in_hot_zone,near_zones,zone_interactions,nearest_zone,nearest_distance
+2026-02-06,30684927,short,chat_learning_2026-02-06.json,2026-02-06T09:03:06.837000+00:00,4856.67,0.7000000000007276,False,,,classic_pivot,18.21833333333325
+2026-02-06,30757363,short,chat_learning_2026-02-06.json,2026-02-06T15:19:13.982000+00:00,4949.115,0.8800000000028376,False,,,resistance_1,11.186666666666497
+2026-02-06,30795718,short,chat_learning_2026-02-06.json,2026-02-06T18:22:21.464000+00:00,4962.98,0.6,False,,,resistance_1,2.678333333333285
+2026-02-09,30895198,long,chat_learning_2026-02-09.json,2026-02-09T05:07:12.471000+00:00,5014.275,0.62,True,time_average,time_average:inside,time_average,0.10481545533093595
+2026-02-10,31078819,long,chat_learning_2026-02-10.json,2026-02-09T21:49:22.389000+00:00,5062.59,0.86,False,,,quote_average,1.991420585335618
+2026-02-10,31165153,long,chat_learning_2026-02-10.json,2026-02-10T06:33:14.203000+00:00,5029.74,0.8,False,,,quote_average,3.933292775310292
+2026-02-10,31286186,short,chat_learning_2026-02-10.json,2026-02-10T17:48:36.921000+00:00,5032.675,0.48,False,,,quote_average,4.06416291482401
+2026-02-11,31335923,long,retrospective_candidates_2026-02-11.json,2026-02-11T00:17:51.299000+00:00,5032.48,0.68,True,opening_range_high,opening_range_high:breakout,opening_range_high,0.5250000000005457

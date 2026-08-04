@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "study": "causal hot-zone context around micro structure-shift entries",
+  "days": [
+    "2026-01-20",
+    "2026-02-12"
+  ],
+  "daysAnalyzed": 18,
+  "futureDataPolicy": {
+    "zoneConstruction": "causal: previous broker day or expanding current-day data only",
+    "entryTrigger": "causal 3-second pivot failure and structure break",
+    "futureTicksUsedOnlyFor": "outcome measurement after the entry tick"
+  },
+  "vwapCaveat": "No traded volume exists in the exports. quote_average is quote-count weighted; time_average is a one-second time-weighted proxy.",
+  "zoneRadius": "max(0.35, 2x trailing 5-minute median spread, 4x trailing median one-second move), capped at 1.25",
+  "excellentEntryProxy": "spread covered within 5 seconds, 15-second MFE >= 1.00, and 15-second MAE <= max(spread + 0.25, 0.60)",
+  "overall": [
+    {
+      "period": "earlier",
+      "in_hot_zone": false,
+      "events": 14097,
+      "cover_5s_rate": 0.4923742640278073,
+      "excellent_proxy_rate": 0.15216003404979783,
+      "median_mfe_15": 0.31999999999970896,
+      "median_mae_15": 0.8500000000003638
+    },
+    {
+      "period": "earlier",
+      "in_hot_zone": true,
+      "events": 865,
+      "cover_5s_rate": 0.4751445086705202,
+      "excellent_proxy_rate": 0.15028901734104047,
+      "median_mfe_15": 0.27999999999974534,
+      "median_mae_15": 0.819999999999709
+    },
+    {
+      "period": "later",
+      "in_hot_zone": false,
+      "events": 5493,
+      "cover_5s_rate": 0.3841252503185873,
+      "excellent_proxy_rate": 0.1112324776988895,
+      "median_mfe_15": 0.1499999999996362,
+      "median_mae_15": 0.8000000000001819
+    },
+    {
+      "period": "later",
+      "in_hot_zone": true,
+      "events": 586,
+      "cover_5s_rate": 0.38054607508532423,
+      "excellent_proxy_rate": 0.12798634812286688,
+      "median_mfe_15": 0.07000000000016371,
+      "median_mae_15": 0.7300000000004729
+    }
+  ]
+}

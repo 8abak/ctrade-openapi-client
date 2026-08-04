@@ -1,0 +1,204 @@
+{
+  "schemaVersion": 1,
+  "day": "2026-02-12",
+  "mode": "causal_quote_average_reaction_replay",
+  "generatedAt": "2026-08-04T05:46:25.004883+00:00",
+  "selectionPolicy": {
+    "futureTicksUsed": false,
+    "side": "long",
+    "zone": "expanding quote-count average (not true volume VWAP)",
+    "trigger": "causal 3-second HH/LL failure-and-break inside the zone after a reaction approach",
+    "continuity": "maximum prior five-second one-second jump <= 1.25",
+    "spreadRatioLimit": 1.5,
+    "cooldownSeconds": 30
+  },
+  "outcomePolicy": "outcomeAudit is appended only after the complete causal candidate list is frozen",
+  "signals": [
+    {
+      "sequence": 1,
+      "id": "hot-zone-quote-reaction-long-31628653",
+      "tick_id": 31628653,
+      "timestamp_ms": 1770876691000,
+      "side": "long",
+      "bid": 5065.61,
+      "ask": 5065.84,
+      "zone": "expanding_quote_average",
+      "zone_price": 5065.462417805976,
+      "zone_distance": 0.2625821940246169,
+      "zone_radius": 0.46,
+      "features": {
+        "pivot_seconds": 3,
+        "spread_ratio": 1.0,
+        "maximum_prior_5s_jump": 0.43000000000029104,
+        "interaction": "reaction"
+      },
+      "outcomeAudit": {
+        "mfe5": 0.68,
+        "mae5": 0.12,
+        "pnl5": 0.68,
+        "mfe15": 1.24,
+        "mae15": 0.12,
+        "pnl15": 0.86,
+        "mfe60": 1.24,
+        "mae60": 0.12,
+        "pnl60": 0.65,
+        "spreadCoverMs": 453
+      }
+    },
+    {
+      "sequence": 2,
+      "id": "hot-zone-quote-reaction-long-31663473",
+      "tick_id": 31663473,
+      "timestamp_ms": 1770891338000,
+      "side": "long",
+      "bid": 5065.01,
+      "ask": 5065.17,
+      "zone": "expanding_quote_average",
+      "zone_price": 5065.287194881487,
+      "zone_distance": 0.19719488148712117,
+      "zone_radius": 0.38,
+      "features": {
+        "pivot_seconds": 3,
+        "spread_ratio": 0.8421052631578947,
+        "maximum_prior_5s_jump": 0.3600000000005821,
+        "interaction": "reaction"
+      },
+      "outcomeAudit": {
+        "mfe5": 0.25,
+        "mae5": 0.35,
+        "pnl5": 0.13,
+        "mfe15": 0.86,
+        "mae15": 0.53,
+        "pnl15": 0.73,
+        "mfe60": 1.35,
+        "mae60": 1.26,
+        "pnl60": -0.07,
+        "spreadCoverMs": 476
+      }
+    },
+    {
+      "sequence": 3,
+      "id": "hot-zone-quote-reaction-long-31675822",
+      "tick_id": 31675822,
+      "timestamp_ms": 1770897346000,
+      "side": "long",
+      "bid": 5064.62,
+      "ask": 5064.86,
+      "zone": "expanding_quote_average",
+      "zone_price": 5065.065773261528,
+      "zone_distance": 0.32577326152841124,
+      "zone_radius": 0.42,
+      "features": {
+        "pivot_seconds": 3,
+        "spread_ratio": 1.1428571428571428,
+        "maximum_prior_5s_jump": 0.44499999999970896,
+        "interaction": "reaction"
+      },
+      "outcomeAudit": {
+        "mfe5": 1.12,
+        "mae5": 0.29,
+        "pnl5": 1.12,
+        "mfe15": 1.15,
+        "mae15": 0.46,
+        "pnl15": -0.25,
+        "mfe60": 1.15,
+        "mae60": 2.36,
+        "pnl60": -1.52,
+        "spreadCoverMs": 755
+      }
+    },
+    {
+      "sequence": 4,
+      "id": "hot-zone-quote-reaction-long-31676672",
+      "tick_id": 31676672,
+      "timestamp_ms": 1770897721000,
+      "side": "long",
+      "bid": 5065.24,
+      "ask": 5065.43,
+      "zone": "expanding_quote_average",
+      "zone_price": 5065.059250084174,
+      "zone_distance": 0.27574991582605435,
+      "zone_radius": 0.42,
+      "features": {
+        "pivot_seconds": 3,
+        "spread_ratio": 0.9047619047619048,
+        "maximum_prior_5s_jump": 0.4899999999997817,
+        "interaction": "reaction"
+      },
+      "outcomeAudit": {
+        "mfe5": 0.01,
+        "mae5": 0.24,
+        "pnl5": -0.04,
+        "mfe15": 0.19,
+        "mae15": 0.61,
+        "pnl15": -0.55,
+        "mfe60": 0.19,
+        "mae60": 0.66,
+        "pnl60": -0.48,
+        "spreadCoverMs": 2200
+      }
+    },
+    {
+      "sequence": 5,
+      "id": "hot-zone-quote-reaction-long-31681106",
+      "tick_id": 31681106,
+      "timestamp_ms": 1770899959000,
+      "side": "long",
+      "bid": 5065.17,
+      "ask": 5065.34,
+      "zone": "expanding_quote_average",
+      "zone_price": 5064.986014891291,
+      "zone_distance": 0.2689851087088755,
+      "zone_radius": 0.44,
+      "features": {
+        "pivot_seconds": 3,
+        "spread_ratio": 0.7727272727272728,
+        "maximum_prior_5s_jump": 0.23999999999978172,
+        "interaction": "reaction"
+      },
+      "outcomeAudit": {
+        "mfe5": -0.12,
+        "mae5": 0.17,
+        "pnl5": -0.13,
+        "mfe15": -0.12,
+        "mae15": 0.4,
+        "pnl15": -0.16,
+        "mfe60": -0.12,
+        "mae60": 2.8,
+        "pnl60": -2.56,
+        "spreadCoverMs": null
+      }
+    },
+    {
+      "sequence": 6,
+      "id": "hot-zone-quote-reaction-long-31709919",
+      "tick_id": 31709919,
+      "timestamp_ms": 1770909287000,
+      "side": "long",
+      "bid": 5065.05,
+      "ask": 5065.23,
+      "zone": "expanding_quote_average",
+      "zone_price": 5064.637399028333,
+      "zone_distance": 0.5026009716666522,
+      "zone_radius": 0.5600000000013097,
+      "features": {
+        "pivot_seconds": 3,
+        "spread_ratio": 1.0588235294117645,
+        "maximum_prior_5s_jump": 0.37999999999919964,
+        "interaction": "reaction"
+      },
+      "outcomeAudit": {
+        "mfe5": 0.27,
+        "mae5": 0.05,
+        "pnl5": 0.27,
+        "mfe15": 0.48,
+        "mae15": 0.18,
+        "pnl15": 0.2,
+        "mfe60": 2.15,
+        "mae60": 0.18,
+        "pnl60": 1.03,
+        "spreadCoverMs": 555
+      }
+    }
+  ]
+}

@@ -41,8 +41,8 @@
       "side": "long",
       "hindsightSeedTickId": 31335954,
       "studyEntryTickId": 31335923,
-      "status": "awaiting_user_review",
-      "rating": null,
+      "status": "accepted",
+      "rating": "excellent",
       "proposedPattern": "micro W reversal: higher low, higher-high break, then executable hold",
       "selectionRationale": "Entry is delayed until after the first upward jump. The new price level prints repeatedly and remains executable before the next acceleration.",
       "observableAtEntry": {
@@ -71,8 +71,9 @@
         "maximumAdverseMovement15": 0.34
       },
       "provenance": "retrospective_hindsight_selected_for_pattern_discovery",
-      "userAccepted": null,
-      "eligibleForPositiveTraining": false
+      "userAccepted": true,
+      "userAssessment": "Good entry; difficult to predict before it happens, motivating hot-zone anticipation plus live confirmation.",
+      "eligibleForPositiveTraining": true
     }
   ]
 }
