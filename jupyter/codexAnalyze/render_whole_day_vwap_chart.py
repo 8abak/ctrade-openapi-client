@@ -17,7 +17,7 @@ REPO_ROOT = PROJECT_DIR.parent.parent
 SYDNEY = ZoneInfo("Australia/Sydney")
 
 
-def render(day: str) -> Path:
+def render(day: str, panoramic: bool = False) -> Path:
     ticks = study.load_ticks(REPO_ROOT / f"logs/sql_exports/ticks_XAUUSD_{day}.csv")
     indicator = rolling_indicator(ticks, 30)
     quotes = ticks.set_index("timestamp_utc")[["bid", "ask"]].resample("20s").last()
@@ -26,9 +26,19 @@ def render(day: str) -> Path:
     view.index = view.index.tz_convert(SYDNEY)
 
     start = pd.Timestamp(day, tz=SYDNEY) + pd.Timedelta(hours=8)
-    panels = [(start + pd.Timedelta(hours=8 * i), start + pd.Timedelta(hours=8 * (i + 1))) for i in range(3)]
+    panels = (
+        [(start, start + pd.Timedelta(hours=24))]
+        if panoramic
+        else [(start + pd.Timedelta(hours=8 * i), start + pd.Timedelta(hours=8 * (i + 1))) for i in range(3)]
+    )
     plt.style.use("dark_background")
-    fig, axes = plt.subplots(3, 1, figsize=(18, 15), constrained_layout=True)
+    fig, axes = plt.subplots(
+        len(panels), 1,
+        figsize=((32, 8) if panoramic else (18, 15)),
+        constrained_layout=True,
+        squeeze=False,
+    )
+    axes = axes[:, 0]
     fig.patch.set_facecolor("#081015")
     fig.suptitle(
         f"XAUUSD · {day} broker day · 30-minute equal-tick VWAP · Sydney time",
@@ -63,7 +73,8 @@ def render(day: str) -> Path:
         if panel_number == 1:
             axis.legend(loc="upper right", ncol=5, frameon=False, fontsize=10, labelcolor="#a9bbc6")
 
-    output = PROJECT_DIR / "history_data" / "screenshots" / f"{day}_whole_day_vwap.png"
+    suffix = "whole_day_vwap_panorama" if panoramic else "whole_day_vwap"
+    output = PROJECT_DIR / "history_data" / "screenshots" / f"{day}_{suffix}.png"
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=170, facecolor=fig.get_facecolor(), bbox_inches="tight")
     plt.close(fig)
@@ -73,8 +84,9 @@ def render(day: str) -> Path:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Render a phone-readable whole broker-day VWAP chart.")
     parser.add_argument("--day", default="2026-02-12")
+    parser.add_argument("--panoramic", action="store_true")
     args = parser.parse_args()
-    print(render(args.day))
+    print(render(args.day, panoramic=args.panoramic))
 
 
 if __name__ == "__main__":
