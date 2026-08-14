@@ -43,6 +43,7 @@
   const TRADE_DEFAULT_LOT_SIZE = 0.01;
   const TRADE_REVIEW_DEFAULT_TICKS_BEFORE = 300;
   const TRADE_REVIEW_DEFAULT_TICKS_AFTER = 300;
+  const DRAWING_EXIT_CONFIRM_TICKS = 20;
   const TRADE_MARKER_COLORS = {
     buyEntry: "#7ef0c7",
     sellEntry: "#ff9fb2",
@@ -3985,6 +3986,7 @@
   function drawingVisibleEnd(channel) {
     const fittedEnd = Number(channel.endTickId || 0);
     let visibleEnd = Math.max(fittedEnd, Number(state.rangeLastId || fittedEnd));
+    let consecutiveOutside = 0;
     for (const row of state.rows || []) {
       const tickId = Number(row.id || 0);
       const mid = Number(row.mid ?? ((Number(row.bid) + Number(row.ask)) / 2));
@@ -3993,8 +3995,13 @@
       }
       const values = regressionValuesAt(channel, tickId);
       if (mid < values.lower || mid > values.upper) {
-        visibleEnd = tickId;
-        break;
+        consecutiveOutside += 1;
+        if (consecutiveOutside >= DRAWING_EXIT_CONFIRM_TICKS) {
+          visibleEnd = tickId;
+          break;
+        }
+      } else {
+        consecutiveOutside = 0;
       }
     }
     return visibleEnd;
