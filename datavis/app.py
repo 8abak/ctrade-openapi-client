@@ -36,12 +36,14 @@ from datavis.backbone import BIGBONES_SOURCE
 from datavis.backbone import load_state_row as load_backbone_state_row
 from datavis.backbone import resolve_current_day_ref as resolve_current_backbone_day_ref
 from datavis.backbone import resolve_day_ref_for_timestamp as resolve_backbone_day_ref_for_timestamp
+from datavis.brokerday import brokerday_bounds, brokerday_for_timestamp
 from datavis.db import db_connect as shared_db_connect
 from datavis.mavg import list_page_config_rows as list_mavg_config_rows
 from datavis.mavg import query_point_rows_after_value_id as query_mavg_points_after_value_id
 from datavis.mavg import query_point_rows_for_tick_range as query_mavg_points_for_tick_range
 from datavis.mavg import query_point_rows_for_time_range as query_mavg_points_for_time_range
 from datavis.rects import RectPaperService, RectServiceError
+from datavis.regression_channel import RegressionChannelError, fit_regression_channel
 from datavis.smart_scalp import SmartScalpError, SmartScalpService
 from datavis.structure import StructureEngine, replay_ticks
 from datavis.trading import CTraderGateway, load_broker_config
@@ -207,6 +209,21 @@ class TradeSmartEntryArmRequest(BaseModel):
 
 class TradeSmartCloseArmRequest(BaseModel):
     armed: bool = False
+
+
+class TradeCloseConfigRequest(BaseModel):
+    mode: str = Field(..., min_length=5, max_length=7)
+    startTickId: Optional[int] = Field(None, ge=1)
+    endTickId: Optional[int] = Field(None, ge=1)
+    deviations: Optional[float] = Field(None, gt=0, le=10)
+
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, value: str) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized not in {"manual", "smart", "channel"}:
+            raise ValueError("mode must be manual, smart, or channel")
+        return normalized
 
 
 class TradeSmartConfigRequest(BaseModel):
@@ -1309,6 +1326,80 @@ def query_latest_tick(cur: Any) -> Optional[Dict[str, Any]]:
     )
     row = cur.fetchone()
     return dict(row) if row else None
+
+
+def load_acd_payload() -> Dict[str, Any]:
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, timestamp, bid, ask, mid
+                FROM public.ticks
+                WHERE symbol = %s
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (TICK_SYMBOL,),
+            )
+            latest = dict(cur.fetchone() or {})
+            if not latest:
+                return {"available": False, "reason": "No live ticks are available."}
+            broker_day = brokerday_for_timestamp(latest["timestamp"])
+            day_start, _ = brokerday_bounds(broker_day)
+            opening_end = day_start + timedelta(minutes=30)
+            cur.execute(
+                """
+                SELECT
+                    MIN(bid) AS opening_low,
+                    MAX(ask) AS opening_high,
+                    MIN(id) AS start_tick_id,
+                    MAX(id) AS end_tick_id,
+                    COUNT(*) AS tick_count
+                FROM public.ticks
+                WHERE symbol = %s AND timestamp >= %s AND timestamp < %s
+                """,
+                (TICK_SYMBOL, day_start, opening_end),
+            )
+            opening = dict(cur.fetchone() or {})
+    opening_low = float(opening.get("opening_low") or 0.0)
+    opening_high = float(opening.get("opening_high") or 0.0)
+    if opening_high <= opening_low:
+        return {
+            "available": False,
+            "reason": "The 08:00-08:30 Sydney opening range is not complete.",
+            "brokerDay": broker_day.isoformat(),
+        }
+    opening_range = opening_high - opening_low
+    a_offset = opening_range * 0.5
+    c_offset = opening_range
+    current_mid = float(latest.get("mid") or ((float(latest["bid"]) + float(latest["ask"])) / 2.0))
+    levels = {
+        "cUp": opening_high + c_offset,
+        "aUp": opening_high + a_offset,
+        "openingHigh": opening_high,
+        "openingLow": opening_low,
+        "aDown": opening_low - a_offset,
+        "cDown": opening_low - c_offset,
+    }
+    if current_mid >= levels["aUp"]:
+        direction = "up"
+    elif current_mid <= levels["aDown"]:
+        direction = "down"
+    else:
+        direction = "neutral"
+    return {
+        "available": True,
+        "brokerDay": broker_day.isoformat(),
+        "openingStart": day_start.isoformat(),
+        "openingEnd": opening_end.isoformat(),
+        "startTickId": int(opening.get("start_tick_id") or 0),
+        "endTickId": int(opening.get("end_tick_id") or 0),
+        "tickCount": int(opening.get("tick_count") or 0),
+        "openingRange": opening_range,
+        "currentMid": current_mid,
+        "direction": direction,
+        "levels": levels,
+    }
 
 
 def query_bootstrap_rows(
@@ -3571,6 +3662,11 @@ def api_health() -> Dict[str, Any]:
     }
 
 
+@app.get("/api/live/acd")
+def live_acd() -> Dict[str, Any]:
+    return load_acd_payload()
+
+
 @app.get("/api/sql/schema")
 def sql_schema(_: Optional[str] = Depends(require_sql_admin)) -> Dict[str, Any]:
     return list_sql_tables()
@@ -3852,6 +3948,39 @@ def trade_smart_close(payload: TradeSmartCloseArmRequest, username: str = Depend
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Broker integration is not configured.")
     try:
         return SMART_SCALP_SERVICE.arm_close(armed=payload.armed)
+    except Exception as exc:
+        _handle_smart_scalp_error(exc)
+
+
+@app.post("/api/trade/close-config")
+def trade_close_config(payload: TradeCloseConfigRequest, username: str = Depends(require_trade_auth)) -> Dict[str, Any]:
+    _ = username
+    if _trade_not_configured():
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Broker integration is not configured.")
+    try:
+        channel = None
+        if payload.mode == "channel":
+            if payload.startTickId is None or payload.endTickId is None or payload.deviations is None:
+                raise RegressionChannelError("Channel start, end, and regression number are required.")
+            if payload.endTickId <= payload.startTickId:
+                raise RegressionChannelError("Channel end tick must be greater than its start tick.")
+            with db_connection(readonly=True) as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    rows = query_rows_between(cur, payload.startTickId, payload.endTickId, MAX_TICK_WINDOW + 1)
+            if len(rows) > MAX_TICK_WINDOW:
+                raise RegressionChannelError(f"Regression channels support at most {MAX_TICK_WINDOW} ticks.")
+            channel = fit_regression_channel(
+                rows,
+                start_tick_id=payload.startTickId,
+                end_tick_id=payload.endTickId,
+                deviations=payload.deviations,
+            )
+        return SMART_SCALP_SERVICE.set_close_configuration(mode=payload.mode, channel=channel)
+    except RegressionChannelError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "TRADE_CHANNEL_INVALID", "message": str(exc)},
+        ) from exc
     except Exception as exc:
         _handle_smart_scalp_error(exc)
 

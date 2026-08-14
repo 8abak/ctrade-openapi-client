@@ -339,6 +339,53 @@ select {
   width: 100%;
   height: 100%;
   min-height: 320px;
+  touch-action: none;
+}
+
+.acd-hud {
+  position: absolute;
+  z-index: 7;
+  top: 0.8rem;
+  right: 0.8rem;
+  max-width: min(390px, calc(100% - 5rem));
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.48rem 0.6rem;
+  border: 1px solid rgba(109, 216, 255, 0.2);
+  border-radius: 9px;
+  background: rgba(5, 9, 15, 0.78);
+  backdrop-filter: blur(8px);
+  pointer-events: none;
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.acd-hud-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  color: var(--accent);
+  font-size: 0.7rem;
+  letter-spacing: 0.1em;
+}
+
+.acd-hud-title strong {
+  color: var(--muted);
+  font-size: 0.67rem;
+}
+
+.acd-hud-title strong[data-direction="up"] {
+  color: #7ef0c7;
+}
+
+.acd-hud-title strong[data-direction="down"] {
+  color: #ff9fb2;
+}
+
+.acd-hud-levels {
+  color: #c9d7ea;
+  font-size: 0.65rem;
+  white-space: nowrap;
 }
 
 .chart-tip {
@@ -668,6 +715,38 @@ select {
   gap: 0.65rem;
 }
 
+.trade-config-grid,
+.trade-channel-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
+.trade-config-wide,
+.trade-channel-grid label:last-child {
+  grid-column: 1 / -1;
+}
+
+.trade-channel-config {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0.65rem;
+  border: 1px solid rgba(109, 216, 255, 0.16);
+  border-radius: 8px;
+  background: rgba(109, 216, 255, 0.035);
+}
+
+.trade-channel-config[hidden],
+.legacy-trade-section[hidden] {
+  display: none;
+}
+
+.trade-channel-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.45rem;
+}
+
 .chart-trade-entry {
   position: absolute;
   z-index: 6;
@@ -703,9 +782,9 @@ select {
 }
 
 .chart-trade-button {
-  min-width: 124px;
-  min-height: 2.85rem;
-  border-radius: 10px;
+  min-width: 112px;
+  min-height: 2.35rem;
+  border-radius: 8px;
   border: 1px solid rgba(147, 181, 255, 0.2);
   background: rgba(8, 13, 22, 0.16);
   backdrop-filter: blur(8px);
@@ -714,6 +793,18 @@ select {
   letter-spacing: 0.02em;
   cursor: pointer;
   transition: background 140ms ease, border-color 140ms ease, transform 140ms ease;
+}
+
+.chart-trade-action {
+  padding: 0.48rem 0.78rem;
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.78rem;
+}
+
+.chart-trade-button-close {
+  border-color: rgba(255, 200, 87, 0.62);
+  background: rgba(92, 72, 18, 0.32);
+  color: #fff0ba;
 }
 
 .chart-trade-button:hover:not(:disabled) {
@@ -1094,6 +1185,39 @@ select {
     width: min(360px, calc(100vw - 1.5rem));
   }
 
+  .live-workspace {
+    gap: 0;
+    height: 100dvh;
+    padding: max(0.3rem, env(safe-area-inset-top)) max(0.3rem, env(safe-area-inset-right)) max(0.3rem, env(safe-area-inset-bottom)) max(0.3rem, env(safe-area-inset-left));
+  }
+
+  .live-chart-panel {
+    padding: 0.2rem;
+    border-radius: 6px;
+  }
+
+  .live-sidebar-toggle {
+    top: max(0.55rem, env(safe-area-inset-top));
+    left: max(0.55rem, env(safe-area-inset-left));
+    width: 2.65rem;
+    height: 2.65rem;
+    background: rgba(8, 13, 22, 0.86);
+    backdrop-filter: blur(8px);
+  }
+
+  .live-sidebar {
+    top: max(0.35rem, env(safe-area-inset-top));
+    left: max(0.35rem, env(safe-area-inset-left));
+    bottom: max(0.35rem, env(safe-area-inset-bottom));
+    width: min(360px, calc(100vw - max(0.7rem, env(safe-area-inset-left) + env(safe-area-inset-right))));
+  }
+
+  .live-sidebar-scroll {
+    padding: 0.85rem;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+
   .live-sidebar-backdrop {
     display: block;
     position: fixed;
@@ -1133,17 +1257,48 @@ select {
   }
 
   .chart-trade-entry {
-    width: calc(100% - 1.5rem);
-    bottom: 1rem;
+    width: auto;
+    max-width: calc(100% - 1rem);
+    bottom: max(0.65rem, env(safe-area-inset-bottom));
   }
 
   .chart-trade-entry-buttons {
-    width: 100%;
+    width: auto;
   }
 
   .chart-trade-button {
-    min-width: 0;
-    width: 100%;
+    min-width: 108px;
+    width: auto;
+    min-height: 2.25rem;
+  }
+
+  .chart-trade-hint {
+    max-width: calc(100vw - 2rem);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .acd-hud {
+    top: max(0.5rem, env(safe-area-inset-top));
+    right: max(0.45rem, env(safe-area-inset-right));
+    max-width: calc(100% - 4.3rem);
+    padding: 0.4rem 0.5rem;
+  }
+
+  .acd-hud-levels {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .trade-config-grid,
+  .trade-channel-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .trade-config-wide,
+  .trade-channel-grid label:last-child {
+    grid-column: auto;
   }
 
   .trade-section-toggle {

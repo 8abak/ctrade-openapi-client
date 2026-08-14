@@ -10,6 +10,8 @@ from datetime import datetime
 from statistics import mean
 from typing import Any, Callable, Deque, Dict, List, Optional
 
+from datavis.regression_channel import channel_values_at
+
 
 class SmartScalpError(RuntimeError):
     def __init__(
@@ -207,6 +209,8 @@ class SmartScalpService:
         self._summary_log_interval_ms = 30000
         self._auth_valid_until_ms = 0
         self._close_preference_armed = True
+        self._close_mode = "smart"
+        self._channel_model: Optional[Dict[str, Any]] = None
 
     def _default_config(self) -> Dict[str, Any]:
         return {
@@ -413,11 +417,35 @@ class SmartScalpService:
             return self.snapshot_state()
 
     def arm_close(self, *, armed: bool) -> Dict[str, Any]:
+        return self.set_close_configuration(mode="smart" if armed else "manual")
+
+    def set_close_configuration(
+        self,
+        *,
+        mode: str,
+        channel: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        normalized_mode = str(mode or "manual").strip().lower()
+        if normalized_mode not in {"manual", "smart", "channel"}:
+            raise SmartScalpError(
+                "Close status must be manual, smart, or channel.",
+                code="TRADE_CLOSE_MODE_INVALID",
+                status_code=400,
+            )
+        if normalized_mode == "channel" and not channel:
+            raise SmartScalpError(
+                "Draw a regression channel before enabling channel close.",
+                code="TRADE_CHANNEL_REQUIRED",
+                status_code=400,
+            )
         with self._lock:
-            self._close_preference_armed = bool(armed)
+            self._close_mode = normalized_mode
+            self._close_preference_armed = normalized_mode != "manual"
+            if channel is not None:
+                self._channel_model = copy.deepcopy(channel)
             snapshot = self._refresh_snapshot_locked(force=True)
             positions = list(snapshot.get("positions") or [])
-            if armed:
+            if self._close_preference_armed:
                 if not self._broker_ready_locked():
                     raise SmartScalpError(
                         self._broker_reason_locked(),
@@ -427,19 +455,23 @@ class SmartScalpService:
                 self._state["error"] = None
                 self._state["lastAutoDisarmReason"] = None
                 self._seed_recent_ticks_locked()
-                self._logger.info("smart_scalp smart_close_enabled symbol=%s", self._symbol)
+                self._logger.info(
+                    "smart_scalp close_mode_enabled symbol=%s mode=%s",
+                    self._symbol,
+                    normalized_mode,
+                )
             else:
-                self._logger.info("smart_scalp smart_close_disabled symbol=%s", self._symbol)
+                self._logger.info("smart_scalp close_mode_manual symbol=%s", self._symbol)
                 self._clear_smart_position_locked()
             self._apply_close_preference_locked()
             self._update_waiting_state_locked(positions=positions)
-            self._touch_locked(self._state["statusText"])
+            self._touch_locked("Close status set to " + normalized_mode + ".")
             return self.snapshot_state()
 
     def reset(self, *, reason: str, restore_close_preference: bool = False) -> Dict[str, Any]:
         with self._lock:
             if restore_close_preference:
-                self._close_preference_armed = True
+                self._close_preference_armed = self._close_mode != "manual"
             self._clear_armed_locked(reason=reason, backend_state="idle", auto_reason=reason)
             self._apply_close_preference_locked()
             return self.snapshot_state()
@@ -458,6 +490,8 @@ class SmartScalpService:
                 "smartBuyArmed": bool(state.get("armed", {}).get("buy")),
                 "smartSellArmed": bool(state.get("armed", {}).get("sell")),
                 "smartCloseArmed": bool(self._close_preference_armed),
+                "closeMode": self._close_mode,
+                "channel": copy.deepcopy(self._channel_model),
                 "hasOpenPosition": bool(state.get("openPositionCount")),
                 "openPositionCount": int(state.get("openPositionCount") or 0),
                 "backendState": state.get("backendState"),
@@ -668,7 +702,11 @@ class SmartScalpService:
                 }
                 self._clear_smart_position_locked()
                 return
-            evaluation = self._evaluate_close_locked(positions[0] if len(positions) == 1 else None)
+            evaluation = (
+                self._evaluate_channel_close_locked(positions[0] if len(positions) == 1 else None)
+                if self._close_mode == "channel"
+                else self._evaluate_close_locked(positions[0] if len(positions) == 1 else None)
+            )
             if evaluation:
                 self._execute_close_locked(positions[0], evaluation)
                 return
@@ -858,6 +896,44 @@ class SmartScalpService:
         }
         return None
 
+    def _evaluate_channel_close_locked(self, position: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not position or not self._channel_model:
+            return None
+        history = list(self._tick_history)
+        if not history:
+            self._state["evaluation"] = {"type": "channel_close", "status": "waiting_tick"}
+            return None
+        current = history[-1]
+        tick_id = int(current.get("id") or 0)
+        mid = _tick_mid(current)
+        if tick_id <= 0 or mid is None:
+            return None
+        values = channel_values_at(self._channel_model, tick_id)
+        side = str(position.get("side") or "").strip().lower()
+        crossed = mid <= values["lower"] if side == "buy" else mid >= values["upper"]
+        self._state["evaluation"] = {
+            "type": "channel_close",
+            "status": "triggered" if crossed else "armed_waiting",
+            "side": side,
+            "tickId": tick_id,
+            "mid": mid,
+            **values,
+        }
+        if not crossed:
+            return None
+        boundary = "lower" if side == "buy" else "upper"
+        return {
+            "kind": "close",
+            "closeMode": "channel",
+            "reason": (
+                f"{side.upper()} position crossed the regression channel {boundary} band "
+                f"at tick {tick_id}."
+            ),
+            "tickId": tick_id,
+            "mid": mid,
+            **values,
+        }
+
     def _select_entry_evaluation_locked(
         self,
         buy_evaluation: Optional[Dict[str, Any]],
@@ -946,7 +1022,7 @@ class SmartScalpService:
                 position_id=position_id,
                 volume=volume,
                 reason=evaluation["reason"],
-                source="smart_close",
+                source="channel_close" if evaluation.get("closeMode") == "channel" else "smart_close",
             )
             self._state["cooldownUntilMs"] = _now_ms() + int(self._config["cooldownSeconds"]) * 1000
             self._state["lastTradeMutationId"] = int(self._state["lastTradeMutationId"]) + 1
@@ -1135,7 +1211,7 @@ class SmartScalpService:
         return bool(self._entry_armed_locked("buy") or self._entry_armed_locked("sell"))
 
     def _close_enabled_locked(self) -> bool:
-        return bool(self._close_preference_armed)
+        return bool(self._close_preference_armed and self._close_mode in {"smart", "channel"})
 
     def _update_waiting_state_locked(
         self,

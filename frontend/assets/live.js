@@ -80,6 +80,8 @@
     overlayFrame: 0,
     resizeObserver: null,
     ui: { sidebarCollapsed: true },
+    acd: null,
+    touchNav: null,
     paper: {
       current: null,
       busy: false,
@@ -129,6 +131,12 @@
         inputsInitialized: false,
         lastTradeMutationId: 0,
       },
+      config: {
+        side: "buy",
+        closeMode: "manual",
+        channelDrawState: "idle",
+        channelFirstTickId: null,
+      },
     },
   };
 
@@ -174,6 +182,18 @@
     tradeSessionSummary: document.getElementById("tradeSessionSummary"),
     tradeBrokerSummary: document.getElementById("tradeBrokerSummary"),
     tradeLogoutButton: document.getElementById("tradeLogoutButton"),
+    tradeConfigSection: document.getElementById("tradeConfigSection"),
+    tradeConfigSummary: document.getElementById("tradeConfigSummary"),
+    tradeSideToggle: document.getElementById("tradeSideToggle"),
+    tradeConfigLotSize: document.getElementById("tradeConfigLotSize"),
+    tradeCloseModeToggle: document.getElementById("tradeCloseModeToggle"),
+    tradeChannelConfig: document.getElementById("tradeChannelConfig"),
+    tradeChannelStartId: document.getElementById("tradeChannelStartId"),
+    tradeChannelEndId: document.getElementById("tradeChannelEndId"),
+    tradeChannelDeviations: document.getElementById("tradeChannelDeviations"),
+    tradeChannelDrawButton: document.getElementById("tradeChannelDrawButton"),
+    tradeChannelRedrawButton: document.getElementById("tradeChannelRedrawButton"),
+    tradeChannelStatus: document.getElementById("tradeChannelStatus"),
     tradePreparedLotSize: document.getElementById("tradePreparedLotSize"),
     tradePreparedStopLoss: document.getElementById("tradePreparedStopLoss"),
     tradePreparedTakeProfit: document.getElementById("tradePreparedTakeProfit"),
@@ -225,7 +245,11 @@
     chartSmartSellButton: document.getElementById("chartSmartSellButton"),
     chartSmartCloseButton: document.getElementById("chartSmartCloseButton"),
     chartTradeSmartStatus: document.getElementById("chartTradeSmartStatus"),
+    chartTradeActionButton: document.getElementById("chartTradeActionButton"),
     chartTradeHint: document.getElementById("chartTradeHint"),
+    acdHud: document.getElementById("acdHud"),
+    acdDirection: document.getElementById("acdDirection"),
+    acdLevels: document.getElementById("acdLevels"),
   };
 
   function sanitizeWindowValue(rawValue) {
@@ -277,9 +301,226 @@
   }
 
   function bindSegment(container, handler) {
+    if (!container) {
+      return;
+    }
     container.querySelectorAll("button").forEach((button) => {
       button.addEventListener("click", () => handler(button.dataset.value));
     });
+  }
+
+  function selectedSegmentValue(container, fallback) {
+    return container?.querySelector("button.active")?.dataset.value || fallback;
+  }
+
+  function readTradeConfiguration() {
+    const lotSize = Number(elements.tradeConfigLotSize?.value || TRADE_DEFAULT_LOT_SIZE);
+    return {
+      side: selectedSegmentValue(elements.tradeSideToggle, state.trade.config.side || "buy"),
+      lotSize,
+      closeMode: selectedSegmentValue(elements.tradeCloseModeToggle, state.trade.config.closeMode || "manual"),
+      startTickId: Number(elements.tradeChannelStartId?.value || 0),
+      endTickId: Number(elements.tradeChannelEndId?.value || 0),
+      deviations: Number(elements.tradeChannelDeviations?.value || 2),
+    };
+  }
+
+  function persistTradeConfiguration() {
+    const config = readTradeConfiguration();
+    state.trade.config.side = config.side;
+    state.trade.config.closeMode = config.closeMode;
+    try {
+      window.localStorage.setItem("datavis.live.tradeConfig", JSON.stringify(config));
+    } catch (error) {
+      void error;
+    }
+  }
+
+  function restoreTradeConfiguration() {
+    let saved = null;
+    try {
+      saved = JSON.parse(window.localStorage.getItem("datavis.live.tradeConfig") || "null");
+    } catch (error) {
+      void error;
+    }
+    const side = saved?.side === "sell" ? "sell" : "buy";
+    const closeMode = ["manual", "smart", "channel"].includes(saved?.closeMode) ? saved.closeMode : "manual";
+    state.trade.config.side = side;
+    state.trade.config.closeMode = closeMode;
+    setSegment(elements.tradeSideToggle, side);
+    setSegment(elements.tradeCloseModeToggle, closeMode);
+    if (Number(saved?.lotSize) > 0) {
+      elements.tradeConfigLotSize.value = String(saved.lotSize);
+    }
+    if (Number(saved?.startTickId) > 0) {
+      elements.tradeChannelStartId.value = String(Math.round(saved.startTickId));
+    }
+    if (Number(saved?.endTickId) > 0) {
+      elements.tradeChannelEndId.value = String(Math.round(saved.endTickId));
+    }
+    if (Number(saved?.deviations) > 0) {
+      elements.tradeChannelDeviations.value = String(saved.deviations);
+    }
+    renderTradeConfiguration();
+  }
+
+  function renderTradeConfiguration() {
+    if (!elements.tradeConfigSection) {
+      return;
+    }
+    const config = readTradeConfiguration();
+    state.trade.config.side = config.side;
+    state.trade.config.closeMode = config.closeMode;
+    elements.tradeChannelConfig.hidden = config.closeMode !== "channel";
+    elements.tradeConfigSummary.textContent = [
+      config.side === "sell" ? "Sell" : "Buy",
+      Number.isFinite(config.lotSize) ? formatLots(config.lotSize) + " lot" : "Invalid lot",
+      config.closeMode.charAt(0).toUpperCase() + config.closeMode.slice(1),
+    ].join(" · ");
+    if (elements.tradePreparedLotSize && Number.isFinite(config.lotSize) && config.lotSize > 0) {
+      elements.tradePreparedLotSize.value = String(config.lotSize);
+    }
+    if (elements.tradeChannelDrawButton) {
+      elements.tradeChannelDrawButton.textContent = state.trade.config.channelDrawState === "idle" ? "Draw on chart" : "Cancel draw";
+    }
+    const channel = smartPayload()?.channel;
+    if (elements.tradeChannelStatus) {
+      if (state.trade.config.channelDrawState === "first") {
+        elements.tradeChannelStatus.textContent = "Tap the channel start tick on the chart.";
+      } else if (state.trade.config.channelDrawState === "second") {
+        elements.tradeChannelStatus.textContent = "Start " + String(state.trade.config.channelFirstTickId) + " selected. Tap the end tick.";
+      } else if (channel) {
+        elements.tradeChannelStatus.textContent = "Channel " + String(channel.startTickId) + " → " + String(channel.endTickId) + " · " + Number(channel.deviations).toFixed(1) + "σ · monitoring server-side.";
+      } else {
+        elements.tradeChannelStatus.textContent = "Choose Draw, then tap the channel start and end ticks.";
+      }
+    }
+    renderTradeEntryOverlay();
+    queueOverlayRender();
+  }
+
+  function closeConfigurationPayload() {
+    const config = readTradeConfiguration();
+    const payload = { mode: config.closeMode };
+    if (config.closeMode === "channel") {
+      if (!Number.isFinite(config.startTickId) || config.startTickId <= 0
+        || !Number.isFinite(config.endTickId) || config.endTickId <= config.startTickId
+        || !Number.isFinite(config.deviations) || config.deviations <= 0) {
+        throw new Error("Set a valid channel start, end, and regression number.");
+      }
+      payload.startTickId = Math.round(config.startTickId);
+      payload.endTickId = Math.round(config.endTickId);
+      payload.deviations = config.deviations;
+    }
+    return payload;
+  }
+
+  async function syncTradeCloseConfiguration(options) {
+    persistTradeConfiguration();
+    if (!state.trade.authenticated) {
+      renderTradeConfiguration();
+      return null;
+    }
+    const payload = closeConfigurationPayload();
+    const response = await tradeFetchJson("/api/trade/close-config", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    applySmartPayload(response);
+    renderTradeConfiguration();
+    if (!options?.silent) {
+      tradeStatus("Close status set to " + payload.mode + ".", false);
+    }
+    return response;
+  }
+
+  function toggleTradeChannelDraw() {
+    if (state.trade.config.channelDrawState !== "idle") {
+      state.trade.config.channelDrawState = "idle";
+      state.trade.config.channelFirstTickId = null;
+      renderTradeConfiguration();
+      return;
+    }
+    state.trade.config.channelDrawState = "first";
+    state.trade.config.channelFirstTickId = null;
+    renderTradeConfiguration();
+  }
+
+  function handleTradeChannelChartClick(event) {
+    if (state.trade.config.channelDrawState === "idle" || event?.target) {
+      return false;
+    }
+    const point = resolveChartPointFromPixel(event.offsetX, event.offsetY);
+    if (!point) {
+      return true;
+    }
+    if (state.trade.config.channelDrawState === "first") {
+      state.trade.config.channelFirstTickId = Number(point.tickId);
+      elements.tradeChannelStartId.value = String(Math.round(point.tickId));
+      state.trade.config.channelDrawState = "second";
+      renderTradeConfiguration();
+      return true;
+    }
+    if (Number(point.tickId) <= Number(state.trade.config.channelFirstTickId)) {
+      tradeStatus("Channel end tick must be to the right of its start.", true);
+      return true;
+    }
+    elements.tradeChannelEndId.value = String(Math.round(point.tickId));
+    state.trade.config.channelDrawState = "idle";
+    state.trade.config.channelFirstTickId = null;
+    syncTradeCloseConfiguration().catch((error) => tradeStatus(error.message || "Channel draw failed.", true));
+    renderTradeConfiguration();
+    return true;
+  }
+
+  async function handleTradeAction() {
+    if (state.trade.actionBusy || !state.trade.authenticated) {
+      return;
+    }
+    const positions = state.trade.positions || [];
+    const config = readTradeConfiguration();
+    if (!positions.length) {
+      try {
+        await syncTradeCloseConfiguration({ silent: true });
+      } catch (error) {
+        tradeStatus(error.message || "Trade configuration is invalid.", true);
+        return;
+      }
+      submitMarketOrder(config.side);
+      return;
+    }
+    if (positions.length === 1 && config.closeMode === "manual") {
+      submitClosePosition(positions[0].positionId, positions[0].volume);
+    }
+  }
+
+  async function loadAcd() {
+    try {
+      state.acd = await fetchJson("/api/live/acd");
+    } catch (error) {
+      state.acd = { available: false, reason: error.message || "ACD unavailable." };
+    }
+    renderAcdHud();
+    queueOverlayRender();
+  }
+
+  function renderAcdHud() {
+    if (!elements.acdHud) {
+      return;
+    }
+    const acd = state.acd;
+    if (!acd?.available) {
+      elements.acdDirection.textContent = "—";
+      elements.acdLevels.textContent = acd?.reason || "Opening range unavailable.";
+      return;
+    }
+    const current = Number(state.rows[state.rows.length - 1]?.mid ?? acd.currentMid);
+    const levels = acd.levels || {};
+    const direction = current >= Number(levels.aUp) ? "UP" : (current <= Number(levels.aDown) ? "DOWN" : "NEUTRAL");
+    elements.acdDirection.textContent = direction;
+    elements.acdDirection.dataset.direction = direction.toLowerCase();
+    elements.acdLevels.textContent = "A " + formatPrice(levels.aDown) + " / " + formatPrice(levels.aUp)
+      + " · C " + formatPrice(levels.cDown) + " / " + formatPrice(levels.cUp);
   }
 
   function writeQuery() {
@@ -425,6 +666,7 @@
   }
 
   function renderMeta() {
+    renderAcdHud();
     if (state.rangeLastId == null) {
       elements.liveMeta.textContent = "No chart range loaded.";
       return;
@@ -710,6 +952,9 @@
   }
 
   function handlePaperChartClick(event) {
+    if (handleTradeChannelChartClick(event)) {
+      return;
+    }
     if (state.paper.busy) {
       return;
     }
@@ -839,6 +1084,7 @@
       elements.chartSmartBuyButton,
       elements.chartSmartSellButton,
       elements.chartSmartCloseButton,
+      elements.chartTradeActionButton,
       elements.tradePositionConfirmButton,
       elements.tradePositionResetButton,
     ].forEach((button) => {
@@ -2079,6 +2325,32 @@
     const smartBuyAvailability = smartAvailability("buy");
     const smartSellAvailability = smartAvailability("sell");
     const smartCloseAvailability = smartAvailability("close");
+    const tradeConfig = readTradeConfiguration();
+    const positionCount = state.trade.positions.length;
+    if (elements.chartTradeActionButton) {
+      const opening = positionCount === 0;
+      const manualClose = positionCount === 1 && tradeConfig.closeMode === "manual";
+      const visible = authConfigured && (opening || manualClose);
+      elements.chartTradeActionButton.hidden = !visible;
+      elements.chartTradeActionButton.classList.toggle("chart-trade-button-buy", opening && tradeConfig.side === "buy");
+      elements.chartTradeActionButton.classList.toggle("chart-trade-button-sell", opening && tradeConfig.side === "sell");
+      elements.chartTradeActionButton.classList.toggle("chart-trade-button-close", manualClose);
+      if (opening) {
+        elements.chartTradeActionButton.textContent = busy
+          ? (tradeConfig.side === "sell" ? "Selling…" : "Buying…")
+          : (tradeConfig.side === "sell" ? "Sell " : "Buy ") + formatLots(tradeConfig.lotSize) + " lot";
+        let channelReady = true;
+        if (tradeConfig.closeMode === "channel") {
+          channelReady = Number.isFinite(tradeConfig.startTickId) && tradeConfig.startTickId > 0
+            && Number.isFinite(tradeConfig.endTickId) && tradeConfig.endTickId > tradeConfig.startTickId
+            && Number.isFinite(tradeConfig.deviations) && tradeConfig.deviations > 0;
+        }
+        elements.chartTradeActionButton.disabled = !prepared.ready || busy || !channelReady;
+      } else if (manualClose) {
+        elements.chartTradeActionButton.textContent = busy ? "Closing…" : "Close position";
+        elements.chartTradeActionButton.disabled = busy;
+      }
+    }
     if (elements.chartTradeBuyButton) {
       elements.chartTradeBuyButton.hidden = !authConfigured;
       elements.chartTradeBuyButton.disabled = !authConfigured || !prepared.ready || busy;
@@ -2117,11 +2389,13 @@
       }
     }
     if (elements.chartTradeHint) {
-      elements.chartTradeHint.textContent = busy && state.trade.activeOrderSide
+      elements.chartTradeHint.textContent = positionCount && tradeConfig.closeMode !== "manual"
+        ? (tradeConfig.closeMode === "channel" ? "Regression channel is monitoring this position" : "Smart close is monitoring this position")
+        : (busy && state.trade.activeOrderSide
         ? ("Sending " + state.trade.activeOrderSide + " | " + formatLots(prepared.lotSize) + " lot | SL " + (prepared.stopLoss != null ? formatPrice(prepared.stopLoss) : "none") + " | TP " + (prepared.takeProfit != null ? formatPrice(prepared.takeProfit) : "none"))
         : (prepared.ready
-          ? ("Using " + formatLots(prepared.lotSize) + " lot | SL " + (prepared.stopLoss != null ? formatPrice(prepared.stopLoss) : "none") + " | TP " + (prepared.takeProfit != null ? formatPrice(prepared.takeProfit) : "none"))
-          : prepared.reason);
+          ? (tradeConfig.closeMode.charAt(0).toUpperCase() + tradeConfig.closeMode.slice(1) + " close")
+          : prepared.reason));
     }
     renderPreparedTradeSummary();
     renderBrokerSummary();
@@ -2271,6 +2545,91 @@
     return sections.length ? "<div class=\"chart-tip\">" + sections.join("") + "</div>" : "";
   }
 
+  function setupTouchNavigation() {
+    if (!elements.chartHost || elements.chartHost.dataset.touchNavigation === "ready") {
+      return;
+    }
+    elements.chartHost.dataset.touchNavigation = "ready";
+    elements.chartHost.addEventListener("touchstart", function (event) {
+      if (event.touches.length !== 1 || !state.chart) {
+        state.touchNav = null;
+        return;
+      }
+      const touch = event.touches[0];
+      const hostRect = elements.chartHost.getBoundingClientRect();
+      const viewport = state.viewport.currentWindow();
+      if (!viewport || !Number.isFinite(viewport.startValue) || !Number.isFinite(viewport.endValue)) {
+        return;
+      }
+      state.touchNav = {
+        startX: touch.clientX,
+        startY: touch.clientY,
+        startValue: Number(viewport.startValue),
+        endValue: Number(viewport.endValue),
+        edgeZoom: touch.clientX - hostRect.left <= 56,
+        moved: false,
+      };
+    }, { passive: true });
+    elements.chartHost.addEventListener("touchmove", function (event) {
+      if (!state.touchNav || event.touches.length !== 1 || !state.chart) {
+        return;
+      }
+      const touch = event.touches[0];
+      const nav = state.touchNav;
+      const dx = touch.clientX - nav.startX;
+      const dy = touch.clientY - nav.startY;
+      if (Math.abs(dx) < 2 && Math.abs(dy) < 2) {
+        return;
+      }
+      const xValues = buildPrimaryXValues();
+      if (xValues.length < 2) {
+        return;
+      }
+      const domainMin = xValues[0];
+      const domainMax = xValues[xValues.length - 1];
+      const originalSpan = Math.max(2, nav.endValue - nav.startValue);
+      let nextStart = nav.startValue;
+      let nextEnd = nav.endValue;
+      if (nav.edgeZoom) {
+        const factor = Math.exp(dy / 180);
+        const nextSpan = Math.max(10, Math.min(domainMax - domainMin, originalSpan * factor));
+        const center = (nav.startValue + nav.endValue) / 2;
+        nextStart = center - nextSpan / 2;
+        nextEnd = center + nextSpan / 2;
+      } else if (Math.abs(dx) >= Math.abs(dy) * 0.65) {
+        const width = Math.max(1, elements.chartHost.getBoundingClientRect().width);
+        const shift = -(dx / width) * originalSpan;
+        nextStart = nav.startValue + shift;
+        nextEnd = nav.endValue + shift;
+      } else {
+        return;
+      }
+      const span = nextEnd - nextStart;
+      if (nextStart < domainMin) {
+        nextStart = domainMin;
+        nextEnd = domainMin + span;
+      }
+      if (nextEnd > domainMax) {
+        nextEnd = domainMax;
+        nextStart = domainMax - span;
+      }
+      nav.moved = true;
+      event.preventDefault();
+      state.chart.dispatchAction({
+        type: "dataZoom",
+        dataZoomId: "zoom-inside",
+        startValue: nextStart,
+        endValue: nextEnd,
+      });
+    }, { passive: false });
+    elements.chartHost.addEventListener("touchend", function () {
+      state.touchNav = null;
+    }, { passive: true });
+    elements.chartHost.addEventListener("touchcancel", function () {
+      state.touchNav = null;
+    }, { passive: true });
+  }
+
   function ensureChart() {
     const rect = elements.chartHost.getBoundingClientRect();
     if (rect.width < 180 || rect.height < 180) {
@@ -2325,6 +2684,7 @@
       state.chart.getZr().on("click", function (event) {
         handlePaperChartClick(event);
       });
+      setupTouchNavigation();
       if (typeof ResizeObserver === "function") {
         state.resizeObserver = new ResizeObserver(() => {
           state.chart.resize();
@@ -2729,6 +3089,18 @@
     }
     if (state.paper.firstPoint) {
       pushYAxisItem(overlayItems, charting.pointItem(state.paper.firstPoint.tickId, state.paper.firstPoint.price));
+    }
+    if (state.acd?.available) {
+      Object.values(state.acd.levels || {}).forEach((value) => {
+        pushYAxisItem(overlayItems, charting.rangeItem(state.rangeFirstId, state.rangeLastId, value, value));
+      });
+    }
+    const regressionChannel = smartPayload()?.channel;
+    if (regressionChannel) {
+      const channelEnd = Math.max(Number(regressionChannel.endTickId || 0), Number(state.rangeLastId || 0));
+      const center = Number(regressionChannel.intercept || 0) + Number(regressionChannel.slopePerTick || 0) * (channelEnd - Number(regressionChannel.startTickId || 0));
+      const halfWidth = Number(regressionChannel.halfWidth || 0);
+      pushYAxisItem(overlayItems, charting.rangeItem(regressionChannel.startTickId, channelEnd, center - halfWidth, center + halfWidth));
     }
     return { coreItems: coreItems, overlayItems: overlayItems };
   }
@@ -3295,12 +3667,122 @@
     return graphics;
   }
 
+  function chartGridRect() {
+    return state.chart?.getModel()?.getComponent("grid", 0)?.coordinateSystem?.getRect?.() || null;
+  }
+
+  function buildAcdGraphics() {
+    if (!state.chart || !state.acd?.available) {
+      return [];
+    }
+    const rect = chartGridRect();
+    if (!rect) {
+      return [];
+    }
+    const levelSpecs = [
+      ["C+", state.acd.levels?.cUp, "rgba(255,200,87,0.70)"],
+      ["A+", state.acd.levels?.aUp, "rgba(109,216,255,0.72)"],
+      ["OR+", state.acd.levels?.openingHigh, "rgba(147,164,189,0.42)"],
+      ["OR-", state.acd.levels?.openingLow, "rgba(147,164,189,0.42)"],
+      ["A-", state.acd.levels?.aDown, "rgba(109,216,255,0.72)"],
+      ["C-", state.acd.levels?.cDown, "rgba(255,200,87,0.70)"],
+    ];
+    const graphics = [];
+    levelSpecs.forEach(function (spec) {
+      const price = Number(spec[1]);
+      const point = state.chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [Number(state.rangeLastId || 1), price]);
+      if (!Array.isArray(point) || !Number.isFinite(Number(point[1]))) {
+        return;
+      }
+      const y = Number(point[1]);
+      if (y < rect.y || y > rect.y + rect.height) {
+        return;
+      }
+      graphics.push({
+        type: "line",
+        shape: { x1: rect.x, y1: y, x2: rect.x + rect.width, y2: y },
+        style: { stroke: spec[2], lineWidth: spec[0].startsWith("C") ? 1.2 : 1, lineDash: spec[0].startsWith("OR") ? [3, 4] : [7, 5] },
+      });
+      graphics.push({
+        type: "text",
+        style: {
+          text: spec[0] + " " + formatPrice(price),
+          x: rect.x + rect.width - 5,
+          y: y - 3,
+          textAlign: "right",
+          textVerticalAlign: "bottom",
+          fill: spec[2],
+          font: "10px 'IBM Plex Mono'",
+          backgroundColor: "rgba(5,9,15,0.78)",
+          padding: [2, 3],
+        },
+      });
+    });
+    return graphics;
+  }
+
+  function regressionValuesAt(channel, tickId) {
+    const center = Number(channel.intercept || 0) + Number(channel.slopePerTick || 0) * (Number(tickId) - Number(channel.startTickId || 0));
+    const halfWidth = Number(channel.halfWidth || 0);
+    return { center, upper: center + halfWidth, lower: center - halfWidth };
+  }
+
+  function buildRegressionChannelGraphics() {
+    const channel = smartPayload()?.channel;
+    if (!state.chart || !channel) {
+      return [];
+    }
+    const startId = Number(channel.startTickId);
+    const endId = Math.max(Number(channel.endTickId), Number(state.rangeLastId || channel.endTickId));
+    const start = regressionValuesAt(channel, startId);
+    const end = regressionValuesAt(channel, endId);
+    const startUpper = state.chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [startId, start.upper]);
+    const startLower = state.chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [startId, start.lower]);
+    const endUpper = state.chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [endId, end.upper]);
+    const endLower = state.chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [endId, end.lower]);
+    const startCenter = state.chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [startId, start.center]);
+    const endCenter = state.chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [endId, end.center]);
+    const points = [startUpper, endUpper, endLower, startLower];
+    if (points.concat([startCenter, endCenter]).some((point) => !Array.isArray(point) || !Number.isFinite(Number(point[0])) || !Number.isFinite(Number(point[1])))) {
+      return [];
+    }
+    return [{
+      type: "polygon",
+      shape: { points },
+      style: { fill: "rgba(109,216,255,0.08)", stroke: "none" },
+    }, {
+      type: "line",
+      shape: { x1: startUpper[0], y1: startUpper[1], x2: endUpper[0], y2: endUpper[1] },
+      style: { stroke: "rgba(109,216,255,0.88)", lineWidth: 1.4 },
+    }, {
+      type: "line",
+      shape: { x1: startCenter[0], y1: startCenter[1], x2: endCenter[0], y2: endCenter[1] },
+      style: { stroke: "rgba(232,238,248,0.46)", lineWidth: 1, lineDash: [5, 4] },
+    }, {
+      type: "line",
+      shape: { x1: startLower[0], y1: startLower[1], x2: endLower[0], y2: endLower[1] },
+      style: { stroke: "rgba(109,216,255,0.88)", lineWidth: 1.4 },
+    }];
+  }
+
   function renderOverlay() {
     if (!state.chart) {
       return;
     }
     state.chart.setOption({
       graphic: [{
+        id: "acd-overlay",
+        type: "group",
+        silent: true,
+        z: 4,
+        children: buildAcdGraphics(),
+      }, {
+        id: "regression-channel-overlay",
+        type: "group",
+        silent: true,
+        z: 5,
+        children: buildRegressionChannelGraphics(),
+      }, {
         id: "range-box-overlay",
         type: "group",
         silent: true,
@@ -3909,6 +4391,9 @@
         tradeStatus(error.message || "Trade refresh failed.", true);
       });
       await syncSmartContext({ silent: true }).catch(function () {});
+      await syncTradeCloseConfiguration({ silent: true }).catch((error) => {
+        tradeStatus(error.message || "Trade configuration sync failed.", true);
+      });
     } catch (error) {
       if (error?.code === "TRADE_AUTH_NOT_CONFIGURED") {
         applyTradeSessionPayload({
@@ -4124,6 +4609,9 @@
           tradeStatus(error.message || "Trade refresh failed.", true);
         });
         await syncSmartContext({ silent: true }).catch(function () {});
+        await syncTradeCloseConfiguration({ silent: true }).catch((error) => {
+          tradeStatus(error.message || "Trade configuration sync failed.", true);
+        });
         return;
       }
       tradeStatus("Trade login required.", false);
@@ -4163,20 +4651,50 @@
     elements.tradeLogoutButton.addEventListener("click", function () {
       requestTradeLogout();
     });
-    elements.chartTradeBuyButton.addEventListener("click", function () {
-      submitMarketOrder("buy");
+    if (elements.chartTradeBuyButton) {
+      elements.chartTradeBuyButton.addEventListener("click", function () { submitMarketOrder("buy"); });
+    }
+    if (elements.chartTradeSellButton) {
+      elements.chartTradeSellButton.addEventListener("click", function () { submitMarketOrder("sell"); });
+    }
+    if (elements.chartSmartBuyButton) {
+      elements.chartSmartBuyButton.addEventListener("click", function () { toggleSmartEntry("buy"); });
+    }
+    if (elements.chartSmartSellButton) {
+      elements.chartSmartSellButton.addEventListener("click", function () { toggleSmartEntry("sell"); });
+    }
+    if (elements.chartSmartCloseButton) {
+      elements.chartSmartCloseButton.addEventListener("click", function () { toggleSmartClose(); });
+    }
+    if (elements.chartTradeActionButton) {
+      elements.chartTradeActionButton.addEventListener("click", function () { handleTradeAction(); });
+    }
+    bindSegment(elements.tradeSideToggle, function (value) {
+      setSegment(elements.tradeSideToggle, value);
+      persistTradeConfiguration();
+      renderTradeConfiguration();
     });
-    elements.chartTradeSellButton.addEventListener("click", function () {
-      submitMarketOrder("sell");
+    bindSegment(elements.tradeCloseModeToggle, function (value) {
+      setSegment(elements.tradeCloseModeToggle, value);
+      persistTradeConfiguration();
+      renderTradeConfiguration();
+      if (value !== "channel" || (Number(elements.tradeChannelStartId.value) > 0 && Number(elements.tradeChannelEndId.value) > Number(elements.tradeChannelStartId.value))) {
+        syncTradeCloseConfiguration().catch((error) => tradeStatus(error.message || "Close status update failed.", true));
+      }
     });
-    elements.chartSmartBuyButton.addEventListener("click", function () {
-      toggleSmartEntry("buy");
+    elements.tradeConfigLotSize.addEventListener("input", function () {
+      persistTradeConfiguration();
+      renderTradeConfiguration();
     });
-    elements.chartSmartSellButton.addEventListener("click", function () {
-      toggleSmartEntry("sell");
+    [elements.tradeChannelStartId, elements.tradeChannelEndId, elements.tradeChannelDeviations].forEach(function (input) {
+      input.addEventListener("input", function () {
+        persistTradeConfiguration();
+        renderTradeConfiguration();
+      });
     });
-    elements.chartSmartCloseButton.addEventListener("click", function () {
-      toggleSmartClose();
+    elements.tradeChannelDrawButton.addEventListener("click", toggleTradeChannelDraw);
+    elements.tradeChannelRedrawButton.addEventListener("click", function () {
+      syncTradeCloseConfiguration().catch((error) => tradeStatus(error.message || "Channel redraw failed.", true));
     });
     elements.tradeOpenList.addEventListener("click", function (event) {
       const button = event.target.closest("button[data-action]");
@@ -4296,6 +4814,7 @@
         submitSmartSettings();
       });
     }
+    restoreTradeConfiguration();
     syncPreparedTradeInputs();
     renderTradeEntryOverlay();
     renderPositionEditor();
@@ -4758,5 +5277,6 @@
   applyInitialConfig(parseQuery());
   setupPaperPanel();
   setupTradePanel();
+  loadAcd();
   loadAll(true);
 }());

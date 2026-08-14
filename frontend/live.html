@@ -182,7 +182,58 @@
               <button class="ghost-button compact-button" id="tradeLogoutButton" type="button">Logout</button>
             </div>
 
-            <details class="trade-section-shell" id="tradePreparedSection" open>
+            <details class="trade-section-shell trade-config-section" id="tradeConfigSection" open>
+              <summary class="trade-section-toggle">
+                <span class="trade-list-title">Trade Configuration</span>
+                <span class="trade-section-summary" id="tradeConfigSummary">Buy · 0.01 lot · Manual</span>
+              </summary>
+              <div class="trade-section-body">
+                <div class="trade-config-grid">
+                  <div class="live-control-field">
+                    <span>direction</span>
+                    <div class="segmented trade-side-toggle" id="tradeSideToggle" aria-label="Trade direction">
+                      <button type="button" data-value="buy">Buy</button>
+                      <button type="button" data-value="sell">Sell</button>
+                    </div>
+                  </div>
+                  <label>
+                    <span>lot</span>
+                    <input id="tradeConfigLotSize" type="number" min="0.01" step="0.01" value="0.01" inputmode="decimal">
+                  </label>
+                  <div class="live-control-field trade-config-wide">
+                    <span>close status</span>
+                    <div class="segmented trade-close-toggle" id="tradeCloseModeToggle" aria-label="Close status">
+                      <button type="button" data-value="manual">Manual</button>
+                      <button type="button" data-value="smart">Smart</button>
+                      <button type="button" data-value="channel">Channel</button>
+                    </div>
+                  </div>
+                </div>
+                <div class="trade-channel-config" id="tradeChannelConfig" hidden>
+                  <div class="trade-channel-grid">
+                    <label>
+                      <span>start tick id</span>
+                      <input id="tradeChannelStartId" type="number" min="1" step="1" inputmode="numeric" placeholder="tap chart">
+                    </label>
+                    <label>
+                      <span>end tick id</span>
+                      <input id="tradeChannelEndId" type="number" min="1" step="1" inputmode="numeric" placeholder="tap chart">
+                    </label>
+                    <label>
+                      <span>regression number</span>
+                      <input id="tradeChannelDeviations" type="number" min="0.1" max="10" step="0.1" value="2" inputmode="decimal">
+                    </label>
+                  </div>
+                  <div class="trade-channel-actions">
+                    <button class="ghost-button compact-button" id="tradeChannelDrawButton" type="button">Draw on chart</button>
+                    <button class="ghost-button compact-button" id="tradeChannelRedrawButton" type="button">Redraw</button>
+                  </div>
+                  <div class="trade-session-copy" id="tradeChannelStatus">Choose Draw, then tap the channel start and end ticks.</div>
+                </div>
+              </div>
+            </details>
+
+            <details class="trade-section-shell legacy-trade-section" id="tradePreparedSection" hidden>
               <summary class="trade-section-toggle">
                 <span class="trade-list-title">Prepared Entry</span>
                 <span class="trade-section-summary" id="tradePreparedSectionSummary">0.01 lot | SL none | TP none</span>
@@ -214,7 +265,7 @@
               </div>
             </details>
 
-            <details class="trade-section-shell" id="tradeSmartSection">
+            <details class="trade-section-shell legacy-trade-section" id="tradeSmartSection" hidden>
               <summary class="trade-section-toggle">
                 <span class="trade-list-title">Smart Scalping</span>
                 <span class="trade-section-summary" id="tradeSmartSectionSummary">Idle</span>
@@ -259,7 +310,7 @@
               </div>
             </details>
 
-            <details class="trade-section-shell" id="tradeOpenSection" open>
+            <details class="trade-section-shell legacy-trade-section" id="tradeOpenSection" hidden>
               <summary class="trade-section-toggle">
                 <span class="trade-list-title">Open Positions</span>
                 <span class="trade-section-summary" id="tradeOpenSectionSummary">No open positions</span>
@@ -273,7 +324,7 @@
               </div>
             </details>
 
-            <details class="trade-section-shell" id="tradePositionSection" open>
+            <details class="trade-section-shell legacy-trade-section" id="tradePositionSection" hidden>
               <summary class="trade-section-toggle">
                 <span class="trade-list-title">Position Editor</span>
                 <span class="trade-section-summary" id="tradePositionSectionSummary">Select a position</span>
@@ -307,7 +358,7 @@
               </div>
             </details>
 
-            <details class="trade-section-shell" id="tradePendingSection">
+            <details class="trade-section-shell legacy-trade-section" id="tradePendingSection" hidden>
               <summary class="trade-section-toggle">
                 <span class="trade-list-title">Pending Orders</span>
                 <span class="trade-section-summary" id="tradePendingSectionSummary">No pending orders</span>
@@ -321,7 +372,7 @@
               </div>
             </details>
 
-            <details class="trade-section-shell trade-review-shell" id="tradeReviewSection">
+            <details class="trade-section-shell trade-review-shell legacy-trade-section" id="tradeReviewSection" hidden>
               <summary class="trade-section-toggle">
                 <span class="trade-list-title">Trade Review</span>
                 <span class="trade-section-summary" id="tradeReviewSectionSummary">No review trade selected</span>
@@ -353,15 +404,14 @@
     <section class="live-chart-stage">
       <div class="panel chart-panel live-chart-panel" id="chartPanel">
         <div id="liveChart" class="chart-host"></div>
+        <div class="acd-hud" id="acdHud" aria-live="polite">
+          <div class="acd-hud-title"><span>ACD</span><strong id="acdDirection">—</strong></div>
+          <div class="acd-hud-levels" id="acdLevels">Loading opening range…</div>
+        </div>
         <div class="chart-trade-entry" id="chartTradeEntry">
           <div class="chart-trade-entry-buttons">
-            <button class="chart-trade-button chart-trade-button-buy" id="chartTradeBuyButton" type="button">Buy Market</button>
-            <button class="chart-trade-button chart-trade-button-sell" id="chartTradeSellButton" type="button">Sell Market</button>
-            <button class="chart-trade-button chart-trade-button-smart" id="chartSmartBuyButton" type="button">Smart Buy OFF</button>
-            <button class="chart-trade-button chart-trade-button-smart" id="chartSmartSellButton" type="button">Smart Sell OFF</button>
-            <button class="chart-trade-button chart-trade-button-smart chart-trade-button-smart-close" id="chartSmartCloseButton" type="button">Smart Close OFF</button>
+            <button class="chart-trade-button chart-trade-action" id="chartTradeActionButton" type="button">Buy 0.01 lot</button>
           </div>
-          <div class="chart-trade-smart-status" id="chartTradeSmartStatus">Smart scalping unavailable.</div>
           <div class="chart-trade-hint" id="chartTradeHint">Login required</div>
         </div>
 
