@@ -4,3 +4,6 @@ __pycache__/
 /jupyter/
 **/.ipynb_checkpoints/
 
+# Broker OAuth tokens are runtime secrets and must survive code deployments.
+creds.json
+
