@@ -688,7 +688,7 @@
       state.acd = { available: false, reason: error.message || "ACD unavailable." };
     }
     renderAcdHud();
-    queueOverlayRender();
+    renderChart({ shiftWithRun: false });
   }
 
   function renderAcdHud() {
@@ -3123,6 +3123,57 @@
         z: 9,
       });
     }
+    if (config.showAcd && state.acd?.available) {
+      const specs = [
+        ["C+", state.acd.levels?.cUp, "#ffc857"],
+        ["A+", state.acd.levels?.aUp, "#6dd8ff"],
+        ["OR+", state.acd.levels?.openingHigh, "#93a4bd"],
+        ["OR−", state.acd.levels?.openingLow, "#93a4bd"],
+        ["A−", state.acd.levels?.aDown, "#6dd8ff"],
+        ["C−", state.acd.levels?.cDown, "#ffc857"],
+      ].filter((spec) => Number.isFinite(Number(spec[1])));
+      series.push({
+        id: "acd-level-series",
+        name: "Daily ACD",
+        type: "line",
+        data: state.rows.length ? [
+          [Number(state.rows[0].id), Number(state.acd.currentMid)],
+          [Number(state.rows[state.rows.length - 1].id), Number(state.acd.currentMid)],
+        ] : [],
+        showSymbol: false,
+        lineStyle: { opacity: 0 },
+        animation: false,
+        silent: true,
+        markLine: {
+          silent: true,
+          symbol: ["none", "none"],
+          precision: 2,
+          label: {
+            show: true,
+            position: "insideEndTop",
+            color: "#e7f5ff",
+            backgroundColor: "rgba(5,9,15,0.88)",
+            padding: [2, 4],
+            formatter: function (params) {
+              return String(params.name || "ACD") + " " + formatPrice(params.value);
+            },
+          },
+          data: specs.map(function (spec) {
+            return {
+              name: spec[0],
+              yAxis: Number(spec[1]),
+              lineStyle: {
+                color: spec[2],
+                width: spec[0].startsWith("C") ? 1.5 : 1.2,
+                type: spec[0].startsWith("OR") ? "dotted" : "dashed",
+                opacity: 0.92,
+              },
+            };
+          }),
+        },
+        z: 8,
+      });
+    }
     if (isLiveTradeOverlayMode()) {
       series.push({
         id: "trade-open-connectors",
@@ -3293,13 +3344,23 @@
   function yBounds(options) {
     const config = currentConfig();
     const sources = buildYAxisItems(config);
-    return charting.buildVisibleIntegerYAxis({
+    const bounds = charting.buildVisibleIntegerYAxis({
       visibleRange: options?.visibleRange || viewportRange(state.viewport.currentWindow()),
       coreItems: sources.coreItems,
       overlayItems: sources.overlayItems,
       includeOverlays: config.sizing || Boolean(config.showAcd && state.acd?.available),
       ...Y_AXIS_STYLE,
     });
+    if (!config.showAcd || !state.acd?.available) {
+      return bounds;
+    }
+    const acdPrices = Object.values(state.acd.levels || {}).map(Number).filter(Number.isFinite);
+    if (!acdPrices.length) {
+      return bounds;
+    }
+    const low = Math.min(Number.isFinite(Number(bounds.min)) ? Number(bounds.min) : Math.min(...acdPrices), ...acdPrices);
+    const high = Math.max(Number.isFinite(Number(bounds.max)) ? Number(bounds.max) : Math.max(...acdPrices), ...acdPrices);
+    return charting.buildIntegerYAxis(low, high, Y_AXIS_STYLE);
   }
 
   function renderChart(options) {
