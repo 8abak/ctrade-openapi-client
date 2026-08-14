@@ -3329,8 +3329,14 @@
     const regressionChannel = state.studyDrawing.model || smartPayload()?.drawing || smartPayload()?.channel;
     if (regressionChannel) {
       const drawingEnd = drawingVisibleEnd(regressionChannel);
-      const values = regressionValuesAt(regressionChannel, drawingEnd);
-      pushYAxisItem(overlayItems, charting.rangeItem(regressionChannel.startTickId, drawingEnd, values.lower, values.upper));
+      const startValues = regressionValuesAt(regressionChannel, regressionChannel.startTickId);
+      const endValues = regressionValuesAt(regressionChannel, drawingEnd);
+      pushYAxisItem(overlayItems, charting.rangeItem(
+        regressionChannel.startTickId,
+        drawingEnd,
+        Math.min(startValues.lower, endValues.lower),
+        Math.max(startValues.upper, endValues.upper)
+      ));
     }
     return { coreItems: coreItems, overlayItems: overlayItems };
   }
@@ -3348,7 +3354,9 @@
       visibleRange: options?.visibleRange || viewportRange(state.viewport.currentWindow()),
       coreItems: sources.coreItems,
       overlayItems: sources.overlayItems,
-      includeOverlays: config.sizing || Boolean(config.showAcd && state.acd?.available),
+      includeOverlays: config.sizing
+        || Boolean(config.showAcd && state.acd?.available)
+        || Boolean(state.studyDrawing.model || smartPayload()?.drawing || smartPayload()?.channel),
       ...Y_AXIS_STYLE,
     });
     if (!config.showAcd || !state.acd?.available) {
@@ -4030,7 +4038,10 @@
       style: { stroke: "rgba(109,216,255,0.88)", lineWidth: 1.4 },
     }];
     if (kind === "regression") {
-      return [graphics[2]];
+      graphics[1].style = { stroke: "rgba(109,216,255,0.92)", lineWidth: 1.35, lineDash: [7, 5] };
+      graphics[2].style = { stroke: "rgba(232,238,248,0.82)", lineWidth: 1.5 };
+      graphics[3].style = { stroke: "rgba(109,216,255,0.92)", lineWidth: 1.35, lineDash: [7, 5] };
+      return graphics.slice(1);
     }
     if (kind === "pitchfork" && Array.isArray(channel.pivotTickIds) && Array.isArray(channel.pivotPrices)) {
       channel.pivotTickIds.forEach(function (tickId, index) {
