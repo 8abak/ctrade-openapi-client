@@ -20,6 +20,8 @@
     rangeEndTsMs: null,
     sourceRowCount: 0,
     loading: false,
+    acd: null,
+    showAcd: false,
     ui: { sidebarCollapsed: true },
   };
 
@@ -28,6 +30,7 @@
     sidebarToggle: document.getElementById("sidebarToggle"),
     sidebarBackdrop: document.getElementById("sidebarBackdrop"),
     pointTarget: document.getElementById("pointTarget"),
+    showAcd: document.getElementById("showAcd"),
     latestButton: document.getElementById("latestButton"),
     zoomInButton: document.getElementById("zoomInButton"),
     zoomOutButton: document.getElementById("zoomOutButton"),
@@ -78,6 +81,73 @@
       return hours + "h " + String(minutes).padStart(2, "0") + "m";
     }
     return Math.max(1, minutes) + "m";
+  }
+
+  function formatPrice(value) {
+    const number = Number(value);
+    return Number.isFinite(number) ? number.toFixed(2) : "-";
+  }
+
+  function acdSpecs() {
+    if (!state.showAcd || !state.acd?.available) {
+      return [];
+    }
+    return [
+      ["C+", state.acd.levels?.cUp, "#ffc857"],
+      ["A+", state.acd.levels?.aUp, "#6dd8ff"],
+      ["OR+", state.acd.levels?.openingHigh, "#93a4bd"],
+      ["OR−", state.acd.levels?.openingLow, "#93a4bd"],
+      ["A−", state.acd.levels?.aDown, "#6dd8ff"],
+      ["C−", state.acd.levels?.cDown, "#ffc857"],
+    ].filter(function (spec) { return Number.isFinite(Number(spec[1])); });
+  }
+
+  function acdSeries() {
+    const specs = acdSpecs();
+    if (!specs.length) {
+      return null;
+    }
+    return {
+      id: "bigpicture-acd-levels",
+      name: "Daily ACD",
+      type: "line",
+      data: state.points.length ? [
+        [Number(state.rangeStartTsMs), Number(state.acd.currentMid)],
+        [Number(state.rangeEndTsMs), Number(state.acd.currentMid)],
+      ] : [],
+      showSymbol: false,
+      silent: true,
+      animation: false,
+      lineStyle: { opacity: 0 },
+      markLine: {
+        silent: true,
+        symbol: ["none", "none"],
+        precision: 2,
+        label: {
+          show: true,
+          position: "insideEndTop",
+          color: "#e7f5ff",
+          backgroundColor: "rgba(5,9,15,0.88)",
+          padding: [2, 4],
+          formatter: function (params) {
+            return String(params.name || "ACD") + " " + formatPrice(params.value);
+          },
+        },
+        data: specs.map(function (spec) {
+          return {
+            name: spec[0],
+            yAxis: Number(spec[1]),
+            lineStyle: {
+              color: spec[2],
+              width: spec[0].startsWith("C") ? 1.5 : 1.2,
+              type: spec[0].startsWith("OR") ? "dotted" : "dashed",
+              opacity: 0.92,
+            },
+          };
+        }),
+      },
+      z: 8,
+    };
   }
 
   function renderMeta() {
@@ -153,15 +223,21 @@
         return charting.pointItem(row.timestampMs, row.mid);
       })
       .filter(Boolean);
-    state.chart.setOption({
-      yAxis: charting.buildVisibleIntegerYAxis({
+    let yAxis = charting.buildVisibleIntegerYAxis({
         visibleRange: visibleRange,
         coreItems: coreItems,
         overlayItems: [],
         includeOverlays: false,
         ...Y_AXIS_STYLE,
-      }),
-      series: [{
+      });
+    const specs = acdSpecs();
+    if (specs.length) {
+      const prices = specs.map(function (spec) { return Number(spec[1]); });
+      const low = Math.min(Number.isFinite(Number(yAxis.min)) ? Number(yAxis.min) : Math.min(...prices), ...prices);
+      const high = Math.max(Number.isFinite(Number(yAxis.max)) ? Number(yAxis.max) : Math.max(...prices), ...prices);
+      yAxis = charting.buildIntegerYAxis(low, high, Y_AXIS_STYLE);
+    }
+    const series = [{
         id: "bigpicture-line",
         type: "line",
         showSymbol: false,
@@ -169,8 +245,31 @@
         lineStyle: { width: 1.4, color: "#e8eef8" },
         areaStyle: { color: "rgba(109,216,255,0.05)" },
         data: data,
-      }],
+      }];
+    const acd = acdSeries();
+    if (acd) {
+      series.push(acd);
+    }
+    state.chart.setOption({
+      yAxis: yAxis,
+      series: series,
+    }, {
+      replaceMerge: ["series"],
     });
+  }
+
+  async function loadAcd() {
+    try {
+      state.acd = await fetchJson("/api/live/acd");
+    } catch (error) {
+      state.acd = { available: false, reason: error.message || "ACD unavailable." };
+      if (state.showAcd) {
+        status(state.acd.reason, true);
+      }
+    }
+    if (state.points.length) {
+      renderChart();
+    }
   }
 
   function applyPayload(payload) {
@@ -257,6 +356,16 @@
   elements.pointTarget.addEventListener("change", function () {
     elements.pointTarget.value = String(sanitizePointTarget(elements.pointTarget.value));
   });
+  elements.showAcd.addEventListener("change", function () {
+    state.showAcd = Boolean(elements.showAcd.checked);
+    try {
+      window.localStorage.setItem("datavis.bigpicture.showAcd", state.showAcd ? "1" : "0");
+    } catch (error) {
+      void error;
+    }
+    renderChart();
+    status(state.showAcd ? "Daily ACD enabled." : "Daily ACD hidden.", false);
+  });
   elements.latestButton.addEventListener("click", function () { loadLatest(); });
   elements.zoomInButton.addEventListener("click", function () { loadRange(buildScaledRange(ZOOM_IN_FACTOR)); });
   elements.zoomOutButton.addEventListener("click", function () { loadRange(buildScaledRange(ZOOM_OUT_FACTOR)); });
@@ -270,5 +379,12 @@
   });
 
   setSidebarCollapsed(true);
+  try {
+    state.showAcd = window.localStorage.getItem("datavis.bigpicture.showAcd") === "1";
+  } catch (error) {
+    void error;
+  }
+  elements.showAcd.checked = state.showAcd;
+  loadAcd();
   loadLatest();
 }());
