@@ -43,7 +43,7 @@ from datavis.mavg import query_point_rows_after_value_id as query_mavg_points_af
 from datavis.mavg import query_point_rows_for_tick_range as query_mavg_points_for_tick_range
 from datavis.mavg import query_point_rows_for_time_range as query_mavg_points_for_time_range
 from datavis.rects import RectPaperService, RectServiceError
-from datavis.regression_channel import RegressionChannelError, fit_regression_channel
+from datavis.regression_channel import RegressionChannelError, fit_pitchfork, fit_regression_channel
 from datavis.smart_scalp import SmartScalpError, SmartScalpService
 from datavis.structure import StructureEngine, replay_ticks
 from datavis.trading import CTraderGateway, load_broker_config
@@ -212,17 +212,18 @@ class TradeSmartCloseArmRequest(BaseModel):
 
 
 class TradeCloseConfigRequest(BaseModel):
-    mode: str = Field(..., min_length=5, max_length=7)
+    mode: str = Field(..., min_length=5, max_length=10)
     startTickId: Optional[int] = Field(None, ge=1)
     endTickId: Optional[int] = Field(None, ge=1)
+    anchorTickId: Optional[int] = Field(None, ge=1)
     deviations: Optional[float] = Field(None, gt=0, le=10)
 
     @field_validator("mode")
     @classmethod
     def validate_mode(cls, value: str) -> str:
         normalized = str(value or "").strip().lower()
-        if normalized not in {"manual", "smart", "channel"}:
-            raise ValueError("mode must be manual, smart, or channel")
+        if normalized not in {"manual", "smart", "regression", "channel", "pitchfork"}:
+            raise ValueError("mode must be manual, smart, regression, channel, or pitchfork")
         return normalized
 
 
@@ -3958,28 +3959,45 @@ def trade_close_config(payload: TradeCloseConfigRequest, username: str = Depends
     if _trade_not_configured():
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Broker integration is not configured.")
     try:
-        channel = None
-        if payload.mode == "channel":
+        drawing = None
+        if payload.mode in {"regression", "channel"}:
             if payload.startTickId is None or payload.endTickId is None or payload.deviations is None:
-                raise RegressionChannelError("Channel start, end, and regression number are required.")
+                raise RegressionChannelError("Start, end, and regression number are required.")
             if payload.endTickId <= payload.startTickId:
-                raise RegressionChannelError("Channel end tick must be greater than its start tick.")
+                raise RegressionChannelError("End tick must be greater than the start tick.")
             with db_connection(readonly=True) as conn:
                 with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                     rows = query_rows_between(cur, payload.startTickId, payload.endTickId, MAX_TICK_WINDOW + 1)
             if len(rows) > MAX_TICK_WINDOW:
-                raise RegressionChannelError(f"Regression channels support at most {MAX_TICK_WINDOW} ticks.")
-            channel = fit_regression_channel(
+                raise RegressionChannelError(f"Regression drawings support at most {MAX_TICK_WINDOW} ticks.")
+            drawing = fit_regression_channel(
                 rows,
                 start_tick_id=payload.startTickId,
                 end_tick_id=payload.endTickId,
                 deviations=payload.deviations,
             )
-        return SMART_SCALP_SERVICE.set_close_configuration(mode=payload.mode, channel=channel)
+            drawing["kind"] = payload.mode
+        elif payload.mode == "pitchfork":
+            if payload.startTickId is None or payload.endTickId is None or payload.anchorTickId is None:
+                raise RegressionChannelError("Pitchfork needs three tick IDs.")
+            if not payload.startTickId < payload.endTickId < payload.anchorTickId:
+                raise RegressionChannelError("Pitchfork ticks must increase from left to right.")
+            if payload.anchorTickId - payload.startTickId > MAX_TICK_WINDOW:
+                raise RegressionChannelError(f"Pitchforks support at most {MAX_TICK_WINDOW} ticks.")
+            with db_connection(readonly=True) as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    rows = query_rows_between(cur, payload.startTickId, payload.anchorTickId, MAX_TICK_WINDOW + 1)
+            drawing = fit_pitchfork(
+                rows,
+                start_tick_id=payload.startTickId,
+                end_tick_id=payload.endTickId,
+                anchor_tick_id=payload.anchorTickId,
+            )
+        return SMART_SCALP_SERVICE.set_close_configuration(mode=payload.mode, channel=drawing)
     except RegressionChannelError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"error": "TRADE_CHANNEL_INVALID", "message": str(exc)},
+            detail={"error": "TRADE_DRAWING_INVALID", "message": str(exc)},
         ) from exc
     except Exception as exc:
         _handle_smart_scalp_error(exc)

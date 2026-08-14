@@ -136,6 +136,7 @@
         closeMode: "manual",
         channelDrawState: "idle",
         channelFirstTickId: null,
+        channelSecondTickId: null,
       },
     },
   };
@@ -188,8 +189,12 @@
     tradeConfigLotSize: document.getElementById("tradeConfigLotSize"),
     tradeCloseModeToggle: document.getElementById("tradeCloseModeToggle"),
     tradeChannelConfig: document.getElementById("tradeChannelConfig"),
+    tradeDrawingTitle: document.getElementById("tradeDrawingTitle"),
     tradeChannelStartId: document.getElementById("tradeChannelStartId"),
     tradeChannelEndId: document.getElementById("tradeChannelEndId"),
+    tradePitchforkAnchorField: document.getElementById("tradePitchforkAnchorField"),
+    tradePitchforkAnchorId: document.getElementById("tradePitchforkAnchorId"),
+    tradeRegressionNumberField: document.getElementById("tradeRegressionNumberField"),
     tradeChannelDeviations: document.getElementById("tradeChannelDeviations"),
     tradeChannelDrawButton: document.getElementById("tradeChannelDrawButton"),
     tradeChannelRedrawButton: document.getElementById("tradeChannelRedrawButton"),
@@ -321,6 +326,7 @@
       closeMode: selectedSegmentValue(elements.tradeCloseModeToggle, state.trade.config.closeMode || "manual"),
       startTickId: Number(elements.tradeChannelStartId?.value || 0),
       endTickId: Number(elements.tradeChannelEndId?.value || 0),
+      anchorTickId: Number(elements.tradePitchforkAnchorId?.value || 0),
       deviations: Number(elements.tradeChannelDeviations?.value || 2),
     };
   }
@@ -344,7 +350,7 @@
       void error;
     }
     const side = saved?.side === "sell" ? "sell" : "buy";
-    const closeMode = ["manual", "smart", "channel"].includes(saved?.closeMode) ? saved.closeMode : "manual";
+    const closeMode = ["manual", "smart", "regression", "channel", "pitchfork"].includes(saved?.closeMode) ? saved.closeMode : "manual";
     state.trade.config.side = side;
     state.trade.config.closeMode = closeMode;
     setSegment(elements.tradeSideToggle, side);
@@ -357,6 +363,9 @@
     }
     if (Number(saved?.endTickId) > 0) {
       elements.tradeChannelEndId.value = String(Math.round(saved.endTickId));
+    }
+    if (Number(saved?.anchorTickId) > 0) {
+      elements.tradePitchforkAnchorId.value = String(Math.round(saved.anchorTickId));
     }
     if (Number(saved?.deviations) > 0) {
       elements.tradeChannelDeviations.value = String(saved.deviations);
@@ -371,7 +380,17 @@
     const config = readTradeConfiguration();
     state.trade.config.side = config.side;
     state.trade.config.closeMode = config.closeMode;
-    elements.tradeChannelConfig.hidden = config.closeMode !== "channel";
+    const drawingMode = ["regression", "channel", "pitchfork"].includes(config.closeMode);
+    elements.tradeChannelConfig.hidden = !drawingMode;
+    if (elements.tradeDrawingTitle) {
+      elements.tradeDrawingTitle.textContent = config.closeMode.charAt(0).toUpperCase() + config.closeMode.slice(1) + " drawing";
+    }
+    if (elements.tradePitchforkAnchorField) {
+      elements.tradePitchforkAnchorField.hidden = config.closeMode !== "pitchfork";
+    }
+    if (elements.tradeRegressionNumberField) {
+      elements.tradeRegressionNumberField.hidden = config.closeMode === "pitchfork";
+    }
     elements.tradeConfigSummary.textContent = [
       config.side === "sell" ? "Sell" : "Buy",
       Number.isFinite(config.lotSize) ? formatLots(config.lotSize) + " lot" : "Invalid lot",
@@ -383,16 +402,22 @@
     if (elements.tradeChannelDrawButton) {
       elements.tradeChannelDrawButton.textContent = state.trade.config.channelDrawState === "idle" ? "Draw on chart" : "Cancel draw";
     }
-    const channel = smartPayload()?.channel;
+    const channel = smartPayload()?.drawing || smartPayload()?.channel;
     if (elements.tradeChannelStatus) {
       if (state.trade.config.channelDrawState === "first") {
-        elements.tradeChannelStatus.textContent = "Tap the channel start tick on the chart.";
+        elements.tradeChannelStatus.textContent = "Tap tick 1, the drawing start.";
       } else if (state.trade.config.channelDrawState === "second") {
-        elements.tradeChannelStatus.textContent = "Start " + String(state.trade.config.channelFirstTickId) + " selected. Tap the end tick.";
+        elements.tradeChannelStatus.textContent = "Tick 1: " + String(state.trade.config.channelFirstTickId) + ". Tap tick 2.";
+      } else if (state.trade.config.channelDrawState === "third") {
+        elements.tradeChannelStatus.textContent = "Ticks 1 and 2 selected. Tap tick 3 to finish the pitchfork.";
       } else if (channel) {
-        elements.tradeChannelStatus.textContent = "Channel " + String(channel.startTickId) + " → " + String(channel.endTickId) + " · " + Number(channel.deviations).toFixed(1) + "σ · monitoring server-side.";
+        const kind = String(channel.kind || config.closeMode);
+        const detail = kind === "pitchfork"
+          ? channel.pivotTickIds.join(" → ")
+          : String(channel.startTickId) + " → " + String(channel.endTickId) + " · " + Number(channel.deviations).toFixed(1) + "σ";
+        elements.tradeChannelStatus.textContent = kind.charAt(0).toUpperCase() + kind.slice(1) + " " + detail + " · live trading monitor active.";
       } else {
-        elements.tradeChannelStatus.textContent = "Choose Draw, then tap the channel start and end ticks.";
+        elements.tradeChannelStatus.textContent = "Choose Draw, then tap the required ticks from left to right.";
       }
     }
     renderTradeEntryOverlay();
@@ -402,15 +427,24 @@
   function closeConfigurationPayload() {
     const config = readTradeConfiguration();
     const payload = { mode: config.closeMode };
-    if (config.closeMode === "channel") {
+    if (["regression", "channel"].includes(config.closeMode)) {
       if (!Number.isFinite(config.startTickId) || config.startTickId <= 0
         || !Number.isFinite(config.endTickId) || config.endTickId <= config.startTickId
         || !Number.isFinite(config.deviations) || config.deviations <= 0) {
-        throw new Error("Set a valid channel start, end, and regression number.");
+        throw new Error("Set valid start/end ticks and a regression number.");
       }
       payload.startTickId = Math.round(config.startTickId);
       payload.endTickId = Math.round(config.endTickId);
       payload.deviations = config.deviations;
+    } else if (config.closeMode === "pitchfork") {
+      if (!Number.isFinite(config.startTickId) || config.startTickId <= 0
+        || !Number.isFinite(config.endTickId) || config.endTickId <= config.startTickId
+        || !Number.isFinite(config.anchorTickId) || config.anchorTickId <= config.endTickId) {
+        throw new Error("Set three increasing pitchfork tick IDs.");
+      }
+      payload.startTickId = Math.round(config.startTickId);
+      payload.endTickId = Math.round(config.endTickId);
+      payload.anchorTickId = Math.round(config.anchorTickId);
     }
     return payload;
   }
@@ -438,11 +472,13 @@
     if (state.trade.config.channelDrawState !== "idle") {
       state.trade.config.channelDrawState = "idle";
       state.trade.config.channelFirstTickId = null;
+      state.trade.config.channelSecondTickId = null;
       renderTradeConfiguration();
       return;
     }
     state.trade.config.channelDrawState = "first";
     state.trade.config.channelFirstTickId = null;
+    state.trade.config.channelSecondTickId = null;
     renderTradeConfiguration();
   }
 
@@ -461,14 +497,33 @@
       renderTradeConfiguration();
       return true;
     }
-    if (Number(point.tickId) <= Number(state.trade.config.channelFirstTickId)) {
-      tradeStatus("Channel end tick must be to the right of its start.", true);
+    if (state.trade.config.channelDrawState === "second") {
+      if (Number(point.tickId) <= Number(state.trade.config.channelFirstTickId)) {
+        tradeStatus("Tick 2 must be to the right of tick 1.", true);
+        return true;
+      }
+      elements.tradeChannelEndId.value = String(Math.round(point.tickId));
+      if (readTradeConfiguration().closeMode === "pitchfork") {
+        state.trade.config.channelSecondTickId = Number(point.tickId);
+        state.trade.config.channelDrawState = "third";
+        renderTradeConfiguration();
+        return true;
+      }
+      state.trade.config.channelDrawState = "idle";
+      state.trade.config.channelFirstTickId = null;
+      syncTradeCloseConfiguration().catch((error) => tradeStatus(error.message || "Drawing failed.", true));
+      renderTradeConfiguration();
       return true;
     }
-    elements.tradeChannelEndId.value = String(Math.round(point.tickId));
+    if (Number(point.tickId) <= Number(state.trade.config.channelSecondTickId)) {
+      tradeStatus("Tick 3 must be to the right of tick 2.", true);
+      return true;
+    }
+    elements.tradePitchforkAnchorId.value = String(Math.round(point.tickId));
     state.trade.config.channelDrawState = "idle";
     state.trade.config.channelFirstTickId = null;
-    syncTradeCloseConfiguration().catch((error) => tradeStatus(error.message || "Channel draw failed.", true));
+    state.trade.config.channelSecondTickId = null;
+    syncTradeCloseConfiguration().catch((error) => tradeStatus(error.message || "Pitchfork draw failed.", true));
     renderTradeConfiguration();
     return true;
   }
@@ -519,8 +574,9 @@
     const direction = current >= Number(levels.aUp) ? "UP" : (current <= Number(levels.aDown) ? "DOWN" : "NEUTRAL");
     elements.acdDirection.textContent = direction;
     elements.acdDirection.dataset.direction = direction.toLowerCase();
-    elements.acdLevels.textContent = "A " + formatPrice(levels.aDown) + " / " + formatPrice(levels.aUp)
-      + " · C " + formatPrice(levels.cDown) + " / " + formatPrice(levels.cUp);
+    elements.acdLevels.textContent = "A− " + formatPrice(levels.aDown) + "   A+ " + formatPrice(levels.aUp)
+      + "\nC− " + formatPrice(levels.cDown) + "   C+ " + formatPrice(levels.cUp)
+      + "\nOR " + formatPrice(levels.openingLow) + " — " + formatPrice(levels.openingHigh);
   }
 
   function writeQuery() {
@@ -2339,13 +2395,17 @@
         elements.chartTradeActionButton.textContent = busy
           ? (tradeConfig.side === "sell" ? "Selling…" : "Buying…")
           : (tradeConfig.side === "sell" ? "Sell " : "Buy ") + formatLots(tradeConfig.lotSize) + " lot";
-        let channelReady = true;
-        if (tradeConfig.closeMode === "channel") {
-          channelReady = Number.isFinite(tradeConfig.startTickId) && tradeConfig.startTickId > 0
+        let drawingReady = true;
+        if (["regression", "channel"].includes(tradeConfig.closeMode)) {
+          drawingReady = Number.isFinite(tradeConfig.startTickId) && tradeConfig.startTickId > 0
             && Number.isFinite(tradeConfig.endTickId) && tradeConfig.endTickId > tradeConfig.startTickId
             && Number.isFinite(tradeConfig.deviations) && tradeConfig.deviations > 0;
+        } else if (tradeConfig.closeMode === "pitchfork") {
+          drawingReady = Number.isFinite(tradeConfig.startTickId) && tradeConfig.startTickId > 0
+            && Number.isFinite(tradeConfig.endTickId) && tradeConfig.endTickId > tradeConfig.startTickId
+            && Number.isFinite(tradeConfig.anchorTickId) && tradeConfig.anchorTickId > tradeConfig.endTickId;
         }
-        elements.chartTradeActionButton.disabled = !prepared.ready || busy || !channelReady;
+        elements.chartTradeActionButton.disabled = !prepared.ready || busy || !drawingReady;
       } else if (manualClose) {
         elements.chartTradeActionButton.textContent = busy ? "Closing…" : "Close position";
         elements.chartTradeActionButton.disabled = busy;
@@ -2390,7 +2450,9 @@
     }
     if (elements.chartTradeHint) {
       elements.chartTradeHint.textContent = positionCount && tradeConfig.closeMode !== "manual"
-        ? (tradeConfig.closeMode === "channel" ? "Regression channel is monitoring this position" : "Smart close is monitoring this position")
+        ? (["regression", "channel", "pitchfork"].includes(tradeConfig.closeMode)
+          ? tradeConfig.closeMode.charAt(0).toUpperCase() + tradeConfig.closeMode.slice(1) + " is monitoring this position"
+          : "Smart close is monitoring this position")
         : (busy && state.trade.activeOrderSide
         ? ("Sending " + state.trade.activeOrderSide + " | " + formatLots(prepared.lotSize) + " lot | SL " + (prepared.stopLoss != null ? formatPrice(prepared.stopLoss) : "none") + " | TP " + (prepared.takeProfit != null ? formatPrice(prepared.takeProfit) : "none"))
         : (prepared.ready
@@ -3071,36 +3133,16 @@
         pushYAxisItem(overlayItems, charting.pointItem(overlay.exitTickId, overlay.trade.exitPrice));
       }
     }
-    const paperRect = activePaperRect();
-    if (paperRect) {
-      const rectStart = Number(paperRect.leftx ?? paperRect.entrytickid ?? state.rangeFirstId ?? state.rangeLastId);
-      const rectEnd = Number(paperRect.rightx ?? paperRect.closedtickid ?? paperRect.entrytickid ?? state.rangeLastId ?? rectStart);
-      pushYAxisItem(overlayItems, charting.rangeItem(rectStart, rectEnd, paperRect.lowprice, paperRect.highprice));
-      [
-        paperRect.entryprice,
-        paperRect.stoploss,
-        paperRect.takeprofit,
-        paperRect.exitprice,
-        paperRect.firstprice,
-        paperRect.secondprice,
-      ].forEach((value) => {
-        pushYAxisItem(overlayItems, charting.rangeItem(rectStart, rectEnd, value, value));
-      });
-    }
-    if (state.paper.firstPoint) {
-      pushYAxisItem(overlayItems, charting.pointItem(state.paper.firstPoint.tickId, state.paper.firstPoint.price));
-    }
     if (state.acd?.available) {
       Object.values(state.acd.levels || {}).forEach((value) => {
         pushYAxisItem(overlayItems, charting.rangeItem(state.rangeFirstId, state.rangeLastId, value, value));
       });
     }
-    const regressionChannel = smartPayload()?.channel;
+    const regressionChannel = smartPayload()?.drawing || smartPayload()?.channel;
     if (regressionChannel) {
-      const channelEnd = Math.max(Number(regressionChannel.endTickId || 0), Number(state.rangeLastId || 0));
-      const center = Number(regressionChannel.intercept || 0) + Number(regressionChannel.slopePerTick || 0) * (channelEnd - Number(regressionChannel.startTickId || 0));
-      const halfWidth = Number(regressionChannel.halfWidth || 0);
-      pushYAxisItem(overlayItems, charting.rangeItem(regressionChannel.startTickId, channelEnd, center - halfWidth, center + halfWidth));
+      const drawingEnd = drawingVisibleEnd(regressionChannel);
+      const values = regressionValuesAt(regressionChannel, drawingEnd);
+      pushYAxisItem(overlayItems, charting.rangeItem(regressionChannel.startTickId, drawingEnd, values.lower, values.upper));
     }
     return { coreItems: coreItems, overlayItems: overlayItems };
   }
@@ -3118,7 +3160,7 @@
       visibleRange: options?.visibleRange || viewportRange(state.viewport.currentWindow()),
       coreItems: sources.coreItems,
       overlayItems: sources.overlayItems,
-      includeOverlays: config.sizing,
+      includeOverlays: config.sizing || Boolean(state.acd?.available),
       ...Y_AXIS_STYLE,
     });
   }
@@ -3723,17 +3765,42 @@
 
   function regressionValuesAt(channel, tickId) {
     const center = Number(channel.intercept || 0) + Number(channel.slopePerTick || 0) * (Number(tickId) - Number(channel.startTickId || 0));
+    if (String(channel.kind || "channel") === "pitchfork") {
+      return {
+        center,
+        upper: center + Number(channel.upperOffset || 0),
+        lower: center + Number(channel.lowerOffset || 0),
+      };
+    }
     const halfWidth = Number(channel.halfWidth || 0);
     return { center, upper: center + halfWidth, lower: center - halfWidth };
   }
 
+  function drawingVisibleEnd(channel) {
+    const fittedEnd = Number(channel.endTickId || 0);
+    let visibleEnd = Math.max(fittedEnd, Number(state.rangeLastId || fittedEnd));
+    for (const row of state.rows || []) {
+      const tickId = Number(row.id || 0);
+      const mid = Number(row.mid ?? ((Number(row.bid) + Number(row.ask)) / 2));
+      if (tickId <= fittedEnd || !Number.isFinite(mid)) {
+        continue;
+      }
+      const values = regressionValuesAt(channel, tickId);
+      if (mid < values.lower || mid > values.upper) {
+        visibleEnd = tickId;
+        break;
+      }
+    }
+    return visibleEnd;
+  }
+
   function buildRegressionChannelGraphics() {
-    const channel = smartPayload()?.channel;
+    const channel = smartPayload()?.drawing || smartPayload()?.channel;
     if (!state.chart || !channel) {
       return [];
     }
     const startId = Number(channel.startTickId);
-    const endId = Math.max(Number(channel.endTickId), Number(state.rangeLastId || channel.endTickId));
+    const endId = drawingVisibleEnd(channel);
     const start = regressionValuesAt(channel, startId);
     const end = regressionValuesAt(channel, endId);
     const startUpper = state.chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [startId, start.upper]);
@@ -3746,10 +3813,11 @@
     if (points.concat([startCenter, endCenter]).some((point) => !Array.isArray(point) || !Number.isFinite(Number(point[0])) || !Number.isFinite(Number(point[1])))) {
       return [];
     }
-    return [{
+    const kind = String(channel.kind || "channel");
+    const graphics = [{
       type: "polygon",
       shape: { points },
-      style: { fill: "rgba(109,216,255,0.08)", stroke: "none" },
+      style: { fill: kind === "regression" ? "transparent" : "rgba(109,216,255,0.08)", stroke: "none" },
     }, {
       type: "line",
       shape: { x1: startUpper[0], y1: startUpper[1], x2: endUpper[0], y2: endUpper[1] },
@@ -3763,6 +3831,22 @@
       shape: { x1: startLower[0], y1: startLower[1], x2: endLower[0], y2: endLower[1] },
       style: { stroke: "rgba(109,216,255,0.88)", lineWidth: 1.4 },
     }];
+    if (kind === "regression") {
+      return [graphics[2]];
+    }
+    if (kind === "pitchfork" && Array.isArray(channel.pivotTickIds) && Array.isArray(channel.pivotPrices)) {
+      channel.pivotTickIds.forEach(function (tickId, index) {
+        const point = state.chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [Number(tickId), Number(channel.pivotPrices[index])]);
+        if (Array.isArray(point) && Number.isFinite(Number(point[0])) && Number.isFinite(Number(point[1]))) {
+          graphics.push({
+            type: "circle",
+            shape: { cx: point[0], cy: point[1], r: 4 },
+            style: { fill: "#ffc857", stroke: "rgba(5,9,15,0.9)", lineWidth: 1 },
+          });
+        }
+      });
+    }
+    return graphics;
   }
 
   function renderOverlay() {
@@ -3788,12 +3872,6 @@
         silent: true,
         z: 2,
         children: buildRangeBoxGraphics(),
-      }, {
-        id: "paper-rect-overlay",
-        type: "group",
-        silent: false,
-        z: 9,
-        children: buildPaperRectGraphics(),
       }, {
         id: "trade-overlay",
         type: "group",
@@ -4678,7 +4756,10 @@
       setSegment(elements.tradeCloseModeToggle, value);
       persistTradeConfiguration();
       renderTradeConfiguration();
-      if (value !== "channel" || (Number(elements.tradeChannelStartId.value) > 0 && Number(elements.tradeChannelEndId.value) > Number(elements.tradeChannelStartId.value))) {
+      const needsDrawing = ["regression", "channel", "pitchfork"].includes(value);
+      const hasTwoTicks = Number(elements.tradeChannelStartId.value) > 0 && Number(elements.tradeChannelEndId.value) > Number(elements.tradeChannelStartId.value);
+      const hasPitchfork = value !== "pitchfork" || Number(elements.tradePitchforkAnchorId.value) > Number(elements.tradeChannelEndId.value);
+      if (!needsDrawing || (hasTwoTicks && hasPitchfork)) {
         syncTradeCloseConfiguration().catch((error) => tradeStatus(error.message || "Close status update failed.", true));
       }
     });
@@ -4686,7 +4767,7 @@
       persistTradeConfiguration();
       renderTradeConfiguration();
     });
-    [elements.tradeChannelStartId, elements.tradeChannelEndId, elements.tradeChannelDeviations].forEach(function (input) {
+    [elements.tradeChannelStartId, elements.tradeChannelEndId, elements.tradePitchforkAnchorId, elements.tradeChannelDeviations].forEach(function (input) {
       input.addEventListener("input", function () {
         persistTradeConfiguration();
         renderTradeConfiguration();
@@ -4694,7 +4775,7 @@
     });
     elements.tradeChannelDrawButton.addEventListener("click", toggleTradeChannelDraw);
     elements.tradeChannelRedrawButton.addEventListener("click", function () {
-      syncTradeCloseConfiguration().catch((error) => tradeStatus(error.message || "Channel redraw failed.", true));
+      syncTradeCloseConfiguration().catch((error) => tradeStatus(error.message || "Drawing update failed.", true));
     });
     elements.tradeOpenList.addEventListener("click", function (event) {
       const button = event.target.closest("button[data-action]");

@@ -351,9 +351,10 @@ select {
   display: grid;
   gap: 0.2rem;
   padding: 0.48rem 0.6rem;
-  border: 1px solid rgba(109, 216, 255, 0.2);
+  border: 1px solid rgba(109, 216, 255, 0.52);
   border-radius: 9px;
-  background: rgba(5, 9, 15, 0.78);
+  background: rgba(5, 9, 15, 0.92);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.34), inset 3px 0 0 rgba(109, 216, 255, 0.72);
   backdrop-filter: blur(8px);
   pointer-events: none;
   font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
@@ -384,8 +385,9 @@ select {
 
 .acd-hud-levels {
   color: #c9d7ea;
-  font-size: 0.65rem;
-  white-space: nowrap;
+  font-size: 0.69rem;
+  line-height: 1.45;
+  white-space: pre-line;
 }
 
 .chart-tip {
@@ -734,6 +736,20 @@ select {
   border: 1px solid rgba(109, 216, 255, 0.16);
   border-radius: 8px;
   background: rgba(109, 216, 255, 0.035);
+}
+
+.trade-drawing-title {
+  color: var(--accent);
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.trade-close-toggle {
+  grid-auto-flow: row;
+  grid-auto-columns: auto;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .trade-channel-config[hidden],

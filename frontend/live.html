@@ -138,22 +138,6 @@
           </div>
         </section>
 
-        <section class="live-sidebar-section paper-sidebar-section" id="paperPanel">
-          <header class="trade-panel-header">
-            <h2>Paper Rect</h2>
-          </header>
-          <div class="live-inline-actions">
-            <button class="ghost-button compact-button" id="rectDrawButton" type="button">Draw Rect</button>
-            <button class="ghost-button compact-button" id="rectClearButton" type="button">Clear Rect</button>
-            <button class="ghost-button compact-button" id="rectManualCloseButton" type="button">Manual Close</button>
-          </div>
-          <label class="compact-check paper-smart-close-toggle">
-            <input id="rectSmartCloseToggle" type="checkbox">
-            <span>Smart Close</span>
-          </label>
-          <div class="status-line" id="rectStatusLine">No paper rectangle.</div>
-        </section>
-
         <section class="live-sidebar-section trade-sidebar-section" id="tradePanel">
           <header class="trade-panel-header">
             <h2>Trading</h2>
@@ -205,30 +189,37 @@
                     <div class="segmented trade-close-toggle" id="tradeCloseModeToggle" aria-label="Close status">
                       <button type="button" data-value="manual">Manual</button>
                       <button type="button" data-value="smart">Smart</button>
+                      <button type="button" data-value="regression">Regression</button>
                       <button type="button" data-value="channel">Channel</button>
+                      <button type="button" data-value="pitchfork">Pitchfork</button>
                     </div>
                   </div>
                 </div>
                 <div class="trade-channel-config" id="tradeChannelConfig" hidden>
+                  <div class="trade-drawing-title" id="tradeDrawingTitle">Regression drawing</div>
                   <div class="trade-channel-grid">
                     <label>
-                      <span>start tick id</span>
+                      <span>tick 1 · start</span>
                       <input id="tradeChannelStartId" type="number" min="1" step="1" inputmode="numeric" placeholder="tap chart">
                     </label>
                     <label>
-                      <span>end tick id</span>
+                      <span>tick 2 · end</span>
                       <input id="tradeChannelEndId" type="number" min="1" step="1" inputmode="numeric" placeholder="tap chart">
                     </label>
-                    <label>
+                    <label id="tradePitchforkAnchorField" hidden>
+                      <span>tick 3 · fork end</span>
+                      <input id="tradePitchforkAnchorId" type="number" min="1" step="1" inputmode="numeric" placeholder="tap chart">
+                    </label>
+                    <label id="tradeRegressionNumberField">
                       <span>regression number</span>
                       <input id="tradeChannelDeviations" type="number" min="0.1" max="10" step="0.1" value="2" inputmode="decimal">
                     </label>
                   </div>
                   <div class="trade-channel-actions">
                     <button class="ghost-button compact-button" id="tradeChannelDrawButton" type="button">Draw on chart</button>
-                    <button class="ghost-button compact-button" id="tradeChannelRedrawButton" type="button">Redraw</button>
+                    <button class="ghost-button compact-button" id="tradeChannelRedrawButton" type="button">Apply edit</button>
                   </div>
-                  <div class="trade-session-copy" id="tradeChannelStatus">Choose Draw, then tap the channel start and end ticks.</div>
+                  <div class="trade-session-copy" id="tradeChannelStatus">Choose Draw, then tap the required ticks from left to right.</div>
                 </div>
               </div>
             </details>
@@ -405,7 +396,7 @@
       <div class="panel chart-panel live-chart-panel" id="chartPanel">
         <div id="liveChart" class="chart-host"></div>
         <div class="acd-hud" id="acdHud" aria-live="polite">
-          <div class="acd-hud-title"><span>ACD</span><strong id="acdDirection">—</strong></div>
+          <div class="acd-hud-title"><span>DAILY ACD</span><strong id="acdDirection">—</strong></div>
           <div class="acd-hud-levels" id="acdLevels">Loading opening range…</div>
         </div>
         <div class="chart-trade-entry" id="chartTradeEntry">
