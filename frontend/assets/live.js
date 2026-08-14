@@ -11,6 +11,7 @@
     showEvents: false,
     showStructure: false,
     showRanges: false,
+    showAcd: false,
     sizing: false,
     id: "",
     reviewStart: "",
@@ -81,6 +82,7 @@
     resizeObserver: null,
     ui: { sidebarCollapsed: true },
     acd: null,
+    studyDrawing: { model: null },
     touchNav: null,
     paper: {
       current: null,
@@ -152,6 +154,7 @@
     showEvents: document.getElementById("showEvents"),
     showStructure: document.getElementById("showStructure"),
     showRanges: document.getElementById("showRanges"),
+    showAcd: document.getElementById("showAcd"),
     sizingToggle: document.getElementById("sizingToggle"),
     mavgOptions: document.getElementById("mavgOptions"),
     mavgSummary: document.getElementById("mavgSummary"),
@@ -188,6 +191,7 @@
     tradeSideToggle: document.getElementById("tradeSideToggle"),
     tradeConfigLotSize: document.getElementById("tradeConfigLotSize"),
     tradeCloseModeToggle: document.getElementById("tradeCloseModeToggle"),
+    tradeDrawingTypeToggle: document.getElementById("tradeDrawingTypeToggle"),
     tradeChannelConfig: document.getElementById("tradeChannelConfig"),
     tradeDrawingTitle: document.getElementById("tradeDrawingTitle"),
     tradeChannelStartId: document.getElementById("tradeChannelStartId"),
@@ -199,6 +203,8 @@
     tradeChannelDrawButton: document.getElementById("tradeChannelDrawButton"),
     tradeChannelRedrawButton: document.getElementById("tradeChannelRedrawButton"),
     tradeChannelStatus: document.getElementById("tradeChannelStatus"),
+    tradeDrawingUseForClose: document.getElementById("tradeDrawingUseForClose"),
+    tradeDrawingClearButton: document.getElementById("tradeDrawingClearButton"),
     tradePreparedLotSize: document.getElementById("tradePreparedLotSize"),
     tradePreparedStopLoss: document.getElementById("tradePreparedStopLoss"),
     tradePreparedTakeProfit: document.getElementById("tradePreparedTakeProfit"),
@@ -275,6 +281,7 @@
       showEvents: params.has("showEvents") ? params.get("showEvents") !== "0" : DEFAULTS.showEvents,
       showStructure: params.has("showStructure") ? params.get("showStructure") !== "0" : DEFAULTS.showStructure,
       showRanges: params.has("showRanges") ? params.get("showRanges") !== "0" : DEFAULTS.showRanges,
+      showAcd: params.has("showAcd") ? params.get("showAcd") !== "0" : DEFAULTS.showAcd,
       sizing: params.get("sizing") === "1",
       id: params.get("id") || DEFAULTS.id,
       reviewStart: params.get("reviewStart") || DEFAULTS.reviewStart,
@@ -291,6 +298,7 @@
       showEvents: elements.showEvents.checked,
       showStructure: elements.showStructure.checked,
       showRanges: elements.showRanges.checked,
+      showAcd: elements.showAcd.checked,
       sizing: Boolean(elements.sizingToggle.checked),
       id: (elements.tickId.value || "").trim(),
       reviewStart: (elements.reviewStart.value || "").trim(),
@@ -320,10 +328,16 @@
 
   function readTradeConfiguration() {
     const lotSize = Number(elements.tradeConfigLotSize?.value || TRADE_DEFAULT_LOT_SIZE);
+    const drawingType = selectedSegmentValue(elements.tradeDrawingTypeToggle, "regression");
+    const baseCloseMode = selectedSegmentValue(elements.tradeCloseModeToggle, "manual");
+    const useDrawingForClose = Boolean(elements.tradeDrawingUseForClose?.checked);
     return {
       side: selectedSegmentValue(elements.tradeSideToggle, state.trade.config.side || "buy"),
       lotSize,
-      closeMode: selectedSegmentValue(elements.tradeCloseModeToggle, state.trade.config.closeMode || "manual"),
+      closeMode: useDrawingForClose ? drawingType : baseCloseMode,
+      baseCloseMode,
+      drawingType,
+      useDrawingForClose,
       startTickId: Number(elements.tradeChannelStartId?.value || 0),
       endTickId: Number(elements.tradeChannelEndId?.value || 0),
       anchorTickId: Number(elements.tradePitchforkAnchorId?.value || 0),
@@ -336,7 +350,10 @@
     state.trade.config.side = config.side;
     state.trade.config.closeMode = config.closeMode;
     try {
-      window.localStorage.setItem("datavis.live.tradeConfig", JSON.stringify(config));
+      window.localStorage.setItem("datavis.live.tradeConfig", JSON.stringify({
+        ...config,
+        drawingModel: state.studyDrawing.model,
+      }));
     } catch (error) {
       void error;
     }
@@ -350,11 +367,22 @@
       void error;
     }
     const side = saved?.side === "sell" ? "sell" : "buy";
-    const closeMode = ["manual", "smart", "regression", "channel", "pitchfork"].includes(saved?.closeMode) ? saved.closeMode : "manual";
+    const legacyDrawingMode = ["regression", "channel", "pitchfork"].includes(saved?.closeMode) ? saved.closeMode : null;
+    const closeMode = ["manual", "smart"].includes(saved?.baseCloseMode)
+      ? saved.baseCloseMode
+      : (["manual", "smart"].includes(saved?.closeMode) ? saved.closeMode : "manual");
+    const drawingType = ["regression", "channel", "pitchfork"].includes(saved?.drawingType)
+      ? saved.drawingType
+      : (legacyDrawingMode || "regression");
     state.trade.config.side = side;
     state.trade.config.closeMode = closeMode;
     setSegment(elements.tradeSideToggle, side);
     setSegment(elements.tradeCloseModeToggle, closeMode);
+    setSegment(elements.tradeDrawingTypeToggle, drawingType);
+    elements.tradeDrawingUseForClose.checked = Boolean(saved?.useDrawingForClose || legacyDrawingMode);
+    if (saved?.drawingModel && typeof saved.drawingModel === "object") {
+      state.studyDrawing.model = saved.drawingModel;
+    }
     if (Number(saved?.lotSize) > 0) {
       elements.tradeConfigLotSize.value = String(saved.lotSize);
     }
@@ -380,16 +408,15 @@
     const config = readTradeConfiguration();
     state.trade.config.side = config.side;
     state.trade.config.closeMode = config.closeMode;
-    const drawingMode = ["regression", "channel", "pitchfork"].includes(config.closeMode);
-    elements.tradeChannelConfig.hidden = !drawingMode;
+    const drawingMode = config.drawingType;
     if (elements.tradeDrawingTitle) {
-      elements.tradeDrawingTitle.textContent = config.closeMode.charAt(0).toUpperCase() + config.closeMode.slice(1) + " drawing";
+      elements.tradeDrawingTitle.textContent = drawingMode.charAt(0).toUpperCase() + drawingMode.slice(1) + " drawing";
     }
     if (elements.tradePitchforkAnchorField) {
-      elements.tradePitchforkAnchorField.hidden = config.closeMode !== "pitchfork";
+      elements.tradePitchforkAnchorField.hidden = drawingMode !== "pitchfork";
     }
     if (elements.tradeRegressionNumberField) {
-      elements.tradeRegressionNumberField.hidden = config.closeMode === "pitchfork";
+      elements.tradeRegressionNumberField.hidden = drawingMode === "pitchfork";
     }
     elements.tradeConfigSummary.textContent = [
       config.side === "sell" ? "Sell" : "Buy",
@@ -402,7 +429,7 @@
     if (elements.tradeChannelDrawButton) {
       elements.tradeChannelDrawButton.textContent = state.trade.config.channelDrawState === "idle" ? "Draw on chart" : "Cancel draw";
     }
-    const channel = smartPayload()?.drawing || smartPayload()?.channel;
+    const channel = state.studyDrawing.model || smartPayload()?.drawing || smartPayload()?.channel;
     if (elements.tradeChannelStatus) {
       if (state.trade.config.channelDrawState === "first") {
         elements.tradeChannelStatus.textContent = "Tap tick 1, the drawing start.";
@@ -411,13 +438,14 @@
       } else if (state.trade.config.channelDrawState === "third") {
         elements.tradeChannelStatus.textContent = "Ticks 1 and 2 selected. Tap tick 3 to finish the pitchfork.";
       } else if (channel) {
-        const kind = String(channel.kind || config.closeMode);
+        const kind = String(channel.kind || drawingMode);
         const detail = kind === "pitchfork"
-          ? channel.pivotTickIds.join(" → ")
+          ? (Array.isArray(channel.pivotTickIds) ? channel.pivotTickIds.join(" → ") : "three anchors")
           : String(channel.startTickId) + " → " + String(channel.endTickId) + " · " + Number(channel.deviations).toFixed(1) + "σ";
-        elements.tradeChannelStatus.textContent = kind.charAt(0).toUpperCase() + kind.slice(1) + " " + detail + " · live trading monitor active.";
+        elements.tradeChannelStatus.textContent = kind.charAt(0).toUpperCase() + kind.slice(1) + " " + detail
+          + (config.useDrawingForClose ? " · connected to trade close." : " · study only.");
       } else {
-        elements.tradeChannelStatus.textContent = "Choose Draw, then tap the required ticks from left to right.";
+        elements.tradeChannelStatus.textContent = "Study only. Choose Draw, then tap the required ticks.";
       }
     }
     renderTradeEntryOverlay();
@@ -447,6 +475,110 @@
       payload.anchorTickId = Math.round(config.anchorTickId);
     }
     return payload;
+  }
+
+  function studyMid(row) {
+    const value = Number(row?.mid ?? ((Number(row?.bid) + Number(row?.ask)) / 2));
+    return Number.isFinite(value) && value > 0 ? value : null;
+  }
+
+  function buildStudyDrawingModel() {
+    const config = readTradeConfiguration();
+    const startId = Math.round(config.startTickId);
+    const secondId = Math.round(config.endTickId);
+    if (!Number.isFinite(startId) || startId <= 0 || !Number.isFinite(secondId) || secondId <= startId) {
+      throw new Error("Set two increasing tick IDs.");
+    }
+    if (config.drawingType === "pitchfork") {
+      const thirdId = Math.round(config.anchorTickId);
+      if (!Number.isFinite(thirdId) || thirdId <= secondId) {
+        throw new Error("Pitchfork needs three increasing tick IDs.");
+      }
+      const ids = [startId, secondId, thirdId];
+      const prices = ids.map((tickId) => studyMid(state.rows.find((row) => Number(row.id) === tickId)));
+      if (prices.some((price) => price == null)) {
+        throw new Error("Load all three pitchfork ticks before drawing.");
+      }
+      const midpointId = (secondId + thirdId) / 2;
+      const midpointPrice = (prices[1] + prices[2]) / 2;
+      const slope = (midpointPrice - prices[0]) / (midpointId - startId);
+      const offsets = [
+        prices[1] - (prices[0] + slope * (secondId - startId)),
+        prices[2] - (prices[0] + slope * (thirdId - startId)),
+      ].sort((a, b) => a - b);
+      return {
+        kind: "pitchfork",
+        startTickId: startId,
+        endTickId: thirdId,
+        anchorTickId: thirdId,
+        pivotTickIds: ids,
+        pivotPrices: prices,
+        intercept: prices[0],
+        slopePerTick: slope,
+        lowerOffset: offsets[0],
+        upperOffset: offsets[1],
+      };
+    }
+
+    const points = (state.rows || [])
+      .map((row) => [Number(row.id), studyMid(row)])
+      .filter((point) => point[0] >= startId && point[0] <= secondId && point[1] != null);
+    if (points.length < 2) {
+      throw new Error("Load the selected regression ticks before drawing.");
+    }
+    const xs = points.map((point) => point[0] - startId);
+    const ys = points.map((point) => point[1]);
+    const meanX = xs.reduce((sum, value) => sum + value, 0) / xs.length;
+    const meanY = ys.reduce((sum, value) => sum + value, 0) / ys.length;
+    const variance = xs.reduce((sum, value) => sum + ((value - meanX) ** 2), 0);
+    const slope = variance <= 0 ? 0 : xs.reduce((sum, value, index) => sum + ((value - meanX) * (ys[index] - meanY)), 0) / variance;
+    const intercept = meanY - slope * meanX;
+    const residualStd = Math.sqrt(ys.reduce((sum, value, index) => sum + ((value - (intercept + slope * xs[index])) ** 2), 0) / ys.length);
+    const deviations = Number(config.deviations);
+    if (!Number.isFinite(deviations) || deviations <= 0 || deviations > 10) {
+      throw new Error("Regression number must be between 0 and 10.");
+    }
+    return {
+      kind: config.drawingType,
+      startTickId: startId,
+      endTickId: secondId,
+      deviations,
+      sampleCount: points.length,
+      intercept,
+      slopePerTick: slope,
+      residualStd,
+      halfWidth: Math.max(0.000001, residualStd * deviations),
+    };
+  }
+
+  async function applyStudyDrawing() {
+    state.studyDrawing.model = buildStudyDrawingModel();
+    persistTradeConfiguration();
+    renderTradeConfiguration();
+    renderChart({ shiftWithRun: false });
+    if (readTradeConfiguration().useDrawingForClose) {
+      if (!state.trade.authenticated) {
+        tradeStatus("Drawing saved for study. Log in to connect it to trade close.", true);
+        return;
+      }
+      await syncTradeCloseConfiguration();
+    } else {
+      status("Study drawing updated.", false);
+    }
+  }
+
+  function clearStudyDrawing() {
+    state.studyDrawing.model = null;
+    if (elements.tradeDrawingUseForClose.checked) {
+      elements.tradeDrawingUseForClose.checked = false;
+      if (state.trade.authenticated) {
+        syncTradeCloseConfiguration({ silent: true }).catch((error) => tradeStatus(error.message || "Close reset failed.", true));
+      }
+    }
+    persistTradeConfiguration();
+    renderTradeConfiguration();
+    renderChart({ shiftWithRun: false });
+    status("Study drawing cleared.", false);
   }
 
   async function syncTradeCloseConfiguration(options) {
@@ -503,7 +635,7 @@
         return true;
       }
       elements.tradeChannelEndId.value = String(Math.round(point.tickId));
-      if (readTradeConfiguration().closeMode === "pitchfork") {
+      if (readTradeConfiguration().drawingType === "pitchfork") {
         state.trade.config.channelSecondTickId = Number(point.tickId);
         state.trade.config.channelDrawState = "third";
         renderTradeConfiguration();
@@ -511,7 +643,7 @@
       }
       state.trade.config.channelDrawState = "idle";
       state.trade.config.channelFirstTickId = null;
-      syncTradeCloseConfiguration().catch((error) => tradeStatus(error.message || "Drawing failed.", true));
+      applyStudyDrawing().catch((error) => status(error.message || "Drawing failed.", true));
       renderTradeConfiguration();
       return true;
     }
@@ -523,7 +655,7 @@
     state.trade.config.channelDrawState = "idle";
     state.trade.config.channelFirstTickId = null;
     state.trade.config.channelSecondTickId = null;
-    syncTradeCloseConfiguration().catch((error) => tradeStatus(error.message || "Pitchfork draw failed.", true));
+    applyStudyDrawing().catch((error) => status(error.message || "Pitchfork draw failed.", true));
     renderTradeConfiguration();
     return true;
   }
@@ -563,6 +695,10 @@
     if (!elements.acdHud) {
       return;
     }
+    elements.acdHud.hidden = !currentConfig().showAcd;
+    if (elements.acdHud.hidden) {
+      return;
+    }
     const acd = state.acd;
     if (!acd?.available) {
       elements.acdDirection.textContent = "—";
@@ -588,6 +724,7 @@
       showEvents: config.showEvents ? "1" : "0",
       showStructure: config.showStructure ? "1" : "0",
       showRanges: config.showRanges ? "1" : "0",
+      showAcd: config.showAcd ? "1" : "0",
       sizing: config.sizing ? "1" : "0",
       window: String(config.window),
       speed: String(config.reviewSpeed),
@@ -3133,12 +3270,12 @@
         pushYAxisItem(overlayItems, charting.pointItem(overlay.exitTickId, overlay.trade.exitPrice));
       }
     }
-    if (state.acd?.available) {
+    if (config.showAcd && state.acd?.available) {
       Object.values(state.acd.levels || {}).forEach((value) => {
         pushYAxisItem(overlayItems, charting.rangeItem(state.rangeFirstId, state.rangeLastId, value, value));
       });
     }
-    const regressionChannel = smartPayload()?.drawing || smartPayload()?.channel;
+    const regressionChannel = state.studyDrawing.model || smartPayload()?.drawing || smartPayload()?.channel;
     if (regressionChannel) {
       const drawingEnd = drawingVisibleEnd(regressionChannel);
       const values = regressionValuesAt(regressionChannel, drawingEnd);
@@ -3160,7 +3297,7 @@
       visibleRange: options?.visibleRange || viewportRange(state.viewport.currentWindow()),
       coreItems: sources.coreItems,
       overlayItems: sources.overlayItems,
-      includeOverlays: config.sizing || Boolean(state.acd?.available),
+      includeOverlays: config.sizing || Boolean(config.showAcd && state.acd?.available),
       ...Y_AXIS_STYLE,
     });
   }
@@ -3714,7 +3851,7 @@
   }
 
   function buildAcdGraphics() {
-    if (!state.chart || !state.acd?.available) {
+    if (!state.chart || !currentConfig().showAcd || !state.acd?.available) {
       return [];
     }
     const rect = chartGridRect();
@@ -3795,7 +3932,7 @@
   }
 
   function buildRegressionChannelGraphics() {
-    const channel = smartPayload()?.drawing || smartPayload()?.channel;
+    const channel = state.studyDrawing.model || smartPayload()?.drawing || smartPayload()?.channel;
     if (!state.chart || !channel) {
       return [];
     }
@@ -4754,14 +4891,17 @@
     });
     bindSegment(elements.tradeCloseModeToggle, function (value) {
       setSegment(elements.tradeCloseModeToggle, value);
+      elements.tradeDrawingUseForClose.checked = false;
       persistTradeConfiguration();
       renderTradeConfiguration();
-      const needsDrawing = ["regression", "channel", "pitchfork"].includes(value);
-      const hasTwoTicks = Number(elements.tradeChannelStartId.value) > 0 && Number(elements.tradeChannelEndId.value) > Number(elements.tradeChannelStartId.value);
-      const hasPitchfork = value !== "pitchfork" || Number(elements.tradePitchforkAnchorId.value) > Number(elements.tradeChannelEndId.value);
-      if (!needsDrawing || (hasTwoTicks && hasPitchfork)) {
-        syncTradeCloseConfiguration().catch((error) => tradeStatus(error.message || "Close status update failed.", true));
-      }
+      syncTradeCloseConfiguration().catch((error) => tradeStatus(error.message || "Close status update failed.", true));
+    });
+    bindSegment(elements.tradeDrawingTypeToggle, function (value) {
+      setSegment(elements.tradeDrawingTypeToggle, value);
+      state.studyDrawing.model = null;
+      persistTradeConfiguration();
+      renderTradeConfiguration();
+      renderChart({ shiftWithRun: false });
     });
     elements.tradeConfigLotSize.addEventListener("input", function () {
       persistTradeConfiguration();
@@ -4775,7 +4915,30 @@
     });
     elements.tradeChannelDrawButton.addEventListener("click", toggleTradeChannelDraw);
     elements.tradeChannelRedrawButton.addEventListener("click", function () {
-      syncTradeCloseConfiguration().catch((error) => tradeStatus(error.message || "Drawing update failed.", true));
+      applyStudyDrawing().catch((error) => status(error.message || "Drawing update failed.", true));
+    });
+    elements.tradeDrawingClearButton.addEventListener("click", clearStudyDrawing);
+    elements.tradeDrawingUseForClose.addEventListener("change", function () {
+      persistTradeConfiguration();
+      renderTradeConfiguration();
+      if (!elements.tradeDrawingUseForClose.checked) {
+        if (state.trade.authenticated) {
+          syncTradeCloseConfiguration().catch((error) => tradeStatus(error.message || "Close status update failed.", true));
+        }
+        return;
+      }
+      if (!state.studyDrawing.model) {
+        elements.tradeDrawingUseForClose.checked = false;
+        persistTradeConfiguration();
+        renderTradeConfiguration();
+        tradeStatus("Draw or apply a study object before connecting trade close.", true);
+        return;
+      }
+      if (!state.trade.authenticated) {
+        tradeStatus("Study saved. Log in to connect it to trade close.", true);
+        return;
+      }
+      syncTradeCloseConfiguration().catch((error) => tradeStatus(error.message || "Drawing close setup failed.", true));
     });
     elements.tradeOpenList.addEventListener("click", function (event) {
       const button = event.target.closest("button[data-action]");
@@ -5239,6 +5402,7 @@
     elements.showEvents.checked = Boolean(config.showEvents);
     elements.showStructure.checked = Boolean(config.showStructure);
     elements.showRanges.checked = Boolean(config.showRanges);
+    elements.showAcd.checked = Boolean(config.showAcd);
     elements.sizingToggle.checked = Boolean(config.sizing);
     elements.tickId.value = config.id;
     elements.reviewStart.value = config.reviewStart;
@@ -5279,12 +5443,13 @@
     status("Run state updated.", false);
   });
 
-  [elements.showTicks, elements.showEvents, elements.showStructure, elements.showRanges, elements.sizingToggle].forEach((control) => {
+  [elements.showTicks, elements.showEvents, elements.showStructure, elements.showRanges, elements.showAcd, elements.sizingToggle].forEach((control) => {
     control.addEventListener("change", function () {
       writeQuery();
-      if (control === elements.sizingToggle) {
+      if (control === elements.sizingToggle || control === elements.showAcd) {
+        renderAcdHud();
         renderChart({ resetView: false });
-        status("Sizing updated.", false);
+        status(control === elements.showAcd ? "ACD display updated." : "Sizing updated.", false);
         return;
       }
       loadAll(false).catch((error) => status(error.message || "Display refresh failed.", true));

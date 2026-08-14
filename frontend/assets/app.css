@@ -360,6 +360,10 @@ select {
   font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 
+.acd-hud[hidden] {
+  display: none;
+}
+
 .acd-hud-title {
   display: flex;
   align-items: center;
@@ -761,6 +765,10 @@ select {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 0.45rem;
+}
+
+.trade-channel-actions > :last-child:nth-child(odd) {
+  grid-column: 1 / -1;
 }
 
 .chart-trade-entry {

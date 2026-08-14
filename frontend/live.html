@@ -91,6 +91,10 @@
                   <span>Range boxes</span>
                 </label>
                 <label class="compact-check">
+                  <input id="showAcd" type="checkbox">
+                  <span>ACD levels</span>
+                </label>
+                <label class="compact-check">
                   <input id="sizingToggle" type="checkbox">
                   <span>Sizing</span>
                 </label>
@@ -135,6 +139,51 @@
           <div class="live-inline-actions">
             <button class="primary-button compact-button" id="applyButton" type="button">Load</button>
             <button class="ghost-button compact-button" id="loadMoreLeftButton" type="button">Load More Left</button>
+          </div>
+        </section>
+
+        <section class="live-sidebar-section" id="studyDrawingPanel">
+          <header class="trade-panel-header">
+            <h2>Study Drawings</h2>
+          </header>
+          <div class="live-control-field">
+            <span>object</span>
+            <div class="segmented trade-drawing-type-toggle" id="tradeDrawingTypeToggle" aria-label="Study drawing type">
+              <button type="button" data-value="regression">Regression</button>
+              <button type="button" data-value="channel">Channel</button>
+              <button type="button" data-value="pitchfork">Pitchfork</button>
+            </div>
+          </div>
+          <div class="trade-channel-config" id="tradeChannelConfig">
+            <div class="trade-drawing-title" id="tradeDrawingTitle">Regression drawing</div>
+            <div class="trade-channel-grid">
+              <label>
+                <span>tick 1 · start</span>
+                <input id="tradeChannelStartId" type="number" min="1" step="1" inputmode="numeric" placeholder="tap chart">
+              </label>
+              <label>
+                <span>tick 2 · end</span>
+                <input id="tradeChannelEndId" type="number" min="1" step="1" inputmode="numeric" placeholder="tap chart">
+              </label>
+              <label id="tradePitchforkAnchorField" hidden>
+                <span>tick 3 · fork end</span>
+                <input id="tradePitchforkAnchorId" type="number" min="1" step="1" inputmode="numeric" placeholder="tap chart">
+              </label>
+              <label id="tradeRegressionNumberField">
+                <span>regression number</span>
+                <input id="tradeChannelDeviations" type="number" min="0.1" max="10" step="0.1" value="2" inputmode="decimal">
+              </label>
+            </div>
+            <div class="trade-channel-actions">
+              <button class="ghost-button compact-button" id="tradeChannelDrawButton" type="button">Draw on chart</button>
+              <button class="ghost-button compact-button" id="tradeChannelRedrawButton" type="button">Apply edit</button>
+              <button class="ghost-button compact-button" id="tradeDrawingClearButton" type="button">Clear object</button>
+            </div>
+            <label class="compact-check">
+              <input id="tradeDrawingUseForClose" type="checkbox">
+              <span>Use this object for trade close</span>
+            </label>
+            <div class="trade-session-copy" id="tradeChannelStatus">Study only. Choose Draw, then tap the required ticks.</div>
           </div>
         </section>
 
@@ -189,37 +238,8 @@
                     <div class="segmented trade-close-toggle" id="tradeCloseModeToggle" aria-label="Close status">
                       <button type="button" data-value="manual">Manual</button>
                       <button type="button" data-value="smart">Smart</button>
-                      <button type="button" data-value="regression">Regression</button>
-                      <button type="button" data-value="channel">Channel</button>
-                      <button type="button" data-value="pitchfork">Pitchfork</button>
                     </div>
                   </div>
-                </div>
-                <div class="trade-channel-config" id="tradeChannelConfig" hidden>
-                  <div class="trade-drawing-title" id="tradeDrawingTitle">Regression drawing</div>
-                  <div class="trade-channel-grid">
-                    <label>
-                      <span>tick 1 · start</span>
-                      <input id="tradeChannelStartId" type="number" min="1" step="1" inputmode="numeric" placeholder="tap chart">
-                    </label>
-                    <label>
-                      <span>tick 2 · end</span>
-                      <input id="tradeChannelEndId" type="number" min="1" step="1" inputmode="numeric" placeholder="tap chart">
-                    </label>
-                    <label id="tradePitchforkAnchorField" hidden>
-                      <span>tick 3 · fork end</span>
-                      <input id="tradePitchforkAnchorId" type="number" min="1" step="1" inputmode="numeric" placeholder="tap chart">
-                    </label>
-                    <label id="tradeRegressionNumberField">
-                      <span>regression number</span>
-                      <input id="tradeChannelDeviations" type="number" min="0.1" max="10" step="0.1" value="2" inputmode="decimal">
-                    </label>
-                  </div>
-                  <div class="trade-channel-actions">
-                    <button class="ghost-button compact-button" id="tradeChannelDrawButton" type="button">Draw on chart</button>
-                    <button class="ghost-button compact-button" id="tradeChannelRedrawButton" type="button">Apply edit</button>
-                  </div>
-                  <div class="trade-session-copy" id="tradeChannelStatus">Choose Draw, then tap the required ticks from left to right.</div>
                 </div>
               </div>
             </details>
