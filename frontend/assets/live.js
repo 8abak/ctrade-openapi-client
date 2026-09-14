@@ -12,6 +12,8 @@
     showStructure: false,
     showRanges: false,
     showAcd: false,
+    showBb1m: false,
+    showBb5m: false,
     sizing: false,
     id: "",
     reviewStart: "",
@@ -83,7 +85,8 @@
     resizeObserver: null,
     ui: { sidebarCollapsed: true },
     acd: null,
-    studyDrawing: { model: null },
+    studyDrawing: { model: null, saved: [] },
+    bollinger: { oneMinute: [], fiveMinute: [], timer: 0, requestToken: 0 },
     touchNav: null,
     paper: {
       current: null,
@@ -156,6 +159,8 @@
     showStructure: document.getElementById("showStructure"),
     showRanges: document.getElementById("showRanges"),
     showAcd: document.getElementById("showAcd"),
+    showBb1m: document.getElementById("showBb1m"),
+    showBb5m: document.getElementById("showBb5m"),
     sizingToggle: document.getElementById("sizingToggle"),
     mavgOptions: document.getElementById("mavgOptions"),
     mavgSummary: document.getElementById("mavgSummary"),
@@ -206,6 +211,8 @@
     tradeChannelStatus: document.getElementById("tradeChannelStatus"),
     tradeDrawingUseForClose: document.getElementById("tradeDrawingUseForClose"),
     tradeDrawingClearButton: document.getElementById("tradeDrawingClearButton"),
+    tradeDrawingKeepButton: document.getElementById("tradeDrawingKeepButton"),
+    tradeDrawingClearAllButton: document.getElementById("tradeDrawingClearAllButton"),
     tradePreparedLotSize: document.getElementById("tradePreparedLotSize"),
     tradePreparedStopLoss: document.getElementById("tradePreparedStopLoss"),
     tradePreparedTakeProfit: document.getElementById("tradePreparedTakeProfit"),
@@ -259,6 +266,7 @@
     chartTradeSmartStatus: document.getElementById("chartTradeSmartStatus"),
     chartTradeActionButton: document.getElementById("chartTradeActionButton"),
     chartTradeHint: document.getElementById("chartTradeHint"),
+    priceLineDistance: document.getElementById("priceLineDistance"),
     acdHud: document.getElementById("acdHud"),
     acdDirection: document.getElementById("acdDirection"),
     acdLevels: document.getElementById("acdLevels"),
@@ -283,6 +291,8 @@
       showStructure: params.has("showStructure") ? params.get("showStructure") !== "0" : DEFAULTS.showStructure,
       showRanges: params.has("showRanges") ? params.get("showRanges") !== "0" : DEFAULTS.showRanges,
       showAcd: params.has("showAcd") ? params.get("showAcd") !== "0" : DEFAULTS.showAcd,
+      showBb1m: params.has("showBb1m") ? params.get("showBb1m") !== "0" : DEFAULTS.showBb1m,
+      showBb5m: params.has("showBb5m") ? params.get("showBb5m") !== "0" : DEFAULTS.showBb5m,
       sizing: params.get("sizing") === "1",
       id: params.get("id") || DEFAULTS.id,
       reviewStart: params.get("reviewStart") || DEFAULTS.reviewStart,
@@ -300,6 +310,8 @@
       showStructure: elements.showStructure.checked,
       showRanges: elements.showRanges.checked,
       showAcd: elements.showAcd.checked,
+      showBb1m: elements.showBb1m.checked,
+      showBb5m: elements.showBb5m.checked,
       sizing: Boolean(elements.sizingToggle.checked),
       id: (elements.tickId.value || "").trim(),
       reviewStart: (elements.reviewStart.value || "").trim(),
@@ -354,6 +366,7 @@
       window.localStorage.setItem("datavis.live.tradeConfig", JSON.stringify({
         ...config,
         drawingModel: state.studyDrawing.model,
+        savedDrawingModels: state.studyDrawing.saved,
       }));
     } catch (error) {
       void error;
@@ -383,6 +396,9 @@
     elements.tradeDrawingUseForClose.checked = Boolean(saved?.useDrawingForClose || legacyDrawingMode);
     if (saved?.drawingModel && typeof saved.drawingModel === "object") {
       state.studyDrawing.model = saved.drawingModel;
+    }
+    if (Array.isArray(saved?.savedDrawingModels)) {
+      state.studyDrawing.saved = saved.savedDrawingModels.filter((item) => item && typeof item === "object").slice(-20);
     }
     if (Number(saved?.lotSize) > 0) {
       elements.tradeConfigLotSize.value = String(saved.lotSize);
@@ -444,9 +460,12 @@
           ? (Array.isArray(channel.pivotTickIds) ? channel.pivotTickIds.join(" → ") : "three anchors")
           : String(channel.startTickId) + " → " + String(channel.endTickId) + " · " + Number(channel.deviations).toFixed(1) + "σ";
         elements.tradeChannelStatus.textContent = kind.charAt(0).toUpperCase() + kind.slice(1) + " " + detail
-          + (config.useDrawingForClose ? " · connected to trade close." : " · study only.");
+          + (config.useDrawingForClose ? " · connected to trade close." : " · study only.")
+          + (state.studyDrawing.saved.length ? " · " + String(state.studyDrawing.saved.length) + " kept RT(s)." : "");
       } else {
-        elements.tradeChannelStatus.textContent = "Study only. Choose Draw, then tap the required ticks.";
+        elements.tradeChannelStatus.textContent = state.studyDrawing.saved.length
+          ? String(state.studyDrawing.saved.length) + " kept RT(s). Draw another or clear all."
+          : "Study only. Choose Draw, then tap the required ticks.";
       }
     }
     renderTradeEntryOverlay();
@@ -580,6 +599,34 @@
     renderTradeConfiguration();
     renderChart({ shiftWithRun: false });
     status("Study drawing cleared.", false);
+  }
+
+  function keepStudyDrawingAndStartNew() {
+    if (!state.studyDrawing.model) {
+      status("Draw an RT before keeping it.", true);
+      return;
+    }
+    state.studyDrawing.saved.push(state.studyDrawing.model);
+    state.studyDrawing.saved = state.studyDrawing.saved.slice(-20);
+    state.studyDrawing.model = null;
+    elements.tradeChannelStartId.value = "";
+    elements.tradeChannelEndId.value = "";
+    if (elements.tradePitchforkAnchorId) elements.tradePitchforkAnchorId.value = "";
+    elements.tradeDrawingUseForClose.checked = false;
+    persistTradeConfiguration();
+    renderTradeConfiguration();
+    renderChart({ shiftWithRun: false });
+    status("RT kept. Select two new ticks to draw another.", false);
+  }
+
+  function clearAllStudyDrawings() {
+    state.studyDrawing.model = null;
+    state.studyDrawing.saved = [];
+    elements.tradeDrawingUseForClose.checked = false;
+    persistTradeConfiguration();
+    renderTradeConfiguration();
+    renderChart({ shiftWithRun: false });
+    status("All manual RTs cleared.", false);
   }
 
   async function syncTradeCloseConfiguration(options) {
@@ -726,6 +773,8 @@
       showStructure: config.showStructure ? "1" : "0",
       showRanges: config.showRanges ? "1" : "0",
       showAcd: config.showAcd ? "1" : "0",
+      showBb1m: config.showBb1m ? "1" : "0",
+      showBb5m: config.showBb5m ? "1" : "0",
       sizing: config.sizing ? "1" : "0",
       window: String(config.window),
       speed: String(config.reviewSpeed),
@@ -1271,6 +1320,8 @@
       elements.tradeSmartCooldownSeconds,
       elements.tradeSmartMaxHoldSeconds,
       elements.tradeSmartApplyButton,
+      elements.tradeDrawingKeepButton,
+      elements.tradeDrawingClearAllButton,
       elements.tradePositionStopLoss,
       elements.tradePositionTakeProfit,
       elements.chartTradeBuyButton,
@@ -2103,6 +2154,58 @@
     return best ? Number(best.id) : null;
   }
 
+  function bollingerEnabled() {
+    const config = currentConfig();
+    return Boolean(config.showBb1m || config.showBb5m);
+  }
+
+  async function refreshBollingerBands(options) {
+    if (!bollingerEnabled() || !Number.isFinite(Number(state.rangeFirstId)) || !Number.isFinite(Number(state.rangeLastId))) {
+      state.bollinger.oneMinute = [];
+      state.bollinger.fiveMinute = [];
+      if (options?.render !== false) renderChart({ shiftWithRun: false });
+      return false;
+    }
+    const token = ++state.bollinger.requestToken;
+    try {
+      const payload = await fetchJson("/api/live/bollinger?" + new URLSearchParams({
+        startId: String(state.rangeFirstId), endId: String(state.rangeLastId),
+      }).toString());
+      if (token !== state.bollinger.requestToken) return false;
+      state.bollinger.oneMinute = Array.isArray(payload.oneMinute) ? payload.oneMinute : [];
+      state.bollinger.fiveMinute = Array.isArray(payload.fiveMinute) ? payload.fiveMinute : [];
+      if (options?.render !== false) renderChart({ shiftWithRun: false });
+      return true;
+    } catch (error) {
+      if (!options?.silent) status(error.message || "Bollinger bands could not be loaded.", true);
+      return false;
+    }
+  }
+
+  function scheduleBollingerRefresh() {
+    if (!bollingerEnabled()) return;
+    if (state.bollinger.timer) window.clearTimeout(state.bollinger.timer);
+    state.bollinger.timer = window.setTimeout(() => {
+      state.bollinger.timer = 0;
+      refreshBollingerBands({ silent: true }).catch(function () {});
+    }, 5000);
+  }
+
+  function bollingerSeries(points, prefix, color) {
+    if (!points.length) return [];
+    const data = (key) => points.map((point) => [Number(point.tickId), Number(point[key])]);
+    return [{
+      id: prefix + "-upper", name: prefix + " upper", type: "line", data: data("upper"), showSymbol: false,
+      animation: false, silent: true, lineStyle: { color, width: 1.15, opacity: .82 }, z: 6,
+    }, {
+      id: prefix + "-middle", name: prefix + " middle", type: "line", data: data("middle"), showSymbol: false,
+      animation: false, silent: true, lineStyle: { color, width: .85, type: "dashed", opacity: .55 }, z: 6,
+    }, {
+      id: prefix + "-lower", name: prefix + " lower", type: "line", data: data("lower"), showSymbol: false,
+      animation: false, silent: true, lineStyle: { color, width: 1.15, opacity: .82 }, z: 6,
+    }];
+  }
+
   function nearestRowForTickValue(tickValue) {
     const target = Number(tickValue);
     if (!Number.isFinite(target) || !state.rows.length) {
@@ -2514,6 +2617,7 @@
     }
     const prepared = preparedTradeState();
     const authConfigured = state.trade.authConfigured;
+    const authenticated = state.trade.authenticated;
     const busy = state.trade.actionBusy;
     const smart = smartPayload();
     const smartBuyAvailability = smartAvailability("buy");
@@ -2550,30 +2654,30 @@
       }
     }
     if (elements.chartTradeBuyButton) {
-      elements.chartTradeBuyButton.hidden = !authConfigured;
-      elements.chartTradeBuyButton.disabled = !authConfigured || !prepared.ready || busy;
+      elements.chartTradeBuyButton.hidden = !authenticated;
+      elements.chartTradeBuyButton.disabled = !authenticated || !prepared.ready || busy;
       elements.chartTradeBuyButton.textContent = busy && state.trade.activeOrderSide === "buy" ? "Buying..." : "Buy Market";
     }
     if (elements.chartTradeSellButton) {
-      elements.chartTradeSellButton.hidden = !authConfigured;
-      elements.chartTradeSellButton.disabled = !authConfigured || !prepared.ready || busy;
+      elements.chartTradeSellButton.hidden = !authenticated;
+      elements.chartTradeSellButton.disabled = !authenticated || !prepared.ready || busy;
       elements.chartTradeSellButton.textContent = busy && state.trade.activeOrderSide === "sell" ? "Selling..." : "Sell Market";
     }
     if (elements.chartSmartBuyButton) {
-      elements.chartSmartBuyButton.hidden = !authConfigured;
-      elements.chartSmartBuyButton.disabled = !authConfigured || busy || !smartBuyAvailability.available;
+      elements.chartSmartBuyButton.hidden = !authenticated;
+      elements.chartSmartBuyButton.disabled = !authenticated || busy || !smartBuyAvailability.available;
       elements.chartSmartBuyButton.classList.toggle("is-armed", currentSmartArmed("buy"));
       elements.chartSmartBuyButton.textContent = currentSmartArmed("buy") ? "Smart Buy ON" : "Smart Buy OFF";
     }
     if (elements.chartSmartSellButton) {
-      elements.chartSmartSellButton.hidden = !authConfigured;
-      elements.chartSmartSellButton.disabled = !authConfigured || busy || !smartSellAvailability.available;
+      elements.chartSmartSellButton.hidden = !authenticated;
+      elements.chartSmartSellButton.disabled = !authenticated || busy || !smartSellAvailability.available;
       elements.chartSmartSellButton.classList.toggle("is-armed", currentSmartArmed("sell"));
       elements.chartSmartSellButton.textContent = currentSmartArmed("sell") ? "Smart Sell ON" : "Smart Sell OFF";
     }
     if (elements.chartSmartCloseButton) {
-      elements.chartSmartCloseButton.hidden = !authConfigured;
-      elements.chartSmartCloseButton.disabled = !authConfigured || busy || !smartCloseAvailability.available;
+      elements.chartSmartCloseButton.hidden = !authenticated || positionCount === 0;
+      elements.chartSmartCloseButton.disabled = !authenticated || positionCount === 0 || busy || !smartCloseAvailability.available;
       elements.chartSmartCloseButton.classList.toggle("is-armed", currentSmartArmed("close"));
       elements.chartSmartCloseButton.textContent = currentSmartArmed("close") ? "Smart Close ON" : "Smart Close OFF";
     }
@@ -2587,7 +2691,7 @@
       }
     }
     if (elements.chartTradeHint) {
-      elements.chartTradeHint.textContent = positionCount && tradeConfig.closeMode !== "manual"
+      elements.chartTradeHint.textContent = !authenticated ? "Login required" : (positionCount && tradeConfig.closeMode !== "manual"
         ? (["regression", "channel", "pitchfork"].includes(tradeConfig.closeMode)
           ? tradeConfig.closeMode.charAt(0).toUpperCase() + tradeConfig.closeMode.slice(1) + " is monitoring this position"
           : "Smart close is monitoring this position")
@@ -2595,7 +2699,7 @@
         ? ("Sending " + state.trade.activeOrderSide + " | " + formatLots(prepared.lotSize) + " lot | SL " + (prepared.stopLoss != null ? formatPrice(prepared.stopLoss) : "none") + " | TP " + (prepared.takeProfit != null ? formatPrice(prepared.takeProfit) : "none"))
         : (prepared.ready
           ? (tradeConfig.closeMode.charAt(0).toUpperCase() + tradeConfig.closeMode.slice(1) + " close")
-          : prepared.reason));
+          : prepared.reason)));
     }
     renderPreparedTradeSummary();
     renderBrokerSummary();
@@ -3083,6 +3187,12 @@
         z: 5,
       });
     }
+    if (config.showBb1m) {
+      series.push(...bollingerSeries(state.bollinger.oneMinute, "BB 1m", "#c08cff"));
+    }
+    if (config.showBb5m) {
+      series.push(...bollingerSeries(state.bollinger.fiveMinute, "BB 5m", "#ffd166"));
+    }
     activeMavgConfigs().forEach(function (mavgConfig, index) {
       series.push({
         id: "mavg-" + String(mavgConfig.id),
@@ -3322,13 +3432,9 @@
         pushYAxisItem(overlayItems, charting.pointItem(overlay.exitTickId, overlay.trade.exitPrice));
       }
     }
-    if (config.showAcd && state.acd?.available) {
-      Object.values(state.acd.levels || {}).forEach((value) => {
-        pushYAxisItem(overlayItems, charting.rangeItem(state.rangeFirstId, state.rangeLastId, value, value));
-      });
-    }
-    const regressionChannel = state.studyDrawing.model || smartPayload()?.drawing || smartPayload()?.channel;
-    if (regressionChannel) {
+    const activeRegressionChannel = state.studyDrawing.model || smartPayload()?.drawing || smartPayload()?.channel;
+    const regressionChannels = state.studyDrawing.saved.concat(activeRegressionChannel ? [activeRegressionChannel] : []);
+    regressionChannels.forEach((regressionChannel) => {
       const drawingEnd = drawingVisibleEnd(regressionChannel);
       const startValues = regressionValuesAt(regressionChannel, regressionChannel.startTickId);
       const endValues = regressionValuesAt(regressionChannel, drawingEnd);
@@ -3338,7 +3444,7 @@
         Math.min(startValues.lower, endValues.lower),
         Math.max(startValues.upper, endValues.upper)
       ));
-    }
+    });
     return { coreItems: coreItems, overlayItems: overlayItems };
   }
 
@@ -3356,20 +3462,13 @@
       coreItems: sources.coreItems,
       overlayItems: sources.overlayItems,
       includeOverlays: config.sizing
-        || Boolean(config.showAcd && state.acd?.available)
-        || Boolean(state.studyDrawing.model || smartPayload()?.drawing || smartPayload()?.channel),
+        || Boolean(state.studyDrawing.saved.length || state.studyDrawing.model || smartPayload()?.drawing || smartPayload()?.channel),
       ...Y_AXIS_STYLE,
     });
-    if (!config.showAcd || !state.acd?.available) {
-      return bounds;
+    if (elements.priceLineDistance) {
+      elements.priceLineDistance.textContent = "$" + String(Number(bounds.interval || 1)) + " between lines";
     }
-    const acdPrices = Object.values(state.acd.levels || {}).map(Number).filter(Number.isFinite);
-    if (!acdPrices.length) {
-      return bounds;
-    }
-    const low = Math.min(Number.isFinite(Number(bounds.min)) ? Number(bounds.min) : Math.min(...acdPrices), ...acdPrices);
-    const high = Math.max(Number.isFinite(Number(bounds.max)) ? Number(bounds.max) : Math.max(...acdPrices), ...acdPrices);
-    return charting.buildIntegerYAxis(low, high, Y_AXIS_STYLE);
+    return bounds;
   }
 
   function renderChart(options) {
@@ -4007,8 +4106,7 @@
     return visibleEnd;
   }
 
-  function buildRegressionChannelGraphics() {
-    const channel = state.studyDrawing.model || smartPayload()?.drawing || smartPayload()?.channel;
+  function buildSingleRegressionChannelGraphics(channel) {
     if (!state.chart || !channel) {
       return [];
     }
@@ -4027,14 +4125,16 @@
       return [];
     }
     const kind = String(channel.kind || "channel");
+    const directionColor = Number(channel.slopePerTick) >= 0 ? "rgba(82,151,255,0.92)" : "rgba(255,137,65,0.92)";
+    const directionFill = Number(channel.slopePerTick) >= 0 ? "rgba(82,151,255,0.08)" : "rgba(255,137,65,0.08)";
     const graphics = [{
       type: "polygon",
       shape: { points },
-      style: { fill: kind === "regression" ? "transparent" : "rgba(109,216,255,0.08)", stroke: "none" },
+      style: { fill: kind === "regression" ? "transparent" : directionFill, stroke: "none" },
     }, {
       type: "line",
       shape: { x1: startUpper[0], y1: startUpper[1], x2: endUpper[0], y2: endUpper[1] },
-      style: { stroke: "rgba(109,216,255,0.88)", lineWidth: 1.4 },
+      style: { stroke: directionColor, lineWidth: 1.4 },
     }, {
       type: "line",
       shape: { x1: startCenter[0], y1: startCenter[1], x2: endCenter[0], y2: endCenter[1] },
@@ -4042,12 +4142,12 @@
     }, {
       type: "line",
       shape: { x1: startLower[0], y1: startLower[1], x2: endLower[0], y2: endLower[1] },
-      style: { stroke: "rgba(109,216,255,0.88)", lineWidth: 1.4 },
+      style: { stroke: directionColor, lineWidth: 1.4 },
     }];
     if (kind === "regression") {
-      graphics[1].style = { stroke: "rgba(109,216,255,0.92)", lineWidth: 1.35, lineDash: [7, 5] };
+      graphics[1].style = { stroke: directionColor, lineWidth: 1.35, lineDash: [7, 5] };
       graphics[2].style = { stroke: "rgba(232,238,248,0.82)", lineWidth: 1.5 };
-      graphics[3].style = { stroke: "rgba(109,216,255,0.92)", lineWidth: 1.35, lineDash: [7, 5] };
+      graphics[3].style = { stroke: directionColor, lineWidth: 1.35, lineDash: [7, 5] };
       return graphics.slice(1);
     }
     if (kind === "pitchfork" && Array.isArray(channel.pivotTickIds) && Array.isArray(channel.pivotPrices)) {
@@ -4063,6 +4163,11 @@
       });
     }
     return graphics;
+  }
+
+  function buildRegressionChannelGraphics() {
+    const active = state.studyDrawing.model || smartPayload()?.drawing || smartPayload()?.channel;
+    return state.studyDrawing.saved.concat(active ? [active] : []).flatMap(buildSingleRegressionChannelGraphics);
   }
 
   function renderOverlay() {
@@ -4462,6 +4567,10 @@
     renderPreparedTradeSummary();
     renderBrokerSummary();
     const openItems = state.trade.positions || [];
+    if (elements.tradeOpenSection) {
+      elements.tradeOpenSection.hidden = !state.trade.authenticated;
+      if (openItems.length && !elements.tradeOpenSection.open) elements.tradeOpenSection.open = true;
+    }
     if (elements.tradeOpenSectionSummary) {
       elements.tradeOpenSectionSummary.textContent = openItems.length
         ? String(openItems.length) + " open " + (openItems.length === 1 ? "position" : "positions")
@@ -4997,6 +5106,8 @@
       applyStudyDrawing().catch((error) => status(error.message || "Drawing update failed.", true));
     });
     elements.tradeDrawingClearButton.addEventListener("click", clearStudyDrawing);
+    elements.tradeDrawingKeepButton.addEventListener("click", keepStudyDrawingAndStartNew);
+    elements.tradeDrawingClearAllButton.addEventListener("click", clearAllStudyDrawings);
     elements.tradeDrawingUseForClose.addEventListener("change", function () {
       persistTradeConfiguration();
       renderTradeConfiguration();
@@ -5269,6 +5380,7 @@
     state.hasMoreLeft = Boolean(payload.hasMoreLeft);
     state.lastMetrics = payload.metrics || null;
     applyPaperPayload(payload.rect || null);
+    await refreshBollingerBands({ silent: true, render: false });
     if (resetView) {
       state.zoom = null;
       state.viewport.reset();
@@ -5311,6 +5423,7 @@
       renderPerf();
       if (changed) {
         renderChart({ shiftWithRun: currentConfig().run === "run" });
+        scheduleBollingerRefresh();
       }
     };
     source.addEventListener("heartbeat", function (event) {
@@ -5353,6 +5466,7 @@
       renderPerf();
       if (changed) {
         renderChart({ shiftWithRun: true });
+        scheduleBollingerRefresh();
       }
       if (payload.endReached) {
         clearActivity();
@@ -5392,6 +5506,7 @@
     renderPerf();
     if (appended || mavgChanged || payload.structureBars?.length || payload.rangeBoxes?.length || payload.structureEvents?.length) {
       renderChart({ shiftWithRun: true });
+      scheduleBollingerRefresh();
     }
     status(payload.endReached ? "Review reached the current end snapshot." : "Review running.", false);
     if (!payload.endReached && currentConfig().run === "run") {
@@ -5448,6 +5563,7 @@
     applyRangePayload(payload);
     state.loadedWindow = prepended ? targetWindow : state.loadedWindow;
     state.hasMoreLeft = Boolean(payload.hasMoreLeft);
+    await refreshBollingerBands({ silent: true, render: false });
     renderMeta();
     renderPerf();
     if (prepended || (payload.firstId != null && payload.firstId < previousFirstId)) {
@@ -5482,6 +5598,8 @@
     elements.showStructure.checked = Boolean(config.showStructure);
     elements.showRanges.checked = Boolean(config.showRanges);
     elements.showAcd.checked = Boolean(config.showAcd);
+    elements.showBb1m.checked = Boolean(config.showBb1m);
+    elements.showBb5m.checked = Boolean(config.showBb5m);
     elements.sizingToggle.checked = Boolean(config.sizing);
     elements.tickId.value = config.id;
     elements.reviewStart.value = config.reviewStart;
@@ -5522,9 +5640,13 @@
     status("Run state updated.", false);
   });
 
-  [elements.showTicks, elements.showEvents, elements.showStructure, elements.showRanges, elements.showAcd, elements.sizingToggle].forEach((control) => {
+  [elements.showTicks, elements.showEvents, elements.showStructure, elements.showRanges, elements.showAcd, elements.showBb1m, elements.showBb5m, elements.sizingToggle].forEach((control) => {
     control.addEventListener("change", function () {
       writeQuery();
+      if (control === elements.showBb1m || control === elements.showBb5m) {
+        refreshBollingerBands({ silent: false }).then(() => status("Bollinger display updated.", false));
+        return;
+      }
       if (control === elements.sizingToggle || control === elements.showAcd) {
         renderAcdHud();
         renderChart({ resetView: false });

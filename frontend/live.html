@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/assets/app.css?v=20260814-acd2">
+  <link rel="stylesheet" href="/assets/app.css?v=20260914-live-study1">
 </head>
 <body class="page-live">
   <div class="live-workspace is-sidebar-collapsed" id="liveWorkspace">
@@ -95,6 +95,14 @@
                   <span>ACD levels</span>
                 </label>
                 <label class="compact-check">
+                  <input id="showBb1m" type="checkbox">
+                  <span>Bollinger 1m</span>
+                </label>
+                <label class="compact-check">
+                  <input id="showBb5m" type="checkbox">
+                  <span>Bollinger 5m</span>
+                </label>
+                <label class="compact-check">
                   <input id="sizingToggle" type="checkbox">
                   <span>Sizing</span>
                 </label>
@@ -177,7 +185,9 @@
             <div class="trade-channel-actions">
               <button class="ghost-button compact-button" id="tradeChannelDrawButton" type="button">Draw on chart</button>
               <button class="ghost-button compact-button" id="tradeChannelRedrawButton" type="button">Apply edit</button>
+              <button class="ghost-button compact-button" id="tradeDrawingKeepButton" type="button">Keep RT + new</button>
               <button class="ghost-button compact-button" id="tradeDrawingClearButton" type="button">Clear object</button>
+              <button class="ghost-button compact-button" id="tradeDrawingClearAllButton" type="button">Clear all RTs</button>
             </div>
             <label class="compact-check">
               <input id="tradeDrawingUseForClose" type="checkbox">
@@ -421,10 +431,16 @@
         </div>
         <div class="chart-trade-entry" id="chartTradeEntry">
           <div class="chart-trade-entry-buttons">
-            <button class="chart-trade-button chart-trade-action" id="chartTradeActionButton" type="button">Buy 0.01 lot</button>
+            <button class="chart-trade-button chart-trade-button-buy" id="chartTradeBuyButton" type="button">Buy Market</button>
+            <button class="chart-trade-button chart-trade-button-sell" id="chartTradeSellButton" type="button">Sell Market</button>
+            <button class="chart-trade-button chart-trade-button-smart" id="chartSmartBuyButton" type="button">Smart Buy OFF</button>
+            <button class="chart-trade-button chart-trade-button-smart" id="chartSmartSellButton" type="button">Smart Sell OFF</button>
+            <button class="chart-trade-button chart-trade-button-smart-close" id="chartSmartCloseButton" type="button">Smart Close OFF</button>
           </div>
+          <div class="chart-trade-smart-status" id="chartTradeSmartStatus"></div>
           <div class="chart-trade-hint" id="chartTradeHint">Login required</div>
         </div>
+        <div class="chart-price-step" id="priceLineDistance">$1 between lines</div>
 
       </div>
     </section>
@@ -432,6 +448,6 @@
 
   <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
   <script src="/assets/charting.js?v=20260814-acd2"></script>
-  <script src="/assets/live.js?v=20260814-rayconfirm1"></script>
+  <script src="/assets/live.js?v=20260914-live-study1"></script>
 </body>
 </html>

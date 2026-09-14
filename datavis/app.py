@@ -37,6 +37,7 @@ from datavis.backbone import load_state_row as load_backbone_state_row
 from datavis.backbone import resolve_current_day_ref as resolve_current_backbone_day_ref
 from datavis.backbone import resolve_day_ref_for_timestamp as resolve_backbone_day_ref_for_timestamp
 from datavis.brokerday import brokerday_bounds, brokerday_for_timestamp
+from datavis.bollinger import build_bollinger_payload
 from datavis.db import db_connect as shared_db_connect
 from datavis.mavg import list_page_config_rows as list_mavg_config_rows
 from datavis.mavg import query_point_rows_after_value_id as query_mavg_points_after_value_id
@@ -2113,6 +2114,41 @@ def load_next_payload(
     return payload
 
 
+def load_live_bollinger_payload(start_id: int, end_id: int) -> Dict[str, Any]:
+    if end_id < start_id:
+        raise HTTPException(status_code=400, detail="endId must not be below startId.")
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                    (SELECT timestamp FROM public.ticks WHERE symbol = %s AND id >= %s ORDER BY id LIMIT 1) AS start_time,
+                    (SELECT timestamp FROM public.ticks WHERE symbol = %s AND id <= %s ORDER BY id DESC LIMIT 1) AS end_time
+                """,
+                (TICK_SYMBOL, start_id, TICK_SYMBOL, end_id),
+            )
+            bounds = dict(cur.fetchone() or {})
+            if bounds.get("start_time") is None or bounds.get("end_time") is None:
+                return {"period": 20, "deviations": 2.0, "oneMinute": [], "fiveMinute": []}
+            cur.execute(
+                """
+                SELECT
+                    date_trunc('minute', timestamp) AS bucket,
+                    (array_agg(id ORDER BY timestamp DESC, id DESC))[1] AS tickid,
+                    (array_agg(COALESCE(mid, (bid + ask) / 2.0) ORDER BY timestamp DESC, id DESC))[1] AS close
+                FROM public.ticks
+                WHERE symbol = %s
+                  AND timestamp >= %s - INTERVAL '110 minutes'
+                  AND timestamp <= %s
+                GROUP BY date_trunc('minute', timestamp)
+                ORDER BY bucket
+                """,
+                (TICK_SYMBOL, bounds["start_time"], bounds["end_time"]),
+            )
+            minute_rows = [dict(row) for row in cur.fetchall()]
+    return build_bollinger_payload(minute_rows, visible_start_id=start_id)
+
+
 def load_previous_payload(
     *,
     before_id: int,
@@ -4185,6 +4221,14 @@ def live_next(
         show_structure=showStructure,
         show_ranges=showRanges,
     )
+
+
+@app.get("/api/live/bollinger")
+def live_bollinger(
+    startId: int = Query(..., ge=1),
+    endId: int = Query(..., ge=1),
+) -> Dict[str, Any]:
+    return load_live_bollinger_payload(startId, endId)
 
 
 @app.get("/api/live/previous")

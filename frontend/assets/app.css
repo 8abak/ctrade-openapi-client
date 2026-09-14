@@ -776,6 +776,21 @@ select {
   z-index: 6;
 }
 
+.chart-price-step {
+  position: absolute;
+  left: 0.75rem;
+  bottom: 0.72rem;
+  z-index: 7;
+  padding: 0.24rem 0.44rem;
+  border: 1px solid rgba(147, 181, 255, 0.18);
+  border-radius: 6px;
+  background: rgba(5, 9, 15, 0.82);
+  color: #b9f47f;
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.68rem;
+  pointer-events: none;
+}
+
 .chart-trade-entry {
   left: 50%;
   bottom: 1.55rem;
