@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/assets/app.css?v=20260914-live-study1">
+  <link rel="stylesheet" href="/assets/app.css?v=20260915-acd-map1">
 </head>
 <body class="page-live">
   <div class="live-workspace is-sidebar-collapsed" id="liveWorkspace">
@@ -93,6 +93,14 @@
                 <label class="compact-check">
                   <input id="showAcd" type="checkbox">
                   <span>ACD levels</span>
+                </label>
+                <label class="compact-select-control">
+                  <span>ACD mini-map</span>
+                  <select id="acdMapCount" aria-label="ACD mini-map sessions">
+                    <option value="0">Hidden</option>
+                    <option value="1" selected>Latest</option>
+                    <option value="2">Last two</option>
+                  </select>
                 </label>
                 <label class="compact-check">
                   <input id="showBb1m" type="checkbox">
@@ -425,6 +433,13 @@
     <section class="live-chart-stage">
       <div class="panel chart-panel live-chart-panel" id="chartPanel">
         <div id="liveChart" class="chart-host"></div>
+        <section class="acd-mini-map" id="acdMiniMap" aria-label="Recent ACD price map">
+          <div class="acd-mini-map-head">
+            <span>ACD POSITION MAP</span>
+            <strong id="acdMiniMapSummary">Latest</strong>
+          </div>
+          <div class="acd-mini-map-chart" id="acdMiniMapChart"></div>
+        </section>
         <div class="acd-hud" id="acdHud" aria-live="polite">
           <div class="acd-hud-title"><span>DAILY ACD</span><strong id="acdDirection">—</strong></div>
           <div class="acd-hud-levels" id="acdLevels">Loading opening range…</div>
@@ -448,6 +463,6 @@
 
   <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
   <script src="/assets/charting.js?v=20260814-acd2"></script>
-  <script src="/assets/live.js?v=20260914-live-study1"></script>
+  <script src="/assets/live.js?v=20260915-acd-map1"></script>
 </body>
 </html>

@@ -12,6 +12,7 @@
     showStructure: false,
     showRanges: false,
     showAcd: false,
+    acdMapCount: 1,
     showBb1m: false,
     showBb5m: false,
     sizing: false,
@@ -85,6 +86,7 @@
     resizeObserver: null,
     ui: { sidebarCollapsed: true },
     acd: null,
+    acdMap: { sessions: [], chart: null, resizeObserver: null, renderTimer: 0 },
     studyDrawing: { model: null, saved: [] },
     bollinger: { oneMinute: [], fiveMinute: [], timer: 0, requestToken: 0 },
     touchNav: null,
@@ -159,6 +161,7 @@
     showStructure: document.getElementById("showStructure"),
     showRanges: document.getElementById("showRanges"),
     showAcd: document.getElementById("showAcd"),
+    acdMapCount: document.getElementById("acdMapCount"),
     showBb1m: document.getElementById("showBb1m"),
     showBb5m: document.getElementById("showBb5m"),
     sizingToggle: document.getElementById("sizingToggle"),
@@ -267,6 +270,9 @@
     chartTradeActionButton: document.getElementById("chartTradeActionButton"),
     chartTradeHint: document.getElementById("chartTradeHint"),
     priceLineDistance: document.getElementById("priceLineDistance"),
+    acdMiniMap: document.getElementById("acdMiniMap"),
+    acdMiniMapChart: document.getElementById("acdMiniMapChart"),
+    acdMiniMapSummary: document.getElementById("acdMiniMapSummary"),
     acdHud: document.getElementById("acdHud"),
     acdDirection: document.getElementById("acdDirection"),
     acdLevels: document.getElementById("acdLevels"),
@@ -291,6 +297,7 @@
       showStructure: params.has("showStructure") ? params.get("showStructure") !== "0" : DEFAULTS.showStructure,
       showRanges: params.has("showRanges") ? params.get("showRanges") !== "0" : DEFAULTS.showRanges,
       showAcd: params.has("showAcd") ? params.get("showAcd") !== "0" : DEFAULTS.showAcd,
+      acdMapCount: [0, 1, 2].includes(Number(params.get("acdMapCount"))) ? Number(params.get("acdMapCount")) : DEFAULTS.acdMapCount,
       showBb1m: params.has("showBb1m") ? params.get("showBb1m") !== "0" : DEFAULTS.showBb1m,
       showBb5m: params.has("showBb5m") ? params.get("showBb5m") !== "0" : DEFAULTS.showBb5m,
       sizing: params.get("sizing") === "1",
@@ -310,6 +317,7 @@
       showStructure: elements.showStructure.checked,
       showRanges: elements.showRanges.checked,
       showAcd: elements.showAcd.checked,
+      acdMapCount: Math.max(0, Math.min(2, Number(elements.acdMapCount?.value || 0))),
       showBb1m: elements.showBb1m.checked,
       showBb5m: elements.showBb5m.checked,
       sizing: Boolean(elements.sizingToggle.checked),
@@ -737,6 +745,142 @@
     }
     renderAcdHud();
     renderChart({ shiftWithRun: false });
+    await loadAcdMiniMap({ silent: true });
+  }
+
+  function acdMapTimeLabel(value) {
+    return new Date(Number(value)).toLocaleTimeString("en-AU", {
+      timeZone: "Australia/Sydney", hour: "2-digit", minute: "2-digit", hour12: false,
+    });
+  }
+
+  function appendLatestAcdMapPoint() {
+    const session = state.acdMap.sessions[0];
+    const latest = state.rows[state.rows.length - 1];
+    const timestampMs = Number(latest?.timestampMs);
+    const price = Number(latest?.mid);
+    if (!session || !Number.isFinite(timestampMs) || !Number.isFinite(price)
+      || timestampMs < Number(session.openingStartMs) || timestampMs > Number(session.sessionEndMs)) {
+      return;
+    }
+    const points = Array.isArray(session.points) ? session.points : (session.points = []);
+    const previous = points[points.length - 1];
+    if (Number(previous?.tickId) === Number(latest.id)) return;
+    points.push({ timestampMs, tickId: Number(latest.id), price });
+    if (points.length > 1800) session.points = points.slice(-1800);
+  }
+
+  function renderAcdMiniMap() {
+    if (!elements.acdMiniMap || !elements.acdMiniMapChart) return;
+    const requested = currentConfig().acdMapCount;
+    const sessions = state.acdMap.sessions.slice(0, requested).filter((session) => Array.isArray(session.points) && session.points.length);
+    elements.acdMiniMap.hidden = requested === 0;
+    if (requested === 0) return;
+    if (!sessions.length) {
+      elements.acdMiniMapSummary.textContent = "Unavailable";
+      return;
+    }
+    appendLatestAcdMapPoint();
+    elements.acdMiniMap.dataset.count = String(sessions.length);
+    elements.acdMiniMapSummary.textContent = sessions.length === 1 ? "Latest" : "Last two";
+    if (!state.acdMap.chart) {
+      state.acdMap.chart = echarts.init(elements.acdMiniMapChart, null, { renderer: "canvas" });
+      state.acdMap.resizeObserver = new ResizeObserver(() => state.acdMap.chart?.resize());
+      state.acdMap.resizeObserver.observe(elements.acdMiniMapChart);
+    }
+
+    const two = sessions.length === 2;
+    const grids = [];
+    const xAxes = [];
+    const yAxes = [];
+    const series = [];
+    sessions.forEach((session, index) => {
+      const points = (session.points || []).filter((point) => Number.isFinite(Number(point.timestampMs)) && Number.isFinite(Number(point.price)));
+      const prices = points.map((point) => Number(point.price)).concat(Object.values(session.levels || {}).map(Number).filter(Number.isFinite));
+      if (!points.length || !prices.length) return;
+      const low = Math.min(...prices);
+      const high = Math.max(...prices);
+      const padding = Math.max(1, (high - low) * 0.06);
+      const top = two ? (34 + index * 153) : 34;
+      grids.push({ left: 42, right: 10, top, height: two ? 119 : 153, containLabel: false });
+      xAxes.push({
+        type: "time", gridIndex: index, min: Number(session.openingStartMs),
+        max: Math.min(Number(session.sessionEndMs), Number(points[points.length - 1].timestampMs)),
+        axisLine: { lineStyle: { color: "rgba(147,181,255,.22)" } }, axisTick: { show: false },
+        splitLine: { show: false }, axisLabel: { color: "#71839c", fontSize: 8, hideOverlap: true, formatter: acdMapTimeLabel },
+      });
+      yAxes.push({
+        type: "value", gridIndex: index, min: Math.floor(low - padding), max: Math.ceil(high + padding), splitNumber: 3,
+        axisLine: { show: false }, axisTick: { show: false }, axisLabel: { color: "#8fa0b8", fontSize: 8, formatter: (value) => String(Math.round(value)) },
+        splitLine: { lineStyle: { color: "rgba(147,181,255,.09)" } },
+      });
+      const levels = session.levels || {};
+      const mapEnd = Math.min(Number(session.sessionEndMs), Number(points[points.length - 1].timestampMs));
+      series.push({
+        name: session.brokerDay, type: "line", xAxisIndex: index, yAxisIndex: index,
+        data: points.map((point) => [Number(point.timestampMs), Number(point.price)]), showSymbol: false,
+        lineStyle: { color: "#b9f47f", width: 1.25 }, animation: false, silent: true, z: 5,
+        markArea: {
+          silent: true, itemStyle: { color: "rgba(109,216,255,.09)", borderColor: "rgba(109,216,255,.25)", borderWidth: 1 },
+          data: [[{ xAxis: Number(session.openingEndMs), yAxis: Number(levels.openingLow) }, { xAxis: mapEnd, yAxis: Number(levels.openingHigh) }]],
+        },
+        markLine: {
+          silent: true, symbol: "none", label: { show: true, position: "insideEndTop", fontSize: 7, color: "#9eadc5", formatter: "{b}" },
+          data: [
+            { name: "C+", yAxis: Number(levels.cUp), lineStyle: { color: "rgba(255,200,87,.48)", type: "dashed", width: 1 } },
+            { name: "A+", yAxis: Number(levels.aUp), lineStyle: { color: "rgba(109,216,255,.58)", type: "dashed", width: 1 } },
+            { name: "OR+", yAxis: Number(levels.openingHigh), lineStyle: { color: "rgba(210,221,238,.52)", width: 1 } },
+            { name: "OR-", yAxis: Number(levels.openingLow), lineStyle: { color: "rgba(210,221,238,.52)", width: 1 } },
+            { name: "A-", yAxis: Number(levels.aDown), lineStyle: { color: "rgba(109,216,255,.58)", type: "dashed", width: 1 } },
+            { name: "C-", yAxis: Number(levels.cDown), lineStyle: { color: "rgba(255,200,87,.48)", type: "dashed", width: 1 } },
+          ],
+        },
+      });
+      const last = points[points.length - 1];
+      series.push({
+        name: "Last price", type: "scatter", xAxisIndex: index, yAxisIndex: index,
+        data: [[Number(last.timestampMs), Number(last.price)]], symbolSize: 7, silent: true, z: 9,
+        itemStyle: { color: "#d5ff8b", borderColor: "#071018", borderWidth: 1 },
+        label: { show: true, position: "left", color: "#d5ff8b", fontSize: 8, formatter: formatPrice(last.price) },
+      });
+      series.push({
+        name: "Session label", type: "scatter", xAxisIndex: index, yAxisIndex: index,
+        data: [[Number(points[0].timestampMs), high]], symbolSize: 0, silent: true,
+        label: { show: true, position: "right", color: "#d8e5f7", fontSize: 9, fontWeight: 600, formatter: String(session.brokerDay) },
+      });
+    });
+    state.acdMap.chart.setOption({
+      animation: false, backgroundColor: "transparent", grid: grids, xAxis: xAxes, yAxis: yAxes, series,
+      tooltip: { show: false },
+    }, { notMerge: true, lazyUpdate: true });
+    requestAnimationFrame(() => state.acdMap.chart?.resize());
+  }
+
+  function scheduleAcdMiniMapRender() {
+    if (currentConfig().acdMapCount === 0) return;
+    if (state.acdMap.renderTimer) window.clearTimeout(state.acdMap.renderTimer);
+    state.acdMap.renderTimer = window.setTimeout(() => {
+      state.acdMap.renderTimer = 0;
+      renderAcdMiniMap();
+    }, 1200);
+  }
+
+  async function loadAcdMiniMap(options) {
+    const count = currentConfig().acdMapCount;
+    if (count === 0) {
+      state.acdMap.sessions = [];
+      renderAcdMiniMap();
+      return;
+    }
+    try {
+      const payload = await fetchJson("/api/live/acd-map?count=" + String(count));
+      state.acdMap.sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
+      renderAcdMiniMap();
+    } catch (error) {
+      state.acdMap.sessions = [];
+      renderAcdMiniMap();
+      if (!options?.silent) status(error.message || "ACD mini-map could not be loaded.", true);
+    }
   }
 
   function renderAcdHud() {
@@ -773,6 +917,7 @@
       showStructure: config.showStructure ? "1" : "0",
       showRanges: config.showRanges ? "1" : "0",
       showAcd: config.showAcd ? "1" : "0",
+      acdMapCount: String(config.acdMapCount),
       showBb1m: config.showBb1m ? "1" : "0",
       showBb5m: config.showBb5m ? "1" : "0",
       sizing: config.sizing ? "1" : "0",
@@ -3504,6 +3649,7 @@
       state.viewportUpdateMeta = null;
       queueOverlayRender();
     });
+    scheduleAcdMiniMapRender();
   }
 
   function rangeBoxStyle(box) {
@@ -5598,6 +5744,7 @@
     elements.showStructure.checked = Boolean(config.showStructure);
     elements.showRanges.checked = Boolean(config.showRanges);
     elements.showAcd.checked = Boolean(config.showAcd);
+    elements.acdMapCount.value = String(config.acdMapCount);
     elements.showBb1m.checked = Boolean(config.showBb1m);
     elements.showBb5m.checked = Boolean(config.showBb5m);
     elements.sizingToggle.checked = Boolean(config.sizing);
@@ -5656,6 +5803,11 @@
       loadAll(false).catch((error) => status(error.message || "Display refresh failed.", true));
       status("Display layers updated.", false);
     });
+  });
+
+  elements.acdMapCount.addEventListener("change", function () {
+    writeQuery();
+    loadAcdMiniMap({ silent: false }).then(() => status("ACD mini-map updated.", false));
   });
 
   if (elements.mavgOptions) {
