@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/assets/app.css?v=20260915-acd-map1">
+  <link rel="stylesheet" href="/assets/app.css?v=20260915-live-compact1">
 </head>
 <body class="page-live">
   <div class="live-workspace is-sidebar-collapsed" id="liveWorkspace">
@@ -440,17 +440,14 @@
           </div>
           <div class="acd-mini-map-chart" id="acdMiniMapChart"></div>
         </section>
-        <div class="acd-hud" id="acdHud" aria-live="polite">
-          <div class="acd-hud-title"><span>DAILY ACD</span><strong id="acdDirection">—</strong></div>
-          <div class="acd-hud-levels" id="acdLevels">Loading opening range…</div>
-        </div>
         <div class="chart-trade-entry" id="chartTradeEntry">
           <div class="chart-trade-entry-buttons">
-            <button class="chart-trade-button chart-trade-button-buy" id="chartTradeBuyButton" type="button">Buy Market</button>
-            <button class="chart-trade-button chart-trade-button-sell" id="chartTradeSellButton" type="button">Sell Market</button>
-            <button class="chart-trade-button chart-trade-button-smart" id="chartSmartBuyButton" type="button">Smart Buy OFF</button>
-            <button class="chart-trade-button chart-trade-button-smart" id="chartSmartSellButton" type="button">Smart Sell OFF</button>
-            <button class="chart-trade-button chart-trade-button-smart-close" id="chartSmartCloseButton" type="button">Smart Close OFF</button>
+            <button class="chart-trade-button chart-trade-button-buy" id="chartTradeBuyButton" type="button" aria-label="Buy market" title="Buy market">B</button>
+            <button class="chart-trade-button chart-trade-button-sell" id="chartTradeSellButton" type="button" aria-label="Sell market" title="Sell market">S</button>
+            <button class="chart-trade-button chart-trade-button-smart" id="chartSmartBuyButton" type="button" aria-label="Toggle smart buy" title="Smart buy">SB</button>
+            <button class="chart-trade-button chart-trade-button-smart" id="chartSmartSellButton" type="button" aria-label="Toggle smart sell" title="Smart sell">SS</button>
+            <button class="chart-trade-button chart-trade-button-smart-close" id="chartSmartCloseButton" type="button" aria-label="Toggle smart close" title="Smart close">SC</button>
+            <button class="chart-trade-button chart-trade-button-close" id="chartCloseButton" type="button" aria-label="Close open positions immediately" title="Close now">C</button>
           </div>
           <div class="chart-trade-smart-status" id="chartTradeSmartStatus"></div>
           <div class="chart-trade-hint" id="chartTradeHint">Login required</div>
@@ -463,6 +460,6 @@
 
   <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
   <script src="/assets/charting.js?v=20260814-acd2"></script>
-  <script src="/assets/live.js?v=20260915-acd-map1"></script>
+  <script src="/assets/live.js?v=20260915-live-compact1"></script>
 </body>
 </html>

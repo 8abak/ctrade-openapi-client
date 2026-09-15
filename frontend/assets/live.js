@@ -266,6 +266,7 @@
     chartSmartBuyButton: document.getElementById("chartSmartBuyButton"),
     chartSmartSellButton: document.getElementById("chartSmartSellButton"),
     chartSmartCloseButton: document.getElementById("chartSmartCloseButton"),
+    chartCloseButton: document.getElementById("chartCloseButton"),
     chartTradeSmartStatus: document.getElementById("chartTradeSmartStatus"),
     chartTradeActionButton: document.getElementById("chartTradeActionButton"),
     chartTradeHint: document.getElementById("chartTradeHint"),
@@ -801,8 +802,8 @@
       const low = Math.min(...prices);
       const high = Math.max(...prices);
       const padding = Math.max(1, (high - low) * 0.06);
-      const top = two ? (34 + index * 153) : 34;
-      grids.push({ left: 42, right: 10, top, height: two ? 119 : 153, containLabel: false });
+      const top = two ? (30 + index * 119) : 30;
+      grids.push({ left: 38, right: 8, top, height: two ? 86 : 102, containLabel: false });
       xAxes.push({
         type: "time", gridIndex: index, min: Number(session.openingStartMs),
         max: Math.min(Number(session.sessionEndMs), Number(points[points.length - 1].timestampMs)),
@@ -1474,6 +1475,7 @@
       elements.chartSmartBuyButton,
       elements.chartSmartSellButton,
       elements.chartSmartCloseButton,
+      elements.chartCloseButton,
       elements.chartTradeActionButton,
       elements.tradePositionConfirmButton,
       elements.tradePositionResetButton,
@@ -2801,30 +2803,41 @@
     if (elements.chartTradeBuyButton) {
       elements.chartTradeBuyButton.hidden = !authenticated;
       elements.chartTradeBuyButton.disabled = !authenticated || !prepared.ready || busy;
-      elements.chartTradeBuyButton.textContent = busy && state.trade.activeOrderSide === "buy" ? "Buying..." : "Buy Market";
+      elements.chartTradeBuyButton.textContent = busy && state.trade.activeOrderSide === "buy" ? "…" : "B";
     }
     if (elements.chartTradeSellButton) {
       elements.chartTradeSellButton.hidden = !authenticated;
       elements.chartTradeSellButton.disabled = !authenticated || !prepared.ready || busy;
-      elements.chartTradeSellButton.textContent = busy && state.trade.activeOrderSide === "sell" ? "Selling..." : "Sell Market";
+      elements.chartTradeSellButton.textContent = busy && state.trade.activeOrderSide === "sell" ? "…" : "S";
     }
     if (elements.chartSmartBuyButton) {
       elements.chartSmartBuyButton.hidden = !authenticated;
       elements.chartSmartBuyButton.disabled = !authenticated || busy || !smartBuyAvailability.available;
       elements.chartSmartBuyButton.classList.toggle("is-armed", currentSmartArmed("buy"));
-      elements.chartSmartBuyButton.textContent = currentSmartArmed("buy") ? "Smart Buy ON" : "Smart Buy OFF";
+      elements.chartSmartBuyButton.textContent = "SB";
+      elements.chartSmartBuyButton.setAttribute("aria-pressed", String(currentSmartArmed("buy")));
+      elements.chartSmartBuyButton.title = currentSmartArmed("buy") ? "Smart buy on" : "Smart buy off";
     }
     if (elements.chartSmartSellButton) {
       elements.chartSmartSellButton.hidden = !authenticated;
       elements.chartSmartSellButton.disabled = !authenticated || busy || !smartSellAvailability.available;
       elements.chartSmartSellButton.classList.toggle("is-armed", currentSmartArmed("sell"));
-      elements.chartSmartSellButton.textContent = currentSmartArmed("sell") ? "Smart Sell ON" : "Smart Sell OFF";
+      elements.chartSmartSellButton.textContent = "SS";
+      elements.chartSmartSellButton.setAttribute("aria-pressed", String(currentSmartArmed("sell")));
+      elements.chartSmartSellButton.title = currentSmartArmed("sell") ? "Smart sell on" : "Smart sell off";
     }
     if (elements.chartSmartCloseButton) {
       elements.chartSmartCloseButton.hidden = !authenticated || positionCount === 0;
       elements.chartSmartCloseButton.disabled = !authenticated || positionCount === 0 || busy || !smartCloseAvailability.available;
       elements.chartSmartCloseButton.classList.toggle("is-armed", currentSmartArmed("close"));
-      elements.chartSmartCloseButton.textContent = currentSmartArmed("close") ? "Smart Close ON" : "Smart Close OFF";
+      elements.chartSmartCloseButton.textContent = "SC";
+      elements.chartSmartCloseButton.setAttribute("aria-pressed", String(currentSmartArmed("close")));
+      elements.chartSmartCloseButton.title = currentSmartArmed("close") ? "Smart close on" : "Smart close off";
+    }
+    if (elements.chartCloseButton) {
+      elements.chartCloseButton.hidden = !authenticated || positionCount === 0;
+      elements.chartCloseButton.disabled = !authenticated || positionCount === 0 || busy;
+      elements.chartCloseButton.textContent = busy && state.trade.activeOrderSide === "close" ? "…" : "C";
     }
     if (elements.chartTradeSmartStatus) {
       const showSummary = state.trade.smart.inputsDirty && elements.tradeSmartShowSummary
@@ -3624,19 +3637,32 @@
     }
     const config = currentConfig();
     const updateMeta = options?.updateMeta || state.viewportUpdateMeta || null;
+    const xValues = buildPrimaryXValues();
+    if (options?.shiftWithRun && config.mode === "live" && config.run === "run" && xValues.length) {
+      const currentWindow = state.viewport.currentWindow();
+      const visibleCount = Math.max(1, Math.min(xValues.length, Number(currentWindow?.visibleCount) || xValues.length));
+      const endIndex = xValues.length - 1;
+      const startIndex = Math.max(0, endIndex - visibleCount + 1);
+      state.viewport.captureZoom({ startValue: xValues[startIndex], endValue: xValues[endIndex] }, xValues);
+    }
     state.viewport.setApplyingProgrammaticViewport(true);
-    const viewportState = state.viewport.projectWindow(buildPrimaryXValues(), {
+    const viewportState = state.viewport.projectWindow(xValues, {
       reset: Boolean(options?.resetView),
       updateMeta: updateMeta,
       applyingProgrammaticViewport: true,
     });
+    const followsLiveEdge = Boolean(viewportState?.followRightEdge && config.mode === "live" && config.run === "run");
+    const visibleSpan = viewportState ? Math.max(1, Number(viewportState.endValue) - Number(viewportState.startValue)) : 1;
+    const rightGap = followsLiveEdge ? Math.max(1, Math.ceil(visibleSpan * 0.04)) : 0;
+    const dataMax = xValues.length ? Number(xValues[xValues.length - 1]) : null;
     const zoom = viewportState
-      ? { startValue: viewportState.startValue, endValue: viewportState.endValue }
+      ? { startValue: viewportState.startValue, endValue: Number(viewportState.endValue) + rightGap }
       : {};
     state.rightEdgeAnchored = Boolean(viewportState?.followRightEdge);
     state.applyingZoom = true;
     chart.setOption({
       series: buildSeries(config),
+      xAxis: { max: followsLiveEdge && Number.isFinite(dataMax) ? dataMax + rightGap : null },
       yAxis: yBounds({ visibleRange: viewportRange(viewportState) }),
       dataZoom: [
         { id: "zoom-inside", startValue: zoom.startValue, endValue: zoom.endValue },
@@ -5054,6 +5080,46 @@
     }
   }
 
+  async function submitCloseAllPositions() {
+    if (!state.trade.authenticated || state.trade.actionBusy) return;
+    const positions = state.trade.positions
+      .map((position) => ({ positionId: Number(position.positionId), volume: Number.parseInt(String(position.volume || 0), 10) }))
+      .filter((position) => Number.isFinite(position.positionId) && Number.isFinite(position.volume) && position.volume > 0);
+    if (!positions.length) {
+      tradeStatus("No open position is available to close.", true);
+      return;
+    }
+    state.trade.activeOrderSide = "close";
+    setTradeBusy(true);
+    let closed = 0;
+    let lastError = null;
+    try {
+      for (const position of positions) {
+        try {
+          const payload = await tradeFetchJson("/api/trade/position/close", {
+            method: "POST",
+            body: JSON.stringify(position),
+          });
+          state.trade.brokerStatus = brokerStatusFromPayload(payload);
+          state.trade.brokerConfigured = Boolean(state.trade.brokerStatus?.configured);
+          applySmartPayload(payload.smart);
+          closed += 1;
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      await refreshTradeData({ silent: true, forceHistory: true });
+      if (lastError) {
+        tradeStatus(String(closed) + " position(s) closed; " + (lastError.message || "one close failed."), true);
+      } else {
+        tradeStatus(String(closed) + " position(s) closed immediately.", false);
+      }
+    } finally {
+      state.trade.activeOrderSide = null;
+      setTradeBusy(false);
+    }
+  }
+
   async function submitAmendPosition(positionId, stopLoss, takeProfit) {
     if (!state.trade.authenticated || state.trade.actionBusy) {
       return;
@@ -5214,6 +5280,9 @@
     }
     if (elements.chartSmartCloseButton) {
       elements.chartSmartCloseButton.addEventListener("click", function () { toggleSmartClose(); });
+    }
+    if (elements.chartCloseButton) {
+      elements.chartCloseButton.addEventListener("click", function () { submitCloseAllPositions(); });
     }
     if (elements.chartTradeActionButton) {
       elements.chartTradeActionButton.addEventListener("click", function () { handleTradeAction(); });
