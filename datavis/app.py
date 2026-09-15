@@ -14,7 +14,7 @@ import threading
 import time
 from collections import defaultdict
 from contextlib import contextmanager
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time as dt_time, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
@@ -1330,6 +1330,49 @@ def query_latest_tick(cur: Any) -> Optional[Dict[str, Any]]:
     return dict(row) if row else None
 
 
+ACD_NEW_YORK = ZoneInfo("America/New_York")
+ACD_NEW_YORK_OPEN = dt_time(9, 30)
+ACD_OPENING_MINUTES = 15
+
+
+def _previous_new_york_weekday(value: date) -> date:
+    result = value - timedelta(days=1)
+    while result.weekday() >= 5:
+        result -= timedelta(days=1)
+    return result
+
+
+def _new_york_acd_window(session_date: date) -> tuple[datetime, datetime]:
+    start_local = datetime.combine(session_date, ACD_NEW_YORK_OPEN, tzinfo=ACD_NEW_YORK)
+    opening_end_local = start_local + timedelta(minutes=ACD_OPENING_MINUTES)
+    return start_local.astimezone(timezone.utc), opening_end_local.astimezone(timezone.utc)
+
+
+def _latest_locked_acd_session(value: datetime) -> tuple[date, datetime, datetime]:
+    local = value.astimezone(ACD_NEW_YORK)
+    session_date = local.date()
+    while session_date.weekday() >= 5:
+        session_date = _previous_new_york_weekday(session_date)
+    opening_start, opening_end = _new_york_acd_window(session_date)
+    if value < opening_end:
+        session_date = _previous_new_york_weekday(session_date)
+        opening_start, opening_end = _new_york_acd_window(session_date)
+    return session_date, opening_start, opening_end
+
+
+def _acd_levels(opening_low: float, opening_high: float) -> Dict[str, float]:
+    opening_range = opening_high - opening_low
+    a_offset = opening_range * 0.5
+    return {
+        "cUp": opening_high + opening_range,
+        "aUp": opening_high + a_offset,
+        "openingHigh": opening_high,
+        "openingLow": opening_low,
+        "aDown": opening_low - a_offset,
+        "cDown": opening_low - opening_range,
+    }
+
+
 def load_acd_payload() -> Dict[str, Any]:
     with db_connection(readonly=True) as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -1346,9 +1389,7 @@ def load_acd_payload() -> Dict[str, Any]:
             latest = dict(cur.fetchone() or {})
             if not latest:
                 return {"available": False, "reason": "No live ticks are available."}
-            broker_day = brokerday_for_timestamp(latest["timestamp"])
-            day_start, _ = brokerday_bounds(broker_day)
-            opening_end = day_start + timedelta(minutes=30)
+            session_date, opening_start, opening_end = _latest_locked_acd_session(latest["timestamp"])
             cur.execute(
                 """
                 SELECT
@@ -1360,7 +1401,7 @@ def load_acd_payload() -> Dict[str, Any]:
                 FROM public.ticks
                 WHERE symbol = %s AND timestamp >= %s AND timestamp < %s
                 """,
-                (TICK_SYMBOL, day_start, opening_end),
+                (TICK_SYMBOL, opening_start, opening_end),
             )
             opening = dict(cur.fetchone() or {})
     opening_low = float(opening.get("opening_low") or 0.0)
@@ -1368,21 +1409,11 @@ def load_acd_payload() -> Dict[str, Any]:
     if opening_high <= opening_low:
         return {
             "available": False,
-            "reason": "The 08:00-08:30 Sydney opening range is not complete.",
-            "brokerDay": broker_day.isoformat(),
+            "reason": "The New York 09:30-09:45 opening range is unavailable.",
+            "brokerDay": session_date.isoformat(),
         }
-    opening_range = opening_high - opening_low
-    a_offset = opening_range * 0.5
-    c_offset = opening_range
     current_mid = float(latest.get("mid") or ((float(latest["bid"]) + float(latest["ask"])) / 2.0))
-    levels = {
-        "cUp": opening_high + c_offset,
-        "aUp": opening_high + a_offset,
-        "openingHigh": opening_high,
-        "openingLow": opening_low,
-        "aDown": opening_low - a_offset,
-        "cDown": opening_low - c_offset,
-    }
+    levels = _acd_levels(opening_low, opening_high)
     if current_mid >= levels["aUp"]:
         direction = "up"
     elif current_mid <= levels["aDown"]:
@@ -1391,18 +1422,18 @@ def load_acd_payload() -> Dict[str, Any]:
         direction = "neutral"
     return {
         "available": True,
-        "brokerDay": broker_day.isoformat(),
-        "openingStart": day_start.isoformat(),
+        "brokerDay": session_date.isoformat(),
+        "openingStart": opening_start.isoformat(),
         "openingEnd": opening_end.isoformat(),
         "startTickId": int(opening.get("start_tick_id") or 0),
         "endTickId": int(opening.get("end_tick_id") or 0),
         "tickCount": int(opening.get("tick_count") or 0),
-        "openingRange": opening_range,
+        "openingRange": opening_high - opening_low,
         "currentMid": current_mid,
         "direction": direction,
         "levels": levels,
+        "timezone": "America/New_York",
     }
-
 
 def load_acd_map_payload(count: int) -> Dict[str, Any]:
     requested_count = clamp_int(count, 1, 2)
@@ -1439,13 +1470,15 @@ def load_acd_map_payload(count: int) -> Dict[str, Any]:
             )
             minute_rows = [dict(row) for row in cur.fetchall()]
 
-            candidate_day = brokerday_for_timestamp(window_end)
+            candidate_day = window_end.astimezone(ACD_NEW_YORK).date()
             acd_candidates: List[Dict[str, Any]] = []
             attempts = 0
             while attempts < 10 and len(acd_candidates) < 4:
-                day_start, _ = brokerday_bounds(candidate_day)
-                opening_end = day_start + timedelta(minutes=30)
-                if opening_end <= window_end:
+                if candidate_day.weekday() < 5:
+                    opening_start, opening_end = _new_york_acd_window(candidate_day)
+                else:
+                    opening_start, opening_end = _new_york_acd_window(_previous_new_york_weekday(candidate_day))
+                if candidate_day.weekday() < 5 and opening_end <= window_end:
                     cur.execute(
                         """
                         SELECT
@@ -1457,30 +1490,22 @@ def load_acd_map_payload(count: int) -> Dict[str, Any]:
                         FROM public.ticks
                         WHERE symbol = %s AND timestamp >= %s AND timestamp < %s
                         """,
-                        (TICK_SYMBOL, day_start, opening_end),
+                        (TICK_SYMBOL, opening_start, opening_end),
                     )
                     opening = dict(cur.fetchone() or {})
                     opening_low = float(opening.get("opening_low") or 0.0)
                     opening_high = float(opening.get("opening_high") or 0.0)
                     if opening_high > opening_low:
                         opening_range = opening_high - opening_low
-                        a_offset = opening_range * 0.5
                         acd_candidates.append({
                             "brokerDay": candidate_day.isoformat(),
-                            "openingStartMs": dt_to_ms(day_start),
+                            "openingStartMs": dt_to_ms(opening_start),
                             "openingEndMs": dt_to_ms(opening_end),
                             "startTickId": int(opening.get("start_tick_id") or 0),
                             "endTickId": int(opening.get("end_tick_id") or 0),
                             "tickCount": int(opening.get("tick_count") or 0),
                             "openingRange": opening_range,
-                            "levels": {
-                                "cUp": opening_high + opening_range,
-                                "aUp": opening_high + a_offset,
-                                "openingHigh": opening_high,
-                                "openingLow": opening_low,
-                                "aDown": opening_low - a_offset,
-                                "cDown": opening_low - opening_range,
-                            },
+                            "levels": _acd_levels(opening_low, opening_high),
                         })
                 candidate_day -= timedelta(days=1)
                 attempts += 1
@@ -1518,9 +1543,12 @@ def load_acd_map_payload(count: int) -> Dict[str, Any]:
         "windowHours": 24,
         "windowStartMs": dt_to_ms(window_start),
         "windowEndMs": dt_to_ms(window_end),
+        "timezone": "America/New_York",
+        "openingWindow": "09:30-09:45",
         "points": points,
         "acds": selected_acds,
     }
+
 
 def query_bootstrap_rows(
     cur: Any,
