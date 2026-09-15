@@ -12,7 +12,7 @@
     showStructure: false,
     showRanges: false,
     showAcd: false,
-    acdMapCount: 1,
+    acdMapCount: 2,
     showBb1m: false,
     showBb5m: false,
     sizing: false,
@@ -86,7 +86,7 @@
     resizeObserver: null,
     ui: { sidebarCollapsed: true },
     acd: null,
-    acdMap: { sessions: [], chart: null, resizeObserver: null, renderTimer: 0 },
+    acdMap: { points: [], acds: [], windowStartMs: null, windowEndMs: null, loadedAtMs: 0, chart: null, resizeObserver: null, renderTimer: 0 },
     studyDrawing: { model: null, saved: [] },
     bollinger: { oneMinute: [], fiveMinute: [], timer: 0, requestToken: 0 },
     touchNav: null,
@@ -298,7 +298,7 @@
       showStructure: params.has("showStructure") ? params.get("showStructure") !== "0" : DEFAULTS.showStructure,
       showRanges: params.has("showRanges") ? params.get("showRanges") !== "0" : DEFAULTS.showRanges,
       showAcd: params.has("showAcd") ? params.get("showAcd") !== "0" : DEFAULTS.showAcd,
-      acdMapCount: [0, 1, 2].includes(Number(params.get("acdMapCount"))) ? Number(params.get("acdMapCount")) : DEFAULTS.acdMapCount,
+      acdMapCount: [0, 1, 2].includes(Number(params.get("acdMapMode"))) ? Number(params.get("acdMapMode")) : DEFAULTS.acdMapCount,
       showBb1m: params.has("showBb1m") ? params.get("showBb1m") !== "0" : DEFAULTS.showBb1m,
       showBb5m: params.has("showBb5m") ? params.get("showBb5m") !== "0" : DEFAULTS.showBb5m,
       sizing: params.get("sizing") === "1",
@@ -756,129 +756,165 @@
   }
 
   function appendLatestAcdMapPoint() {
-    const session = state.acdMap.sessions[0];
     const latest = state.rows[state.rows.length - 1];
     const timestampMs = Number(latest?.timestampMs);
     const price = Number(latest?.mid);
-    if (!session || !Number.isFinite(timestampMs) || !Number.isFinite(price)
-      || timestampMs < Number(session.openingStartMs) || timestampMs > Number(session.sessionEndMs)) {
-      return;
-    }
-    const points = Array.isArray(session.points) ? session.points : (session.points = []);
+    if (!Number.isFinite(timestampMs) || !Number.isFinite(price)) return;
+    const points = state.acdMap.points;
     const previous = points[points.length - 1];
-    if (Number(previous?.tickId) === Number(latest.id)) return;
-    points.push({ timestampMs, tickId: Number(latest.id), price });
-    if (points.length > 1800) session.points = points.slice(-1800);
+    if (Number(previous?.tickId) !== Number(latest.id)) {
+      points.push({ timestampMs, tickId: Number(latest.id), price });
+    }
+    state.acdMap.windowEndMs = timestampMs;
+    state.acdMap.windowStartMs = timestampMs - (24 * 60 * 60 * 1000);
+    state.acdMap.points = points.filter((point) => Number(point.timestampMs) >= state.acdMap.windowStartMs);
+    const newestAcd = state.acdMap.acds[state.acdMap.acds.length - 1];
+    if (newestAcd && timestampMs > Number(newestAcd.activeEndMs)) newestAcd.activeEndMs = timestampMs;
+  }
+
+  function acdSegment(levelName, price, startMs, endMs, color, type) {
+    return [
+      { name: levelName, coord: [startMs, Number(price)], lineStyle: { color, type, width: 1 } },
+      { coord: [endMs, Number(price)] },
+    ];
   }
 
   function renderAcdMiniMap() {
     if (!elements.acdMiniMap || !elements.acdMiniMapChart) return;
     const requested = currentConfig().acdMapCount;
-    const sessions = state.acdMap.sessions.slice(0, requested).filter((session) => Array.isArray(session.points) && session.points.length);
     elements.acdMiniMap.hidden = requested === 0;
     if (requested === 0) return;
-    if (!sessions.length) {
+    appendLatestAcdMapPoint();
+    const points = state.acdMap.points.filter((point) => Number.isFinite(Number(point.timestampMs)) && Number.isFinite(Number(point.price)));
+    const acds = state.acdMap.acds.slice(-requested);
+    if (!points.length || !acds.length) {
       elements.acdMiniMapSummary.textContent = "Unavailable";
       return;
     }
-    appendLatestAcdMapPoint();
-    elements.acdMiniMap.dataset.count = String(sessions.length);
-    elements.acdMiniMapSummary.textContent = sessions.length === 1 ? "Latest" : "Last two";
+    elements.acdMiniMap.dataset.count = String(acds.length);
+    elements.acdMiniMapSummary.textContent = "24H · " + String(acds.length) + " ACD" + (acds.length === 1 ? "" : "s");
     if (!state.acdMap.chart) {
       state.acdMap.chart = echarts.init(elements.acdMiniMapChart, null, { renderer: "canvas" });
       state.acdMap.resizeObserver = new ResizeObserver(() => state.acdMap.chart?.resize());
       state.acdMap.resizeObserver.observe(elements.acdMiniMapChart);
     }
 
-    const two = sessions.length === 2;
-    const grids = [];
-    const xAxes = [];
-    const yAxes = [];
-    const series = [];
-    sessions.forEach((session, index) => {
-      const points = (session.points || []).filter((point) => Number.isFinite(Number(point.timestampMs)) && Number.isFinite(Number(point.price)));
-      const prices = points.map((point) => Number(point.price)).concat(Object.values(session.levels || {}).map(Number).filter(Number.isFinite));
-      if (!points.length || !prices.length) return;
-      const low = Math.min(...prices);
-      const high = Math.max(...prices);
-      const padding = Math.max(1, (high - low) * 0.06);
-      const top = two ? (30 + index * 119) : 30;
-      grids.push({ left: 38, right: 8, top, height: two ? 86 : 102, containLabel: false });
-      xAxes.push({
-        type: "time", gridIndex: index, min: Number(session.openingStartMs),
-        max: Math.min(Number(session.sessionEndMs), Number(points[points.length - 1].timestampMs)),
-        axisLine: { lineStyle: { color: "rgba(147,181,255,.22)" } }, axisTick: { show: false },
-        splitLine: { show: false }, axisLabel: { color: "#71839c", fontSize: 8, hideOverlap: true, formatter: acdMapTimeLabel },
-      });
-      yAxes.push({
-        type: "value", gridIndex: index, min: Math.floor(low - padding), max: Math.ceil(high + padding), splitNumber: 3,
-        axisLine: { show: false }, axisTick: { show: false }, axisLabel: { color: "#8fa0b8", fontSize: 8, formatter: (value) => String(Math.round(value)) },
-        splitLine: { lineStyle: { color: "rgba(147,181,255,.09)" } },
-      });
-      const levels = session.levels || {};
-      const mapEnd = Math.min(Number(session.sessionEndMs), Number(points[points.length - 1].timestampMs));
+    const windowStartMs = Number(state.acdMap.windowStartMs || points[0].timestampMs);
+    const windowEndMs = Number(state.acdMap.windowEndMs || points[points.length - 1].timestampMs);
+    const levelPrices = acds.flatMap((acd) => Object.values(acd.levels || {}).map(Number).filter(Number.isFinite));
+    const prices = points.map((point) => Number(point.price)).concat(levelPrices);
+    const low = Math.min(...prices);
+    const high = Math.max(...prices);
+    const padding = Math.max(1, (high - low) * 0.05);
+    const series = [{
+      name: "24-hour price", type: "line",
+      data: points.map((point) => [Number(point.timestampMs), Number(point.price)]),
+      showSymbol: false, lineStyle: { color: "#b9f47f", width: 1.15 },
+      animation: false, silent: true, z: 6,
+    }];
+
+    acds.forEach((acd, index) => {
+      const levels = acd.levels || {};
+      const startMs = Math.max(windowStartMs, Number(acd.activeStartMs));
+      const endMs = Math.min(windowEndMs, Number(acd.activeEndMs));
+      if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return;
+      const opacity = index === acds.length - 1 ? 1 : 0.62;
       series.push({
-        name: session.brokerDay, type: "line", xAxisIndex: index, yAxisIndex: index,
-        data: points.map((point) => [Number(point.timestampMs), Number(point.price)]), showSymbol: false,
-        lineStyle: { color: "#b9f47f", width: 1.25 }, animation: false, silent: true, z: 5,
+        name: "ACD " + String(acd.brokerDay), type: "line",
+        data: [[startMs, Number(levels.openingHigh)], [endMs, Number(levels.openingHigh)]],
+        showSymbol: false, silent: true, animation: false, lineStyle: { opacity: 0 }, z: 3,
         markArea: {
-          silent: true, itemStyle: { color: "rgba(109,216,255,.09)", borderColor: "rgba(109,216,255,.25)", borderWidth: 1 },
-          data: [[{ xAxis: Number(session.openingEndMs), yAxis: Number(levels.openingLow) }, { xAxis: mapEnd, yAxis: Number(levels.openingHigh) }]],
+          silent: true,
+          itemStyle: {
+            color: "rgba(255, 200, 87, " + String(0.08 * opacity) + ")",
+            borderColor: "rgba(255, 200, 87, " + String(0.24 * opacity) + ")",
+            borderWidth: 1,
+          },
+          data: [[
+            { xAxis: startMs, yAxis: Number(levels.openingLow) },
+            { xAxis: endMs, yAxis: Number(levels.openingHigh) },
+          ]],
         },
         markLine: {
-          silent: true, symbol: "none", label: { show: true, position: "insideEndTop", fontSize: 7, color: "#9eadc5", formatter: "{b}" },
+          silent: true, symbol: "none",
+          label: { show: true, position: "insideEndTop", fontSize: 7, color: "#9eadc5", formatter: "{b}" },
           data: [
-            { name: "C+", yAxis: Number(levels.cUp), lineStyle: { color: "rgba(255,200,87,.48)", type: "dashed", width: 1 } },
-            { name: "A+", yAxis: Number(levels.aUp), lineStyle: { color: "rgba(109,216,255,.58)", type: "dashed", width: 1 } },
-            { name: "OR+", yAxis: Number(levels.openingHigh), lineStyle: { color: "rgba(210,221,238,.52)", width: 1 } },
-            { name: "OR-", yAxis: Number(levels.openingLow), lineStyle: { color: "rgba(210,221,238,.52)", width: 1 } },
-            { name: "A-", yAxis: Number(levels.aDown), lineStyle: { color: "rgba(109,216,255,.58)", type: "dashed", width: 1 } },
-            { name: "C-", yAxis: Number(levels.cDown), lineStyle: { color: "rgba(255,200,87,.48)", type: "dashed", width: 1 } },
+            acdSegment("C+", levels.cUp, startMs, endMs, "rgba(255,200,87," + String(0.48 * opacity) + ")", "dashed"),
+            acdSegment("A+", levels.aUp, startMs, endMs, "rgba(109,216,255," + String(0.58 * opacity) + ")", "dashed"),
+            acdSegment("OR+", levels.openingHigh, startMs, endMs, "rgba(210,221,238," + String(0.58 * opacity) + ")", "solid"),
+            acdSegment("OR-", levels.openingLow, startMs, endMs, "rgba(210,221,238," + String(0.58 * opacity) + ")", "solid"),
+            acdSegment("A-", levels.aDown, startMs, endMs, "rgba(109,216,255," + String(0.58 * opacity) + ")", "dashed"),
+            acdSegment("C-", levels.cDown, startMs, endMs, "rgba(255,200,87," + String(0.48 * opacity) + ")", "dashed"),
           ],
         },
       });
-      const last = points[points.length - 1];
       series.push({
-        name: "Last price", type: "scatter", xAxisIndex: index, yAxisIndex: index,
-        data: [[Number(last.timestampMs), Number(last.price)]], symbolSize: 7, silent: true, z: 9,
-        itemStyle: { color: "#d5ff8b", borderColor: "#071018", borderWidth: 1 },
-        label: { show: true, position: "left", color: "#d5ff8b", fontSize: 8, formatter: formatPrice(last.price) },
-      });
-      series.push({
-        name: "Session label", type: "scatter", xAxisIndex: index, yAxisIndex: index,
-        data: [[Number(points[0].timestampMs), high]], symbolSize: 0, silent: true,
-        label: { show: true, position: "right", color: "#d8e5f7", fontSize: 9, fontWeight: 600, formatter: String(session.brokerDay) },
+        name: "ACD date", type: "scatter", data: [[startMs, high]],
+        symbolSize: 0, silent: true, z: 8,
+        label: { show: true, position: "right", color: "#d8e5f7", fontSize: 8, formatter: String(acd.brokerDay) },
       });
     });
+
+    const last = points[points.length - 1];
+    series.push({
+      name: "Last price", type: "scatter",
+      data: [[Number(last.timestampMs), Number(last.price)]], symbolSize: 7, silent: true, z: 10,
+      itemStyle: { color: "#d5ff8b", borderColor: "#071018", borderWidth: 1 },
+      label: { show: true, position: "left", color: "#d5ff8b", fontSize: 8, formatter: formatPrice(last.price) },
+    });
     state.acdMap.chart.setOption({
-      animation: false, backgroundColor: "transparent", grid: grids, xAxis: xAxes, yAxis: yAxes, series,
+      animation: false,
+      backgroundColor: "transparent",
+      grid: { left: 38, right: 8, top: 30, bottom: 22, containLabel: false },
+      xAxis: {
+        type: "time", min: windowStartMs, max: windowEndMs,
+        axisLine: { lineStyle: { color: "rgba(147,181,255,.22)" } }, axisTick: { show: false },
+        splitLine: { show: false },
+        axisLabel: { color: "#71839c", fontSize: 8, hideOverlap: true, formatter: acdMapTimeLabel },
+      },
+      yAxis: {
+        type: "value", min: Math.floor(low - padding), max: Math.ceil(high + padding), splitNumber: 3,
+        axisLine: { show: false }, axisTick: { show: false },
+        axisLabel: { color: "#8fa0b8", fontSize: 8, formatter: (value) => String(Math.round(value)) },
+        splitLine: { lineStyle: { color: "rgba(147,181,255,.09)" } },
+      },
+      series,
       tooltip: { show: false },
     }, { notMerge: true, lazyUpdate: true });
     requestAnimationFrame(() => state.acdMap.chart?.resize());
   }
-
   function scheduleAcdMiniMapRender() {
     if (currentConfig().acdMapCount === 0) return;
     if (state.acdMap.renderTimer) window.clearTimeout(state.acdMap.renderTimer);
     state.acdMap.renderTimer = window.setTimeout(() => {
       state.acdMap.renderTimer = 0;
-      renderAcdMiniMap();
+      if ((Date.now() - Number(state.acdMap.loadedAtMs || 0)) >= 300000) {
+        loadAcdMiniMap({ silent: true });
+      } else {
+        renderAcdMiniMap();
+      }
     }, 1200);
   }
 
   async function loadAcdMiniMap(options) {
     const count = currentConfig().acdMapCount;
     if (count === 0) {
-      state.acdMap.sessions = [];
+      state.acdMap.points = [];
+      state.acdMap.acds = [];
       renderAcdMiniMap();
       return;
     }
     try {
       const payload = await fetchJson("/api/live/acd-map?count=" + String(count));
-      state.acdMap.sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
+      state.acdMap.points = Array.isArray(payload.points) ? payload.points : [];
+      state.acdMap.acds = Array.isArray(payload.acds) ? payload.acds : [];
+      state.acdMap.windowStartMs = Number(payload.windowStartMs) || null;
+      state.acdMap.windowEndMs = Number(payload.windowEndMs) || null;
+      state.acdMap.loadedAtMs = Date.now();
       renderAcdMiniMap();
     } catch (error) {
-      state.acdMap.sessions = [];
+      state.acdMap.points = [];
+      state.acdMap.acds = [];
       renderAcdMiniMap();
       if (!options?.silent) status(error.message || "ACD mini-map could not be loaded.", true);
     }
@@ -918,7 +954,7 @@
       showStructure: config.showStructure ? "1" : "0",
       showRanges: config.showRanges ? "1" : "0",
       showAcd: config.showAcd ? "1" : "0",
-      acdMapCount: String(config.acdMapCount),
+      acdMapMode: String(config.acdMapCount),
       showBb1m: config.showBb1m ? "1" : "0",
       showBb5m: config.showBb5m ? "1" : "0",
       sizing: config.sizing ? "1" : "0",

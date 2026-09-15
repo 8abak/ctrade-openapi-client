@@ -377,10 +377,6 @@ select {
   pointer-events: none;
 }
 
-.acd-mini-map[data-count="2"] {
-  height: 276px;
-}
-
 .acd-mini-map[hidden] {
   display: none;
 }
@@ -1418,10 +1414,6 @@ select {
     left: max(0.45rem, env(safe-area-inset-left));
     width: min(265px, calc(100% - 0.9rem));
     height: 148px;
-  }
-
-  .acd-mini-map[data-count="2"] {
-    height: min(255px, calc(100% - 4.4rem));
   }
 
   .trade-config-grid,

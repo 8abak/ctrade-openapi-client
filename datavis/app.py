@@ -1420,82 +1420,107 @@ def load_acd_map_payload(count: int) -> Dict[str, Any]:
             )
             latest = dict(cur.fetchone() or {})
             if not latest:
-                return {"available": False, "reason": "No live ticks are available.", "sessions": []}
+                return {"available": False, "reason": "No live ticks are available.", "points": [], "acds": []}
 
-            latest_broker_day = brokerday_for_timestamp(latest["timestamp"])
-            sessions: List[Dict[str, Any]] = []
-            candidate_day = latest_broker_day
+            window_end = latest["timestamp"]
+            window_start = window_end - timedelta(hours=24)
+            cur.execute(
+                """
+                SELECT
+                    date_trunc('minute', timestamp) AS bucket,
+                    (array_agg(id ORDER BY timestamp DESC, id DESC))[1] AS tick_id,
+                    (array_agg(COALESCE(mid, (bid + ask) / 2.0) ORDER BY timestamp DESC, id DESC))[1] AS close
+                FROM public.ticks
+                WHERE symbol = %s AND timestamp >= %s AND timestamp <= %s
+                GROUP BY date_trunc('minute', timestamp)
+                ORDER BY bucket
+                """,
+                (TICK_SYMBOL, window_start, window_end),
+            )
+            minute_rows = [dict(row) for row in cur.fetchall()]
+
+            candidate_day = brokerday_for_timestamp(window_end)
+            acd_candidates: List[Dict[str, Any]] = []
             attempts = 0
-            while len(sessions) < requested_count and attempts < 10:
-                day_start, day_end = brokerday_bounds(candidate_day)
+            while attempts < 10 and len(acd_candidates) < 4:
+                day_start, _ = brokerday_bounds(candidate_day)
                 opening_end = day_start + timedelta(minutes=30)
-                cur.execute(
-                    """
-                    SELECT
-                        MIN(bid) AS opening_low,
-                        MAX(ask) AS opening_high,
-                        MIN(id) AS start_tick_id,
-                        MAX(id) AS end_tick_id,
-                        COUNT(*) AS tick_count
-                    FROM public.ticks
-                    WHERE symbol = %s AND timestamp >= %s AND timestamp < %s
-                    """,
-                    (TICK_SYMBOL, day_start, opening_end),
-                )
-                opening = dict(cur.fetchone() or {})
-                opening_low = float(opening.get("opening_low") or 0.0)
-                opening_high = float(opening.get("opening_high") or 0.0)
-                if opening_high > opening_low:
-                    visible_end = min(day_end, latest["timestamp"] + timedelta(microseconds=1))
+                if opening_end <= window_end:
                     cur.execute(
                         """
                         SELECT
-                            date_trunc('minute', timestamp) AS bucket,
-                            (array_agg(id ORDER BY timestamp DESC, id DESC))[1] AS tick_id,
-                            (array_agg(COALESCE(mid, (bid + ask) / 2.0) ORDER BY timestamp DESC, id DESC))[1] AS close
+                            MIN(bid) AS opening_low,
+                            MAX(ask) AS opening_high,
+                            MIN(id) AS start_tick_id,
+                            MAX(id) AS end_tick_id,
+                            COUNT(*) AS tick_count
                         FROM public.ticks
                         WHERE symbol = %s AND timestamp >= %s AND timestamp < %s
-                        GROUP BY date_trunc('minute', timestamp)
-                        ORDER BY bucket
                         """,
-                        (TICK_SYMBOL, day_start, visible_end),
+                        (TICK_SYMBOL, day_start, opening_end),
                     )
-                    minute_rows = [dict(row) for row in cur.fetchall()]
-                    opening_range = opening_high - opening_low
-                    a_offset = opening_range * 0.5
-                    levels = {
-                        "cUp": opening_high + opening_range,
-                        "aUp": opening_high + a_offset,
-                        "openingHigh": opening_high,
-                        "openingLow": opening_low,
-                        "aDown": opening_low - a_offset,
-                        "cDown": opening_low - opening_range,
-                    }
-                    sessions.append({
-                        "brokerDay": candidate_day.isoformat(),
-                        "openingStartMs": dt_to_ms(day_start),
-                        "openingEndMs": dt_to_ms(opening_end),
-                        "sessionEndMs": dt_to_ms(day_end),
-                        "startTickId": int(opening.get("start_tick_id") or 0),
-                        "endTickId": int(opening.get("end_tick_id") or 0),
-                        "tickCount": int(opening.get("tick_count") or 0),
-                        "openingRange": opening_range,
-                        "levels": levels,
-                        "points": [
-                            {
-                                "timestampMs": dt_to_ms(row.get("bucket")),
-                                "tickId": int(row.get("tick_id") or 0),
-                                "price": float(row.get("close") or 0.0),
-                            }
-                            for row in minute_rows
-                            if row.get("bucket") is not None and row.get("close") is not None
-                        ],
-                    })
+                    opening = dict(cur.fetchone() or {})
+                    opening_low = float(opening.get("opening_low") or 0.0)
+                    opening_high = float(opening.get("opening_high") or 0.0)
+                    if opening_high > opening_low:
+                        opening_range = opening_high - opening_low
+                        a_offset = opening_range * 0.5
+                        acd_candidates.append({
+                            "brokerDay": candidate_day.isoformat(),
+                            "openingStartMs": dt_to_ms(day_start),
+                            "openingEndMs": dt_to_ms(opening_end),
+                            "startTickId": int(opening.get("start_tick_id") or 0),
+                            "endTickId": int(opening.get("end_tick_id") or 0),
+                            "tickCount": int(opening.get("tick_count") or 0),
+                            "openingRange": opening_range,
+                            "levels": {
+                                "cUp": opening_high + opening_range,
+                                "aUp": opening_high + a_offset,
+                                "openingHigh": opening_high,
+                                "openingLow": opening_low,
+                                "aDown": opening_low - a_offset,
+                                "cDown": opening_low - opening_range,
+                            },
+                        })
                 candidate_day -= timedelta(days=1)
                 attempts += 1
 
-    return {"available": bool(sessions), "count": len(sessions), "sessions": sessions}
+    chronological = sorted(acd_candidates, key=lambda item: int(item["openingEndMs"]))
+    active_acds: List[Dict[str, Any]] = []
+    for index, acd in enumerate(chronological):
+        active_start = int(acd["openingEndMs"])
+        next_start = (
+            int(chronological[index + 1]["openingEndMs"])
+            if index + 1 < len(chronological)
+            else dt_to_ms(window_end)
+        )
+        clipped_start = max(active_start, dt_to_ms(window_start) or active_start)
+        clipped_end = min(next_start, dt_to_ms(window_end) or next_start)
+        if clipped_end > clipped_start:
+            active_acds.append({
+                **acd,
+                "activeStartMs": clipped_start,
+                "activeEndMs": clipped_end,
+            })
 
+    selected_acds = active_acds[-requested_count:]
+    points = [
+        {
+            "timestampMs": dt_to_ms(row.get("bucket")),
+            "tickId": int(row.get("tick_id") or 0),
+            "price": float(row.get("close") or 0.0),
+        }
+        for row in minute_rows
+        if row.get("bucket") is not None and row.get("close") is not None
+    ]
+    return {
+        "available": bool(points and selected_acds),
+        "windowHours": 24,
+        "windowStartMs": dt_to_ms(window_start),
+        "windowEndMs": dt_to_ms(window_end),
+        "points": points,
+        "acds": selected_acds,
+    }
 
 def query_bootstrap_rows(
     cur: Any,
