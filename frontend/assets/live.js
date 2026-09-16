@@ -301,7 +301,7 @@
       showStructure: params.has("showStructure") ? params.get("showStructure") !== "0" : DEFAULTS.showStructure,
       showRanges: params.has("showRanges") ? params.get("showRanges") !== "0" : DEFAULTS.showRanges,
       showAcd: params.has("showAcd") ? params.get("showAcd") !== "0" : DEFAULTS.showAcd,
-      acdMapCount: [0, 1, 2].includes(Number(params.get("acdMapAcds"))) ? Number(params.get("acdMapAcds")) : DEFAULTS.acdMapCount,
+      acdMapCount: Number(params.get("acdMapAcds")) === 0 ? 0 : DEFAULTS.acdMapCount,
       showBb1m: params.has("showBb1m") ? params.get("showBb1m") !== "0" : DEFAULTS.showBb1m,
       showBb5m: params.has("showBb5m") ? params.get("showBb5m") !== "0" : DEFAULTS.showBb5m,
       showVwap: params.has("showVwap") ? params.get("showVwap") !== "0" : DEFAULTS.showVwap,
@@ -322,7 +322,7 @@
       showStructure: elements.showStructure.checked,
       showRanges: elements.showRanges.checked,
       showAcd: elements.showAcd.checked,
-      acdMapCount: Math.max(0, Math.min(2, Number(elements.acdMapCount?.value || 0))),
+      acdMapCount: Number(elements.acdMapCount?.value || 0) === 0 ? 0 : 2,
       showBb1m: elements.showBb1m.checked,
       showBb5m: elements.showBb5m.checked,
       showVwap: elements.showVwap.checked,
@@ -784,6 +784,34 @@
     ];
   }
 
+  function miniMapVwapSeries(windowStartMs, windowEndMs) {
+    if (!currentConfig().showVwap) return [];
+    const points = state.vwap.points.filter((point) => {
+      const timestampMs = Number(point.timestampMs);
+      return Number.isFinite(timestampMs) && timestampMs >= windowStartMs && timestampMs <= windowEndMs;
+    });
+    if (!points.length) return [];
+    const specs = [
+      ["upper3", "+3σ", "rgba(192,140,255,.32)", 0.65, "dashed"],
+      ["upper2", "+2σ", "rgba(192,140,255,.44)", 0.75, "dashed"],
+      ["upper1", "+1σ", "rgba(192,140,255,.62)", 0.85, "dashed"],
+      ["vwap", "VWAP", "#7ee7ff", 1.15, "solid"],
+      ["lower1", "−1σ", "rgba(192,140,255,.62)", 0.85, "dashed"],
+      ["lower2", "−2σ", "rgba(192,140,255,.44)", 0.75, "dashed"],
+      ["lower3", "−3σ", "rgba(192,140,255,.32)", 0.65, "dashed"],
+    ];
+    return specs.map((spec) => ({
+      name: "Sydney " + spec[1], type: "line",
+      data: points.map((point) => [Number(point.timestampMs), Number(point[spec[0]])]),
+      showSymbol: false, connectNulls: true, animation: false, silent: true,
+      lineStyle: { color: spec[2], width: spec[3], type: spec[4] }, z: 5,
+      endLabel: spec[0] === "vwap" ? {
+        show: true, formatter: "VWAP", color: spec[2], fontSize: 7,
+        backgroundColor: "rgba(5,9,15,.72)", padding: [1, 2], distance: 2,
+      } : { show: false },
+    }));
+  }
+
   function renderAcdMiniMap() {
     if (!elements.acdMiniMap || !elements.acdMiniMapChart) return;
     const requested = currentConfig().acdMapCount;
@@ -807,7 +835,13 @@
     const windowStartMs = Number(state.acdMap.windowStartMs || points[0].timestampMs);
     const windowEndMs = Number(state.acdMap.windowEndMs || points[points.length - 1].timestampMs);
     const levelPrices = acds.flatMap((acd) => Object.values(acd.levels || {}).map(Number).filter(Number.isFinite));
-    const prices = points.map((point) => Number(point.price)).concat(levelPrices);
+    const vwapPrices = currentConfig().showVwap
+      ? state.vwap.points
+        .filter((point) => Number(point.timestampMs) >= windowStartMs && Number(point.timestampMs) <= windowEndMs)
+        .flatMap((point) => ["vwap", "upper1", "lower1", "upper2", "lower2", "upper3", "lower3"]
+          .map((key) => Number(point[key])).filter(Number.isFinite))
+      : [];
+    const prices = points.map((point) => Number(point.price)).concat(levelPrices, vwapPrices);
     const low = Math.min(...prices);
     const high = Math.max(...prices);
     const padding = Math.max(1, (high - low) * 0.05);
@@ -817,6 +851,7 @@
       showSymbol: false, lineStyle: { color: "#b9f47f", width: 1.15 },
       animation: false, silent: true, z: 6,
     }];
+    series.push(...miniMapVwapSeries(windowStartMs, windowEndMs));
 
     acds.forEach((acd, index) => {
       const levels = acd.levels || {};
