@@ -15,6 +15,7 @@
     acdMapCount: 2,
     showBb1m: false,
     showBb5m: false,
+    showVwap: true,
     sizing: false,
     id: "",
     reviewStart: "",
@@ -89,6 +90,7 @@
     acdMap: { points: [], acds: [], windowStartMs: null, windowEndMs: null, loadedAtMs: 0, chart: null, resizeObserver: null, renderTimer: 0 },
     studyDrawing: { model: null, saved: [] },
     bollinger: { oneMinute: [], fiveMinute: [], timer: 0, requestToken: 0 },
+    vwap: { points: [], timer: 0, requestToken: 0, sessionStartMs: null, gapMinutes: null },
     touchNav: null,
     paper: {
       current: null,
@@ -164,6 +166,7 @@
     acdMapCount: document.getElementById("acdMapCount"),
     showBb1m: document.getElementById("showBb1m"),
     showBb5m: document.getElementById("showBb5m"),
+    showVwap: document.getElementById("showVwap"),
     sizingToggle: document.getElementById("sizingToggle"),
     mavgOptions: document.getElementById("mavgOptions"),
     mavgSummary: document.getElementById("mavgSummary"),
@@ -301,6 +304,7 @@
       acdMapCount: [0, 1, 2].includes(Number(params.get("acdMapAcds"))) ? Number(params.get("acdMapAcds")) : DEFAULTS.acdMapCount,
       showBb1m: params.has("showBb1m") ? params.get("showBb1m") !== "0" : DEFAULTS.showBb1m,
       showBb5m: params.has("showBb5m") ? params.get("showBb5m") !== "0" : DEFAULTS.showBb5m,
+      showVwap: params.has("showVwap") ? params.get("showVwap") !== "0" : DEFAULTS.showVwap,
       sizing: params.get("sizing") === "1",
       id: params.get("id") || DEFAULTS.id,
       reviewStart: params.get("reviewStart") || DEFAULTS.reviewStart,
@@ -321,6 +325,7 @@
       acdMapCount: Math.max(0, Math.min(2, Number(elements.acdMapCount?.value || 0))),
       showBb1m: elements.showBb1m.checked,
       showBb5m: elements.showBb5m.checked,
+      showVwap: elements.showVwap.checked,
       sizing: Boolean(elements.sizingToggle.checked),
       id: (elements.tickId.value || "").trim(),
       reviewStart: (elements.reviewStart.value || "").trim(),
@@ -957,6 +962,7 @@
       acdMapAcds: String(config.acdMapCount),
       showBb1m: config.showBb1m ? "1" : "0",
       showBb5m: config.showBb5m ? "1" : "0",
+      showVwap: config.showVwap ? "1" : "0",
       sizing: config.sizing ? "1" : "0",
       window: String(config.window),
       speed: String(config.reviewSpeed),
@@ -2389,6 +2395,64 @@
     }];
   }
 
+  async function refreshVwap(options) {
+    if (!currentConfig().showVwap || !Number.isFinite(Number(state.rangeLastId))) {
+      state.vwap.points = [];
+      if (options?.render !== false) renderChart({ shiftWithRun: false });
+      return false;
+    }
+    const token = ++state.vwap.requestToken;
+    try {
+      const payload = await fetchJson("/api/live/vwap?" + new URLSearchParams({
+        endId: String(state.rangeLastId),
+      }).toString());
+      if (token !== state.vwap.requestToken) return false;
+      state.vwap.points = Array.isArray(payload.points) ? payload.points : [];
+      state.vwap.sessionStartMs = Number(payload.sessionStartMs) || null;
+      state.vwap.gapMinutes = Number(payload.gapMinutes) || null;
+      if (options?.render !== false) renderChart({ shiftWithRun: false });
+      return Boolean(payload.available);
+    } catch (error) {
+      if (!options?.silent) status(error.message || "Sydney-day VWAP could not be loaded.", true);
+      return false;
+    }
+  }
+
+  function scheduleVwapRefresh() {
+    if (!currentConfig().showVwap) return;
+    if (state.vwap.timer) window.clearTimeout(state.vwap.timer);
+    state.vwap.timer = window.setTimeout(() => {
+      state.vwap.timer = 0;
+      refreshVwap({ silent: true }).catch(function () {});
+    }, 60000);
+  }
+
+  function vwapSeries(points) {
+    if (!points.length) return [];
+    const specs = [
+      ["upper3", "+3σ", "rgba(192,140,255,.38)", 0.8, "dashed"],
+      ["upper2", "+2σ", "rgba(192,140,255,.52)", 0.9, "dashed"],
+      ["upper1", "+1σ", "rgba(192,140,255,.72)", 1.0, "dashed"],
+      ["vwap", "VWAP", "#7ee7ff", 1.45, "solid"],
+      ["lower1", "−1σ", "rgba(192,140,255,.72)", 1.0, "dashed"],
+      ["lower2", "−2σ", "rgba(192,140,255,.52)", 0.9, "dashed"],
+      ["lower3", "−3σ", "rgba(192,140,255,.38)", 0.8, "dashed"],
+    ];
+    return specs.map(function (spec) {
+      return {
+        id: "sydney-vwap-" + spec[0], name: "Sydney " + spec[1], type: "line",
+        data: points.map((point) => [Number(point.tickId), Number(point[spec[0]])]),
+        showSymbol: false, connectNulls: true, animation: false, silent: true,
+        lineStyle: { color: spec[2], width: spec[3], type: spec[4] }, z: 7,
+        endLabel: {
+          show: true, formatter: spec[1], color: spec[2], fontSize: 9,
+          backgroundColor: "rgba(5,9,15,.78)", padding: [1, 3], distance: 3,
+        },
+        labelLayout: { moveOverlap: "shiftY" },
+      };
+    });
+  }
+
   function nearestRowForTickValue(tickValue) {
     const target = Number(tickValue);
     if (!Number.isFinite(target) || !state.rows.length) {
@@ -3386,6 +3450,9 @@
     }
     if (config.showBb5m) {
       series.push(...bollingerSeries(state.bollinger.fiveMinute, "BB 5m", "#ffd166"));
+    }
+    if (config.showVwap) {
+      series.push(...vwapSeries(state.vwap.points));
     }
     activeMavgConfigs().forEach(function (mavgConfig, index) {
       series.push({
@@ -5632,6 +5699,7 @@
     state.lastMetrics = payload.metrics || null;
     applyPaperPayload(payload.rect || null);
     await refreshBollingerBands({ silent: true, render: false });
+    await refreshVwap({ silent: true, render: false });
     if (resetView) {
       state.zoom = null;
       state.viewport.reset();
@@ -5675,6 +5743,7 @@
       if (changed) {
         renderChart({ shiftWithRun: currentConfig().run === "run" });
         scheduleBollingerRefresh();
+        scheduleVwapRefresh();
       }
     };
     source.addEventListener("heartbeat", function (event) {
@@ -5718,6 +5787,7 @@
       if (changed) {
         renderChart({ shiftWithRun: true });
         scheduleBollingerRefresh();
+        scheduleVwapRefresh();
       }
       if (payload.endReached) {
         clearActivity();
@@ -5758,6 +5828,7 @@
     if (appended || mavgChanged || payload.structureBars?.length || payload.rangeBoxes?.length || payload.structureEvents?.length) {
       renderChart({ shiftWithRun: true });
       scheduleBollingerRefresh();
+      scheduleVwapRefresh();
     }
     status(payload.endReached ? "Review reached the current end snapshot." : "Review running.", false);
     if (!payload.endReached && currentConfig().run === "run") {
@@ -5815,6 +5886,7 @@
     state.loadedWindow = prepended ? targetWindow : state.loadedWindow;
     state.hasMoreLeft = Boolean(payload.hasMoreLeft);
     await refreshBollingerBands({ silent: true, render: false });
+    await refreshVwap({ silent: true, render: false });
     renderMeta();
     renderPerf();
     if (prepended || (payload.firstId != null && payload.firstId < previousFirstId)) {
@@ -5852,6 +5924,7 @@
     elements.acdMapCount.value = String(config.acdMapCount);
     elements.showBb1m.checked = Boolean(config.showBb1m);
     elements.showBb5m.checked = Boolean(config.showBb5m);
+    elements.showVwap.checked = Boolean(config.showVwap);
     elements.sizingToggle.checked = Boolean(config.sizing);
     elements.tickId.value = config.id;
     elements.reviewStart.value = config.reviewStart;
@@ -5892,11 +5965,15 @@
     status("Run state updated.", false);
   });
 
-  [elements.showTicks, elements.showEvents, elements.showStructure, elements.showRanges, elements.showAcd, elements.showBb1m, elements.showBb5m, elements.sizingToggle].forEach((control) => {
+  [elements.showTicks, elements.showEvents, elements.showStructure, elements.showRanges, elements.showAcd, elements.showBb1m, elements.showBb5m, elements.showVwap, elements.sizingToggle].forEach((control) => {
     control.addEventListener("change", function () {
       writeQuery();
       if (control === elements.showBb1m || control === elements.showBb5m) {
         refreshBollingerBands({ silent: false }).then(() => status("Bollinger display updated.", false));
+        return;
+      }
+      if (control === elements.showVwap) {
+        refreshVwap({ silent: false }).then(() => status("Sydney-day VWAP display updated.", false));
         return;
       }
       if (control === elements.sizingToggle || control === elements.showAcd) {

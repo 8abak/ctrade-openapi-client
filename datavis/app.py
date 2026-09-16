@@ -6,6 +6,7 @@ import logging
 import os
 import csv
 import re
+import math
 import secrets
 import base64
 import hmac
@@ -1333,6 +1334,10 @@ def query_latest_tick(cur: Any) -> Optional[Dict[str, Any]]:
 ACD_NEW_YORK = ZoneInfo("America/New_York")
 ACD_NEW_YORK_OPEN = dt_time(9, 30)
 ACD_OPENING_MINUTES = 15
+SYDNEY_TIMEZONE = ZoneInfo("Australia/Sydney")
+SYDNEY_GAP_WINDOW_START = dt_time(5, 0)
+SYDNEY_GAP_WINDOW_END = dt_time(9, 30)
+SYDNEY_MINIMUM_GAP = timedelta(minutes=20)
 
 
 def _previous_new_york_weekday(value: date) -> date:
@@ -1547,6 +1552,132 @@ def load_acd_map_payload(count: int) -> Dict[str, Any]:
         "openingWindow": "09:30-09:45",
         "points": points,
         "acds": selected_acds,
+    }
+
+
+def _is_sydney_day_gap(previous_timestamp: datetime, next_timestamp: datetime) -> bool:
+    if next_timestamp - previous_timestamp < SYDNEY_MINIMUM_GAP:
+        return False
+    local_time = next_timestamp.astimezone(SYDNEY_TIMEZONE).timetz().replace(tzinfo=None)
+    return SYDNEY_GAP_WINDOW_START <= local_time <= SYDNEY_GAP_WINDOW_END
+
+
+def _sydney_vwap_points(minute_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    running_count = 0
+    running_sum = 0.0
+    running_square_sum = 0.0
+    points: List[Dict[str, Any]] = []
+    for row in minute_rows:
+        tick_count = int(row.get("tick_count") or 0)
+        price_sum = float(row.get("price_sum") or 0.0)
+        square_sum = float(row.get("square_sum") or 0.0)
+        if tick_count <= 0:
+            continue
+        running_count += tick_count
+        running_sum += price_sum
+        running_square_sum += square_sum
+        vwap = running_sum / running_count
+        variance = max(0.0, (running_square_sum / running_count) - (vwap * vwap))
+        deviation = math.sqrt(variance)
+        points.append({
+            "timestampMs": dt_to_ms(row.get("bucket")),
+            "tickId": int(row.get("tick_id") or 0),
+            "vwap": vwap,
+            "upper1": vwap + deviation,
+            "lower1": vwap - deviation,
+            "upper2": vwap + (2.0 * deviation),
+            "lower2": vwap - (2.0 * deviation),
+            "upper3": vwap + (3.0 * deviation),
+            "lower3": vwap - (3.0 * deviation),
+            "tickCount": running_count,
+        })
+    return points
+
+
+def load_live_vwap_payload(end_id: int) -> Dict[str, Any]:
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, timestamp
+                FROM public.ticks
+                WHERE symbol = %s AND id <= %s
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (TICK_SYMBOL, end_id),
+            )
+            ending = dict(cur.fetchone() or {})
+            if not ending:
+                return {"available": False, "reason": "No ticks are available for VWAP.", "points": []}
+            end_time = ending["timestamp"]
+            cur.execute(
+                """
+                WITH minute_activity AS (
+                    SELECT
+                        date_trunc('minute', timestamp) AS bucket,
+                        MIN(timestamp) AS first_timestamp,
+                        MAX(timestamp) AS last_timestamp
+                    FROM public.ticks
+                    WHERE symbol = %s
+                      AND timestamp >= %s - INTERVAL '36 hours'
+                      AND timestamp <= %s
+                    GROUP BY date_trunc('minute', timestamp)
+                ), ordered AS (
+                    SELECT
+                        first_timestamp AS timestamp,
+                        LAG(last_timestamp) OVER (ORDER BY bucket) AS previous_timestamp
+                    FROM minute_activity
+                )
+                SELECT previous_timestamp, timestamp AS session_start
+                FROM ordered
+                WHERE previous_timestamp IS NOT NULL
+                  AND timestamp - previous_timestamp >= INTERVAL '20 minutes'
+                  AND (timestamp AT TIME ZONE 'Australia/Sydney')::time >= TIME '05:00'
+                  AND (timestamp AT TIME ZONE 'Australia/Sydney')::time <= TIME '09:30'
+                ORDER BY timestamp DESC
+                LIMIT 1
+                """,
+                (TICK_SYMBOL, end_time, end_time),
+            )
+            gap = dict(cur.fetchone() or {})
+            session_start = gap.get("session_start")
+            previous_timestamp = gap.get("previous_timestamp")
+            if session_start is None or previous_timestamp is None or not _is_sydney_day_gap(previous_timestamp, session_start):
+                return {
+                    "available": False,
+                    "reason": "The latest Sydney morning market gap could not be identified.",
+                    "points": [],
+                }
+            cur.execute(
+                """
+                SELECT
+                    date_trunc('minute', timestamp) AS bucket,
+                    (array_agg(id ORDER BY timestamp DESC, id DESC))[1] AS tick_id,
+                    COUNT(*) AS tick_count,
+                    SUM(COALESCE(mid, (bid + ask) / 2.0)) AS price_sum,
+                    SUM(POWER(COALESCE(mid, (bid + ask) / 2.0), 2)) AS square_sum
+                FROM public.ticks
+                WHERE symbol = %s
+                  AND timestamp >= %s
+                  AND timestamp <= %s
+                GROUP BY date_trunc('minute', timestamp)
+                ORDER BY bucket
+                """,
+                (TICK_SYMBOL, session_start, end_time),
+            )
+            minute_rows = [dict(row) for row in cur.fetchall()]
+    points = _sydney_vwap_points(minute_rows)
+    return {
+        "available": bool(points),
+        "timezone": "Australia/Sydney",
+        "sessionStart": session_start.isoformat(),
+        "sessionStartMs": dt_to_ms(session_start),
+        "gapStart": previous_timestamp.isoformat(),
+        "gapMinutes": round((session_start - previous_timestamp).total_seconds() / 60.0, 1),
+        "weighting": "tick-volume proxy",
+        "deviations": 3,
+        "points": points,
     }
 
 
@@ -3853,6 +3984,11 @@ def live_acd() -> Dict[str, Any]:
 @app.get("/api/live/acd-map")
 def live_acd_map(count: int = Query(1, ge=1, le=2)) -> Dict[str, Any]:
     return load_acd_map_payload(count)
+
+
+@app.get("/api/live/vwap")
+def live_vwap(endId: int = Query(..., ge=1)) -> Dict[str, Any]:
+    return load_live_vwap_payload(endId)
 
 
 @app.get("/api/sql/schema")
