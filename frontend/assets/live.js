@@ -16,7 +16,6 @@
     showBb1m: false,
     showBb5m: false,
     showVwap: true,
-    sizing: false,
     id: "",
     reviewStart: "",
     reviewSpeed: 1,
@@ -75,14 +74,10 @@
     lastMetrics: null,
     streamConnected: false,
     hasMoreLeft: false,
-    loadedWindow: DEFAULTS.window,
     rangeFirstId: null,
     rangeLastId: null,
     rightEdgeAnchored: true,
-    zoom: null,
-    viewport: charting.createViewportModel({ rightEdgeToleranceItems: 1, debugName: "live" }),
     viewportUpdateMeta: null,
-    applyingZoom: false,
     overlayFrame: 0,
     resizeObserver: null,
     ui: { sidebarCollapsed: true },
@@ -91,7 +86,6 @@
     studyDrawing: { model: null, saved: [] },
     bollinger: { oneMinute: [], fiveMinute: [], timer: 0, requestToken: 0 },
     vwap: { points: [], timer: 0, requestToken: 0, sessionStartMs: null, gapMinutes: null },
-    touchNav: null,
     paper: {
       current: null,
       busy: false,
@@ -167,7 +161,6 @@
     showBb1m: document.getElementById("showBb1m"),
     showBb5m: document.getElementById("showBb5m"),
     showVwap: document.getElementById("showVwap"),
-    sizingToggle: document.getElementById("sizingToggle"),
     mavgOptions: document.getElementById("mavgOptions"),
     mavgSummary: document.getElementById("mavgSummary"),
     tickId: document.getElementById("tickId"),
@@ -175,7 +168,6 @@
     reviewSpeedToggle: document.getElementById("reviewSpeedToggle"),
     windowSize: document.getElementById("windowSize"),
     applyButton: document.getElementById("applyButton"),
-    loadMoreLeftButton: document.getElementById("loadMoreLeftButton"),
     statusLine: document.getElementById("statusLine"),
     liveMeta: document.getElementById("liveMeta"),
     livePerf: document.getElementById("livePerf"),
@@ -305,7 +297,6 @@
       showBb1m: params.has("showBb1m") ? params.get("showBb1m") !== "0" : DEFAULTS.showBb1m,
       showBb5m: params.has("showBb5m") ? params.get("showBb5m") !== "0" : DEFAULTS.showBb5m,
       showVwap: params.has("showVwap") ? params.get("showVwap") !== "0" : DEFAULTS.showVwap,
-      sizing: params.get("sizing") === "1",
       id: params.get("id") || DEFAULTS.id,
       reviewStart: params.get("reviewStart") || DEFAULTS.reviewStart,
       reviewSpeed: REVIEW_SPEEDS.includes(speed) ? speed : DEFAULTS.reviewSpeed,
@@ -326,7 +317,6 @@
       showBb1m: elements.showBb1m.checked,
       showBb5m: elements.showBb5m.checked,
       showVwap: elements.showVwap.checked,
-      sizing: Boolean(elements.sizingToggle.checked),
       id: (elements.tickId.value || "").trim(),
       reviewStart: (elements.reviewStart.value || "").trim(),
       reviewSpeed: Number.parseFloat(elements.reviewSpeedToggle.querySelector("button.active")?.dataset.value || String(DEFAULTS.reviewSpeed)),
@@ -998,7 +988,6 @@
       showBb1m: config.showBb1m ? "1" : "0",
       showBb5m: config.showBb5m ? "1" : "0",
       showVwap: config.showVwap ? "1" : "0",
-      sizing: config.sizing ? "1" : "0",
       window: String(config.window),
       speed: String(config.reviewSpeed),
     });
@@ -1017,7 +1006,6 @@
       showEvents: config.showEvents ? "1" : "0",
       showStructure: config.showStructure ? "1" : "0",
       showRanges: config.showRanges ? "1" : "0",
-      sizing: config.sizing ? "1" : "0",
     };
   }
 
@@ -3142,89 +3130,15 @@
     return sections.length ? "<div class=\"chart-tip\">" + sections.join("") + "</div>" : "";
   }
 
-  function setupTouchNavigation() {
-    if (!elements.chartHost || elements.chartHost.dataset.touchNavigation === "ready") {
-      return;
-    }
-    elements.chartHost.dataset.touchNavigation = "ready";
-    elements.chartHost.addEventListener("touchstart", function (event) {
-      if (event.touches.length !== 1 || !state.chart) {
-        state.touchNav = null;
-        return;
-      }
-      const touch = event.touches[0];
-      const hostRect = elements.chartHost.getBoundingClientRect();
-      const viewport = state.viewport.currentWindow();
-      if (!viewport || !Number.isFinite(viewport.startValue) || !Number.isFinite(viewport.endValue)) {
-        return;
-      }
-      state.touchNav = {
-        startX: touch.clientX,
-        startY: touch.clientY,
-        startValue: Number(viewport.startValue),
-        endValue: Number(viewport.endValue),
-        edgeZoom: touch.clientX - hostRect.left <= 56,
-        moved: false,
-      };
-    }, { passive: true });
+  function lockLandscapeChartTouch() {
+    if (!elements.chartHost || elements.chartHost.dataset.landscapeTouchLock === "ready") return;
+    elements.chartHost.dataset.landscapeTouchLock = "ready";
     elements.chartHost.addEventListener("touchmove", function (event) {
-      if (!state.touchNav || event.touches.length !== 1 || !state.chart) {
-        return;
+      if (window.matchMedia("(orientation: landscape) and (pointer: coarse)").matches) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
       }
-      const touch = event.touches[0];
-      const nav = state.touchNav;
-      const dx = touch.clientX - nav.startX;
-      const dy = touch.clientY - nav.startY;
-      if (Math.abs(dx) < 2 && Math.abs(dy) < 2) {
-        return;
-      }
-      const xValues = buildPrimaryXValues();
-      if (xValues.length < 2) {
-        return;
-      }
-      const domainMin = xValues[0];
-      const domainMax = xValues[xValues.length - 1];
-      const originalSpan = Math.max(2, nav.endValue - nav.startValue);
-      let nextStart = nav.startValue;
-      let nextEnd = nav.endValue;
-      if (nav.edgeZoom) {
-        const factor = Math.exp(dy / 180);
-        const nextSpan = Math.max(10, Math.min(domainMax - domainMin, originalSpan * factor));
-        const center = (nav.startValue + nav.endValue) / 2;
-        nextStart = center - nextSpan / 2;
-        nextEnd = center + nextSpan / 2;
-      } else if (Math.abs(dx) >= Math.abs(dy) * 0.65) {
-        const width = Math.max(1, elements.chartHost.getBoundingClientRect().width);
-        const shift = -(dx / width) * originalSpan;
-        nextStart = nav.startValue + shift;
-        nextEnd = nav.endValue + shift;
-      } else {
-        return;
-      }
-      const span = nextEnd - nextStart;
-      if (nextStart < domainMin) {
-        nextStart = domainMin;
-        nextEnd = domainMin + span;
-      }
-      if (nextEnd > domainMax) {
-        nextEnd = domainMax;
-        nextStart = domainMax - span;
-      }
-      nav.moved = true;
-      event.preventDefault();
-      state.chart.dispatchAction({
-        type: "dataZoom",
-        dataZoomId: "zoom-inside",
-        startValue: nextStart,
-        endValue: nextEnd,
-      });
-    }, { passive: false });
-    elements.chartHost.addEventListener("touchend", function () {
-      state.touchNav = null;
-    }, { passive: true });
-    elements.chartHost.addEventListener("touchcancel", function () {
-      state.touchNav = null;
-    }, { passive: true });
+    }, { passive: false, capture: true });
   }
 
   function ensureChart() {
@@ -3236,7 +3150,7 @@
       state.chart = echarts.init(elements.chartHost, null, { renderer: "canvas" });
       state.chart.setOption({
         animation: false,
-        grid: { left: 54, right: 16, top: 14, bottom: 54 },
+        grid: { left: 54, right: 16, top: 14, bottom: 28 },
         tooltip: {
           trigger: "axis",
           axisPointer: { type: "cross" },
@@ -3246,42 +3160,15 @@
           padding: 0,
           extraCssText: "box-shadow:none;",
         },
-        xAxis: { type: "value", scale: true, boundaryGap: ["1%", "1%"], axisLabel: { color: "#9eadc5" } },
+        xAxis: { type: "value", scale: true, axisLabel: { color: "#9eadc5" } },
         yAxis: { type: "value", scale: true, axisLabel: { color: "#9eadc5" } },
-        dataZoom: [
-          { id: "zoom-inside", type: "inside", filterMode: "none", rangeMode: ["value", "value"] },
-          {
-            id: "zoom-slider",
-            type: "slider",
-            filterMode: "none",
-            rangeMode: ["value", "value"],
-            height: 20,
-            bottom: 10,
-            borderColor: "rgba(147, 181, 255, 0.12)",
-            backgroundColor: "rgba(8, 13, 22, 0.92)",
-            fillerColor: "rgba(109, 216, 255, 0.12)",
-            handleStyle: { color: "#6dd8ff", borderColor: "#6dd8ff" },
-          },
-        ],
+        dataZoom: [],
         series: [],
       }, { notMerge: true, lazyUpdate: true });
-      state.chart.on("dataZoom", (event) => {
-        if (state.applyingZoom || state.viewport.currentWindow()?.applyingProgrammaticViewport) {
-          return;
-        }
-        const zoom = charting.readChartDataZoom(state.chart, event);
-        state.zoom = zoom ? { start: zoom.start, end: zoom.end, startValue: zoom.startValue, endValue: zoom.endValue } : null;
-        const viewportState = state.viewport.captureZoom(zoom, buildPrimaryXValues());
-        state.rightEdgeAnchored = Boolean(viewportState?.followRightEdge);
-        state.chart.setOption({
-          yAxis: yBounds({ visibleRange: viewportRange(viewportState) }),
-        }, { lazyUpdate: true });
-        queueOverlayRender();
-      });
       state.chart.getZr().on("click", function (event) {
         handlePaperChartClick(event);
       });
-      setupTouchNavigation();
+      lockLandscapeChartTouch();
       if (typeof ResizeObserver === "function") {
         state.resizeObserver = new ResizeObserver(() => {
           state.chart.resize();
@@ -3744,21 +3631,14 @@
     return { coreItems: coreItems, overlayItems: overlayItems };
   }
 
-  function viewportRange(viewportState) {
-    return viewportState
-      ? { min: viewportState.startValue, max: viewportState.endValue }
-      : null;
-  }
-
   function yBounds(options) {
     const config = currentConfig();
     const sources = buildYAxisItems(config);
     const bounds = charting.buildVisibleIntegerYAxis({
-      visibleRange: options?.visibleRange || viewportRange(state.viewport.currentWindow()),
+      visibleRange: options?.visibleRange || null,
       coreItems: sources.coreItems,
       overlayItems: sources.overlayItems,
-      includeOverlays: config.sizing
-        || Boolean(state.studyDrawing.saved.length || state.studyDrawing.model || smartPayload()?.drawing || smartPayload()?.channel),
+      includeOverlays: false,
       ...Y_AXIS_STYLE,
     });
     if (elements.priceLineDistance) {
@@ -3774,42 +3654,24 @@
       return;
     }
     const config = currentConfig();
-    const updateMeta = options?.updateMeta || state.viewportUpdateMeta || null;
-    const xValues = buildPrimaryXValues();
-    if (options?.shiftWithRun && config.mode === "live" && config.run === "run" && xValues.length) {
-      const currentWindow = state.viewport.currentWindow();
-      const visibleCount = Math.max(1, Math.min(xValues.length, Number(currentWindow?.visibleCount) || xValues.length));
-      const endIndex = xValues.length - 1;
-      const startIndex = Math.max(0, endIndex - visibleCount + 1);
-      state.viewport.captureZoom({ startValue: xValues[startIndex], endValue: xValues[endIndex] }, xValues);
-    }
-    state.viewport.setApplyingProgrammaticViewport(true);
-    const viewportState = state.viewport.projectWindow(xValues, {
-      reset: Boolean(options?.resetView),
-      updateMeta: updateMeta,
-      applyingProgrammaticViewport: true,
-    });
-    const followsLiveEdge = Boolean(viewportState?.followRightEdge && config.mode === "live" && config.run === "run");
-    const visibleSpan = viewportState ? Math.max(1, Number(viewportState.endValue) - Number(viewportState.startValue)) : 1;
-    const rightGap = followsLiveEdge ? Math.max(1, Math.ceil(visibleSpan * 0.04)) : 0;
+    const tickXValues = state.rows.map((row) => Number(row.id)).filter(Number.isFinite);
+    const xValues = tickXValues.length ? tickXValues : buildPrimaryXValues();
+    const dataMin = xValues.length ? Number(xValues[0]) : null;
     const dataMax = xValues.length ? Number(xValues[xValues.length - 1]) : null;
-    const zoom = viewportState
-      ? { startValue: viewportState.startValue, endValue: Number(viewportState.endValue) + rightGap }
-      : {};
-    state.rightEdgeAnchored = Boolean(viewportState?.followRightEdge);
-    state.applyingZoom = true;
+    const visibleSpan = Number.isFinite(dataMin) && Number.isFinite(dataMax) ? Math.max(1, dataMax - dataMin) : 1;
+    const sideGap = Math.max(1, Math.ceil(visibleSpan * 0.015));
+    const visibleRange = Number.isFinite(dataMin) && Number.isFinite(dataMax) ? { min: dataMin, max: dataMax } : null;
+    state.rightEdgeAnchored = true;
     chart.setOption({
       series: buildSeries(config),
-      xAxis: { max: followsLiveEdge && Number.isFinite(dataMax) ? dataMax + rightGap : null },
-      yAxis: yBounds({ visibleRange: viewportRange(viewportState) }),
-      dataZoom: [
-        { id: "zoom-inside", startValue: zoom.startValue, endValue: zoom.endValue },
-        { id: "zoom-slider", startValue: zoom.startValue, endValue: zoom.endValue },
-      ],
-    }, { replaceMerge: ["series"], lazyUpdate: true });
+      xAxis: {
+        min: Number.isFinite(dataMin) ? dataMin - sideGap : null,
+        max: Number.isFinite(dataMax) ? dataMax + sideGap : null,
+      },
+      yAxis: yBounds({ visibleRange }),
+      dataZoom: [],
+    }, { replaceMerge: ["series", "dataZoom"], lazyUpdate: true });
     requestAnimationFrame(() => {
-      state.applyingZoom = false;
-      state.viewport.setApplyingProgrammaticViewport(false);
       state.viewportUpdateMeta = null;
       queueOverlayRender();
     });
@@ -4596,25 +4458,6 @@
       trimMavgToRows();
     }
     return appended;
-  }
-
-  function dedupePrepend(rows, targetWindow) {
-    if (!Array.isArray(rows) || !rows.length) {
-      return 0;
-    }
-    const existing = new Set(state.rows.map((row) => Number(row.id)));
-    const older = rows.filter((row) => !existing.has(Number(row.id)));
-    if (!older.length) {
-      return 0;
-    }
-    state.rows = older.concat(state.rows).sort((left, right) => Number(left.id) - Number(right.id));
-    if (state.rows.length > targetWindow) {
-      state.rows = state.rows.slice(0, targetWindow);
-    }
-    state.viewportUpdateMeta = { appendedCount: 0, droppedFromStart: 0, prependedCount: older.length, reason: "prepend" };
-    syncRangeFromRows();
-    trimMavgToRows();
-    return older.length;
   }
 
   function applyRangePayload(payload) {
@@ -5710,21 +5553,10 @@
     return "/api/live/next?" + params.toString();
   }
 
-  function previousUrl(config, limit) {
-    return "/api/live/previous?" + new URLSearchParams({
-      beforeId: String(state.rangeFirstId || 1),
-      currentLastId: String(state.rangeLastId || state.rangeFirstId || 1),
-      limit: String(limit),
-      mode: config.mode,
-      ...visibilityParams(config),
-    }).toString();
-  }
-
   async function loadBootstrap(resetView) {
     const config = currentConfig();
     const startId = config.mode === "review" ? await resolveReviewStartId(config) : null;
     const payload = await fetchJson(bootstrapUrl(config, startId));
-    state.loadedWindow = Number(payload.window) || config.window;
     replaceRows(payload.rows || []);
     replaceMavgPayload(payload);
     replaceStructure(payload);
@@ -5735,11 +5567,7 @@
     applyPaperPayload(payload.rect || null);
     await refreshBollingerBands({ silent: true, render: false });
     await refreshVwap({ silent: true, render: false });
-    if (resetView) {
-      state.zoom = null;
-      state.viewport.reset();
-      state.rightEdgeAnchored = true;
-    }
+    state.rightEdgeAnchored = true;
     renderMeta();
     renderPerf();
     renderChart({ resetView: Boolean(resetView) });
@@ -5894,45 +5722,6 @@
     }
   }
 
-  async function loadMoreLeft() {
-    if (state.rangeFirstId == null) {
-      status("Load the chart first.", true);
-      return;
-    }
-    clearActivity();
-    const config = currentConfig();
-    const previousFirstId = state.rangeFirstId;
-    const targetWindow = Math.min(MAX_WINDOW, (Number(state.loadedWindow) || config.window) + config.window);
-    const limit = Math.max(0, Math.min(config.window, targetWindow - state.rows.length));
-    if (!limit) {
-      status("Loaded history is already at the chart cap.", false);
-      await resumeRunIfNeeded();
-      return;
-    }
-    const payload = await fetchJson(previousUrl(config, limit));
-    state.lastMetrics = payload.metrics || null;
-    if (Object.prototype.hasOwnProperty.call(payload || {}, "rect")) {
-      applyPaperPayload(payload.rect || null);
-    }
-    const prepended = dedupePrepend(payload.rows || [], targetWindow);
-    replaceMavgPayload(payload);
-    replaceStructure(payload);
-    applyRangePayload(payload);
-    state.loadedWindow = prepended ? targetWindow : state.loadedWindow;
-    state.hasMoreLeft = Boolean(payload.hasMoreLeft);
-    await refreshBollingerBands({ silent: true, render: false });
-    await refreshVwap({ silent: true, render: false });
-    renderMeta();
-    renderPerf();
-    if (prepended || (payload.firstId != null && payload.firstId < previousFirstId)) {
-      renderChart({ shiftWithRun: false });
-      status(prepended + " older tick(s) were added off-screen to the left.", false);
-    } else {
-      status("No older data was available.", false);
-    }
-    await resumeRunIfNeeded();
-  }
-
   async function loadAll(resetView) {
     const token = state.loadToken + 1;
     state.loadToken = token;
@@ -5960,7 +5749,6 @@
     elements.showBb1m.checked = Boolean(config.showBb1m);
     elements.showBb5m.checked = Boolean(config.showBb5m);
     elements.showVwap.checked = Boolean(config.showVwap);
-    elements.sizingToggle.checked = Boolean(config.sizing);
     elements.tickId.value = config.id;
     elements.reviewStart.value = config.reviewStart;
     elements.windowSize.value = String(config.window);
@@ -6000,7 +5788,7 @@
     status("Run state updated.", false);
   });
 
-  [elements.showTicks, elements.showEvents, elements.showStructure, elements.showRanges, elements.showAcd, elements.showBb1m, elements.showBb5m, elements.showVwap, elements.sizingToggle].forEach((control) => {
+  [elements.showTicks, elements.showEvents, elements.showStructure, elements.showRanges, elements.showAcd, elements.showBb1m, elements.showBb5m, elements.showVwap].forEach((control) => {
     control.addEventListener("change", function () {
       writeQuery();
       if (control === elements.showBb1m || control === elements.showBb5m) {
@@ -6011,10 +5799,10 @@
         refreshVwap({ silent: false }).then(() => status("Sydney-day VWAP display updated.", false));
         return;
       }
-      if (control === elements.sizingToggle || control === elements.showAcd) {
+      if (control === elements.showAcd) {
         renderAcdHud();
         renderChart({ resetView: false });
-        status(control === elements.showAcd ? "ACD display updated." : "Sizing updated.", false);
+        status("ACD display updated.", false);
         return;
       }
       loadAll(false).catch((error) => status(error.message || "Display refresh failed.", true));
@@ -6064,6 +5852,9 @@
     control.addEventListener("change", function () {
       if (control === elements.windowSize) {
         elements.windowSize.value = String(sanitizeWindowValue(elements.windowSize.value));
+        writeQuery();
+        loadAll(true).catch((error) => status(error.message || "Window refresh failed.", true));
+        return;
       }
       writeQuery();
     });
@@ -6077,9 +5868,6 @@
   });
   elements.applyButton.addEventListener("click", function () {
     loadAll(true);
-  });
-  elements.loadMoreLeftButton.addEventListener("click", function () {
-    loadMoreLeft().catch((error) => status(error.message || "Load More Left failed.", true));
   });
   window.addEventListener("keydown", function (event) {
     if (event.key !== "Escape") {
