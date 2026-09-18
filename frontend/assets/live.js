@@ -13,8 +13,8 @@
     showRanges: false,
     showAcd: false,
     acdMapCount: 2,
-    showBb1m: false,
-    showBb5m: false,
+    showBb1m: true,
+    showBb5m: true,
     showVwap: true,
     id: "",
     reviewStart: "",
@@ -82,7 +82,11 @@
     resizeObserver: null,
     ui: { sidebarCollapsed: true },
     acd: null,
-    acdMap: { points: [], acds: [], windowStartMs: null, windowEndMs: null, loadedAtMs: 0, chart: null, resizeObserver: null, renderTimer: 0 },
+    acdMap: {
+      points: [], acds: [], oneMinute: [], fiveMinute: [],
+      windowStartMs: null, windowEndMs: null, loadedAtMs: 0,
+      chart: null, resizeObserver: null, renderTimer: 0,
+    },
     studyDrawing: { model: null, saved: [] },
     bollinger: { oneMinute: [], fiveMinute: [], timer: 0, requestToken: 0 },
     vwap: { points: [], timer: 0, requestToken: 0, sessionStartMs: null, gapMinutes: null },
@@ -294,9 +298,9 @@
       showRanges: params.has("showRanges") ? params.get("showRanges") !== "0" : DEFAULTS.showRanges,
       showAcd: params.has("showAcd") ? params.get("showAcd") !== "0" : DEFAULTS.showAcd,
       acdMapCount: Number(params.get("acdMapAcds")) === 0 ? 0 : DEFAULTS.acdMapCount,
-      showBb1m: params.has("showBb1m") ? params.get("showBb1m") !== "0" : DEFAULTS.showBb1m,
-      showBb5m: params.has("showBb5m") ? params.get("showBb5m") !== "0" : DEFAULTS.showBb5m,
-      showVwap: params.has("showVwap") ? params.get("showVwap") !== "0" : DEFAULTS.showVwap,
+      showBb1m: true,
+      showBb5m: true,
+      showVwap: true,
       id: params.get("id") || DEFAULTS.id,
       reviewStart: params.get("reviewStart") || DEFAULTS.reviewStart,
       reviewSpeed: REVIEW_SPEEDS.includes(speed) ? speed : DEFAULTS.reviewSpeed,
@@ -314,9 +318,9 @@
       showRanges: elements.showRanges.checked,
       showAcd: elements.showAcd.checked,
       acdMapCount: Number(elements.acdMapCount?.value || 0) === 0 ? 0 : 2,
-      showBb1m: elements.showBb1m.checked,
-      showBb5m: elements.showBb5m.checked,
-      showVwap: elements.showVwap.checked,
+      showBb1m: true,
+      showBb5m: true,
+      showVwap: true,
       id: (elements.tickId.value || "").trim(),
       reviewStart: (elements.reviewStart.value || "").trim(),
       reviewSpeed: Number.parseFloat(elements.reviewSpeedToggle.querySelector("button.active")?.dataset.value || String(DEFAULTS.reviewSpeed)),
@@ -775,7 +779,6 @@
   }
 
   function miniMapVwapSeries(windowStartMs, windowEndMs) {
-    if (!currentConfig().showVwap) return [];
     const points = state.vwap.points.filter((point) => {
       const timestampMs = Number(point.timestampMs);
       return Number.isFinite(timestampMs) && timestampMs >= windowStartMs && timestampMs <= windowEndMs;
@@ -802,6 +805,45 @@
     }));
   }
 
+  function miniMapBollingerSeries(points, prefix, color) {
+    const visible = points.filter((point) => Number.isFinite(Number(point.timestampMs)));
+    if (!visible.length) return [];
+    const specs = [
+      ["upper", "upper", 0.72, "solid"],
+      ["middle", "middle", 0.58, "dashed"],
+      ["lower", "lower", 0.72, "solid"],
+    ];
+    return specs.map((spec) => ({
+      name: prefix + " " + spec[1], type: "line",
+      data: visible.map((point) => [Number(point.timestampMs), Number(point[spec[0]])]),
+      showSymbol: false, connectNulls: true, animation: false, silent: true,
+      lineStyle: { color, width: spec[2], type: spec[3], opacity: .74 }, z: 4,
+    }));
+  }
+
+  async function refreshAcdMiniMapBollinger() {
+    const points = state.acdMap.points;
+    const firstTickId = Number(points[0]?.tickId);
+    const lastTickId = Number(points[points.length - 1]?.tickId);
+    if (!Number.isFinite(firstTickId) || !Number.isFinite(lastTickId) || lastTickId < firstTickId) {
+      state.acdMap.oneMinute = [];
+      state.acdMap.fiveMinute = [];
+      return false;
+    }
+    try {
+      const payload = await fetchJson("/api/live/bollinger?" + new URLSearchParams({
+        startId: String(firstTickId), endId: String(lastTickId),
+      }).toString());
+      state.acdMap.oneMinute = Array.isArray(payload.oneMinute) ? payload.oneMinute : [];
+      state.acdMap.fiveMinute = Array.isArray(payload.fiveMinute) ? payload.fiveMinute : [];
+      return true;
+    } catch (error) {
+      state.acdMap.oneMinute = [];
+      state.acdMap.fiveMinute = [];
+      return false;
+    }
+  }
+
   function renderAcdMiniMap() {
     if (!elements.acdMiniMap || !elements.acdMiniMapChart) return;
     const requested = currentConfig().acdMapCount;
@@ -825,13 +867,9 @@
     const windowStartMs = Number(state.acdMap.windowStartMs || points[0].timestampMs);
     const windowEndMs = Number(state.acdMap.windowEndMs || points[points.length - 1].timestampMs);
     const levelPrices = acds.flatMap((acd) => Object.values(acd.levels || {}).map(Number).filter(Number.isFinite));
-    const vwapPrices = currentConfig().showVwap
-      ? state.vwap.points
-        .filter((point) => Number(point.timestampMs) >= windowStartMs && Number(point.timestampMs) <= windowEndMs)
-        .flatMap((point) => ["vwap", "upper1", "lower1", "upper2", "lower2", "upper3", "lower3"]
-          .map((key) => Number(point[key])).filter(Number.isFinite))
-      : [];
-    const prices = points.map((point) => Number(point.price)).concat(levelPrices, vwapPrices);
+    // Indicator overlays remain clipped to the price/ACD viewport. They never
+    // expand the mini-map scale and flatten the actual tick movement.
+    const prices = points.map((point) => Number(point.price)).concat(levelPrices);
     const low = Math.min(...prices);
     const high = Math.max(...prices);
     const padding = Math.max(1, (high - low) * 0.05);
@@ -841,6 +879,8 @@
       showSymbol: false, lineStyle: { color: "#b9f47f", width: 1.15 },
       animation: false, silent: true, z: 6,
     }];
+    series.push(...miniMapBollingerSeries(state.acdMap.oneMinute, "BB 1m", "#c08cff"));
+    series.push(...miniMapBollingerSeries(state.acdMap.fiveMinute, "BB 5m", "#ffd166"));
     series.push(...miniMapVwapSeries(windowStartMs, windowEndMs));
 
     acds.forEach((acd, index) => {
@@ -931,6 +971,8 @@
     if (count === 0) {
       state.acdMap.points = [];
       state.acdMap.acds = [];
+      state.acdMap.oneMinute = [];
+      state.acdMap.fiveMinute = [];
       renderAcdMiniMap();
       return;
     }
@@ -941,10 +983,13 @@
       state.acdMap.windowStartMs = Number(payload.windowStartMs) || null;
       state.acdMap.windowEndMs = Number(payload.windowEndMs) || null;
       state.acdMap.loadedAtMs = Date.now();
+      await refreshAcdMiniMapBollinger();
       renderAcdMiniMap();
     } catch (error) {
       state.acdMap.points = [];
       state.acdMap.acds = [];
+      state.acdMap.oneMinute = [];
+      state.acdMap.fiveMinute = [];
       renderAcdMiniMap();
       if (!options?.silent) status(error.message || "ACD mini-map could not be loaded.", true);
     }
@@ -2367,8 +2412,7 @@
   }
 
   function bollingerEnabled() {
-    const config = currentConfig();
-    return Boolean(config.showBb1m || config.showBb5m);
+    return true;
   }
 
   async function refreshBollingerBands(options) {
@@ -2419,7 +2463,7 @@
   }
 
   async function refreshVwap(options) {
-    if (!currentConfig().showVwap || !Number.isFinite(Number(state.rangeLastId))) {
+    if (!Number.isFinite(Number(state.rangeLastId))) {
       state.vwap.points = [];
       if (options?.render !== false) renderChart({ shiftWithRun: false });
       return false;
@@ -2442,7 +2486,6 @@
   }
 
   function scheduleVwapRefresh() {
-    if (!currentConfig().showVwap) return;
     if (state.vwap.timer) window.clearTimeout(state.vwap.timer);
     state.vwap.timer = window.setTimeout(() => {
       state.vwap.timer = 0;
@@ -3370,15 +3413,9 @@
         z: 5,
       });
     }
-    if (config.showBb1m) {
-      series.push(...bollingerSeries(state.bollinger.oneMinute, "BB 1m", "#c08cff"));
-    }
-    if (config.showBb5m) {
-      series.push(...bollingerSeries(state.bollinger.fiveMinute, "BB 5m", "#ffd166"));
-    }
-    if (config.showVwap) {
-      series.push(...vwapSeries(state.vwap.points));
-    }
+    series.push(...bollingerSeries(state.bollinger.oneMinute, "BB 1m", "#c08cff"));
+    series.push(...bollingerSeries(state.bollinger.fiveMinute, "BB 5m", "#ffd166"));
+    series.push(...vwapSeries(state.vwap.points));
     activeMavgConfigs().forEach(function (mavgConfig, index) {
       series.push({
         id: "mavg-" + String(mavgConfig.id),
