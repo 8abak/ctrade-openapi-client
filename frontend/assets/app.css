@@ -864,7 +864,7 @@ select {
   display: grid;
   justify-items: end;
   gap: 0.25rem;
-  pointer-events: none;
+  pointer-events: auto;
 }
 
 .chart-trade-entry-left {
@@ -990,6 +990,7 @@ select {
   border-radius: 999px;
   background: rgba(5, 9, 15, 0.72);
   border: 1px solid rgba(109, 216, 255, 0.16);
+  pointer-events: none;
 }
 
 .chart-trade-hint {
@@ -1152,6 +1153,7 @@ select {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  pointer-events: none;
 }
 
 .sql-toolbar-actions,

@@ -2925,12 +2925,15 @@
     }
     if (elements.chartTradeBuyButton) {
       elements.chartTradeBuyButton.hidden = !authenticated;
-      elements.chartTradeBuyButton.disabled = !authenticated || !prepared.ready || busy;
+      // Keep the one-click controls tappable after login. If preparation or
+      // broker state is invalid, submitMarketOrder reports the exact reason in
+      // the trade status instead of leaving a silently disabled button.
+      elements.chartTradeBuyButton.disabled = !authenticated || busy;
       elements.chartTradeBuyButton.textContent = busy && state.trade.activeOrderSide === "buy" ? "…" : "B";
     }
     if (elements.chartTradeSellButton) {
       elements.chartTradeSellButton.hidden = !authenticated;
-      elements.chartTradeSellButton.disabled = !authenticated || !prepared.ready || busy;
+      elements.chartTradeSellButton.disabled = !authenticated || busy;
       elements.chartTradeSellButton.textContent = busy && state.trade.activeOrderSide === "sell" ? "…" : "S";
     }
     if (elements.chartSmartBuyButton) {
