@@ -793,16 +793,21 @@
       ["lower2", "−2σ", "rgba(192,140,255,.44)", 0.75, "dashed"],
       ["lower3", "−3σ", "rgba(192,140,255,.32)", 0.65, "dashed"],
     ];
-    return specs.map((spec) => ({
-      name: "Sydney " + spec[1], type: "line",
-      data: points.map((point) => [Number(point.timestampMs), Number(point[spec[0]])]),
-      showSymbol: false, connectNulls: true, animation: false, silent: true,
-      lineStyle: { color: spec[2], width: spec[3], type: spec[4] }, z: 5,
-      endLabel: spec[0] === "vwap" ? {
-        show: true, formatter: "VWAP", color: spec[2], fontSize: 7,
-        backgroundColor: "rgba(5,9,15,.72)", padding: [1, 2], distance: 2,
-      } : { show: false },
-    }));
+    return specs.map((spec) => {
+      const data = points.map((point) => [Number(point.timestampMs), Number(point[spec[0]])]);
+      if (data.length && Number.isFinite(windowEndMs) && data[data.length - 1][0] < windowEndMs) {
+        data.push([windowEndMs, data[data.length - 1][1]]);
+      }
+      return {
+        name: "Sydney " + spec[1], type: "line", data,
+        showSymbol: false, connectNulls: true, animation: false, silent: true,
+        lineStyle: { color: spec[2], width: spec[3], type: spec[4] }, z: 5,
+        endLabel: spec[0] === "vwap" ? {
+          show: true, formatter: "VWAP", color: spec[2], fontSize: 7,
+          backgroundColor: "rgba(5,9,15,.72)", padding: [1, 2], distance: 2,
+        } : { show: false },
+      };
+    });
   }
 
   function miniMapBollingerSeries(points, prefix, color) {
@@ -813,12 +818,18 @@
       ["middle", "middle", 0.58, "dashed"],
       ["lower", "lower", 0.72, "solid"],
     ];
-    return specs.map((spec) => ({
-      name: prefix + " " + spec[1], type: "line",
-      data: visible.map((point) => [Number(point.timestampMs), Number(point[spec[0]])]),
-      showSymbol: false, connectNulls: true, animation: false, silent: true,
-      lineStyle: { color, width: spec[2], type: spec[3], opacity: .74 }, z: 4,
-    }));
+    return specs.map((spec) => {
+      const data = visible.map((point) => [Number(point.timestampMs), Number(point[spec[0]])]);
+      const lastMs = Number(state.acdMap.windowEndMs);
+      if (data.length && Number.isFinite(lastMs) && data[data.length - 1][0] < lastMs) {
+        data.push([lastMs, data[data.length - 1][1]]);
+      }
+      return {
+        name: prefix + " " + spec[1], type: "line", data,
+        showSymbol: false, connectNulls: true, animation: false, silent: true,
+        lineStyle: { color, width: spec[2], type: spec[3], opacity: .74 }, z: 4,
+      };
+    });
   }
 
   async function refreshAcdMiniMapBollinger() {
@@ -955,7 +966,9 @@
   }
   function scheduleAcdMiniMapRender() {
     if (currentConfig().acdMapCount === 0) return;
-    if (state.acdMap.renderTimer) window.clearTimeout(state.acdMap.renderTimer);
+    // Throttle rather than debounce: an active market may never pause long
+    // enough for a reset-on-every-tick timer to run.
+    if (state.acdMap.renderTimer) return;
     state.acdMap.renderTimer = window.setTimeout(() => {
       state.acdMap.renderTimer = 0;
       if ((Date.now() - Number(state.acdMap.loadedAtMs || 0)) >= 300000) {
@@ -2440,7 +2453,9 @@
 
   function scheduleBollingerRefresh() {
     if (!bollingerEnabled()) return;
-    if (state.bollinger.timer) window.clearTimeout(state.bollinger.timer);
+    // Do not postpone the refresh on every tick. In a busy market that would
+    // keep the bands frozen at the bootstrap boundary indefinitely.
+    if (state.bollinger.timer) return;
     state.bollinger.timer = window.setTimeout(() => {
       state.bollinger.timer = 0;
       refreshBollingerBands({ silent: true }).catch(function () {});
@@ -2451,8 +2466,8 @@
     if (!points.length) return [];
     const data = (key) => {
       const values = points.map((point) => [Number(point.tickId), Number(point[key])]);
-      const firstId = Number(state.rangeFirstId);
-      const lastId = Number(state.rangeLastId);
+      const firstId = Number(state.rows[0]?.id);
+      const lastId = Number(state.rows[state.rows.length - 1]?.id);
       if (values.length && Number.isFinite(firstId) && values[0][0] > firstId) {
         values.unshift([firstId, values[0][1]]);
       }
@@ -2500,7 +2515,7 @@
   }
 
   function scheduleVwapRefresh() {
-    if (state.vwap.timer) window.clearTimeout(state.vwap.timer);
+    if (state.vwap.timer) return;
     state.vwap.timer = window.setTimeout(() => {
       state.vwap.timer = 0;
       refreshVwap({ silent: true }).catch(function () {});
@@ -2520,7 +2535,7 @@
     ];
     return specs.map(function (spec) {
       const data = points.map((point) => [Number(point.tickId), Number(point[spec[0]])]);
-      const lastId = Number(state.rangeLastId);
+      const lastId = Number(state.rows[state.rows.length - 1]?.id);
       if (data.length && Number.isFinite(lastId) && data[data.length - 1][0] < lastId) {
         data.push([lastId, data[data.length - 1][1]]);
       }
