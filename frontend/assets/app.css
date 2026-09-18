@@ -1572,9 +1572,56 @@ select {
   }
 
   .chart-trade-entry-left {
-    top: auto;
+    top: max(4rem, calc(env(safe-area-inset-top) + 3.55rem));
     right: auto;
     left: max(0.45rem, env(safe-area-inset-left));
-    bottom: max(2.45rem, calc(env(safe-area-inset-bottom) + 2.1rem));
+    bottom: auto;
+    align-items: flex-start;
+    justify-items: start;
+  }
+
+  .chart-trade-entry-left .chart-trade-entry-buttons {
+    width: 38px;
+    flex-direction: column;
+    flex-wrap: nowrap;
+    align-items: stretch;
+  }
+
+  .chart-trade-entry-left .chart-trade-button {
+    width: 38px;
+    min-width: 38px;
+  }
+
+  .chart-trade-entry-left .chart-trade-smart-status,
+  .chart-trade-entry-left .chart-trade-hint {
+    max-width: 9rem;
+  }
+}
+
+@media (orientation: landscape) and (hover: none) and (pointer: coarse) {
+  .chart-trade-entry-left {
+    top: max(4rem, calc(env(safe-area-inset-top) + 3.55rem));
+    right: auto;
+    left: max(0.45rem, env(safe-area-inset-left));
+    bottom: auto;
+    align-items: flex-start;
+    justify-items: start;
+  }
+
+  .chart-trade-entry-left .chart-trade-entry-buttons {
+    width: 38px;
+    flex-direction: column;
+    flex-wrap: nowrap;
+    align-items: stretch;
+  }
+
+  .chart-trade-entry-left .chart-trade-button {
+    width: 38px;
+    min-width: 38px;
+  }
+
+  .chart-trade-entry-left .chart-trade-smart-status,
+  .chart-trade-entry-left .chart-trade-hint {
+    max-width: 9rem;
   }
 }
