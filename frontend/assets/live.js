@@ -2449,7 +2449,21 @@
 
   function bollingerSeries(points, prefix, color) {
     if (!points.length) return [];
-    const data = (key) => points.map((point) => [Number(point.tickId), Number(point[key])]);
+    const data = (key) => {
+      const values = points.map((point) => [Number(point.tickId), Number(point[key])]);
+      const firstId = Number(state.rangeFirstId);
+      const lastId = Number(state.rangeLastId);
+      if (values.length && Number.isFinite(firstId) && values[0][0] > firstId) {
+        values.unshift([firstId, values[0][1]]);
+      }
+      if (values.length && Number.isFinite(lastId) && values[values.length - 1][0] < lastId) {
+        values.push([lastId, values[values.length - 1][1]]);
+      }
+      if (values.length === 1 && Number.isFinite(firstId) && Number.isFinite(lastId) && lastId > firstId) {
+        return [[firstId, values[0][1]], [lastId, values[0][1]]];
+      }
+      return values;
+    };
     return [{
       id: prefix + "-upper", name: prefix + " upper", type: "line", data: data("upper"), showSymbol: false,
       animation: false, silent: true, lineStyle: { color, width: 1.15, opacity: .82 }, z: 6,
@@ -2505,9 +2519,14 @@
       ["lower3", "−3σ", "rgba(192,140,255,.38)", 0.8, "dashed"],
     ];
     return specs.map(function (spec) {
+      const data = points.map((point) => [Number(point.tickId), Number(point[spec[0]])]);
+      const lastId = Number(state.rangeLastId);
+      if (data.length && Number.isFinite(lastId) && data[data.length - 1][0] < lastId) {
+        data.push([lastId, data[data.length - 1][1]]);
+      }
       return {
         id: "sydney-vwap-" + spec[0], name: "Sydney " + spec[1], type: "line",
-        data: points.map((point) => [Number(point.tickId), Number(point[spec[0]])]),
+        data,
         showSymbol: false, connectNulls: true, animation: false, silent: true,
         lineStyle: { color: spec[2], width: spec[3], type: spec[4] }, z: 7,
         endLabel: {
