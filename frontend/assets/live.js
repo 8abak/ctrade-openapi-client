@@ -810,51 +810,6 @@
     });
   }
 
-  function miniMapBollingerSeries(points, prefix, color) {
-    const visible = points.filter((point) => Number.isFinite(Number(point.timestampMs)));
-    if (!visible.length) return [];
-    const specs = [
-      ["upper", "upper", 0.72, "solid"],
-      ["middle", "middle", 0.58, "dashed"],
-      ["lower", "lower", 0.72, "solid"],
-    ];
-    return specs.map((spec) => {
-      const data = visible.map((point) => [Number(point.timestampMs), Number(point[spec[0]])]);
-      const lastMs = Number(state.acdMap.windowEndMs);
-      if (data.length && Number.isFinite(lastMs) && data[data.length - 1][0] < lastMs) {
-        data.push([lastMs, data[data.length - 1][1]]);
-      }
-      return {
-        name: prefix + " " + spec[1], type: "line", data,
-        showSymbol: false, connectNulls: true, animation: false, silent: true,
-        lineStyle: { color, width: spec[2], type: spec[3], opacity: .74 }, z: 4,
-      };
-    });
-  }
-
-  async function refreshAcdMiniMapBollinger() {
-    const points = state.acdMap.points;
-    const firstTickId = Number(points[0]?.tickId);
-    const lastTickId = Number(points[points.length - 1]?.tickId);
-    if (!Number.isFinite(firstTickId) || !Number.isFinite(lastTickId) || lastTickId < firstTickId) {
-      state.acdMap.oneMinute = [];
-      state.acdMap.fiveMinute = [];
-      return false;
-    }
-    try {
-      const payload = await fetchJson("/api/live/bollinger?" + new URLSearchParams({
-        startId: String(firstTickId), endId: String(lastTickId),
-      }).toString());
-      state.acdMap.oneMinute = Array.isArray(payload.oneMinute) ? payload.oneMinute : [];
-      state.acdMap.fiveMinute = Array.isArray(payload.fiveMinute) ? payload.fiveMinute : [];
-      return true;
-    } catch (error) {
-      state.acdMap.oneMinute = [];
-      state.acdMap.fiveMinute = [];
-      return false;
-    }
-  }
-
   function renderAcdMiniMap() {
     if (!elements.acdMiniMap || !elements.acdMiniMapChart) return;
     const requested = currentConfig().acdMapCount;
@@ -890,8 +845,8 @@
       showSymbol: false, lineStyle: { color: "#b9f47f", width: 1.15 },
       animation: false, silent: true, z: 6,
     }];
-    series.push(...miniMapBollingerSeries(state.acdMap.oneMinute, "BB 1m", "#c08cff"));
-    series.push(...miniMapBollingerSeries(state.acdMap.fiveMinute, "BB 5m", "#ffd166"));
+    // Keep the position map focused on price, ACD and today's VWAP. The
+    // Bollinger studies belong on the full chart only.
     series.push(...miniMapVwapSeries(windowStartMs, windowEndMs));
 
     acds.forEach((acd, index) => {
@@ -996,7 +951,6 @@
       state.acdMap.windowStartMs = Number(payload.windowStartMs) || null;
       state.acdMap.windowEndMs = Number(payload.windowEndMs) || null;
       state.acdMap.loadedAtMs = Date.now();
-      await refreshAcdMiniMapBollinger();
       renderAcdMiniMap();
     } catch (error) {
       state.acdMap.points = [];
@@ -2065,7 +2019,12 @@
   }
 
   async function toggleSmartEntry(side) {
-    if (!state.trade.authenticated || state.trade.actionBusy) {
+    if (!state.trade.authenticated) {
+      tradeStatus("Login required before changing smart entry.", true);
+      return;
+    }
+    if (state.trade.actionBusy) {
+      tradeStatus("Another trade action is still being sent.", true);
       return;
     }
     await syncSmartContext({ silent: true }).catch(function () {});
@@ -2089,7 +2048,12 @@
   }
 
   async function toggleSmartClose() {
-    if (!state.trade.authenticated || state.trade.actionBusy) {
+    if (!state.trade.authenticated) {
+      tradeStatus("Login required before changing smart close.", true);
+      return;
+    }
+    if (state.trade.actionBusy) {
+      tradeStatus("Another trade action is still being sent.", true);
       return;
     }
     await syncSmartContext({ silent: true }).catch(function () {});
@@ -2967,9 +2931,6 @@
     const authenticated = state.trade.authenticated;
     const busy = state.trade.actionBusy;
     const smart = smartPayload();
-    const smartBuyAvailability = smartAvailability("buy");
-    const smartSellAvailability = smartAvailability("sell");
-    const smartCloseAvailability = smartAvailability("close");
     const tradeConfig = readTradeConfiguration();
     const positionCount = state.trade.positions.length;
     if (elements.chartTradeActionButton) {
@@ -3015,7 +2976,7 @@
     }
     if (elements.chartSmartBuyButton) {
       elements.chartSmartBuyButton.hidden = !authenticated;
-      elements.chartSmartBuyButton.disabled = !authenticated || busy || !smartBuyAvailability.available;
+      elements.chartSmartBuyButton.disabled = !authenticated || busy;
       elements.chartSmartBuyButton.classList.toggle("is-armed", currentSmartArmed("buy"));
       elements.chartSmartBuyButton.textContent = "SB";
       elements.chartSmartBuyButton.setAttribute("aria-pressed", String(currentSmartArmed("buy")));
@@ -3023,7 +2984,7 @@
     }
     if (elements.chartSmartSellButton) {
       elements.chartSmartSellButton.hidden = !authenticated;
-      elements.chartSmartSellButton.disabled = !authenticated || busy || !smartSellAvailability.available;
+      elements.chartSmartSellButton.disabled = !authenticated || busy;
       elements.chartSmartSellButton.classList.toggle("is-armed", currentSmartArmed("sell"));
       elements.chartSmartSellButton.textContent = "SS";
       elements.chartSmartSellButton.setAttribute("aria-pressed", String(currentSmartArmed("sell")));
@@ -3031,7 +2992,7 @@
     }
     if (elements.chartSmartCloseButton) {
       elements.chartSmartCloseButton.hidden = !authenticated || positionCount === 0;
-      elements.chartSmartCloseButton.disabled = !authenticated || positionCount === 0 || busy || !smartCloseAvailability.available;
+      elements.chartSmartCloseButton.disabled = !authenticated || positionCount === 0 || busy;
       elements.chartSmartCloseButton.classList.toggle("is-armed", currentSmartArmed("close"));
       elements.chartSmartCloseButton.textContent = "SC";
       elements.chartSmartCloseButton.setAttribute("aria-pressed", String(currentSmartArmed("close")));
@@ -5070,7 +5031,12 @@
   }
 
   async function submitMarketOrder(side) {
-    if (!state.trade.authenticated || state.trade.actionBusy) {
+    if (!state.trade.authenticated) {
+      tradeStatus("Login required before placing an order.", true);
+      return;
+    }
+    if (state.trade.actionBusy) {
+      tradeStatus("Another trade action is still being sent.", true);
       return;
     }
     const prepared = preparedTradeState();
@@ -5321,23 +5287,39 @@
     elements.tradeLogoutButton.addEventListener("click", function () {
       requestTradeLogout();
     });
-    if (elements.chartTradeBuyButton) {
-      elements.chartTradeBuyButton.addEventListener("click", function () { submitMarketOrder("buy"); });
+    const chartTradeActions = {
+      buy: function () { submitMarketOrder("buy"); },
+      sell: function () { submitMarketOrder("sell"); },
+      "smart-buy": function () { toggleSmartEntry("buy"); },
+      "smart-sell": function () { toggleSmartEntry("sell"); },
+      "smart-close": function () { toggleSmartClose(); },
+      close: function () { submitCloseAllPositions(); },
+    };
+    let lastTouchActionAt = 0;
+    function runChartTradeAction(button) {
+      const action = chartTradeActions[String(button?.dataset?.tradeAction || "")];
+      if (!action || button.disabled || button.hidden) return;
+      action();
     }
-    if (elements.chartTradeSellButton) {
-      elements.chartTradeSellButton.addEventListener("click", function () { submitMarketOrder("sell"); });
-    }
-    if (elements.chartSmartBuyButton) {
-      elements.chartSmartBuyButton.addEventListener("click", function () { toggleSmartEntry("buy"); });
-    }
-    if (elements.chartSmartSellButton) {
-      elements.chartSmartSellButton.addEventListener("click", function () { toggleSmartEntry("sell"); });
-    }
-    if (elements.chartSmartCloseButton) {
-      elements.chartSmartCloseButton.addEventListener("click", function () { toggleSmartClose(); });
-    }
-    if (elements.chartCloseButton) {
-      elements.chartCloseButton.addEventListener("click", function () { submitCloseAllPositions(); });
+    if (elements.chartTradeEntry) {
+      // Mobile Safari can lose a synthetic click when the controls sit above
+      // the ECharts canvas. Handle the completed touch directly, suppress its
+      // follow-up click, and retain the normal click path for mouse/keyboard.
+      elements.chartTradeEntry.addEventListener("pointerup", function (event) {
+        const button = event.target.closest("button[data-trade-action]");
+        if (!button || (event.pointerType !== "touch" && event.pointerType !== "pen")) return;
+        event.preventDefault();
+        event.stopPropagation();
+        lastTouchActionAt = Date.now();
+        runChartTradeAction(button);
+      });
+      elements.chartTradeEntry.addEventListener("click", function (event) {
+        const button = event.target.closest("button[data-trade-action]");
+        if (!button) return;
+        event.stopPropagation();
+        if ((Date.now() - lastTouchActionAt) < 700) return;
+        runChartTradeAction(button);
+      });
     }
     if (elements.chartTradeActionButton) {
       elements.chartTradeActionButton.addEventListener("click", function () { handleTradeAction(); });

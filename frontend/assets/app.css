@@ -837,7 +837,7 @@ select {
 
 .chart-trade-entry {
   position: absolute;
-  z-index: 6;
+  z-index: 30;
 }
 
 .chart-price-step {
@@ -868,8 +868,10 @@ select {
 }
 
 .chart-trade-entry-left {
-  left: 1.15rem;
-  bottom: 1.15rem;
+  top: auto;
+  right: auto;
+  left: 0.75rem;
+  bottom: 2.55rem;
   transform: none;
   justify-items: start;
 }
@@ -887,6 +889,8 @@ select {
 }
 
 .chart-trade-button {
+  position: relative;
+  z-index: 1;
   min-width: 38px;
   min-height: 2rem;
   padding: 0.3rem 0.48rem;
@@ -900,6 +904,8 @@ select {
   font-weight: 600;
   letter-spacing: 0.02em;
   cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
   transition: background 140ms ease, border-color 140ms ease, transform 140ms ease;
 }
 
@@ -1377,9 +1383,10 @@ select {
   .chart-trade-entry {
     width: auto;
     max-width: calc(100% - 1rem);
-    top: max(0.55rem, env(safe-area-inset-top));
-    right: max(0.45rem, env(safe-area-inset-right));
-    bottom: auto;
+    top: auto;
+    right: auto;
+    left: max(0.45rem, env(safe-area-inset-left));
+    bottom: max(2.45rem, calc(env(safe-area-inset-bottom) + 2.1rem));
   }
 
   .chart-trade-entry-buttons {
@@ -1552,5 +1559,12 @@ select {
   .live-sidebar-toggle {
     top: max(0.35rem, env(safe-area-inset-top));
     left: max(0.35rem, env(safe-area-inset-left));
+  }
+
+  .chart-trade-entry-left {
+    top: auto;
+    right: auto;
+    left: max(0.45rem, env(safe-area-inset-left));
+    bottom: max(2.45rem, calc(env(safe-area-inset-bottom) + 2.1rem));
   }
 }
