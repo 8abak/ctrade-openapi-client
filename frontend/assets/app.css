@@ -836,8 +836,10 @@ select {
 }
 
 .chart-trade-entry {
-  position: absolute;
-  z-index: 30;
+  position: fixed;
+  z-index: 2147483647;
+  isolation: isolate;
+  pointer-events: auto !important;
 }
 
 .chart-price-step {
@@ -904,6 +906,9 @@ select {
   font-weight: 600;
   letter-spacing: 0.02em;
   cursor: pointer;
+  pointer-events: auto !important;
+  user-select: none;
+  -webkit-user-select: none;
   touch-action: manipulation;
   -webkit-tap-highlight-color: transparent;
   transition: background 140ms ease, border-color 140ms ease, transform 140ms ease;
@@ -923,6 +928,11 @@ select {
 
 .chart-trade-button:hover:not(:disabled) {
   transform: translateY(-1px);
+}
+
+.chart-trade-button.is-pressed:not(:disabled) {
+  transform: scale(0.93);
+  filter: brightness(1.45);
 }
 
 .chart-trade-button:disabled {

@@ -5287,40 +5287,59 @@
     elements.tradeLogoutButton.addEventListener("click", function () {
       requestTradeLogout();
     });
-    const chartTradeActions = {
-      buy: function () { submitMarketOrder("buy"); },
-      sell: function () { submitMarketOrder("sell"); },
-      "smart-buy": function () { toggleSmartEntry("buy"); },
-      "smart-sell": function () { toggleSmartEntry("sell"); },
-      "smart-close": function () { toggleSmartClose(); },
-      close: function () { submitCloseAllPositions(); },
-    };
-    let lastTouchActionAt = 0;
-    function runChartTradeAction(button) {
-      const action = chartTradeActions[String(button?.dataset?.tradeAction || "")];
-      if (!action || button.disabled || button.hidden) return;
+    const chartTradeActions = [
+      [elements.chartTradeBuyButton, function () { submitMarketOrder("buy"); }],
+      [elements.chartTradeSellButton, function () { submitMarketOrder("sell"); }],
+      [elements.chartSmartBuyButton, function () { toggleSmartEntry("buy"); }],
+      [elements.chartSmartSellButton, function () { toggleSmartEntry("sell"); }],
+      [elements.chartSmartCloseButton, function () { toggleSmartClose(); }],
+      [elements.chartCloseButton, function () { submitCloseAllPositions(); }],
+    ];
+    const actionByButton = new Map();
+    const lastActivationByButton = new WeakMap();
+    function activateChartTradeButton(button, event) {
+      const action = actionByButton.get(button);
+      if (!action) return;
+      const now = Date.now();
+      if ((now - Number(lastActivationByButton.get(button) || 0)) < 700 || button.disabled || button.hidden) return;
+      lastActivationByButton.set(button, now);
+      if (event?.cancelable) event.preventDefault();
+      event?.stopPropagation();
+      button.classList.add("is-pressed");
+      window.setTimeout(function () { button.classList.remove("is-pressed"); }, 180);
       action();
     }
-    if (elements.chartTradeEntry) {
-      // Mobile Safari can lose a synthetic click when the controls sit above
-      // the ECharts canvas. Handle the completed touch directly, suppress its
-      // follow-up click, and retain the normal click path for mouse/keyboard.
-      elements.chartTradeEntry.addEventListener("pointerup", function (event) {
-        const button = event.target.closest("button[data-trade-action]");
-        if (!button || (event.pointerType !== "touch" && event.pointerType !== "pen")) return;
-        event.preventDefault();
-        event.stopPropagation();
-        lastTouchActionAt = Date.now();
-        runChartTradeAction(button);
-      });
-      elements.chartTradeEntry.addEventListener("click", function (event) {
-        const button = event.target.closest("button[data-trade-action]");
-        if (!button) return;
-        event.stopPropagation();
-        if ((Date.now() - lastTouchActionAt) < 700) return;
-        runChartTradeAction(button);
-      });
+    function chartTradeButtonAt(clientX, clientY) {
+      return chartTradeActions.map((entry) => entry[0]).find(function (button) {
+        if (!button || button.hidden || button.disabled) return false;
+        const rect = button.getBoundingClientRect();
+        return clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom;
+      }) || null;
     }
+    chartTradeActions.forEach(function (entry) {
+      const button = entry[0];
+      if (!button) return;
+      actionByButton.set(button, entry[1]);
+      button.dataset.actionBound = "true";
+      function activate(event) {
+        activateChartTradeButton(button, event);
+      }
+      // Direct listeners avoid Safari retargeting the event to the chart canvas.
+      button.addEventListener("touchend", activate, { passive: false });
+      button.addEventListener("pointerup", function (event) {
+        if (event.pointerType === "mouse") return;
+        activate(event);
+      });
+      button.addEventListener("click", activate);
+    });
+    // Last-resort iOS hit test: if WebKit reports the canvas as the event
+    // target, use the actual touch coordinates against the fixed controls.
+    document.addEventListener("touchend", function (event) {
+      const touch = event.changedTouches?.[0];
+      if (!touch) return;
+      const button = chartTradeButtonAt(Number(touch.clientX), Number(touch.clientY));
+      if (button) activateChartTradeButton(button, event);
+    }, { capture: true, passive: false });
     if (elements.chartTradeActionButton) {
       elements.chartTradeActionButton.addEventListener("click", function () { handleTradeAction(); });
     }
