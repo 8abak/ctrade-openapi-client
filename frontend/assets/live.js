@@ -130,6 +130,8 @@
       volumeInfo: null,
       positionEditorDraft: null,
       activeOrderSide: null,
+      touchOrderArm: null,
+      chartActionFeedback: null,
       activePositionId: null,
       pendingProtectionEdits: {},
       selectedHistoricalTradeOverlay: null,
@@ -2423,6 +2425,17 @@
     return best ? Number(best.id) : null;
   }
 
+  function chartTradeFeedback(message, isError) {
+    state.trade.chartActionFeedback = { message: String(message), isError: Boolean(isError), until: Date.now() + 5000 };
+    renderTradeEntryOverlay();
+    window.setTimeout(function () {
+      if (state.trade.chartActionFeedback?.until <= Date.now()) {
+        state.trade.chartActionFeedback = null;
+        renderTradeEntryOverlay();
+      }
+    }, 5050);
+  }
+
   function bollingerEnabled() {
     return true;
   }
@@ -3002,12 +3015,14 @@
       // broker state is invalid, submitMarketOrder reports the exact reason in
       // the trade status instead of leaving a silently disabled button.
       elements.chartTradeBuyButton.disabled = !authenticated || busy;
-      elements.chartTradeBuyButton.textContent = busy && state.trade.activeOrderSide === "buy" ? "…" : "B";
+      elements.chartTradeBuyButton.classList.toggle("is-confirming", state.trade.touchOrderArm?.side === "buy");
+      elements.chartTradeBuyButton.textContent = busy && state.trade.activeOrderSide === "buy" ? "…" : (state.trade.touchOrderArm?.side === "buy" ? "BUY?" : "BUY");
     }
     if (elements.chartTradeSellButton) {
       elements.chartTradeSellButton.hidden = !authenticated;
       elements.chartTradeSellButton.disabled = !authenticated || busy;
-      elements.chartTradeSellButton.textContent = busy && state.trade.activeOrderSide === "sell" ? "…" : "S";
+      elements.chartTradeSellButton.classList.toggle("is-confirming", state.trade.touchOrderArm?.side === "sell");
+      elements.chartTradeSellButton.textContent = busy && state.trade.activeOrderSide === "sell" ? "…" : (state.trade.touchOrderArm?.side === "sell" ? "SELL?" : "SELL");
     }
     if (elements.chartSmartBuyButton) {
       elements.chartSmartBuyButton.hidden = !authenticated;
@@ -3048,7 +3063,10 @@
       }
     }
     if (elements.chartTradeHint) {
-      elements.chartTradeHint.textContent = !authenticated ? "Login required" : (positionCount && tradeConfig.closeMode !== "manual"
+      elements.chartTradeHint.textContent = state.trade.touchOrderArm
+        ? "Tap " + state.trade.touchOrderArm.side.toUpperCase() + " again to place market order"
+        : state.trade.chartActionFeedback?.until > Date.now() ? state.trade.chartActionFeedback.message
+        : !authenticated ? "Login required" : (positionCount && tradeConfig.closeMode !== "manual"
         ? (["regression", "channel", "pitchfork"].includes(tradeConfig.closeMode)
           ? tradeConfig.closeMode.charAt(0).toUpperCase() + tradeConfig.closeMode.slice(1) + " is monitoring this position"
           : "Smart close is monitoring this position")
@@ -5128,15 +5146,18 @@
   async function submitMarketOrder(side) {
     if (!state.trade.authenticated) {
       tradeStatus("Login required before placing an order.", true);
+      chartTradeFeedback("Login required before placing an order.", true);
       return;
     }
     if (state.trade.actionBusy) {
       tradeStatus("Another trade action is still being sent.", true);
+      chartTradeFeedback("Another trade action is still being sent.", true);
       return;
     }
     const prepared = preparedTradeState();
     if (!prepared.ready) {
       tradeStatus(prepared.reason || "Prepared trade inputs are invalid.", true);
+      chartTradeFeedback(prepared.reason || "Prepared trade inputs are invalid.", true);
       return;
     }
     state.trade.activeOrderSide = side === "sell" ? "sell" : "buy";
@@ -5156,11 +5177,13 @@
       state.trade.brokerConfigured = Boolean(state.trade.brokerStatus?.configured);
       applySmartPayload(payload.smart);
       tradeStatus((state.trade.activeOrderSide === "sell" ? "Sell" : "Buy") + " market order submitted.", false);
+      chartTradeFeedback((state.trade.activeOrderSide === "sell" ? "Sell" : "Buy") + " market order submitted.", false);
       await refreshTradeData({ silent: true, forceHistory: true });
     } catch (error) {
       state.trade.brokerStatus = brokerStatusFromPayload(error?.payload || { broker: state.trade.brokerStatus });
       state.trade.brokerConfigured = Boolean(state.trade.brokerStatus?.configured);
       tradeStatus(error.message || "Order submit failed.", true);
+      chartTradeFeedback(error.message || "Order submit failed.", true);
     } finally {
       state.trade.activeOrderSide = null;
       setTradeBusy(false);
@@ -5392,14 +5415,40 @@
     ];
     const actionByButton = new Map();
     const lastActivationByButton = new WeakMap();
+    const pointerStartById = new Map();
+    const touchStartById = new Map();
+    let lastTouchActivationAt = 0;
+    let touchOrderArmTimer = 0;
+    function clearTouchOrderArm() {
+      window.clearTimeout(touchOrderArmTimer);
+      if (!state.trade.touchOrderArm) return;
+      state.trade.touchOrderArm = null;
+      renderTradeEntryOverlay();
+    }
     function activateChartTradeButton(button, event) {
       const action = actionByButton.get(button);
       if (!action) return;
+      if (currentConfig().mode !== "live" || !state.ui.sidebarCollapsed) return;
       const now = Date.now();
-      if ((now - Number(lastActivationByButton.get(button) || 0)) < 700 || button.disabled || button.hidden) return;
-      lastActivationByButton.set(button, now);
       if (event?.cancelable) event.preventDefault();
       event?.stopPropagation();
+      if ((now - Number(lastActivationByButton.get(button) || 0)) < 180 || button.disabled || button.hidden) return;
+      lastActivationByButton.set(button, now);
+      const manualSide = button === elements.chartTradeBuyButton ? "buy" : button === elements.chartTradeSellButton ? "sell" : null;
+      const touchLandscape = window.matchMedia("(orientation: landscape) and (pointer: coarse)").matches;
+      if (manualSide && touchLandscape) {
+        const armed = state.trade.touchOrderArm;
+        if (!armed || armed.side !== manualSide || now > armed.until) {
+          clearTouchOrderArm();
+          state.trade.touchOrderArm = { side: manualSide, until: now + 1800 };
+          touchOrderArmTimer = window.setTimeout(clearTouchOrderArm, 1800);
+          renderTradeEntryOverlay();
+          return;
+        }
+        clearTouchOrderArm();
+      } else {
+        clearTouchOrderArm();
+      }
       button.classList.add("is-pressed");
       window.setTimeout(function () { button.classList.remove("is-pressed"); }, 180);
       action();
@@ -5420,21 +5469,61 @@
         activateChartTradeButton(button, event);
       }
       // Direct listeners avoid Safari retargeting the event to the chart canvas.
-      button.addEventListener("touchend", activate, { passive: false });
-      button.addEventListener("pointerup", function (event) {
-        if (event.pointerType === "mouse") return;
-        activate(event);
-      });
       button.addEventListener("click", activate);
     });
-    // Last-resort iOS hit test: if WebKit reports the canvas as the event
-    // target, use the actual touch coordinates against the fixed controls.
+    // Capture by visible coordinates before Safari can retarget a touch to the
+    // chart canvas or the settings toggle underneath the trade rail.
+    document.addEventListener("pointerdown", function (event) {
+      if (event.pointerType === "mouse" || !state.ui.sidebarCollapsed || currentConfig().mode !== "live") return;
+      const button = chartTradeButtonAt(event.clientX, event.clientY);
+      if (!button) return;
+      pointerStartById.set(event.pointerId, button);
+      if (event.cancelable) event.preventDefault();
+      event.stopPropagation();
+    }, true);
+    document.addEventListener("pointerup", function (event) {
+      if (event.pointerType === "mouse") return;
+      const startedOn = pointerStartById.get(event.pointerId);
+      pointerStartById.delete(event.pointerId);
+      const button = chartTradeButtonAt(event.clientX, event.clientY);
+      if (button && button === startedOn) {
+        lastTouchActivationAt = Date.now();
+        activateChartTradeButton(button, event);
+      }
+    }, true);
+    document.addEventListener("pointercancel", function (event) {
+      pointerStartById.delete(event.pointerId);
+    }, true);
+    document.addEventListener("touchstart", function (event) {
+      for (const touch of event.changedTouches || []) {
+        const button = chartTradeButtonAt(Number(touch.clientX), Number(touch.clientY));
+        if (button) touchStartById.set(touch.identifier, button);
+      }
+    }, { capture: true, passive: true });
     document.addEventListener("touchend", function (event) {
-      const touch = event.changedTouches?.[0];
-      if (!touch) return;
-      const button = chartTradeButtonAt(Number(touch.clientX), Number(touch.clientY));
-      if (button) activateChartTradeButton(button, event);
+      for (const touch of event.changedTouches || []) {
+        const startedOn = touchStartById.get(touch.identifier);
+        touchStartById.delete(touch.identifier);
+        const button = chartTradeButtonAt(Number(touch.clientX), Number(touch.clientY));
+        if (button && button === startedOn) {
+          lastTouchActivationAt = Date.now();
+          activateChartTradeButton(button, event);
+        }
+      }
     }, { capture: true, passive: false });
+    document.addEventListener("touchcancel", function (event) {
+      for (const touch of event.changedTouches || []) touchStartById.delete(touch.identifier);
+    }, true);
+    document.addEventListener("click", function (event) {
+      const button = chartTradeButtonAt(event.clientX, event.clientY);
+      if (!button) return;
+      if (Date.now() - lastTouchActivationAt < 700) {
+        if (event.cancelable) event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      activateChartTradeButton(button, event);
+    }, true);
     if (elements.chartTradeActionButton) {
       elements.chartTradeActionButton.addEventListener("click", function () { handleTradeAction(); });
     }
