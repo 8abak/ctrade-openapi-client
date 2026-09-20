@@ -749,8 +749,8 @@
   }
 
   function acdMapTimeLabel(value) {
-    return new Date(Number(value)).toLocaleTimeString("en-AU", {
-      timeZone: "Australia/Sydney", hour: "2-digit", minute: "2-digit", hour12: false,
+    return new Date(Number(value)).toLocaleString("en-AU", {
+      timeZone: "Australia/Sydney", weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false,
     });
   }
 
@@ -761,14 +761,19 @@
     if (!Number.isFinite(timestampMs) || !Number.isFinite(price)) return;
     const points = state.acdMap.points;
     const previous = points[points.length - 1];
-    if (Number(previous?.tickId) !== Number(latest.id)) {
-      points.push({ timestampMs, tickId: Number(latest.id), price });
+    if (Number(previous?.tickId) !== Number(latest.id) && timestampMs >= Number(previous?.timestampMs || 0)) {
+      const newPoint = { timestampMs, tickId: Number(latest.id), price };
+      if (Math.floor(Number(previous?.timestampMs) / 60000) === Math.floor(timestampMs / 60000)) {
+        points[points.length - 1] = newPoint;
+      } else {
+        points.push(newPoint);
+      }
     }
-    state.acdMap.windowEndMs = timestampMs;
-    state.acdMap.windowStartMs = timestampMs - (24 * 60 * 60 * 1000);
-    state.acdMap.points = points.filter((point) => Number(point.timestampMs) >= state.acdMap.windowStartMs);
+    const previousWindowEndMs = Number(state.acdMap.windowEndMs);
+    state.acdMap.windowEndMs = Math.max(previousWindowEndMs || 0, timestampMs);
     const newestAcd = state.acdMap.acds[state.acdMap.acds.length - 1];
-    if (newestAcd && timestampMs > Number(newestAcd.activeEndMs)) newestAcd.activeEndMs = timestampMs;
+    if (newestAcd && Number(newestAcd.activeEndMs) >= previousWindowEndMs - 1000
+        && timestampMs > Number(newestAcd.activeEndMs)) newestAcd.activeEndMs = timestampMs;
   }
 
   function acdSegment(levelName, price, startMs, endMs, color, type) {
@@ -778,7 +783,7 @@
     ];
   }
 
-  function miniMapVwapSeries(windowStartMs, windowEndMs) {
+  function miniMapVwapSeries(windowStartMs, windowEndMs, toX) {
     const points = state.acdMap.vwapPoints.filter((point) => {
       const timestampMs = Number(point.timestampMs);
       return Number.isFinite(timestampMs) && timestampMs >= windowStartMs && timestampMs <= windowEndMs;
@@ -801,7 +806,7 @@
     });
     return [...segments.entries()].flatMap(([start, part]) => specs.map((spec) => ({
       name: "Sydney quote VWAP proxy " + spec[1] + " " + start,
-      type: "line", data: part.map((point) => [Number(point.timestampMs), Number(point[spec[0]])]),
+      type: "line", data: part.map((point) => [toX(Number(point.timestampMs)), Number(point[spec[0]])]),
       showSymbol: false, connectNulls: false, animation: false, silent: true,
       lineStyle: { color: spec[2], width: spec[3], type: spec[4] }, z: 5,
     })));
@@ -820,7 +825,7 @@
       return;
     }
     elements.acdMiniMap.dataset.count = String(acds.length);
-    elements.acdMiniMapSummary.textContent = "24H · " + String(acds.length) + " ACD" + (acds.length === 1 ? "" : "s");
+    elements.acdMiniMapSummary.textContent = "~24H TICKS · " + String(acds.length) + " ACD" + (acds.length === 1 ? "" : "s");
     if (!state.acdMap.chart) {
       state.acdMap.chart = echarts.init(elements.acdMiniMapChart, null, { renderer: "canvas" });
       state.acdMap.resizeObserver = new ResizeObserver(() => state.acdMap.chart?.resize());
@@ -829,6 +834,19 @@
 
     const windowStartMs = Number(state.acdMap.windowStartMs || points[0].timestampMs);
     const windowEndMs = Number(state.acdMap.windowEndMs || points[points.length - 1].timestampMs);
+    const toX = (timestampMs) => {
+      let left = 0, right = points.length;
+      while (left < right) {
+        const middle = (left + right) >>> 1;
+        if (Number(points[middle].timestampMs) < timestampMs) left = middle + 1;
+        else right = middle;
+      }
+      return Math.min(points.length - 1, left);
+    };
+    const toLastX = (timestampMs) => {
+      const index = toX(timestampMs);
+      return Number(points[index].timestampMs) > timestampMs ? Math.max(0, index - 1) : index;
+    };
     const levelPrices = acds.flatMap((acd) => Object.values(acd.levels || {}).map(Number).filter(Number.isFinite));
     const vwapPrices = state.acdMap.vwapPoints.flatMap((point) =>
       ["vwap", "upper1", "lower1", "upper2", "lower2", "upper3", "lower3"]
@@ -837,29 +855,38 @@
     const low = Math.min(...prices);
     const high = Math.max(...prices);
     const padding = Math.max(1, (high - low) * 0.05);
+    const priceData = [];
+    points.forEach((point, index) => {
+      if (index && Number(point.timestampMs) - Number(points[index - 1].timestampMs) > 30 * 60000)
+        priceData.push([index - .5, null]);
+      priceData.push([index, Number(point.price)]);
+    });
     const series = [{
-      name: "24-hour price", type: "line",
-      data: points.map((point) => [Number(point.timestampMs), Number(point.price)]),
+      name: "Recent market price", type: "line",
+      data: priceData, connectNulls: false,
       showSymbol: false, lineStyle: { color: "#b9f47f", width: 1.15 },
       animation: false, silent: true, z: 6,
       markLine: {silent: true, symbol: "none", label: {show: false}, data:
         (state.acdMap.sydneyResetsMs || []).filter((value) => value > windowStartMs && value <= windowEndMs)
-          .map((value) => ({name: "Sydney reset", xAxis: value, lineStyle: {color: "#7ee7ff77", type: "dotted"}}))
-          .concat(acds.map((acd) => ({name: "NY reset", xAxis: Number(acd.openingStartMs),
+          .map((value) => ({name: "Sydney reset", xAxis: toX(value), lineStyle: {color: "#7ee7ff77", type: "dotted"}}))
+          .concat(acds.map((acd) => ({name: "NY reset", xAxis: toX(Number(acd.openingStartMs)),
             lineStyle: {color: "#ffc85777", type: "dotted"}})))},
     }];
     // The 24-hour mini-map shows VWAP proxy and deviations, never Bollinger.
-    series.push(...miniMapVwapSeries(windowStartMs, windowEndMs));
+    series.push(...miniMapVwapSeries(windowStartMs, windowEndMs, toX));
 
     acds.forEach((acd, index) => {
       const levels = acd.levels || {};
       const startMs = Math.max(windowStartMs, Number(acd.activeStartMs));
       const endMs = Math.min(windowEndMs, Number(acd.activeEndMs));
       if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return;
+      const startX = toX(startMs);
+      const endX = toLastX(endMs < windowEndMs ? endMs - 1 : endMs);
+      if (endX <= startX) return;
       const opacity = index === acds.length - 1 ? 1 : 0.62;
       series.push({
         name: "ACD " + String(acd.brokerDay), type: "line",
-        data: [[startMs, Number(levels.openingHigh)], [endMs, Number(levels.openingHigh)]],
+        data: [[startX, Number(levels.openingHigh)], [endX, Number(levels.openingHigh)]],
         showSymbol: false, silent: true, animation: false, lineStyle: { opacity: 0 }, z: 3,
         markArea: {
           silent: true,
@@ -869,25 +896,25 @@
             borderWidth: 1,
           },
           data: [[
-            { xAxis: startMs, yAxis: Number(levels.openingLow) },
-            { xAxis: endMs, yAxis: Number(levels.openingHigh) },
+            { xAxis: startX, yAxis: Number(levels.openingLow) },
+            { xAxis: endX, yAxis: Number(levels.openingHigh) },
           ]],
         },
         markLine: {
           silent: true, symbol: "none",
           label: { show: true, position: "insideEndTop", fontSize: 7, color: "#9eadc5", formatter: "{b}" },
           data: [
-            acdSegment("C+", levels.cUp, startMs, endMs, "rgba(255,200,87," + String(0.48 * opacity) + ")", "dashed"),
-            acdSegment("A+", levels.aUp, startMs, endMs, "rgba(109,216,255," + String(0.58 * opacity) + ")", "dashed"),
-            acdSegment("OR+", levels.openingHigh, startMs, endMs, "rgba(210,221,238," + String(0.58 * opacity) + ")", "solid"),
-            acdSegment("OR-", levels.openingLow, startMs, endMs, "rgba(210,221,238," + String(0.58 * opacity) + ")", "solid"),
-            acdSegment("A-", levels.aDown, startMs, endMs, "rgba(109,216,255," + String(0.58 * opacity) + ")", "dashed"),
-            acdSegment("C-", levels.cDown, startMs, endMs, "rgba(255,200,87," + String(0.48 * opacity) + ")", "dashed"),
+            acdSegment("C+", levels.cUp, startX, endX, "rgba(255,200,87," + String(0.48 * opacity) + ")", "dashed"),
+            acdSegment("A+", levels.aUp, startX, endX, "rgba(109,216,255," + String(0.58 * opacity) + ")", "dashed"),
+            acdSegment("OR+", levels.openingHigh, startX, endX, "rgba(210,221,238," + String(0.58 * opacity) + ")", "solid"),
+            acdSegment("OR-", levels.openingLow, startX, endX, "rgba(210,221,238," + String(0.58 * opacity) + ")", "solid"),
+            acdSegment("A-", levels.aDown, startX, endX, "rgba(109,216,255," + String(0.58 * opacity) + ")", "dashed"),
+            acdSegment("C-", levels.cDown, startX, endX, "rgba(255,200,87," + String(0.48 * opacity) + ")", "dashed"),
           ],
         },
       });
       series.push({
-        name: "ACD date", type: "scatter", data: [[startMs, high]],
+        name: "ACD date", type: "scatter", data: [[startX, high]],
         symbolSize: 0, silent: true, z: 8,
         label: { show: true, position: "right", color: "#d8e5f7", fontSize: 8, formatter: String(acd.brokerDay) },
       });
@@ -896,7 +923,7 @@
     const last = points[points.length - 1];
     series.push({
       name: "Last price", type: "scatter",
-      data: [[Number(last.timestampMs), Number(last.price)]], symbolSize: 7, silent: true, z: 10,
+      data: [[points.length - 1, Number(last.price)]], symbolSize: 7, silent: true, z: 10,
       itemStyle: { color: "#d5ff8b", borderColor: "#071018", borderWidth: 1 },
       label: { show: true, position: "left", color: "#d5ff8b", fontSize: 8, formatter: formatPrice(last.price) },
     });
@@ -905,10 +932,11 @@
       backgroundColor: "transparent",
       grid: { left: 38, right: 8, top: 30, bottom: 22, containLabel: false },
       xAxis: {
-        type: "time", min: windowStartMs, max: windowEndMs,
+        type: "value", min: 0, max: Math.max(1, points.length - 1), splitNumber: 3,
         axisLine: { lineStyle: { color: "rgba(147,181,255,.22)" } }, axisTick: { show: false },
         splitLine: { show: false },
-        axisLabel: { color: "#71839c", fontSize: 8, hideOverlap: true, formatter: acdMapTimeLabel },
+        axisLabel: { color: "#71839c", fontSize: 8, hideOverlap: true,
+          formatter: (value) => acdMapTimeLabel(points[Math.max(0, Math.min(points.length - 1, Math.round(value)))].timestampMs) },
       },
       yAxis: {
         type: "value", min: Math.floor(low - padding), max: Math.ceil(high + padding), splitNumber: 3,

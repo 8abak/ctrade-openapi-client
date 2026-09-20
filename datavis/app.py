@@ -1440,6 +1440,9 @@ def load_acd_payload() -> Dict[str, Any]:
         "timezone": "America/New_York",
     }
 
+ACD_MAP_TARGET_TICKS = 280_000
+
+
 def load_acd_map_payload(count: int) -> Dict[str, Any]:
     requested_count = clamp_int(count, 1, 2)
     with db_connection(readonly=True) as conn:
@@ -1459,7 +1462,20 @@ def load_acd_map_payload(count: int) -> Dict[str, Any]:
                 return {"available": False, "reason": "No live ticks are available.", "points": [], "acds": []}
 
             window_end = latest["timestamp"]
-            window_start = window_end - timedelta(hours=24)
+            cur.execute(
+                """
+                SELECT timestamp
+                FROM public.ticks
+                WHERE symbol = %s AND id <= %s
+                ORDER BY id DESC
+                LIMIT 1 OFFSET %s
+                """,
+                (TICK_SYMBOL, int(latest["id"]), ACD_MAP_TARGET_TICKS - 1),
+            )
+            oldest = dict(cur.fetchone() or {})
+            # Tick count is a stable *market activity* window across weekends;
+            # wall-clock subtraction collapses Monday's map to a few minutes.
+            window_start = oldest.get("timestamp") or (window_end - timedelta(days=7))
             # Start at the broker-day boundary before the visible window so
             # its leftmost VWAP values have the full same-day quote history.
             context_start, _ = brokerday_bounds(brokerday_for_timestamp(window_start))
@@ -1562,7 +1578,9 @@ def load_acd_map_payload(count: int) -> Dict[str, Any]:
                             if dt_to_ms(window_start) < point["sessionStartMs"] <= dt_to_ms(window_end)})
     return {
         "available": bool(points and selected_acds),
-        "windowHours": 24,
+        "windowMode": "recent-market-ticks",
+        "windowTargetTicks": ACD_MAP_TARGET_TICKS,
+        "windowHours": round((window_end - window_start).total_seconds() / 3600, 2),
         "windowStartMs": dt_to_ms(window_start),
         "windowEndMs": dt_to_ms(window_end),
         "timezone": "America/New_York",
