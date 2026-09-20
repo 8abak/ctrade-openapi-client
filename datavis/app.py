@@ -1460,18 +1460,25 @@ def load_acd_map_payload(count: int) -> Dict[str, Any]:
 
             window_end = latest["timestamp"]
             window_start = window_end - timedelta(hours=24)
+            # Start at the broker-day boundary before the visible window so
+            # its leftmost VWAP values have the full same-day quote history.
+            context_start, _ = brokerday_bounds(brokerday_for_timestamp(window_start))
             cur.execute(
                 """
                 SELECT
                     date_trunc('minute', timestamp) AS bucket,
                     (array_agg(id ORDER BY timestamp DESC, id DESC))[1] AS tick_id,
-                    (array_agg(COALESCE(mid, (bid + ask) / 2.0) ORDER BY timestamp DESC, id DESC))[1] AS close
+                    MAX(timestamp) AS last_timestamp,
+                    (array_agg(COALESCE(mid, (bid + ask) / 2.0) ORDER BY timestamp DESC, id DESC))[1] AS close,
+                    COUNT(*) AS tick_count,
+                    SUM(COALESCE(mid, (bid + ask) / 2.0)) AS price_sum,
+                    SUM(POWER(COALESCE(mid, (bid + ask) / 2.0), 2)) AS square_sum
                 FROM public.ticks
                 WHERE symbol = %s AND timestamp >= %s AND timestamp <= %s
                 GROUP BY date_trunc('minute', timestamp)
                 ORDER BY bucket
                 """,
-                (TICK_SYMBOL, window_start, window_end),
+                (TICK_SYMBOL, context_start, window_end),
             )
             minute_rows = [dict(row) for row in cur.fetchall()]
 
@@ -1519,11 +1526,16 @@ def load_acd_map_payload(count: int) -> Dict[str, Any]:
     active_acds: List[Dict[str, Any]] = []
     for index, acd in enumerate(chronological):
         active_start = int(acd["openingEndMs"])
-        next_start = (
-            int(chronological[index + 1]["openingEndMs"])
-            if index + 1 < len(chronological)
-            else dt_to_ms(window_end)
-        )
+        next_start = (int(chronological[index + 1]["openingStartMs"])
+                      if index + 1 < len(chronological) else dt_to_ms(window_end))
+        # The previous ACD ends at 09:30, even during the next 15-minute
+        # opening range before the new levels are locked.
+        if index + 1 == len(chronological):
+            local_now = window_end.astimezone(ACD_NEW_YORK)
+            if local_now.weekday() < 5:
+                reset_start, _ = _new_york_acd_window(local_now.date())
+                if acd["openingEndMs"] < dt_to_ms(reset_start) <= dt_to_ms(window_end):
+                    next_start = dt_to_ms(reset_start)
         clipped_start = max(active_start, dt_to_ms(window_start) or active_start)
         clipped_end = min(next_start, dt_to_ms(window_end) or next_start)
         if clipped_end > clipped_start:
@@ -1536,13 +1548,18 @@ def load_acd_map_payload(count: int) -> Dict[str, Any]:
     selected_acds = active_acds[-requested_count:]
     points = [
         {
-            "timestampMs": dt_to_ms(row.get("bucket")),
+            "timestampMs": dt_to_ms(row.get("last_timestamp") or row.get("bucket")),
             "tickId": int(row.get("tick_id") or 0),
             "price": float(row.get("close") or 0.0),
         }
         for row in minute_rows
         if row.get("bucket") is not None and row.get("close") is not None
+        and (row.get("last_timestamp") or row["bucket"]) >= window_start
     ]
+    vwap_points = [point for point in _sydney_vwap_segments(minute_rows)
+                   if point["timestampMs"] >= dt_to_ms(window_start)]
+    sydney_resets = sorted({point["sessionStartMs"] for point in vwap_points
+                            if dt_to_ms(window_start) < point["sessionStartMs"] <= dt_to_ms(window_end)})
     return {
         "available": bool(points and selected_acds),
         "windowHours": 24,
@@ -1552,6 +1569,9 @@ def load_acd_map_payload(count: int) -> Dict[str, Any]:
         "openingWindow": "09:30-09:45",
         "points": points,
         "acds": selected_acds,
+        "vwapPoints": vwap_points,
+        "sydneyResetsMs": sydney_resets,
+        "vwapWeighting": "tick-count quote proxy",
     }
 
 
@@ -1580,7 +1600,7 @@ def _sydney_vwap_points(minute_rows: List[Dict[str, Any]]) -> List[Dict[str, Any
         variance = max(0.0, (running_square_sum / running_count) - (vwap * vwap))
         deviation = math.sqrt(variance)
         points.append({
-            "timestampMs": dt_to_ms(row.get("bucket")),
+            "timestampMs": dt_to_ms(row.get("last_timestamp") or row.get("bucket")),
             "tickId": int(row.get("tick_id") or 0),
             "vwap": vwap,
             "upper1": vwap + deviation,
@@ -1592,6 +1612,21 @@ def _sydney_vwap_points(minute_rows: List[Dict[str, Any]]) -> List[Dict[str, Any
             "tickCount": running_count,
         })
     return points
+
+
+def _sydney_vwap_segments(minute_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Causal quote averages, reset at each Sydney broker-day boundary."""
+    groups: Dict[date, List[Dict[str, Any]]] = {}
+    for row in minute_rows:
+        bucket = row.get("bucket")
+        if bucket is not None:
+            groups.setdefault(brokerday_for_timestamp(bucket), []).append(row)
+    result: List[Dict[str, Any]] = []
+    for broker_day in sorted(groups):
+        session_start, _ = brokerday_bounds(broker_day)
+        result.extend({**point, "sessionStartMs": dt_to_ms(session_start)}
+                      for point in _sydney_vwap_points(groups[broker_day]))
+    return result
 
 
 def load_live_vwap_payload(end_id: int) -> Dict[str, Any]:

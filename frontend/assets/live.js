@@ -83,7 +83,7 @@
     ui: { sidebarCollapsed: true },
     acd: null,
     acdMap: {
-      points: [], acds: [], oneMinute: [], fiveMinute: [],
+      points: [], acds: [], vwapPoints: [], sydneyResetsMs: [],
       windowStartMs: null, windowEndMs: null, loadedAtMs: 0,
       chart: null, resizeObserver: null, renderTimer: 0,
     },
@@ -779,7 +779,7 @@
   }
 
   function miniMapVwapSeries(windowStartMs, windowEndMs) {
-    const points = state.vwap.points.filter((point) => {
+    const points = state.acdMap.vwapPoints.filter((point) => {
       const timestampMs = Number(point.timestampMs);
       return Number.isFinite(timestampMs) && timestampMs >= windowStartMs && timestampMs <= windowEndMs;
     });
@@ -793,21 +793,18 @@
       ["lower2", "−2σ", "rgba(192,140,255,.44)", 0.75, "dashed"],
       ["lower3", "−3σ", "rgba(192,140,255,.32)", 0.65, "dashed"],
     ];
-    return specs.map((spec) => {
-      const data = points.map((point) => [Number(point.timestampMs), Number(point[spec[0]])]);
-      if (data.length && Number.isFinite(windowEndMs) && data[data.length - 1][0] < windowEndMs) {
-        data.push([windowEndMs, data[data.length - 1][1]]);
-      }
-      return {
-        name: "Sydney " + spec[1], type: "line", data,
-        showSymbol: false, connectNulls: true, animation: false, silent: true,
-        lineStyle: { color: spec[2], width: spec[3], type: spec[4] }, z: 5,
-        endLabel: spec[0] === "vwap" ? {
-          show: true, formatter: "VWAP", color: spec[2], fontSize: 7,
-          backgroundColor: "rgba(5,9,15,.72)", padding: [1, 2], distance: 2,
-        } : { show: false },
-      };
+    const segments = new Map();
+    points.forEach((point) => {
+      const start = Number(point.sessionStartMs);
+      if (!segments.has(start)) segments.set(start, []);
+      segments.get(start).push(point);
     });
+    return [...segments.entries()].flatMap(([start, part]) => specs.map((spec) => ({
+      name: "Sydney quote VWAP proxy " + spec[1] + " " + start,
+      type: "line", data: part.map((point) => [Number(point.timestampMs), Number(point[spec[0]])]),
+      showSymbol: false, connectNulls: false, animation: false, silent: true,
+      lineStyle: { color: spec[2], width: spec[3], type: spec[4] }, z: 5,
+    })));
   }
 
   function renderAcdMiniMap() {
@@ -833,9 +830,10 @@
     const windowStartMs = Number(state.acdMap.windowStartMs || points[0].timestampMs);
     const windowEndMs = Number(state.acdMap.windowEndMs || points[points.length - 1].timestampMs);
     const levelPrices = acds.flatMap((acd) => Object.values(acd.levels || {}).map(Number).filter(Number.isFinite));
-    // Indicator overlays remain clipped to the price/ACD viewport. They never
-    // expand the mini-map scale and flatten the actual tick movement.
-    const prices = points.map((point) => Number(point.price)).concat(levelPrices);
+    const vwapPrices = state.acdMap.vwapPoints.flatMap((point) =>
+      ["vwap", "upper1", "lower1", "upper2", "lower2", "upper3", "lower3"]
+        .map((key) => Number(point[key])).filter(Number.isFinite));
+    const prices = points.map((point) => Number(point.price)).concat(levelPrices, vwapPrices);
     const low = Math.min(...prices);
     const high = Math.max(...prices);
     const padding = Math.max(1, (high - low) * 0.05);
@@ -844,9 +842,13 @@
       data: points.map((point) => [Number(point.timestampMs), Number(point.price)]),
       showSymbol: false, lineStyle: { color: "#b9f47f", width: 1.15 },
       animation: false, silent: true, z: 6,
+      markLine: {silent: true, symbol: "none", label: {show: false}, data:
+        (state.acdMap.sydneyResetsMs || []).filter((value) => value > windowStartMs && value <= windowEndMs)
+          .map((value) => ({name: "Sydney reset", xAxis: value, lineStyle: {color: "#7ee7ff77", type: "dotted"}}))
+          .concat(acds.map((acd) => ({name: "NY reset", xAxis: Number(acd.openingStartMs),
+            lineStyle: {color: "#ffc85777", type: "dotted"}})))},
     }];
-    // Keep the position map focused on price, ACD and today's VWAP. The
-    // Bollinger studies belong on the full chart only.
+    // The 24-hour mini-map shows VWAP proxy and deviations, never Bollinger.
     series.push(...miniMapVwapSeries(windowStartMs, windowEndMs));
 
     acds.forEach((acd, index) => {
@@ -939,8 +941,8 @@
     if (count === 0) {
       state.acdMap.points = [];
       state.acdMap.acds = [];
-      state.acdMap.oneMinute = [];
-      state.acdMap.fiveMinute = [];
+      state.acdMap.vwapPoints = [];
+      state.acdMap.sydneyResetsMs = [];
       renderAcdMiniMap();
       return;
     }
@@ -948,6 +950,8 @@
       const payload = await fetchJson("/api/live/acd-map?count=" + String(count));
       state.acdMap.points = Array.isArray(payload.points) ? payload.points : [];
       state.acdMap.acds = Array.isArray(payload.acds) ? payload.acds : [];
+      state.acdMap.vwapPoints = Array.isArray(payload.vwapPoints) ? payload.vwapPoints : [];
+      state.acdMap.sydneyResetsMs = Array.isArray(payload.sydneyResetsMs) ? payload.sydneyResetsMs : [];
       state.acdMap.windowStartMs = Number(payload.windowStartMs) || null;
       state.acdMap.windowEndMs = Number(payload.windowEndMs) || null;
       state.acdMap.loadedAtMs = Date.now();
@@ -955,8 +959,8 @@
     } catch (error) {
       state.acdMap.points = [];
       state.acdMap.acds = [];
-      state.acdMap.oneMinute = [];
-      state.acdMap.fiveMinute = [];
+      state.acdMap.vwapPoints = [];
+      state.acdMap.sydneyResetsMs = [];
       renderAcdMiniMap();
       if (!options?.silent) status(error.message || "ACD mini-map could not be loaded.", true);
     }
