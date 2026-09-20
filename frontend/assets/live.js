@@ -12,6 +12,7 @@
     showStructure: false,
     showRanges: false,
     showAcd: false,
+    showSmartBand: true,
     acdMapCount: 2,
     showBb1m: true,
     showBb5m: true,
@@ -82,6 +83,7 @@
     resizeObserver: null,
     ui: { sidebarCollapsed: true },
     acd: null,
+    smartBand: { tracker: null },
     acdMap: {
       points: [], acds: [], vwapPoints: [], sydneyResetsMs: [],
       windowStartMs: null, windowEndMs: null, loadedAtMs: 0,
@@ -161,6 +163,7 @@
     showStructure: document.getElementById("showStructure"),
     showRanges: document.getElementById("showRanges"),
     showAcd: document.getElementById("showAcd"),
+    showSmartBand: document.getElementById("showSmartBand"),
     acdMapCount: document.getElementById("acdMapCount"),
     showBb1m: document.getElementById("showBb1m"),
     showBb5m: document.getElementById("showBb5m"),
@@ -297,6 +300,7 @@
       showStructure: params.has("showStructure") ? params.get("showStructure") !== "0" : DEFAULTS.showStructure,
       showRanges: params.has("showRanges") ? params.get("showRanges") !== "0" : DEFAULTS.showRanges,
       showAcd: params.has("showAcd") ? params.get("showAcd") !== "0" : DEFAULTS.showAcd,
+      showSmartBand: params.has("showSmartBand") ? params.get("showSmartBand") !== "0" : DEFAULTS.showSmartBand,
       acdMapCount: Number(params.get("acdMapAcds")) === 0 ? 0 : DEFAULTS.acdMapCount,
       showBb1m: true,
       showBb5m: true,
@@ -317,6 +321,7 @@
       showStructure: elements.showStructure.checked,
       showRanges: elements.showRanges.checked,
       showAcd: elements.showAcd.checked,
+      showSmartBand: elements.showSmartBand.checked,
       acdMapCount: Number(elements.acdMapCount?.value || 0) === 0 ? 0 : 2,
       showBb1m: true,
       showBb5m: true,
@@ -671,7 +676,7 @@
   }
 
   function handleTradeChannelChartClick(event) {
-    if (state.trade.config.channelDrawState === "idle" || event?.target) {
+    if (state.trade.config.channelDrawState === "idle") {
       return false;
     }
     const point = resolveChartPointFromPixel(event.offsetX, event.offsetY);
@@ -1028,6 +1033,7 @@
       showStructure: config.showStructure ? "1" : "0",
       showRanges: config.showRanges ? "1" : "0",
       showAcd: config.showAcd ? "1" : "0",
+      showSmartBand: config.showSmartBand ? "1" : "0",
       acdMapAcds: String(config.acdMapCount),
       showBb1m: config.showBb1m ? "1" : "0",
       showBb5m: config.showBb5m ? "1" : "0",
@@ -1457,9 +1463,6 @@
       return;
     }
     if (state.paper.drawState !== "drawingfirstpoint" && state.paper.drawState !== "drawingsecondpoint") {
-      return;
-    }
-    if (event?.target) {
       return;
     }
     const point = resolveChartPointFromPixel(event.offsetX, event.offsetY);
@@ -3168,6 +3171,16 @@
         tooltipRow("Id", Math.round(tickId)),
       ]));
     }
+    if (currentConfig().showSmartBand) {
+      const band = state.smartBand.tracker?.points.find((item) => item.tickId === Math.round(tickId));
+      if (band) sections.push(tooltipSection("Smart Band · observed", [
+        tooltipRow("Phase", band.phase),
+        tooltipRow("Boundary", band.boundaryState.replaceAll("_", " ")),
+        tooltipRow("Centre", formatPrice(band.center)),
+        tooltipRow("Inner", formatPrice(band.innerLower) + " – " + formatPrice(band.innerUpper)),
+        tooltipRow("Outer", formatPrice(band.outerLower) + " – " + formatPrice(band.outerUpper)),
+      ]));
+    }
     const mavgRows = mavgPointsAtTickId(tickId);
     if (mavgRows.length) {
       sections.push(tooltipSection("Moving Avg", mavgRows.map(function (item) {
@@ -3223,7 +3236,7 @@
       state.chart = echarts.init(elements.chartHost, null, { renderer: "canvas" });
       state.chart.setOption({
         animation: false,
-        grid: { left: 54, right: 16, top: 14, bottom: 28 },
+        grid: { left: 54, right: 82, top: 14, bottom: 28 },
         tooltip: {
           trigger: "axis",
           axisPointer: { type: "cross" },
@@ -3425,21 +3438,70 @@
     };
   }
 
+  function visibleSmartBandPoints() {
+    if (!window.DatavisSmartBand || !state.rows.length) return [];
+    const firstId = Number(state.rows[0].id);
+    const lastId = Number(state.rows[state.rows.length - 1].id);
+    let tracker = state.smartBand.tracker;
+    if (!tracker || tracker.lastId == null || tracker.lastId < firstId || tracker.lastId > lastId) {
+      tracker = new window.DatavisSmartBand.SmartBandTracker(MAX_WINDOW + 1000);
+      state.smartBand.tracker = tracker;
+    }
+    state.rows.forEach((row) => {
+      if (tracker.lastId == null || Number(row.id) > tracker.lastId) tracker.process(row);
+    });
+    return tracker.visible(firstId, lastId);
+  }
+
+  function smartBandSeries(points) {
+    if (!points.length) return [];
+    const segments = new Map();
+    points.forEach((point) => {
+      if (!segments.has(point.segment)) segments.set(point.segment, []);
+      segments.get(point.segment).push(point);
+    });
+    const lastSegment = points[points.length - 1].segment;
+    const specs = [
+      ["outerLower", "Smart outer−", "#5bb7c8", 1, .52, "dashed"],
+      ["innerLower", "Smart inner−", "#74c5d4", 1.2, .72, "solid"],
+      ["center", "Smart centre", "#e8f8e6", 2.3, .98, "solid"],
+      ["innerUpper", "Smart inner+", "#74c5d4", 1.2, .72, "solid"],
+      ["outerUpper", "Smart outer+", "#5bb7c8", 1, .52, "dashed"],
+    ];
+    const stride = Math.max(1, Math.ceil(points.length / 1600));
+    return [...segments.entries()].flatMap(([segment, part]) => specs.map(([key, label, color, width, opacity, type]) => ({
+      id: "smart-band-" + key + "-" + segment, name: label,
+      type: "line", showSymbol: false, animation: false, silent: true,
+      smooth: .12, z: 6,
+      lineStyle: {color, width, opacity, type},
+      data: part.filter((_, index) => index % stride === 0 || index === part.length - 1)
+        .map((point) => [point.tickId, point[key]]),
+      endLabel: segment === lastSegment ? {
+        show: true, formatter: label, color, fontSize: 9,
+        backgroundColor: "rgba(5,9,15,.78)", padding: [1, 2], distance: 2,
+      } : {show: false},
+      labelLayout: {moveOverlap: "shiftY"},
+    })));
+  }
+
   function buildSeries(config) {
     const series = [];
     if (config.showTicks) {
       series.push({
         id: "raw-mid",
-        name: "Raw mid",
-        type: "line",
-        showSymbol: false,
-        hoverAnimation: false,
+        name: "Tick dots",
+        type: "scatter",
+        large: state.rows.length > 3000,
+        largeThreshold: 3000,
+        progressive: 5000,
+        symbolSize: state.rows.length > 5000 ? 2.2 : state.rows.length > 1000 ? 2.8 : 3.8,
         animation: false,
         data: rowsToSeriesData(),
-        lineStyle: { color: "#6dd8ff", width: 1.35 },
-        z: 5,
+        itemStyle: {color: "#c7f480", opacity: state.rows.length > 5000 ? .58 : .82},
+        z: 9,
       });
     }
+    if (config.showSmartBand) series.push(...smartBandSeries(visibleSmartBandPoints()));
     series.push(...bollingerSeries(state.bollinger.oneMinute, "BB 1m", "#c08cff"));
     series.push(...bollingerSeries(state.bollinger.fiveMinute, "BB 5m", "#ffd166"));
     series.push(...vwapSeries(state.vwap.points));
@@ -4462,6 +4524,7 @@
 
   function replaceRows(rows) {
     state.rows = Array.isArray(rows) ? rows.slice() : [];
+    state.smartBand.tracker = null;
     state.viewportUpdateMeta = null;
     syncRangeFromRows();
     trimMavgToRows();
@@ -5852,6 +5915,7 @@
     elements.showStructure.checked = Boolean(config.showStructure);
     elements.showRanges.checked = Boolean(config.showRanges);
     elements.showAcd.checked = Boolean(config.showAcd);
+    elements.showSmartBand.checked = Boolean(config.showSmartBand);
     elements.acdMapCount.value = String(config.acdMapCount);
     elements.showBb1m.checked = Boolean(config.showBb1m);
     elements.showBb5m.checked = Boolean(config.showBb5m);
@@ -5895,7 +5959,7 @@
     status("Run state updated.", false);
   });
 
-  [elements.showTicks, elements.showEvents, elements.showStructure, elements.showRanges, elements.showAcd, elements.showBb1m, elements.showBb5m, elements.showVwap].forEach((control) => {
+  [elements.showTicks, elements.showEvents, elements.showStructure, elements.showRanges, elements.showAcd, elements.showSmartBand, elements.showBb1m, elements.showBb5m, elements.showVwap].forEach((control) => {
     control.addEventListener("change", function () {
       writeQuery();
       if (control === elements.showBb1m || control === elements.showBb5m) {
@@ -5910,6 +5974,11 @@
         renderAcdHud();
         renderChart({ resetView: false });
         status("ACD display updated.", false);
+        return;
+      }
+      if (control === elements.showSmartBand) {
+        renderChart({ resetView: false });
+        status("Smart Band display updated.", false);
         return;
       }
       loadAll(false).catch((error) => status(error.message || "Display refresh failed.", true));

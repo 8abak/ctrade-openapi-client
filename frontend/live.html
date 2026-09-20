@@ -94,11 +94,15 @@
                   <input id="showAcd" type="checkbox">
                   <span>ACD levels</span>
                 </label>
+                <label class="compact-check">
+                  <input id="showSmartBand" type="checkbox" checked>
+                  <span>Smart Band · research</span>
+                </label>
                 <label class="compact-select-control">
                   <span>ACD mini-map</span>
                   <select id="acdMapCount" aria-label="ACD mini-map sessions">
                     <option value="0">Hidden</option>
-                    <option value="2" selected>24h · current + previous</option>
+                    <option value="2" selected>~24h market · 2 ACDs</option>
                   </select>
                 </label>
                 <label class="compact-check">
@@ -459,6 +463,7 @@
 
   <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
   <script src="/assets/charting.js?v=20260814-acd2"></script>
-  <script src="/assets/live.js?v=20260921-market-minimap"></script>
+  <script src="/assets/smart-band.js?v=20260921-causal-v1"></script>
+  <script src="/assets/live.js?v=20260921-tick-dots-smart-band"></script>
 </body>
 </html>
