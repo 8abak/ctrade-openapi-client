@@ -848,7 +848,7 @@ select {
 }
 
 /* Keep the drawer and the order controls in separate touch layers. */
-.live-workspace:not(.is-sidebar-collapsed) ~ .chart-trade-entry {
+.live-workspace:not(.is-sidebar-collapsed) .chart-trade-entry {
   visibility: hidden;
   pointer-events: none !important;
 }
@@ -1588,12 +1588,13 @@ select {
   }
 
   .chart-trade-entry-left {
+    position: absolute;
     top: max(4rem, calc(env(safe-area-inset-top) + 3.55rem));
-    right: auto;
-    left: max(0.45rem, env(safe-area-inset-left));
+    right: max(0.45rem, env(safe-area-inset-right));
+    left: auto;
     bottom: auto;
     align-items: flex-start;
-    justify-items: start;
+    justify-items: end;
     padding: 0.25rem;
     border: 1px solid rgba(147, 181, 255, 0.22);
     border-radius: 10px;
@@ -1612,6 +1613,7 @@ select {
     min-width: 58px;
     min-height: 42px;
     font-size: 0.78rem;
+    backdrop-filter: none;
   }
 
   .chart-trade-entry-left .chart-trade-button-buy,
@@ -1632,12 +1634,13 @@ select {
 
 @media (orientation: landscape) and (hover: none) and (pointer: coarse) {
   .chart-trade-entry-left {
+    position: absolute;
     top: max(4rem, calc(env(safe-area-inset-top) + 3.55rem));
-    right: auto;
-    left: max(0.45rem, env(safe-area-inset-left));
+    right: max(0.45rem, env(safe-area-inset-right));
+    left: auto;
     bottom: auto;
     align-items: flex-start;
-    justify-items: start;
+    justify-items: end;
     padding: 0.25rem;
     border: 1px solid rgba(147, 181, 255, 0.22);
     border-radius: 10px;
@@ -1656,6 +1659,7 @@ select {
     min-width: 58px;
     min-height: 42px;
     font-size: 0.78rem;
+    backdrop-filter: none;
   }
 
   .chart-trade-entry-left .chart-trade-button-buy,

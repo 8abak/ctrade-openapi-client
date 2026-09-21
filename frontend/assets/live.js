@@ -5468,7 +5468,17 @@
       function activate(event) {
         activateChartTradeButton(button, event);
       }
-      // Direct listeners avoid Safari retargeting the event to the chart canvas.
+      // Native button events are primary; coordinate capture below is only a
+      // fallback for Safari when the chart canvas steals the target.
+      button.addEventListener("pointerup", function (event) {
+        if (event.pointerType === "mouse") return;
+        lastTouchActivationAt = Date.now();
+        activate(event);
+      });
+      button.addEventListener("touchend", function (event) {
+        lastTouchActivationAt = Date.now();
+        activate(event);
+      }, { passive: false });
       button.addEventListener("click", activate);
     });
     // Capture by visible coordinates before Safari can retarget a touch to the
