@@ -2,14 +2,16 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <link rel="icon" href="/favicon.ico" sizes="any">
   <link rel="icon" type="image/svg+xml" href="/assets/datavis_favicon.svg">
   <title>datavis.au | Layer Zero</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/assets/app.css?v=20260921-landscape-trade-panel2">
+  <link rel="stylesheet" href="/assets/app.css?v=20260921-compact-trade-dock3">
 </head>
 <body class="page-live">
   <div class="live-workspace is-sidebar-collapsed" id="liveWorkspace">
@@ -447,6 +449,7 @@
           <div class="chart-trade-entry-buttons">
             <button class="chart-trade-button chart-trade-button-buy" id="chartTradeBuyButton" data-trade-action="buy" type="button" aria-label="Buy market; double tap in phone landscape" title="Buy market">BUY</button>
             <button class="chart-trade-button chart-trade-button-sell" id="chartTradeSellButton" data-trade-action="sell" type="button" aria-label="Sell market; double tap in phone landscape" title="Sell market">SELL</button>
+            <button class="chart-trade-button chart-trade-more-button" id="chartTradeMoreButton" type="button" aria-label="More trade actions" aria-expanded="false" title="More trade actions">⋯</button>
             <button class="chart-trade-button chart-trade-button-smart" id="chartSmartBuyButton" data-trade-action="smart-buy" type="button" aria-label="Toggle smart buy" title="Smart buy">SB</button>
             <button class="chart-trade-button chart-trade-button-smart" id="chartSmartSellButton" data-trade-action="smart-sell" type="button" aria-label="Toggle smart sell" title="Smart sell">SS</button>
             <button class="chart-trade-button chart-trade-button-smart-close" id="chartSmartCloseButton" data-trade-action="smart-close" type="button" aria-label="Toggle smart close" title="Smart close">SC</button>
@@ -462,6 +465,6 @@
   <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
   <script src="/assets/charting.js?v=20260814-acd2"></script>
   <script src="/assets/smart-band.js?v=20260921-causal-v1"></script>
-  <script src="/assets/live.js?v=20260921-landscape-trade-panel2"></script>
+  <script src="/assets/live.js?v=20260921-compact-trade-dock3"></script>
 </body>
 </html>

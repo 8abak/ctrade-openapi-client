@@ -941,6 +941,16 @@ select {
   transform: translateY(-1px);
 }
 
+.chart-trade-more-button {
+  display: none;
+}
+
+.chart-trade-more-button.is-armed {
+  border-color: rgba(109, 216, 255, 0.85);
+  color: #d7f0ff;
+  box-shadow: 0 0 0 1px rgba(109, 216, 255, 0.3);
+}
+
 .chart-trade-button.is-pressed:not(:disabled) {
   transform: scale(0.93);
   filter: brightness(1.45);
@@ -1675,5 +1685,76 @@ select {
   .chart-trade-entry-left .chart-trade-hint {
     max-width: min(20rem, calc(100vw - 5rem));
     white-space: normal;
+  }
+}
+
+/* The Home Screen app uses the same compact chart dock as mobile Safari. */
+@media (orientation: landscape) and (pointer: coarse) {
+  .live-workspace,
+  .live-workspace.is-sidebar-collapsed {
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+
+  .chart-trade-entry-left {
+    position: absolute;
+    top: auto;
+    right: auto;
+    bottom: max(2.75rem, calc(env(safe-area-inset-bottom) + 2.45rem));
+    left: 0.4rem;
+    max-width: min(220px, calc(100% - 1rem));
+    padding: 0.22rem;
+    justify-items: start;
+    border-radius: 8px;
+    background: rgba(5, 9, 15, 0.88);
+  }
+
+  .chart-trade-entry-left .chart-trade-entry-buttons {
+    display: flex;
+    width: auto;
+    max-width: 210px;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.2rem;
+  }
+
+  .chart-trade-entry-left .chart-trade-button {
+    width: auto;
+    min-width: 40px;
+    min-height: 42px;
+    padding: 0.32rem 0.45rem;
+    font-size: 0.72rem;
+  }
+
+  .chart-trade-entry-left .chart-trade-button-buy,
+  .chart-trade-entry-left .chart-trade-button-sell {
+    min-width: 58px;
+    min-height: 44px;
+  }
+
+  .chart-trade-entry-left .chart-trade-more-button {
+    display: block;
+  }
+
+  .chart-trade-entry-left .chart-trade-button-smart,
+  .chart-trade-entry-left .chart-trade-button-smart-close {
+    display: none;
+  }
+
+  .chart-trade-entry-left.is-expanded .chart-trade-button-smart,
+  .chart-trade-entry-left.is-expanded .chart-trade-button-smart-close {
+    display: block;
+  }
+
+  .chart-trade-entry-left .chart-trade-smart-status,
+  .chart-trade-entry-left:not(.is-action-feedback) .chart-trade-hint {
+    display: none;
+  }
+
+  .chart-trade-entry-left .chart-trade-hint {
+    max-width: min(210px, calc(100vw - 1rem));
+    white-space: normal;
+    text-align: left;
   }
 }

@@ -267,6 +267,7 @@
     chartTradeEntry: document.getElementById("chartTradeEntry"),
     chartTradeBuyButton: document.getElementById("chartTradeBuyButton"),
     chartTradeSellButton: document.getElementById("chartTradeSellButton"),
+    chartTradeMoreButton: document.getElementById("chartTradeMoreButton"),
     chartSmartBuyButton: document.getElementById("chartSmartBuyButton"),
     chartSmartSellButton: document.getElementById("chartSmartSellButton"),
     chartSmartCloseButton: document.getElementById("chartSmartCloseButton"),
@@ -3024,6 +3025,11 @@
       elements.chartTradeSellButton.classList.toggle("is-confirming", state.trade.touchOrderArm?.side === "sell");
       elements.chartTradeSellButton.textContent = busy && state.trade.activeOrderSide === "sell" ? "…" : (state.trade.touchOrderArm?.side === "sell" ? "SELL?" : "SELL");
     }
+    if (elements.chartTradeMoreButton) {
+      elements.chartTradeMoreButton.hidden = !authenticated;
+      elements.chartTradeMoreButton.disabled = !authenticated || busy;
+      elements.chartTradeMoreButton.classList.toggle("is-armed", currentSmartArmed("buy") || currentSmartArmed("sell") || currentSmartArmed("close"));
+    }
     if (elements.chartSmartBuyButton) {
       elements.chartSmartBuyButton.hidden = !authenticated;
       elements.chartSmartBuyButton.disabled = !authenticated || busy;
@@ -3076,6 +3082,7 @@
           ? (tradeConfig.closeMode.charAt(0).toUpperCase() + tradeConfig.closeMode.slice(1) + " close")
           : prepared.reason)));
     }
+    elements.chartTradeEntry.classList.toggle("is-action-feedback", !authenticated || Boolean(state.trade.touchOrderArm) || Boolean(state.trade.chartActionFeedback?.until > Date.now()));
     renderPreparedTradeSummary();
     renderBrokerSummary();
     renderSmartPanel();
@@ -3240,7 +3247,8 @@
     elements.chartHost.addEventListener("touchmove", function (event) {
       if (window.matchMedia("(orientation: landscape) and (pointer: coarse)").matches) {
         event.preventDefault();
-        event.stopImmediatePropagation();
+        // Keep the chart stationary, but let ECharts receive the move so its
+        // SL/TP graphic handles can be dragged on a phone. dataZoom is off.
       }
     }, { passive: false, capture: true });
   }
@@ -4014,7 +4022,7 @@
             },
             {
               type: "rect",
-              shape: { x: rect.x + rect.width - 92, y: baseY - 10, width: 88, height: 18, r: 4 },
+              shape: { x: rect.x + 4, y: baseY - 15, width: 112, height: 30, r: 6 },
               style: {
                 fill: "rgba(5,9,15,0.9)",
                 stroke: isActive ? "rgba(255,200,87,0.72)" : color,
@@ -4025,7 +4033,7 @@
               type: "text",
               style: {
                 text: labelPrefix + " " + Number(linePrice).toFixed(2),
-                x: rect.x + rect.width - 48,
+                x: rect.x + 60,
                 y: baseY,
                 textAlign: "center",
                 textVerticalAlign: "middle",
@@ -4086,12 +4094,12 @@
               children: [
                 {
                   type: "line",
-                  shape: { x1: rect.x + 18, y1: addY, x2: rect.x + rect.width - 104, y2: addY },
+                  shape: { x1: rect.x + 116, y1: addY, x2: rect.x + rect.width - 2, y2: addY },
                   style: { stroke: "rgba(255,200,87,0.72)", lineWidth: 1, lineDash: [2, 4] },
                 },
                 {
                   type: "rect",
-                  shape: { x: rect.x + rect.width - 100, y: addY - 10, width: 96, height: 18, r: 4 },
+                  shape: { x: rect.x + 4, y: addY - 15, width: 112, height: 30, r: 6 },
                   style: {
                     fill: "rgba(5,9,15,0.82)",
                     stroke: "rgba(255,200,87,0.72)",
@@ -4102,7 +4110,7 @@
                   type: "text",
                   style: {
                     text: "Drag to add",
-                    x: rect.x + rect.width - 52,
+                    x: rect.x + 60,
                     y: addY,
                     textAlign: "center",
                     textVerticalAlign: "middle",
@@ -5295,11 +5303,13 @@
       state.trade.positionEditorDraft = null;
       renderPositionEditor();
       tradeStatus("Position protections updated.", false);
+      chartTradeFeedback("SL/TP updated.", false);
       await refreshTradeData({ silent: true, forceHistory: true });
     } catch (error) {
       state.trade.brokerStatus = brokerStatusFromPayload(error?.payload || { broker: state.trade.brokerStatus });
       state.trade.brokerConfigured = Boolean(state.trade.brokerStatus?.configured);
       tradeStatus(error.message || "Amend SL/TP failed.", true);
+      chartTradeFeedback(error.message || "Amend SL/TP failed.", true);
       throw error;
     } finally {
       setTradeBusy(false);
@@ -5335,6 +5345,7 @@
     setPendingProtectionValue(positionId, "stopLoss", nextValues.stopLoss);
     setPendingProtectionValue(positionId, "takeProfit", nextValues.takeProfit);
     tradeStatus((targetKey === "stopLoss" ? "SL" : "TP") + " applying...", false);
+    chartTradeFeedback((targetKey === "stopLoss" ? "SL" : "TP") + " " + roundedPrice.toFixed(2) + " applying...", false);
     submitAmendPosition(positionId, nextValues.stopLoss, nextValues.takeProfit).catch(() => {
       const pendingKey = String(positionId);
       if (Object.keys(previousPending).length) {
@@ -5415,8 +5426,6 @@
     ];
     const actionByButton = new Map();
     const lastActivationByButton = new WeakMap();
-    const pointerStartById = new Map();
-    const touchStartById = new Map();
     let lastTouchActivationAt = 0;
     let touchOrderArmTimer = 0;
     function clearTouchOrderArm() {
@@ -5432,7 +5441,7 @@
       const now = Date.now();
       if (event?.cancelable) event.preventDefault();
       event?.stopPropagation();
-      if ((now - Number(lastActivationByButton.get(button) || 0)) < 180 || button.disabled || button.hidden) return;
+      if ((now - Number(lastActivationByButton.get(button) || 0)) < 100 || button.disabled || button.hidden) return;
       lastActivationByButton.set(button, now);
       const manualSide = button === elements.chartTradeBuyButton ? "buy" : button === elements.chartTradeSellButton ? "sell" : null;
       const touchLandscape = window.matchMedia("(orientation: landscape) and (pointer: coarse)").matches;
@@ -5440,8 +5449,8 @@
         const armed = state.trade.touchOrderArm;
         if (!armed || armed.side !== manualSide || now > armed.until) {
           clearTouchOrderArm();
-          state.trade.touchOrderArm = { side: manualSide, until: now + 1800 };
-          touchOrderArmTimer = window.setTimeout(clearTouchOrderArm, 1800);
+          state.trade.touchOrderArm = { side: manualSide, until: now + 4000 };
+          touchOrderArmTimer = window.setTimeout(clearTouchOrderArm, 4000);
           renderTradeEntryOverlay();
           return;
         }
@@ -5453,13 +5462,6 @@
       window.setTimeout(function () { button.classList.remove("is-pressed"); }, 180);
       action();
     }
-    function chartTradeButtonAt(clientX, clientY) {
-      return chartTradeActions.map((entry) => entry[0]).find(function (button) {
-        if (!button || button.hidden || button.disabled) return false;
-        const rect = button.getBoundingClientRect();
-        return clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom;
-      }) || null;
-    }
     chartTradeActions.forEach(function (entry) {
       const button = entry[0];
       if (!button) return;
@@ -5468,8 +5470,9 @@
       function activate(event) {
         activateChartTradeButton(button, event);
       }
-      // Native button events are primary; coordinate capture below is only a
-      // fallback for Safari when the chart canvas steals the target.
+      // Never infer an order side from screen coordinates. In standalone iOS
+      // Safari the visual and layout viewports can differ, so only the native
+      // button that received the event is allowed to submit an order.
       button.addEventListener("pointerup", function (event) {
         if (event.pointerType === "mouse") return;
         lastTouchActivationAt = Date.now();
@@ -5479,61 +5482,23 @@
         lastTouchActivationAt = Date.now();
         activate(event);
       }, { passive: false });
-      button.addEventListener("click", activate);
+      button.addEventListener("click", function (event) {
+        if (Date.now() - lastTouchActivationAt < 700) {
+          if (event.cancelable) event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
+        activate(event);
+      });
     });
-    // Capture by visible coordinates before Safari can retarget a touch to the
-    // chart canvas or the settings toggle underneath the trade rail.
-    document.addEventListener("pointerdown", function (event) {
-      if (event.pointerType === "mouse" || !state.ui.sidebarCollapsed || currentConfig().mode !== "live") return;
-      const button = chartTradeButtonAt(event.clientX, event.clientY);
-      if (!button) return;
-      pointerStartById.set(event.pointerId, button);
+    elements.chartTradeMoreButton?.addEventListener("click", function (event) {
       if (event.cancelable) event.preventDefault();
       event.stopPropagation();
-    }, true);
-    document.addEventListener("pointerup", function (event) {
-      if (event.pointerType === "mouse") return;
-      const startedOn = pointerStartById.get(event.pointerId);
-      pointerStartById.delete(event.pointerId);
-      const button = chartTradeButtonAt(event.clientX, event.clientY);
-      if (button && button === startedOn) {
-        lastTouchActivationAt = Date.now();
-        activateChartTradeButton(button, event);
-      }
-    }, true);
-    document.addEventListener("pointercancel", function (event) {
-      pointerStartById.delete(event.pointerId);
-    }, true);
-    document.addEventListener("touchstart", function (event) {
-      for (const touch of event.changedTouches || []) {
-        const button = chartTradeButtonAt(Number(touch.clientX), Number(touch.clientY));
-        if (button) touchStartById.set(touch.identifier, button);
-      }
-    }, { capture: true, passive: true });
-    document.addEventListener("touchend", function (event) {
-      for (const touch of event.changedTouches || []) {
-        const startedOn = touchStartById.get(touch.identifier);
-        touchStartById.delete(touch.identifier);
-        const button = chartTradeButtonAt(Number(touch.clientX), Number(touch.clientY));
-        if (button && button === startedOn) {
-          lastTouchActivationAt = Date.now();
-          activateChartTradeButton(button, event);
-        }
-      }
-    }, { capture: true, passive: false });
-    document.addEventListener("touchcancel", function (event) {
-      for (const touch of event.changedTouches || []) touchStartById.delete(touch.identifier);
-    }, true);
-    document.addEventListener("click", function (event) {
-      const button = chartTradeButtonAt(event.clientX, event.clientY);
-      if (!button) return;
-      if (Date.now() - lastTouchActivationAt < 700) {
-        if (event.cancelable) event.preventDefault();
-        event.stopPropagation();
-        return;
-      }
-      activateChartTradeButton(button, event);
-    }, true);
+      if (elements.chartTradeMoreButton.disabled || elements.chartTradeMoreButton.hidden) return;
+      clearTouchOrderArm();
+      const expanded = elements.chartTradeEntry.classList.toggle("is-expanded");
+      elements.chartTradeMoreButton.setAttribute("aria-expanded", String(expanded));
+    });
     if (elements.chartTradeActionButton) {
       elements.chartTradeActionButton.addEventListener("click", function () { handleTradeAction(); });
     }
