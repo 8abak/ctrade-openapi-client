@@ -3985,6 +3985,12 @@ def live_page() -> FileResponse:
     return FileResponse(FRONTEND_DIR / "live.html")
 
 
+@app.get("/phoneView", include_in_schema=False)
+@app.get("/phoneview", include_in_schema=False)
+def phone_view_page() -> FileResponse:
+    return FileResponse(FRONTEND_DIR / "live.html")
+
+
 @app.get("/backbone", include_in_schema=False)
 def backbone_page() -> FileResponse:
     return FileResponse(FRONTEND_DIR / "backbone.html")

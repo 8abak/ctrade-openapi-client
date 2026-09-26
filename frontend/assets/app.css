@@ -1758,3 +1758,225 @@ select {
     text-align: left;
   }
 }
+
+.phone-action-box {
+  display: none;
+}
+
+.page-phone-view {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  overscroll-behavior: none;
+  background: #070b12;
+}
+
+.page-phone-view .live-workspace,
+.page-phone-view .live-workspace.is-sidebar-collapsed {
+  position: fixed;
+  inset: 0;
+  display: block;
+  width: 100vw;
+  height: 100dvh;
+  padding: 0;
+}
+
+.page-phone-view .live-sidebar,
+.page-phone-view .live-sidebar-toggle,
+.page-phone-view .live-sidebar-backdrop,
+.page-phone-view .chart-trade-entry {
+  display: none !important;
+}
+
+.page-phone-view .live-chart-stage,
+.page-phone-view .live-chart-panel,
+.page-phone-view .chart-host {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.page-phone-view .live-chart-panel {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+}
+
+.page-phone-view .chart-host {
+  pointer-events: none;
+  touch-action: none;
+}
+
+.page-phone-view.phone-action-open .chart-host {
+  pointer-events: auto;
+}
+
+.page-phone-view .acd-mini-map {
+  top: max(0.35rem, env(safe-area-inset-top));
+  left: max(0.35rem, env(safe-area-inset-left));
+  width: min(260px, 28vw);
+  height: min(145px, 30vh);
+  border-radius: 8px;
+}
+
+.page-phone-view .acd-mini-map-head {
+  font-size: 0.56rem;
+}
+
+.page-phone-view .chart-price-step {
+  left: max(0.4rem, env(safe-area-inset-left));
+  bottom: max(0.35rem, env(safe-area-inset-bottom));
+}
+
+.page-phone-view .phone-action-box {
+  position: absolute;
+  z-index: 2147483646;
+  left: max(0.4rem, env(safe-area-inset-left));
+  bottom: max(2.25rem, calc(env(safe-area-inset-bottom) + 1.9rem));
+  display: block;
+  pointer-events: auto;
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.phone-action-box[hidden],
+.phone-action-drawer[hidden],
+.phone-action-context[hidden] {
+  display: none !important;
+}
+
+.phone-action-toggle {
+  min-width: 58px;
+  min-height: 34px;
+  padding: 0.3rem 0.48rem;
+  border: 1px solid rgba(185, 244, 127, .65);
+  border-radius: 7px;
+  background: rgba(5, 9, 15, .9);
+  color: #b9f47f;
+  font: 600 .66rem "IBM Plex Mono", ui-monospace, monospace;
+  touch-action: manipulation;
+}
+
+.phone-action-box.is-open .phone-action-toggle {
+  border-color: #6dd8ff;
+  color: #8ee6ff;
+}
+
+.phone-action-drawer {
+  width: min(330px, calc(100vw - 1rem));
+  margin-top: .28rem;
+  padding: .34rem;
+  border: 1px solid rgba(109, 216, 255, .45);
+  border-radius: 9px;
+  background: rgba(5, 9, 15, .96);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, .42);
+}
+
+.phone-action-selector {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  min-height: 42px;
+  overflow: hidden;
+  border: 1px solid rgba(147, 181, 255, .22);
+  border-radius: 7px;
+}
+
+.phone-action-side {
+  display: grid;
+  align-content: center;
+  gap: 1px;
+  padding: .28rem .46rem;
+  user-select: none;
+  touch-action: none;
+}
+
+.phone-action-editor {
+  border-left: 1px solid rgba(147, 181, 255, .22);
+  text-align: right;
+  color: #b9f47f;
+}
+
+.phone-action-caption {
+  color: #708198;
+  font-size: .48rem;
+  letter-spacing: .08em;
+}
+
+.phone-action-side strong {
+  font-size: .7rem;
+}
+
+.phone-action-help,
+.phone-action-message {
+  margin: .24rem .12rem 0;
+  color: #91a1b8;
+  font-size: .54rem;
+}
+
+.phone-action-message {
+  color: #b7c8dc;
+}
+
+.phone-action-context {
+  display: flex;
+  gap: .3rem;
+  margin-top: .32rem;
+}
+
+.phone-action-context input,
+.phone-action-context button {
+  min-width: 0;
+  min-height: 34px;
+  border: 1px solid rgba(147, 181, 255, .24);
+  border-radius: 6px;
+  background: #0b1320;
+  color: #edf4ff;
+  padding: .28rem .42rem;
+  font: .62rem "IBM Plex Mono", ui-monospace, monospace;
+}
+
+.phone-login-context input {
+  width: 34%;
+}
+
+.phone-login-context button,
+.phone-protection-context button {
+  flex: 1;
+  color: #8ee6ff;
+}
+
+.phone-trade-context button {
+  flex: 1;
+  font-weight: 700;
+}
+
+.phone-buy-button {
+  border-color: rgba(126, 240, 199, .62) !important;
+  color: #cffff0 !important;
+}
+
+.phone-sell-button {
+  border-color: rgba(255, 107, 136, .62) !important;
+  color: #ffd1da !important;
+}
+
+.phone-protection-context label {
+  display: flex;
+  align-items: center;
+  gap: .2rem;
+  color: #91a1b8;
+  font-size: .56rem;
+}
+
+.phone-protection-context input {
+  width: 76px;
+}
+
+@media (orientation: portrait) {
+  .page-phone-view .acd-mini-map {
+    width: min(250px, calc(100vw - 1rem));
+    height: 135px;
+  }
+}

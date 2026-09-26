@@ -4,6 +4,8 @@
   }
   window.__datavisLiveInitialized = true;
 
+  const IS_PHONE_VIEW = /^\/phoneview\/?$/i.test(window.location.pathname);
+
   const DEFAULTS = {
     mode: "live",
     run: "run",
@@ -20,7 +22,7 @@
     id: "",
     reviewStart: "",
     reviewSpeed: 1,
-    window: 2000,
+    window: IS_PHONE_VIEW ? 768 : 2000,
   };
   const MAX_WINDOW = 10000;
   const REVIEW_SPEEDS = [0.5, 1, 2, 3, 5];
@@ -81,7 +83,7 @@
     viewportUpdateMeta: null,
     overlayFrame: 0,
     resizeObserver: null,
-    ui: { sidebarCollapsed: true },
+    ui: { sidebarCollapsed: true, phoneScaleMode: "default", phoneActionIndex: 0 },
     acd: null,
     smartBand: { tracker: null },
     acdMap: {
@@ -282,7 +284,27 @@
     acdHud: document.getElementById("acdHud"),
     acdDirection: document.getElementById("acdDirection"),
     acdLevels: document.getElementById("acdLevels"),
+    phoneActionBox: document.getElementById("phoneActionBox"),
+    phoneActionToggle: document.getElementById("phoneActionToggle"),
+    phoneActionDrawer: document.getElementById("phoneActionDrawer"),
+    phoneActionChoice: document.getElementById("phoneActionChoice"),
+    phoneActionEditor: document.getElementById("phoneActionEditor"),
+    phoneActionName: document.getElementById("phoneActionName"),
+    phoneActionValue: document.getElementById("phoneActionValue"),
+    phoneActionHelp: document.getElementById("phoneActionHelp"),
+    phoneLoginForm: document.getElementById("phoneLoginForm"),
+    phoneLoginUsername: document.getElementById("phoneLoginUsername"),
+    phoneLoginPassword: document.getElementById("phoneLoginPassword"),
+    phoneTradeContext: document.getElementById("phoneTradeContext"),
+    phoneBuyButton: document.getElementById("phoneBuyButton"),
+    phoneSellButton: document.getElementById("phoneSellButton"),
+    phoneProtectionContext: document.getElementById("phoneProtectionContext"),
+    phoneStopLoss: document.getElementById("phoneStopLoss"),
+    phoneTakeProfit: document.getElementById("phoneTakeProfit"),
+    phoneApplyProtection: document.getElementById("phoneApplyProtection"),
+    phoneActionMessage: document.getElementById("phoneActionMessage"),
   };
+  if (IS_PHONE_VIEW) document.body.classList.add("page-phone-view");
 
   function sanitizeWindowValue(rawValue) {
     return Math.max(1, Math.min(MAX_WINDOW, Number.parseInt(rawValue || String(DEFAULTS.window), 10) || DEFAULTS.window));
@@ -302,7 +324,7 @@
       showEvents: params.has("showEvents") ? params.get("showEvents") !== "0" : DEFAULTS.showEvents,
       showStructure: params.has("showStructure") ? params.get("showStructure") !== "0" : DEFAULTS.showStructure,
       showRanges: params.has("showRanges") ? params.get("showRanges") !== "0" : DEFAULTS.showRanges,
-      showAcd: params.has("showAcd") ? params.get("showAcd") !== "0" : DEFAULTS.showAcd,
+      showAcd: params.has("showAcd") ? params.get("showAcd") !== "0" : (IS_PHONE_VIEW || DEFAULTS.showAcd),
       showSmartBand: params.has("showSmartBand") ? params.get("showSmartBand") !== "0" : DEFAULTS.showSmartBand,
       acdMapCount: Number(params.get("acdMapAcds")) === 0 ? 0 : DEFAULTS.acdMapCount,
       showBb1m: true,
@@ -2558,7 +2580,7 @@
         showSymbol: false, connectNulls: true, animation: false, silent: true,
         lineStyle: { color: spec[2], width: spec[3], type: spec[4] }, z: 7,
         endLabel: {
-          show: true, formatter: spec[1], color: spec[2], fontSize: 9,
+          show: !IS_PHONE_VIEW, formatter: spec[1], color: spec[2], fontSize: 9,
           backgroundColor: "rgba(5,9,15,.78)", padding: [1, 3], distance: 3,
         },
         labelLayout: { moveOverlap: "shiftY" },
@@ -3083,6 +3105,7 @@
           : prepared.reason)));
     }
     elements.chartTradeEntry.classList.toggle("is-action-feedback", !authenticated || Boolean(state.trade.touchOrderArm) || Boolean(state.trade.chartActionFeedback?.until > Date.now()));
+    renderPhoneActionPanel();
     renderPreparedTradeSummary();
     renderBrokerSummary();
     renderSmartPanel();
@@ -3262,7 +3285,7 @@
       state.chart = echarts.init(elements.chartHost, null, { renderer: "canvas" });
       state.chart.setOption({
         animation: false,
-        grid: { left: 54, right: 82, top: 14, bottom: 28 },
+        grid: { left: IS_PHONE_VIEW ? 42 : 54, right: IS_PHONE_VIEW ? 104 : 82, top: 14, bottom: 28 },
         tooltip: {
           trigger: "axis",
           axisPointer: { type: "cross" },
@@ -3502,7 +3525,7 @@
       lineStyle: {color, width, opacity, type},
       data: part.filter((_, index) => index % stride === 0 || index === part.length - 1)
         .map((point) => [point.tickId, point[key]]),
-      endLabel: segment === lastSegment ? {
+      endLabel: segment === lastSegment && !IS_PHONE_VIEW ? {
         show: true, formatter: label, color, fontSize: 9,
         backgroundColor: "rgba(5,9,15,.78)", padding: [1, 2], distance: 2,
       } : {show: false},
@@ -3598,7 +3621,7 @@
           symbol: ["none", "none"],
           precision: 2,
           label: {
-            show: true,
+            show: !IS_PHONE_VIEW,
             position: "insideEndTop",
             color: "#e7f5ff",
             backgroundColor: "rgba(5,9,15,0.88)",
@@ -3770,6 +3793,28 @@
         pushYAxisItem(overlayItems, charting.pointItem(overlay.exitTickId, overlay.trade.exitPrice));
       }
     }
+    if (IS_PHONE_VIEW && state.ui.phoneScaleMode === "resize") {
+      visibleSmartBandPoints().forEach((point) => {
+        ["outerLower", "innerLower", "center", "innerUpper", "outerUpper"].forEach((key) => {
+          pushYAxisItem(overlayItems, charting.pointItem(point.tickId, point[key]));
+        });
+      });
+      [state.bollinger.oneMinute, state.bollinger.fiveMinute].forEach((points) => {
+        points.forEach((point) => ["lower", "middle", "upper"].forEach((key) => {
+          pushYAxisItem(overlayItems, charting.pointItem(point.tickId, point[key]));
+        }));
+      });
+      state.vwap.points.forEach((point) => {
+        ["lower3", "lower2", "lower1", "vwap", "upper1", "upper2", "upper3"].forEach((key) => {
+          pushYAxisItem(overlayItems, charting.pointItem(point.tickId, point[key]));
+        });
+      });
+      if (config.showAcd && state.acd?.available) {
+        Object.values(state.acd.levels || {}).forEach((price) => {
+          pushYAxisItem(overlayItems, charting.pointItem(Number(state.rangeLastId), Number(price)));
+        });
+      }
+    }
     const activeRegressionChannel = state.studyDrawing.model || smartPayload()?.drawing || smartPayload()?.channel;
     const regressionChannels = state.studyDrawing.saved.concat(activeRegressionChannel ? [activeRegressionChannel] : []);
     regressionChannels.forEach((regressionChannel) => {
@@ -3793,7 +3838,7 @@
       visibleRange: options?.visibleRange || null,
       coreItems: sources.coreItems,
       overlayItems: sources.overlayItems,
-      includeOverlays: false,
+      includeOverlays: IS_PHONE_VIEW && state.ui.phoneScaleMode === "resize",
       ...Y_AXIS_STYLE,
     });
     if (elements.priceLineDistance) {
@@ -3822,6 +3867,17 @@
       xAxis: {
         min: Number.isFinite(dataMin) ? dataMin - sideGap : null,
         max: Number.isFinite(dataMax) ? dataMax + sideGap : null,
+        axisLabel: IS_PHONE_VIEW ? {
+          color: "#9eadc5",
+          fontSize: 9,
+          hideOverlap: true,
+          formatter: function (tickId) {
+            const row = nearestRowForTickValue(tickId);
+            const timestamp = Number(row?.timestampMs || new Date(row?.timestamp || 0).getTime());
+            if (!Number.isFinite(timestamp) || timestamp <= 0) return "";
+            return new Date(timestamp).toLocaleTimeString("en-AU", { timeZone: "Australia/Sydney", hour: "2-digit", minute: "2-digit", hour12: false });
+          },
+        } : { color: "#9eadc5" },
       },
       yAxis: yBounds({ visibleRange }),
       dataZoom: [],
@@ -4497,6 +4553,62 @@
     return state.studyDrawing.saved.concat(active ? [active] : []).flatMap(buildSingleRegressionChannelGraphics);
   }
 
+  function buildPhoneIndicatorLabelGraphics() {
+    if (!IS_PHONE_VIEW || !state.chart || !state.rows.length) return [];
+    const grid = state.chart.getModel()?.getComponent("grid", 0);
+    const rect = grid?.coordinateSystem?.getRect?.();
+    if (!rect) return [];
+    const lastTick = Number(state.rows[state.rows.length - 1].id);
+    const labels = [];
+    function add(label, price, color) {
+      const numeric = Number(price);
+      if (!Number.isFinite(numeric)) return;
+      const point = state.chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [lastTick, numeric]);
+      if (!Array.isArray(point) || !Number.isFinite(Number(point[1]))) return;
+      if (point[1] < rect.y - 2 || point[1] > rect.y + rect.height + 2) return;
+      labels.push({ label, price: numeric, actualY: Number(point[1]), y: Number(point[1]), color });
+    }
+    const last = (points) => Array.isArray(points) && points.length ? points[points.length - 1] : null;
+    const bb1 = last(state.bollinger.oneMinute);
+    const bb5 = last(state.bollinger.fiveMinute);
+    [[bb1, "BB1", "#c08cff"], [bb5, "BB5", "#ffd166"]].forEach(([point, prefix, color]) => {
+      if (!point) return;
+      add(prefix + " U", point.upper, color); add(prefix + " M", point.middle, color); add(prefix + " L", point.lower, color);
+    });
+    const smart = last(visibleSmartBandPoints());
+    if (smart) {
+      add("S +2", smart.outerUpper, "#5bb7c8"); add("S +1", smart.innerUpper, "#74c5d4");
+      add("S MID", smart.center, "#e8f8e6"); add("S −1", smart.innerLower, "#74c5d4"); add("S −2", smart.outerLower, "#5bb7c8");
+    }
+    const vwap = last(state.vwap.points);
+    if (vwap) {
+      add("V +3", vwap.upper3, "#b57ce8"); add("V +2", vwap.upper2, "#b57ce8"); add("V +1", vwap.upper1, "#b57ce8");
+      add("VWAP", vwap.vwap, "#7ee7ff"); add("V −1", vwap.lower1, "#b57ce8"); add("V −2", vwap.lower2, "#b57ce8"); add("V −3", vwap.lower3, "#b57ce8");
+    }
+    if (currentConfig().showAcd && state.acd?.available) {
+      const levels = state.acd.levels || {};
+      add("C+", levels.cUp, "#ffc857"); add("A+", levels.aUp, "#6dd8ff"); add("OR+", levels.openingHigh, "#93a4bd");
+      add("OR−", levels.openingLow, "#93a4bd"); add("A−", levels.aDown, "#6dd8ff"); add("C−", levels.cDown, "#ffc857");
+    }
+    labels.sort((a, b) => a.actualY - b.actualY);
+    const gap = 12;
+    const minY = rect.y + 6;
+    const maxY = rect.y + rect.height - 6;
+    labels.forEach((item, index) => { item.y = Math.max(item.actualY, index ? labels[index - 1].y + gap : minY); });
+    for (let index = labels.length - 1; index >= 0; index -= 1) {
+      const ceiling = index === labels.length - 1 ? maxY : labels[index + 1].y - gap;
+      labels[index].y = Math.min(labels[index].y, ceiling);
+    }
+    return labels.flatMap((item) => [{
+      type: "polyline", silent: true,
+      shape: { points: [[rect.x + rect.width - 8, item.actualY], [rect.x + rect.width + 2, item.y], [rect.x + rect.width + 7, item.y]] },
+      style: { stroke: item.color, lineWidth: .7, opacity: .78 },
+    }, {
+      type: "text", silent: true,
+      style: { text: item.label, x: rect.x + rect.width + 10, y: item.y, textVerticalAlign: "middle", fill: item.color, font: "8px 'IBM Plex Mono'", backgroundColor: "rgba(5,9,15,.76)", padding: [1, 2] },
+    }]);
+  }
+
   function renderOverlay() {
     if (!state.chart) {
       return;
@@ -4526,6 +4638,12 @@
         silent: false,
         z: 15,
         children: buildTradeProtectionGraphics(),
+      }, {
+        id: "phone-indicator-labels",
+        type: "group",
+        silent: true,
+        z: 30,
+        children: buildPhoneIndicatorLabelGraphics(),
       }],
     }, { replaceMerge: ["graphic"], lazyUpdate: true });
   }
@@ -5314,6 +5432,136 @@
     } finally {
       setTradeBusy(false);
     }
+  }
+
+  const PHONE_ACTION_OPTIONS = ["size", "scale", "action"];
+
+  function renderPhoneActionPanel() {
+    if (!elements.phoneActionBox) return;
+    elements.phoneActionBox.hidden = !IS_PHONE_VIEW;
+    if (!IS_PHONE_VIEW) return;
+    elements.chartTradeEntry.hidden = true;
+    const option = PHONE_ACTION_OPTIONS[state.ui.phoneActionIndex] || "size";
+    const position = activeTradePosition();
+    elements.phoneActionName.textContent = option.toUpperCase();
+    elements.phoneActionValue.textContent = option === "size"
+      ? String(currentConfig().window)
+      : option === "scale" ? state.ui.phoneScaleMode.toUpperCase()
+      : state.trade.authenticated ? "SIGNED IN" : "NOT SIGNED IN";
+    const actionSelected = option === "action";
+    elements.phoneLoginForm.hidden = !actionSelected || state.trade.authenticated;
+    elements.phoneTradeContext.hidden = !actionSelected || !state.trade.authenticated;
+    elements.phoneProtectionContext.hidden = !actionSelected || !state.trade.authenticated || !position;
+    if (position && document.activeElement !== elements.phoneStopLoss && document.activeElement !== elements.phoneTakeProfit) {
+      elements.phoneStopLoss.value = position.stopLoss == null ? "" : Number(position.stopLoss).toFixed(2);
+      elements.phoneTakeProfit.value = position.takeProfit == null ? "" : Number(position.takeProfit).toFixed(2);
+    }
+    const feedback = state.trade.chartActionFeedback?.until > Date.now() ? state.trade.chartActionFeedback.message : "";
+    elements.phoneActionMessage.textContent = feedback || (option === "size"
+      ? "Swipe the right half: up +128, down −128 ticks"
+      : option === "scale" ? "Swipe the right half to switch DEFAULT / RESIZE"
+      : state.trade.authenticated ? (position ? "Trade or update SL / TP" : "Two taps confirm a market order") : "Sign in to trade");
+  }
+
+  function adjustPhoneAction(direction) {
+    const option = PHONE_ACTION_OPTIONS[state.ui.phoneActionIndex] || "size";
+    if (option === "size") {
+      const next = sanitizeWindowValue(currentConfig().window + (direction > 0 ? 128 : -128));
+      elements.windowSize.value = String(next);
+      writeQuery();
+      loadAll(true).catch((error) => status(error.message || "Window refresh failed.", true));
+    } else if (option === "scale") {
+      state.ui.phoneScaleMode = state.ui.phoneScaleMode === "default" ? "resize" : "default";
+      renderChart({ shiftWithRun: false });
+    }
+    renderPhoneActionPanel();
+  }
+
+  function armPhoneMarketOrder(side) {
+    const now = Date.now();
+    const armed = state.trade.touchOrderArm;
+    if (!armed || armed.side !== side || now > armed.until) {
+      state.trade.touchOrderArm = { side, until: now + 4000 };
+      elements.phoneBuyButton.textContent = side === "buy" ? "BUY?" : "BUY";
+      elements.phoneSellButton.textContent = side === "sell" ? "SELL?" : "SELL";
+      window.setTimeout(function () {
+        if (state.trade.touchOrderArm?.until <= Date.now()) {
+          state.trade.touchOrderArm = null;
+          elements.phoneBuyButton.textContent = "BUY";
+          elements.phoneSellButton.textContent = "SELL";
+          renderPhoneActionPanel();
+        }
+      }, 4050);
+      renderPhoneActionPanel();
+      return;
+    }
+    state.trade.touchOrderArm = null;
+    elements.phoneBuyButton.textContent = "BUY";
+    elements.phoneSellButton.textContent = "SELL";
+    submitMarketOrder(side);
+  }
+
+  function setupPhoneViewControls() {
+    if (!IS_PHONE_VIEW || !elements.phoneActionBox) return;
+    elements.phoneActionBox.hidden = false;
+    elements.sidebarToggle.hidden = true;
+    elements.chartTradeEntry.hidden = true;
+    elements.phoneActionToggle.addEventListener("click", function () {
+      const opening = elements.phoneActionDrawer.hidden;
+      elements.phoneActionDrawer.hidden = !opening;
+      elements.phoneActionToggle.setAttribute("aria-expanded", String(opening));
+      elements.phoneActionBox.classList.toggle("is-open", opening);
+      document.body.classList.toggle("phone-action-open", opening);
+      renderPhoneActionPanel();
+    });
+    function bindVerticalSwipe(element, handler) {
+      let startY = null;
+      element.addEventListener("pointerdown", function (event) {
+        startY = Number(event.clientY);
+        element.setPointerCapture?.(event.pointerId);
+        event.preventDefault();
+      });
+      element.addEventListener("pointerup", function (event) {
+        if (startY == null) return;
+        const delta = startY - Number(event.clientY);
+        startY = null;
+        if (Math.abs(delta) >= 18) handler(delta > 0 ? 1 : -1);
+        else handler(0);
+        event.preventDefault();
+        event.stopPropagation();
+      });
+      element.addEventListener("pointercancel", function () { startY = null; });
+    }
+    bindVerticalSwipe(elements.phoneActionChoice, function (direction) {
+      if (!direction) return;
+      state.ui.phoneActionIndex = (state.ui.phoneActionIndex + (direction > 0 ? 1 : -1) + PHONE_ACTION_OPTIONS.length) % PHONE_ACTION_OPTIONS.length;
+      renderPhoneActionPanel();
+    });
+    bindVerticalSwipe(elements.phoneActionEditor, function (direction) {
+      if (!direction) return;
+      adjustPhoneAction(direction);
+    });
+    elements.phoneLoginForm.addEventListener("submit", function (event) {
+      event.preventDefault();
+      elements.tradeUsername.value = elements.phoneLoginUsername.value;
+      elements.tradePassword.value = elements.phoneLoginPassword.value;
+      requestTradeLogin();
+    });
+    elements.phoneBuyButton.addEventListener("click", function () { armPhoneMarketOrder("buy"); });
+    elements.phoneSellButton.addEventListener("click", function () { armPhoneMarketOrder("sell"); });
+    elements.phoneApplyProtection.addEventListener("click", function () {
+      const position = activeTradePosition();
+      if (!position) return;
+      const parse = (input) => input.value.trim() === "" ? null : Number(input.value);
+      const stopLoss = parse(elements.phoneStopLoss);
+      const takeProfit = parse(elements.phoneTakeProfit);
+      if ((stopLoss != null && (!Number.isFinite(stopLoss) || stopLoss <= 0)) || (takeProfit != null && (!Number.isFinite(takeProfit) || takeProfit <= 0))) {
+        chartTradeFeedback("SL and TP must be positive prices.", true);
+        return;
+      }
+      submitAmendPosition(position.positionId, stopLoss, takeProfit).catch(function () {});
+    });
+    renderPhoneActionPanel();
   }
 
   function requestProtectionDrag(positionId, targetPrice, originKey) {
@@ -6121,6 +6369,7 @@
   applyInitialConfig(parseQuery());
   setupPaperPanel();
   setupTradePanel();
+  setupPhoneViewControls();
   loadAcd();
   loadAll(true);
 }());

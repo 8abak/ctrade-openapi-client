@@ -11,7 +11,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/assets/app.css?v=20260921-compact-trade-dock3">
+  <link rel="stylesheet" href="/assets/app.css?v=20260926-phone-view1">
 </head>
 <body class="page-live">
   <div class="live-workspace is-sidebar-collapsed" id="liveWorkspace">
@@ -44,6 +44,7 @@
         <header class="live-sidebar-header">
           <nav class="app-nav" aria-label="Primary">
             <a class="app-nav-link app-nav-link-active" href="/live">Li</a>
+            <a class="app-nav-link" href="/phoneView">Ph</a>
             <a class="app-nav-link" href="/backbone">Ba</a>
             <a class="app-nav-link" href="/bigPic">Bi</a>
             <a class="app-nav-link" href="/sql">Sq</a>
@@ -458,6 +459,35 @@
           <div class="chart-trade-smart-status" id="chartTradeSmartStatus"></div>
           <div class="chart-trade-hint" id="chartTradeHint">Login required</div>
         </div>
+        <section class="phone-action-box" id="phoneActionBox" hidden aria-label="Phone chart controls">
+          <button class="phone-action-toggle" id="phoneActionToggle" type="button" aria-expanded="false">ACTION</button>
+          <div class="phone-action-drawer" id="phoneActionDrawer" hidden>
+            <div class="phone-action-selector" id="phoneActionSelector">
+              <div class="phone-action-side phone-action-choice" id="phoneActionChoice" aria-label="Swipe vertically to choose an option">
+                <span class="phone-action-caption">OPTION</span><strong id="phoneActionName">SIZE</strong>
+              </div>
+              <div class="phone-action-side phone-action-editor" id="phoneActionEditor" aria-label="Swipe vertically to edit this option">
+                <span class="phone-action-caption">VALUE</span><strong id="phoneActionValue">768</strong>
+              </div>
+            </div>
+            <p class="phone-action-help" id="phoneActionHelp">Left: choose · Right: edit</p>
+            <form class="phone-action-context phone-login-context" id="phoneLoginForm" hidden>
+              <input id="phoneLoginUsername" type="text" autocomplete="username" placeholder="Username" aria-label="Trading username">
+              <input id="phoneLoginPassword" type="password" autocomplete="current-password" placeholder="Password" aria-label="Trading password">
+              <button type="submit">SIGN IN</button>
+            </form>
+            <div class="phone-action-context phone-trade-context" id="phoneTradeContext" hidden>
+              <button class="phone-buy-button" id="phoneBuyButton" type="button">BUY</button>
+              <button class="phone-sell-button" id="phoneSellButton" type="button">SELL</button>
+            </div>
+            <div class="phone-action-context phone-protection-context" id="phoneProtectionContext" hidden>
+              <label>SL <input id="phoneStopLoss" inputmode="decimal" placeholder="none"></label>
+              <label>TP <input id="phoneTakeProfit" inputmode="decimal" placeholder="none"></label>
+              <button id="phoneApplyProtection" type="button">APPLY</button>
+            </div>
+            <div class="phone-action-message" id="phoneActionMessage" aria-live="polite"></div>
+          </div>
+        </section>
       </div>
     </section>
   </div>
@@ -465,6 +495,6 @@
   <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
   <script src="/assets/charting.js?v=20260814-acd2"></script>
   <script src="/assets/smart-band.js?v=20260921-causal-v1"></script>
-  <script src="/assets/live.js?v=20260921-compact-trade-dock3"></script>
+  <script src="/assets/live.js?v=20260926-phone-view1"></script>
 </body>
 </html>
