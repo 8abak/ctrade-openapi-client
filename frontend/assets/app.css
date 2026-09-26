@@ -1919,6 +1919,14 @@ select {
   color: #b7c8dc;
 }
 
+.phone-action-message.error {
+  color: #ff9fb2;
+}
+
+.phone-action-message.success {
+  color: #9ff5cf;
+}
+
 .phone-action-context {
   display: flex;
   gap: .3rem;

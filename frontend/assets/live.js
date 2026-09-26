@@ -295,6 +295,7 @@
     phoneLoginForm: document.getElementById("phoneLoginForm"),
     phoneLoginUsername: document.getElementById("phoneLoginUsername"),
     phoneLoginPassword: document.getElementById("phoneLoginPassword"),
+    phoneLoginButton: document.getElementById("phoneLoginButton"),
     phoneTradeContext: document.getElementById("phoneTradeContext"),
     phoneBuyButton: document.getElementById("phoneBuyButton"),
     phoneSellButton: document.getElementById("phoneSellButton"),
@@ -326,7 +327,7 @@
       showRanges: params.has("showRanges") ? params.get("showRanges") !== "0" : DEFAULTS.showRanges,
       showAcd: params.has("showAcd") ? params.get("showAcd") !== "0" : (IS_PHONE_VIEW || DEFAULTS.showAcd),
       showSmartBand: params.has("showSmartBand") ? params.get("showSmartBand") !== "0" : DEFAULTS.showSmartBand,
-      acdMapCount: Number(params.get("acdMapAcds")) === 0 ? 0 : DEFAULTS.acdMapCount,
+      acdMapCount: IS_PHONE_VIEW ? 2 : (Number(params.get("acdMapAcds")) === 0 ? 0 : DEFAULTS.acdMapCount),
       showBb1m: true,
       showBb5m: true,
       showVwap: true,
@@ -347,7 +348,7 @@
       showRanges: elements.showRanges.checked,
       showAcd: elements.showAcd.checked,
       showSmartBand: elements.showSmartBand.checked,
-      acdMapCount: Number(elements.acdMapCount?.value || 0) === 0 ? 0 : 2,
+      acdMapCount: IS_PHONE_VIEW ? 2 : (Number(elements.acdMapCount?.value || 0) === 0 ? 0 : 2),
       showBb1m: true,
       showBb5m: true,
       showVwap: true,
@@ -1551,6 +1552,12 @@
     elements.tradeStatusLine.textContent = message;
     elements.tradeStatusLine.classList.toggle("error", Boolean(isError));
     elements.tradeStatusLine.classList.toggle("success", Boolean(!isError));
+    if (IS_PHONE_VIEW && elements.phoneActionMessage) {
+      state.trade.phoneMessage = { message: String(message || ""), isError: Boolean(isError) };
+      elements.phoneActionMessage.textContent = message;
+      elements.phoneActionMessage.classList.toggle("error", Boolean(isError));
+      elements.phoneActionMessage.classList.toggle("success", Boolean(!isError));
+    }
   }
 
   function tradePayloadDetail(payload) {
@@ -3286,7 +3293,11 @@
       state.chart.setOption({
         animation: false,
         grid: { left: IS_PHONE_VIEW ? 42 : 54, right: IS_PHONE_VIEW ? 104 : 82, top: 14, bottom: 28 },
-        tooltip: {
+        tooltip: IS_PHONE_VIEW ? {
+          show: false,
+          trigger: "none",
+          axisPointer: { show: false, type: "none" },
+        } : {
           trigger: "axis",
           axisPointer: { type: "cross" },
           formatter: tooltipHtml,
@@ -3863,6 +3874,11 @@
     const visibleRange = Number.isFinite(dataMin) && Number.isFinite(dataMax) ? { min: dataMin, max: dataMax } : null;
     state.rightEdgeAnchored = true;
     chart.setOption({
+      tooltip: IS_PHONE_VIEW ? {
+        show: false,
+        trigger: "none",
+        axisPointer: { show: false, type: "none" },
+      } : undefined,
       series: buildSeries(config),
       xAxis: {
         min: Number.isFinite(dataMin) ? dataMin - sideGap : null,
@@ -5186,28 +5202,30 @@
     return state.trade.refreshPromise;
   }
 
-  async function requestTradeLogin() {
+  async function requestTradeLogin(credentials) {
     if (state.trade.loginBusy || state.trade.actionBusy) {
-      return;
+      return false;
     }
     if (!state.trade.authConfigured) {
       tradeStatus("Trade login is not configured on the server.", true);
-      return;
+      return false;
     }
-    const username = (elements.tradeUsername.value || "").trim();
-    const password = elements.tradePassword.value || "";
+    const username = String(credentials?.username ?? elements.tradeUsername.value ?? "").trim();
+    const password = String(credentials?.password ?? elements.tradePassword.value ?? "");
     if (!username || !password) {
       tradeStatus("Username and password are required.", true);
-      return;
+      return false;
     }
     state.trade.loginBusy = true;
     setTradeBusy(true);
+    tradeStatus("Signing in…", false);
     try {
       const payload = await tradeFetchJson("/api/trade/login", {
         method: "POST",
         body: JSON.stringify({ username, password }),
       });
       elements.tradePassword.value = "";
+      if (elements.phoneLoginPassword) elements.phoneLoginPassword.value = "";
       applyTradeSessionPayload({
         authenticated: true,
         username: payload.username || username,
@@ -5224,6 +5242,7 @@
       await syncTradeCloseConfiguration({ silent: true }).catch((error) => {
         tradeStatus(error.message || "Trade configuration sync failed.", true);
       });
+      return true;
     } catch (error) {
       if (error?.code === "TRADE_AUTH_NOT_CONFIGURED") {
         applyTradeSessionPayload({
@@ -5238,9 +5257,11 @@
         renderTradeLists();
       }
       tradeStatus(error.message || "Trade login failed.", true);
+      return false;
     } finally {
       state.trade.loginBusy = false;
       setTradeBusy(false);
+      renderPhoneActionPanel();
     }
   }
 
@@ -5457,10 +5478,13 @@
       elements.phoneTakeProfit.value = position.takeProfit == null ? "" : Number(position.takeProfit).toFixed(2);
     }
     const feedback = state.trade.chartActionFeedback?.until > Date.now() ? state.trade.chartActionFeedback.message : "";
-    elements.phoneActionMessage.textContent = feedback || (option === "size"
+    const phoneMessage = state.trade.phoneMessage?.message || "";
+    elements.phoneActionMessage.textContent = feedback || phoneMessage || (option === "size"
       ? "Swipe the right half: up +128, down −128 ticks"
       : option === "scale" ? "Swipe the right half to switch DEFAULT / RESIZE"
       : state.trade.authenticated ? (position ? "Trade or update SL / TP" : "Two taps confirm a market order") : "Sign in to trade");
+    elements.phoneActionMessage.classList.toggle("error", Boolean(!feedback && phoneMessage && state.trade.phoneMessage?.isError));
+    elements.phoneActionMessage.classList.toggle("success", Boolean(!feedback && phoneMessage && !state.trade.phoneMessage?.isError));
   }
 
   function adjustPhoneAction(direction) {
@@ -5541,12 +5565,17 @@
       if (!direction) return;
       adjustPhoneAction(direction);
     });
-    elements.phoneLoginForm.addEventListener("submit", function (event) {
+    async function submitPhoneLogin(event) {
       event.preventDefault();
-      elements.tradeUsername.value = elements.phoneLoginUsername.value;
-      elements.tradePassword.value = elements.phoneLoginPassword.value;
-      requestTradeLogin();
-    });
+      event.stopPropagation();
+      state.trade.phoneMessage = null;
+      await requestTradeLogin({
+        username: elements.phoneLoginUsername.value,
+        password: elements.phoneLoginPassword.value,
+      });
+    }
+    elements.phoneLoginForm.addEventListener("submit", submitPhoneLogin);
+    elements.phoneLoginButton.addEventListener("click", submitPhoneLogin);
     elements.phoneBuyButton.addEventListener("click", function () { armPhoneMarketOrder("buy"); });
     elements.phoneSellButton.addEventListener("click", function () { armPhoneMarketOrder("sell"); });
     elements.phoneApplyProtection.addEventListener("click", function () {
