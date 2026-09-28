@@ -3985,6 +3985,11 @@ def live_page() -> FileResponse:
     return FileResponse(FRONTEND_DIR / "live.html")
 
 
+@app.get("/structure-watch", include_in_schema=False)
+def structure_watch_page() -> FileResponse:
+    return FileResponse(FRONTEND_DIR / "structure-watch.html")
+
+
 @app.get("/phoneView", include_in_schema=False)
 @app.get("/phoneview", include_in_schema=False)
 def phone_view_page() -> FileResponse:
@@ -4032,6 +4037,35 @@ def api_health() -> Dict[str, Any]:
         "lastTimestamp": serialize_value(row.get("last_timestamp")),
         "lastTimestampMs": dt_to_ms(row.get("last_timestamp")),
         "serverTimeMs": now_ms(),
+    }
+
+
+@app.get("/api/structure-watch")
+def structure_watch_snapshot() -> Dict[str, Any]:
+    """Read the watcher output without joining the live chart's tick hot path."""
+    state_path = Path(os.getenv("DATAVIS_STRUCTURE_WATCH_STATE", str(BASE_DIR / "logs" / "structure_watch.json")))
+    try:
+        snapshot = json.loads(state_path.read_text(encoding="utf-8"))
+        from collections import deque
+        events_path = state_path.with_suffix(".jsonl")
+        events = []
+        if events_path.exists():
+            with events_path.open(encoding="utf-8") as source:
+                events = [json.loads(line) for line in deque(source, maxlen=20) if line.strip()]
+    except (OSError, ValueError, TypeError):
+        return {"status": "offline", "events": []}
+    timestamp = snapshot.get("lastTickTime")
+    try:
+        lag = (datetime.now(timezone.utc) - datetime.fromisoformat(timestamp)).total_seconds()
+    except (ValueError, TypeError):
+        lag = float("inf")
+    return {
+        "status": "live" if lag < 30 else "stale",
+        "lagSeconds": round(lag, 1) if math.isfinite(lag) else None,
+        "symbol": snapshot.get("symbol"),
+        "lastTickId": snapshot.get("lastTickId"),
+        "pending": snapshot.get("pending"),
+        "events": events[::-1],
     }
 
 
@@ -4718,4 +4752,3 @@ def backbone_stream(
             "X-Accel-Buffering": "no",
         },
     )
-
