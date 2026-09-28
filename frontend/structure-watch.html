@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>XAU Structure Watch</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; background: #09121b; color: #e9f1f7; }
+    body { max-width: 920px; margin: 0 auto; padding: 24px; }
+    a { color: #79c6ff; } h1 { margin-bottom: 4px; }
+    .muted { color: #9aafc0; } .badge { padding: 4px 10px; border-radius: 12px; background: #273b4a; }
+    .live { background: #215c4e; } .stale, .offline { background: #744539; }
+    article { background: #11202d; border: 1px solid #31485a; border-radius: 12px; padding: 16px; margin: 14px 0; }
+    .down { border-left: 4px solid #ee876e; } .up { border-left: 4px solid #7adab2; }
+    strong { font-size: 1.2rem; } small { color: #9aafc0; }
+  </style>
+</head>
+<body>
+  <nav><a href="/live">Live chart</a> · <a href="/">Home</a></nav>
+  <h1>XAU Structure Watch</h1>
+  <p class="muted">Observed tick events. Confirmation means a range break held, the boundary was retested, and price rejected it. It is not a trade instruction.</p>
+  <p><span id="status" class="badge">Loading</span> <span id="lag" class="muted"></span></p>
+  <div id="events"></div>
+  <script>
+    const status = document.getElementById('status');
+    const lag = document.getElementById('lag');
+    const events = document.getElementById('events');
+    function node(tag, value) { const el = document.createElement(tag); el.textContent = value; return el; }
+    async function refresh() {
+      try {
+        const response = await fetch('/api/structure-watch', {cache: 'no-store'});
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        const data = await response.json();
+        status.textContent = data.status;
+        status.className = 'badge ' + data.status;
+        lag.textContent = data.lagSeconds == null ? '' : 'Last tick ' + data.lagSeconds + ' seconds ago';
+        events.replaceChildren();
+        for (const event of data.events || []) {
+          const card = node('article', ''); card.className = event.direction;
+          card.append(node('strong', event.direction.toUpperCase() + ' break and retest'));
+          card.append(node('p', 'Range ' + event.rangeLow + '–' + event.rangeHigh + ' · boundary ' + event.boundary + ' · observed ' + event.price));
+          card.append(node('p', 'Invalidation reference ' + event.invalidation + ' · spread ' + event.spread));
+          card.append(node('small', event.timestamp + ' · tick ' + event.tickId + ' · analysis pending'));
+          events.append(card);
+        }
+        if (!data.events?.length) events.append(node('p', 'No confirmed events recorded yet.'));
+      } catch (error) {
+        status.textContent = 'offline'; status.className = 'badge offline'; lag.textContent = error.message;
+      }
+    }
+    refresh(); setInterval(refresh, 5000);
+  </script>
+</body>
+</html>
