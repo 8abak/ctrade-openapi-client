@@ -1,0 +1,17 @@
+{
+  "matches": true,
+  "baseline_trades": 5,
+  "baseline_equity": 454.619999999997,
+  "baseline_net": -45.38000000000302,
+  "compared_fields": [
+    "date",
+    "side",
+    "entry_timestamp",
+    "entry_price",
+    "exit_timestamp",
+    "exit_price",
+    "exit_reason",
+    "net_pnl"
+  ],
+  "note": "Baseline decisions replayed on identical ticks until its permanent latch; flat latched financial state then frozen"
+}
