@@ -1,0 +1,2 @@
+# Preserve byte-level deployed-source hashes on Windows research checkouts.
+*.py text eol=lf

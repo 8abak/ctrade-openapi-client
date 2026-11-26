@@ -1,0 +1,601 @@
+[
+  {
+    "trade_id": 1,
+    "date": "2026-08-31",
+    "side": "down",
+    "entry_timestamp": "2026-08-31T23:55:55.278000+10:00",
+    "entry_price": 4423.089999999999,
+    "entry_executable_quote": 4423.19,
+    "lots": 0.01,
+    "units": 1.0,
+    "upper": 4448.485000000001,
+    "lower": 4431.295,
+    "opposite_exit": 4448.735000000001,
+    "yesterday_bias": "down",
+    "today_direction": "down",
+    "decision_timestamp": "2026-08-31T23:55:55.278000+10:00",
+    "mae_quote": 0.7800000000006548,
+    "mfe_quote": 7.109999999999673,
+    "returned_inside_acd": false,
+    "recovered_after_retracement": false,
+    "opposite_boundary_broken": false,
+    "buffered_opposite_broken": false,
+    "opposite_first_break": null,
+    "trailing_movements": [
+      {
+        "trade_id": 1,
+        "timestamp": "2026-08-31T23:59:03.338000+10:00",
+        "previous": null,
+        "level": 4425.6525
+      },
+      {
+        "trade_id": 1,
+        "timestamp": "2026-08-31T23:59:03.561000+10:00",
+        "previous": 4425.6525,
+        "level": 4425.6475
+      },
+      {
+        "trade_id": 1,
+        "timestamp": "2026-08-31T23:59:04+10:00",
+        "previous": 4425.6475,
+        "level": 4425.6224999999995
+      },
+      {
+        "trade_id": 1,
+        "timestamp": "2026-08-31T23:59:05.591000+10:00",
+        "previous": 4425.6224999999995,
+        "level": 4425.5825
+      },
+      {
+        "trade_id": 1,
+        "timestamp": "2026-08-31T23:59:10.100000+10:00",
+        "previous": 4425.5825,
+        "level": 4425.452499999999
+      },
+      {
+        "trade_id": 1,
+        "timestamp": "2026-08-31T23:59:11.604000+10:00",
+        "previous": 4425.452499999999,
+        "level": 4424.9425
+      },
+      {
+        "trade_id": 1,
+        "timestamp": "2026-08-31T23:59:13.652000+10:00",
+        "previous": 4424.9425,
+        "level": 4424.9325
+      },
+      {
+        "trade_id": 1,
+        "timestamp": "2026-08-31T23:59:14.342000+10:00",
+        "previous": 4424.9325,
+        "level": 4424.922500000001
+      },
+      {
+        "trade_id": 1,
+        "timestamp": "2026-08-31T23:59:14.579000+10:00",
+        "previous": 4424.922500000001,
+        "level": 4424.7725
+      },
+      {
+        "trade_id": 1,
+        "timestamp": "2026-08-31T23:59:14.803000+10:00",
+        "previous": 4424.7725,
+        "level": 4424.7474999999995
+      },
+      {
+        "trade_id": 1,
+        "timestamp": "2026-08-31T23:59:16.161000+10:00",
+        "previous": 4424.7474999999995,
+        "level": 4424.6975
+      },
+      {
+        "trade_id": 1,
+        "timestamp": "2026-08-31T23:59:16.380000+10:00",
+        "previous": 4424.6975,
+        "level": 4424.592500000001
+      },
+      {
+        "trade_id": 1,
+        "timestamp": "2026-08-31T23:59:16.833000+10:00",
+        "previous": 4424.592500000001,
+        "level": 4424.5125
+      },
+      {
+        "trade_id": 1,
+        "timestamp": "2026-08-31T23:59:19.994000+10:00",
+        "previous": 4424.5125,
+        "level": 4424.2625
+      },
+      {
+        "trade_id": 1,
+        "timestamp": "2026-08-31T23:59:27.887000+10:00",
+        "previous": 4424.2625,
+        "level": 4424.2525000000005
+      },
+      {
+        "trade_id": 1,
+        "timestamp": "2026-08-31T23:59:28.121000+10:00",
+        "previous": 4424.2525000000005,
+        "level": 4424.1175
+      },
+      {
+        "trade_id": 1,
+        "timestamp": "2026-08-31T23:59:34.366000+10:00",
+        "previous": 4424.1175,
+        "level": 4423.8875
+      },
+      {
+        "trade_id": 1,
+        "timestamp": "2026-08-31T23:59:34.608000+10:00",
+        "previous": 4423.8875,
+        "level": 4423.8175
+      },
+      {
+        "trade_id": 1,
+        "timestamp": "2026-08-31T23:59:34.830000+10:00",
+        "previous": 4423.8175,
+        "level": 4423.7425
+      },
+      {
+        "trade_id": 1,
+        "timestamp": "2026-08-31T23:59:40.772000+10:00",
+        "previous": 4423.7425,
+        "level": 4423.6375
+      }
+    ],
+    "exit_timestamp": "2026-09-01T00:01:13.091000+10:00",
+    "net_pnl": -0.900000000000764,
+    "mae_timestamp": "2026-08-31T23:57:59.124000+10:00",
+    "mae_price": 4423.87,
+    "mfe_timestamp": "2026-08-31T23:59:40.772000+10:00",
+    "mfe_price": 4415.98,
+    "exit_price": 4423.85,
+    "exit_executable_quote": 4423.75,
+    "exit_reason": "trailing",
+    "gross_pnl": -0.7600000000011278,
+    "charges": 0.1399999999996362,
+    "holding_seconds": 317.813,
+    "exit_equity": 499.0999999999992,
+    "mae_usd": 0.7800000000006548,
+    "mfe_usd": 7.109999999999673
+  },
+  {
+    "trade_id": 2,
+    "date": "2026-09-02",
+    "side": "up",
+    "entry_timestamp": "2026-09-03T00:09:50.463000+10:00",
+    "entry_price": 4393.990000000001,
+    "entry_executable_quote": 4393.89,
+    "lots": 0.01,
+    "units": 1.0,
+    "upper": 4380.455,
+    "lower": 4356.4349999999995,
+    "opposite_exit": 4356.1849999999995,
+    "yesterday_bias": "up",
+    "today_direction": "up",
+    "decision_timestamp": "2026-09-03T00:09:50.463000+10:00",
+    "mae_quote": 5.400000000000546,
+    "mfe_quote": 3.569999999999709,
+    "returned_inside_acd": false,
+    "recovered_after_retracement": false,
+    "opposite_boundary_broken": false,
+    "buffered_opposite_broken": false,
+    "opposite_first_break": null,
+    "trailing_movements": [
+      {
+        "trade_id": 2,
+        "timestamp": "2026-09-03T00:10:29.233000+10:00",
+        "previous": null,
+        "level": 4388.7525000000005
+      },
+      {
+        "trade_id": 2,
+        "timestamp": "2026-09-03T00:10:32.001000+10:00",
+        "previous": 4388.7525000000005,
+        "level": 4388.8325
+      },
+      {
+        "trade_id": 2,
+        "timestamp": "2026-09-03T00:10:35.788000+10:00",
+        "previous": 4388.8325,
+        "level": 4388.8525
+      },
+      {
+        "trade_id": 2,
+        "timestamp": "2026-09-03T00:10:37.901000+10:00",
+        "previous": 4388.8525,
+        "level": 4388.9775
+      },
+      {
+        "trade_id": 2,
+        "timestamp": "2026-09-03T00:10:42.585000+10:00",
+        "previous": 4388.9775,
+        "level": 4389.0075
+      }
+    ],
+    "exit_timestamp": "2026-09-03T00:13:04.682000+10:00",
+    "net_pnl": -5.640000000000545,
+    "mae_timestamp": "2026-09-03T00:13:04.682000+10:00",
+    "mae_price": 4388.59,
+    "mfe_timestamp": "2026-09-03T00:10:42.585000+10:00",
+    "mfe_price": 4397.56,
+    "exit_price": 4388.49,
+    "exit_executable_quote": 4388.59,
+    "exit_reason": "trailing",
+    "gross_pnl": -5.5000000000009095,
+    "charges": 0.13999999999963553,
+    "holding_seconds": 194.219,
+    "exit_equity": 493.4599999999987,
+    "mae_usd": 5.400000000000546,
+    "mfe_usd": 3.569999999999709
+  },
+  {
+    "trade_id": 3,
+    "date": "2026-09-03",
+    "side": "up",
+    "entry_timestamp": "2026-09-04T01:07:10.828000+10:00",
+    "entry_price": 4499.55,
+    "entry_executable_quote": 4499.45,
+    "lots": 0.01,
+    "units": 1.0,
+    "upper": 4483.48,
+    "lower": 4467.335,
+    "opposite_exit": 4467.085,
+    "yesterday_bias": "up",
+    "today_direction": "up",
+    "decision_timestamp": "2026-09-04T01:07:10.828000+10:00",
+    "mae_quote": 4.329999999999927,
+    "mfe_quote": 11.349999999999454,
+    "returned_inside_acd": false,
+    "recovered_after_retracement": false,
+    "opposite_boundary_broken": false,
+    "buffered_opposite_broken": false,
+    "opposite_first_break": null,
+    "trailing_movements": [
+      {
+        "trade_id": 3,
+        "timestamp": "2026-09-04T01:08:14.805000+10:00",
+        "previous": null,
+        "level": 4493.315
+      },
+      {
+        "trade_id": 3,
+        "timestamp": "2026-09-04T01:08:17.791000+10:00",
+        "previous": 4493.315,
+        "level": 4493.5
+      },
+      {
+        "trade_id": 3,
+        "timestamp": "2026-09-04T01:08:21.898000+10:00",
+        "previous": 4493.5,
+        "level": 4493.555
+      },
+      {
+        "trade_id": 3,
+        "timestamp": "2026-09-04T01:08:25.364000+10:00",
+        "previous": 4493.555,
+        "level": 4493.58
+      },
+      {
+        "trade_id": 3,
+        "timestamp": "2026-09-04T01:08:25.592000+10:00",
+        "previous": 4493.58,
+        "level": 4493.6
+      },
+      {
+        "trade_id": 3,
+        "timestamp": "2026-09-04T01:08:25.821000+10:00",
+        "previous": 4493.6,
+        "level": 4493.775
+      },
+      {
+        "trade_id": 3,
+        "timestamp": "2026-09-04T01:14:52.758000+10:00",
+        "previous": 4493.775,
+        "level": 4493.91
+      },
+      {
+        "trade_id": 3,
+        "timestamp": "2026-09-04T01:15:29.435000+10:00",
+        "previous": 4493.91,
+        "level": 4494.525
+      },
+      {
+        "trade_id": 3,
+        "timestamp": "2026-09-04T01:15:35.775000+10:00",
+        "previous": 4494.525,
+        "level": 4494.594999999999
+      },
+      {
+        "trade_id": 3,
+        "timestamp": "2026-09-04T01:15:36.681000+10:00",
+        "previous": 4494.594999999999,
+        "level": 4494.67
+      },
+      {
+        "trade_id": 3,
+        "timestamp": "2026-09-04T01:15:36.927000+10:00",
+        "previous": 4494.67,
+        "level": 4494.7
+      },
+      {
+        "trade_id": 3,
+        "timestamp": "2026-09-04T01:15:37.157000+10:00",
+        "previous": 4494.7,
+        "level": 4494.735
+      },
+      {
+        "trade_id": 3,
+        "timestamp": "2026-09-04T01:15:46.573000+10:00",
+        "previous": 4494.735,
+        "level": 4494.74
+      },
+      {
+        "trade_id": 3,
+        "timestamp": "2026-09-04T01:15:47.254000+10:00",
+        "previous": 4494.74,
+        "level": 4494.745
+      },
+      {
+        "trade_id": 3,
+        "timestamp": "2026-09-04T01:15:47.488000+10:00",
+        "previous": 4494.745,
+        "level": 4494.75
+      },
+      {
+        "trade_id": 3,
+        "timestamp": "2026-09-04T01:15:47.708000+10:00",
+        "previous": 4494.75,
+        "level": 4494.785
+      },
+      {
+        "trade_id": 3,
+        "timestamp": "2026-09-04T01:18:09.877000+10:00",
+        "previous": 4494.785,
+        "level": 4494.79
+      },
+      {
+        "trade_id": 3,
+        "timestamp": "2026-09-04T01:18:13.168000+10:00",
+        "previous": 4494.79,
+        "level": 4494.795
+      },
+      {
+        "trade_id": 3,
+        "timestamp": "2026-09-04T01:18:13.395000+10:00",
+        "previous": 4494.795,
+        "level": 4494.8099999999995
+      },
+      {
+        "trade_id": 3,
+        "timestamp": "2026-09-04T01:18:15.601000+10:00",
+        "previous": 4494.8099999999995,
+        "level": 4494.84
+      },
+      {
+        "trade_id": 3,
+        "timestamp": "2026-09-04T01:18:15.830000+10:00",
+        "previous": 4494.84,
+        "level": 4494.85
+      },
+      {
+        "trade_id": 3,
+        "timestamp": "2026-09-04T01:18:16.970000+10:00",
+        "previous": 4494.85,
+        "level": 4495.365
+      },
+      {
+        "trade_id": 3,
+        "timestamp": "2026-09-04T01:18:17.425000+10:00",
+        "previous": 4495.365,
+        "level": 4495.635
+      },
+      {
+        "trade_id": 3,
+        "timestamp": "2026-09-04T01:18:20.732000+10:00",
+        "previous": 4495.635,
+        "level": 4495.665
+      },
+      {
+        "trade_id": 3,
+        "timestamp": "2026-09-04T01:19:05.048000+10:00",
+        "previous": 4495.665,
+        "level": 4495.715
+      },
+      {
+        "trade_id": 3,
+        "timestamp": "2026-09-04T01:19:06.172000+10:00",
+        "previous": 4495.715,
+        "level": 4495.719999999999
+      },
+      {
+        "trade_id": 3,
+        "timestamp": "2026-09-04T01:19:09.817000+10:00",
+        "previous": 4495.719999999999,
+        "level": 4495.85
+      },
+      {
+        "trade_id": 3,
+        "timestamp": "2026-09-04T01:19:10.491000+10:00",
+        "previous": 4495.85,
+        "level": 4495.889999999999
+      },
+      {
+        "trade_id": 3,
+        "timestamp": "2026-09-04T01:19:10.949000+10:00",
+        "previous": 4495.889999999999,
+        "level": 4495.905
+      },
+      {
+        "trade_id": 3,
+        "timestamp": "2026-09-04T01:19:15.485000+10:00",
+        "previous": 4495.905,
+        "level": 4496.594999999999
+      },
+      {
+        "trade_id": 3,
+        "timestamp": "2026-09-04T01:19:22.797000+10:00",
+        "previous": 4496.594999999999,
+        "level": 4496.715
+      },
+      {
+        "trade_id": 3,
+        "timestamp": "2026-09-04T01:19:23+10:00",
+        "previous": 4496.715,
+        "level": 4496.77
+      },
+      {
+        "trade_id": 3,
+        "timestamp": "2026-09-04T01:19:23.276000+10:00",
+        "previous": 4496.77,
+        "level": 4496.78
+      },
+      {
+        "trade_id": 3,
+        "timestamp": "2026-09-04T01:19:23.499000+10:00",
+        "previous": 4496.78,
+        "level": 4496.795
+      },
+      {
+        "trade_id": 3,
+        "timestamp": "2026-09-04T01:19:28.783000+10:00",
+        "previous": 4496.795,
+        "level": 4496.855
+      },
+      {
+        "trade_id": 3,
+        "timestamp": "2026-09-04T01:19:29+10:00",
+        "previous": 4496.855,
+        "level": 4496.905
+      },
+      {
+        "trade_id": 3,
+        "timestamp": "2026-09-04T01:19:31.262000+10:00",
+        "previous": 4496.905,
+        "level": 4497.165
+      },
+      {
+        "trade_id": 3,
+        "timestamp": "2026-09-04T01:19:31.497000+10:00",
+        "previous": 4497.165,
+        "level": 4497.19
+      }
+    ],
+    "exit_timestamp": "2026-09-04T01:39:07.137000+10:00",
+    "net_pnl": -2.640000000000546,
+    "mae_timestamp": "2026-09-04T01:10:23.815000+10:00",
+    "mae_price": 4495.22,
+    "mfe_timestamp": "2026-09-04T01:19:31.497000+10:00",
+    "mfe_price": 4510.9,
+    "exit_price": 4497.049999999999,
+    "exit_executable_quote": 4497.15,
+    "exit_reason": "trailing",
+    "gross_pnl": -2.5000000000009095,
+    "charges": 0.13999999999963642,
+    "holding_seconds": 1916.309,
+    "exit_equity": 490.8199999999981,
+    "mae_usd": 4.329999999999927,
+    "mfe_usd": 11.349999999999454
+  },
+  {
+    "trade_id": 4,
+    "date": "2026-09-21",
+    "side": "down",
+    "entry_timestamp": "2026-09-22T00:09:21.975000+10:00",
+    "entry_price": 4335.23,
+    "entry_executable_quote": 4335.33,
+    "lots": 0.01,
+    "units": 1.0,
+    "upper": 4365.525,
+    "lower": 4348.4400000000005,
+    "opposite_exit": 4365.775,
+    "yesterday_bias": "down",
+    "today_direction": "down",
+    "decision_timestamp": "2026-09-22T00:09:21.975000+10:00",
+    "mae_quote": 8.610000000000582,
+    "mfe_quote": 3.269999999999527,
+    "returned_inside_acd": false,
+    "recovered_after_retracement": false,
+    "opposite_boundary_broken": false,
+    "buffered_opposite_broken": false,
+    "opposite_first_break": null,
+    "trailing_movements": [
+      {
+        "trade_id": 4,
+        "timestamp": "2026-09-22T00:44:48.841000+10:00",
+        "previous": null,
+        "level": 4340.3
+      },
+      {
+        "trade_id": 4,
+        "timestamp": "2026-09-22T00:44:53.136000+10:00",
+        "previous": 4340.3,
+        "level": 4340.295
+      },
+      {
+        "trade_id": 4,
+        "timestamp": "2026-09-22T00:44:53.361000+10:00",
+        "previous": 4340.295,
+        "level": 4340.200000000001
+      }
+    ],
+    "exit_timestamp": "2026-09-22T00:48:04.299000+10:00",
+    "net_pnl": -5.320000000000836,
+    "mae_timestamp": "2026-09-22T00:30:27.789000+10:00",
+    "mae_price": 4343.84,
+    "mfe_timestamp": "2026-09-22T00:44:53.361000+10:00",
+    "mfe_price": 4331.96,
+    "exit_price": 4340.410000000001,
+    "exit_executable_quote": 4340.31,
+    "exit_reason": "trailing",
+    "gross_pnl": -5.1800000000012005,
+    "charges": 0.13999999999963553,
+    "holding_seconds": 2322.324,
+    "exit_equity": 485.4999999999973,
+    "mae_usd": 8.610000000000582,
+    "mfe_usd": 3.269999999999527
+  },
+  {
+    "trade_id": 5,
+    "date": "2026-09-22",
+    "side": "down",
+    "entry_timestamp": "2026-09-23T00:47:09.127000+10:00",
+    "entry_price": 4320.889999999999,
+    "entry_executable_quote": 4320.99,
+    "lots": 0.01,
+    "units": 1.0,
+    "upper": 4343.674999999999,
+    "lower": 4326.93,
+    "opposite_exit": 4343.924999999999,
+    "yesterday_bias": "down",
+    "today_direction": "down",
+    "decision_timestamp": "2026-09-23T00:47:09.127000+10:00",
+    "mae_quote": 30.640000000000327,
+    "mfe_quote": 0.6399999999994179,
+    "returned_inside_acd": true,
+    "recovered_after_retracement": true,
+    "opposite_boundary_broken": true,
+    "buffered_opposite_broken": true,
+    "opposite_first_break": "2026-09-23T03:52:34.877000+10:00",
+    "trailing_movements": [],
+    "exit_timestamp": "2026-09-23T03:54:26.314000+10:00",
+    "net_pnl": -30.88000000000033,
+    "mae_timestamp": "2026-09-23T03:54:26.314000+10:00",
+    "mae_price": 4351.53,
+    "mfe_timestamp": "2026-09-23T00:51:25.766000+10:00",
+    "mfe_price": 4320.25,
+    "first_retracement_timestamp": "2026-09-23T00:57:57.770000+10:00",
+    "first_retracement_price": 4326.93,
+    "first_recovery_timestamp": "2026-09-23T00:57:57.996000+10:00",
+    "first_recovery_price": 4326.78,
+    "exit_price": 4351.63,
+    "exit_executable_quote": 4351.53,
+    "exit_reason": "capital",
+    "gross_pnl": -30.74000000000069,
+    "charges": 0.1399999999996382,
+    "holding_seconds": 11237.187,
+    "exit_equity": 454.619999999997,
+    "mae_usd": 30.640000000000327,
+    "mfe_usd": 0.6399999999994179
+  }
+]

@@ -1,0 +1,27 @@
+{
+  "passed": true,
+  "checks": {
+    "maximum_one_entry_per_acd_day": true,
+    "daily_counts_match_trade_history": true,
+    "summary_trade_count_matches": true,
+    "net_pnl_reconciles": true,
+    "daily_realized_pnl_reconciles": true,
+    "fixed_position_size": true,
+    "entry_direction_matches_yesterday": true,
+    "causal_decision_is_entry_timestamp": true,
+    "no_entry_after_loss_shutdown": true,
+    "maximum_one_permanent_latch": true,
+    "entry_and_exit_chronological": true,
+    "trailing_only_tightens": true,
+    "active_source_unchanged": true,
+    "active_configuration_unchanged": true,
+    "paper_history_preserved": true,
+    "live_execution_disabled": true,
+    "unrelated_services_still_active": true,
+    "paper_service_and_timer_still_active": true,
+    "frozen_source_hashes_match_deployed": true,
+    "chart_samples_chronological": true,
+    "sampled_drawdown_not_above_tick_maximum": true,
+    "equity_flat_after_shutdown": true
+  }
+}

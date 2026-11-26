@@ -1,0 +1,86 @@
+{
+  "successful_continuation": {
+    "available": false,
+    "reason": "No matching trade in the primary unchanged-risk account; no synthetic or post-shutdown trade substituted"
+  },
+  "retracement_and_recovery": {
+    "available": true,
+    "trade_id": 5,
+    "date": "2026-09-22",
+    "chart": "charts/trade_005.png"
+  },
+  "opposite_boundary_invalidation": {
+    "available": false,
+    "reason": "No matching trade in the primary unchanged-risk account; no synthetic or post-shutdown trade substituted"
+  },
+  "opposite_boundary_breach": {
+    "available": true,
+    "trade_id": 5,
+    "date": "2026-09-22",
+    "chart": "charts/trade_005.png"
+  },
+  "trailing_stop_exit": {
+    "available": true,
+    "trade_id": 1,
+    "date": "2026-08-31",
+    "chart": "charts/trade_001.png"
+  },
+  "risk_shutdown_exit": {
+    "available": true,
+    "trade_id": 5,
+    "date": "2026-09-22",
+    "chart": "charts/trade_005.png"
+  },
+  "trade_001": {
+    "available": true,
+    "trade_id": 1,
+    "date": "2026-08-31",
+    "chart": "charts/trade_001.png"
+  },
+  "trade_002": {
+    "available": true,
+    "trade_id": 2,
+    "date": "2026-09-02",
+    "chart": "charts/trade_002.png"
+  },
+  "trade_003": {
+    "available": true,
+    "trade_id": 3,
+    "date": "2026-09-03",
+    "chart": "charts/trade_003.png"
+  },
+  "trade_004": {
+    "available": true,
+    "trade_id": 4,
+    "date": "2026-09-21",
+    "chart": "charts/trade_004.png"
+  },
+  "trade_005": {
+    "available": true,
+    "trade_id": 5,
+    "date": "2026-09-22",
+    "chart": "charts/trade_005.png"
+  },
+  "rejected_days": [
+    {
+      "date": "2026-09-18",
+      "reason": "yesterday_uncertain",
+      "chart": "charts/rejected_2026-09-18.png"
+    },
+    {
+      "date": "2026-08-27",
+      "reason": "confirmation_incomplete",
+      "chart": "charts/rejected_2026-08-27.png"
+    },
+    {
+      "date": "2026-09-01",
+      "reason": "no_aligned_breakout",
+      "chart": "charts/rejected_2026-09-01.png"
+    },
+    {
+      "date": "2026-09-23",
+      "reason": "risk_shutdown_latched",
+      "chart": "charts/rejected_2026-09-23.png"
+    }
+  ]
+}

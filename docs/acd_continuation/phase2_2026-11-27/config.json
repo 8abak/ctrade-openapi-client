@@ -1,0 +1,19 @@
+{
+  "mode": "paper",
+  "a_offset": 0.75,
+  "c_offset": 1.0,
+  "hold_seconds": 450.0,
+  "entry_minutes": 120.0,
+  "late_hours": 3.0,
+  "opposite_buffer": 0.25,
+  "trailing_activation": 3.0,
+  "trailing_reference": "entry",
+  "trend_threshold": 3.0,
+  "quote_gap_seconds": 60.0,
+  "liquidation_buffer": 5.0,
+  "cost_per_trade": 0.14,
+  "slippage": 0.10,
+  "delay_reserve": 5.0,
+  "ounces_per_lot": 100.0,
+  "swap_per_day": 0.0
+}
