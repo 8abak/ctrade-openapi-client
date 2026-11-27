@@ -1,0 +1,8 @@
+{
+  "passed": true,
+  "configurations": 144,
+  "trades": 5160,
+  "already_reached_targets_checked": 24,
+  "timed_first_quote_checks": 548,
+  "method": "Independent exact UTC-microsecond lookup in hashed full-tick cache; bid/ask fills, slippage, fees, admission budget and next-quote semantics checked"
+}

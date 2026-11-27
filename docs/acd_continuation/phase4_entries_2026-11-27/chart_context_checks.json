@@ -1,0 +1,472 @@
+[
+  {
+    "date": "2026-08-27",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-08-27_exit_A.png",
+    "start": "2026-08-26T13:30:00+00:00",
+    "end": "2026-08-28T14:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-08-28",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-08-28_exit_A.png",
+    "start": "2026-08-27T13:30:00+00:00",
+    "end": "2026-08-31T14:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-08-31",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-08-31_exit_A.png",
+    "start": "2026-08-28T13:30:00+00:00",
+    "end": "2026-09-01T14:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-09-02",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-09-02_exit_A.png",
+    "start": "2026-09-01T13:30:00+00:00",
+    "end": "2026-09-03T14:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-09-03",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-09-03_exit_A.png",
+    "start": "2026-09-02T13:30:00+00:00",
+    "end": "2026-09-04T14:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-09-14",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-09-14_exit_A.png",
+    "start": "2026-09-11T13:30:00+00:00",
+    "end": "2026-09-15T14:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-09-15",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-09-15_exit_A.png",
+    "start": "2026-09-14T13:30:00+00:00",
+    "end": "2026-09-16T14:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-09-16",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-09-16_exit_A.png",
+    "start": "2026-09-15T13:30:00+00:00",
+    "end": "2026-09-17T14:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-09-17",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-09-17_exit_A.png",
+    "start": "2026-09-16T13:30:00+00:00",
+    "end": "2026-09-18T14:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-09-21",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-09-21_exit_A.png",
+    "start": "2026-09-18T13:30:00+00:00",
+    "end": "2026-09-22T14:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-09-22",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-09-22_exit_A.png",
+    "start": "2026-09-21T13:30:00+00:00",
+    "end": "2026-09-23T14:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-09-23",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-09-23_exit_A.png",
+    "start": "2026-09-22T13:30:00+00:00",
+    "end": "2026-09-24T14:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-09-24",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-09-24_exit_A.png",
+    "start": "2026-09-23T13:30:00+00:00",
+    "end": "2026-09-25T14:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-09-28",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-09-28_exit_A.png",
+    "start": "2026-09-25T13:30:00+00:00",
+    "end": "2026-09-29T14:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-09-29",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-09-29_exit_A.png",
+    "start": "2026-09-28T13:30:00+00:00",
+    "end": "2026-09-30T14:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-10-01",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-10-01_exit_A.png",
+    "start": "2026-09-30T13:30:00+00:00",
+    "end": "2026-10-02T14:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-10-05",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-10-05_exit_A.png",
+    "start": "2026-10-02T13:30:00+00:00",
+    "end": "2026-10-06T14:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-10-06",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-10-06_exit_A.png",
+    "start": "2026-10-05T13:30:00+00:00",
+    "end": "2026-10-07T14:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-10-08",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-10-08_exit_A.png",
+    "start": "2026-10-07T13:30:00+00:00",
+    "end": "2026-10-09T14:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-10-09",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-10-09_exit_A.png",
+    "start": "2026-10-08T13:30:00+00:00",
+    "end": "2026-10-12T14:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-10-12",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-10-12_exit_A.png",
+    "start": "2026-10-09T13:30:00+00:00",
+    "end": "2026-10-13T14:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-10-14",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-10-14_exit_A.png",
+    "start": "2026-10-13T13:30:00+00:00",
+    "end": "2026-10-15T14:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-10-16",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-10-16_exit_A.png",
+    "start": "2026-10-15T13:30:00+00:00",
+    "end": "2026-10-19T14:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-10-21",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-10-21_exit_A.png",
+    "start": "2026-10-20T13:30:00+00:00",
+    "end": "2026-10-22T14:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-10-22",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-10-22_exit_A.png",
+    "start": "2026-10-21T13:30:00+00:00",
+    "end": "2026-10-23T14:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-10-23",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-10-23_exit_A.png",
+    "start": "2026-10-22T13:30:00+00:00",
+    "end": "2026-10-26T14:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-10-26",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-10-26_exit_A.png",
+    "start": "2026-10-23T13:30:00+00:00",
+    "end": "2026-10-27T14:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-10-27",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-10-27_exit_A.png",
+    "start": "2026-10-26T13:30:00+00:00",
+    "end": "2026-10-28T14:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-10-29",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-10-29_exit_A.png",
+    "start": "2026-10-28T13:30:00+00:00",
+    "end": "2026-10-30T14:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-10-30",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-10-30_exit_A.png",
+    "start": "2026-10-29T13:30:00+00:00",
+    "end": "2026-11-02T15:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-11-02",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-11-02_exit_A.png",
+    "start": "2026-10-30T13:30:00+00:00",
+    "end": "2026-11-03T15:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-11-03",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-11-03_exit_A.png",
+    "start": "2026-11-02T14:30:00+00:00",
+    "end": "2026-11-04T15:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-11-04",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-11-04_exit_A.png",
+    "start": "2026-11-03T14:30:00+00:00",
+    "end": "2026-11-05T15:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-11-10",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-11-10_exit_A.png",
+    "start": "2026-11-09T14:30:00+00:00",
+    "end": "2026-11-11T15:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-11-11",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-11-11_exit_A.png",
+    "start": "2026-11-10T14:30:00+00:00",
+    "end": "2026-11-12T15:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-11-12",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-11-12_exit_A.png",
+    "start": "2026-11-11T14:30:00+00:00",
+    "end": "2026-11-13T15:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-11-13",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-11-13_exit_A.png",
+    "start": "2026-11-12T14:30:00+00:00",
+    "end": "2026-11-16T15:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-11-16",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-11-16_exit_A.png",
+    "start": "2026-11-13T14:30:00+00:00",
+    "end": "2026-11-17T15:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-11-17",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-11-17_exit_A.png",
+    "start": "2026-11-16T14:30:00+00:00",
+    "end": "2026-11-18T15:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-11-18",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-11-18_exit_A.png",
+    "start": "2026-11-17T14:30:00+00:00",
+    "end": "2026-11-19T15:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-11-19",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-11-19_exit_A.png",
+    "start": "2026-11-18T14:30:00+00:00",
+    "end": "2026-11-20T15:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-11-20",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-11-20_exit_A.png",
+    "start": "2026-11-19T14:30:00+00:00",
+    "end": "2026-11-23T15:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-11-24",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-11-24_exit_A.png",
+    "start": "2026-11-23T14:30:00+00:00",
+    "end": "2026-11-25T15:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-11-25",
+    "exit_profile": "exit_A",
+    "path": "charts/session_2026-11-25_exit_A.png",
+    "start": "2026-11-24T14:30:00+00:00",
+    "end": "2026-11-26T15:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-09-02",
+    "exit_profile": "exit_B",
+    "path": "charts/session_2026-09-02_exit_B.png",
+    "start": "2026-09-01T13:30:00+00:00",
+    "end": "2026-09-03T14:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-09-02",
+    "exit_profile": "exit_C",
+    "path": "charts/session_2026-09-02_exit_C.png",
+    "start": "2026-09-01T13:30:00+00:00",
+    "end": "2026-09-03T14:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  },
+  {
+    "date": "2026-09-02",
+    "exit_profile": "exit_D",
+    "path": "charts/session_2026-09-02_exit_D.png",
+    "start": "2026-09-01T13:30:00+00:00",
+    "end": "2026-09-03T14:15:00+00:00",
+    "same_scales": true,
+    "previous_context_available": true,
+    "next_formation_complete": true
+  }
+]

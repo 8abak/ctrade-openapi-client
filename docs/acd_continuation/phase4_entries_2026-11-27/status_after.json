@@ -1,0 +1,116 @@
+{
+  "capturedAt": "2026-11-27T01:46:20.627121+00:00",
+  "state": {
+    "realized": 0.0,
+    "latched": false,
+    "used": [],
+    "position": null,
+    "last": "2026-11-27T12:46:19.843000+11:00",
+    "session": "2026-11-26",
+    "history": [
+      [
+        80966489,
+        "2026-11-27T01:30:00.074000+11:00",
+        3574.43,
+        3574.52
+      ],
+      [
+        80967394,
+        "2026-11-27T01:34:00.506000+11:00",
+        3586.48,
+        3586.65
+      ],
+      [
+        80969402,
+        "2026-11-27T01:43:17.172000+11:00",
+        3571.88,
+        3572.01
+      ],
+      [
+        80969765,
+        "2026-11-27T01:44:59.961000+11:00",
+        3579.15,
+        3579.28
+      ],
+      [
+        81036720,
+        "2026-11-27T12:46:19.843000+11:00",
+        3577.15,
+        3577.3
+      ]
+    ],
+    "previous_move": "up",
+    "paused": true,
+    "config": {
+      "mode": "paper",
+      "a_offset": 0.75,
+      "c_offset": 1.0,
+      "hold_seconds": 450.0,
+      "entry_minutes": 120.0,
+      "late_hours": 3.0,
+      "opposite_buffer": 0.25,
+      "trailing_activation": 3.0,
+      "trailing_reference": "entry",
+      "trend_threshold": 3.0,
+      "quote_gap_seconds": 60.0,
+      "liquidation_buffer": 5.0,
+      "cost_per_trade": 0.14,
+      "slippage": 0.1,
+      "delay_reserve": 5.0,
+      "ounces_per_lot": 100.0,
+      "swap_per_day": 0.0
+    },
+    "equity": 500.0,
+    "session_end": "2026-11-27T14:30:00+00:00",
+    "formation_gap": false
+  },
+  "events": [],
+  "health": {
+    "mode": "paper",
+    "brokerOrdersEnabled": false,
+    "timestamp": "2026-11-27T01:46:20.166539+00:00",
+    "lastQuote": "2026-11-27T12:46:19.843000+11:00",
+    "processed": 4,
+    "position": null,
+    "latched": false,
+    "paused": true,
+    "controlPending": false
+  },
+  "config": {
+    "mode": "paper",
+    "a_offset": 0.75,
+    "c_offset": 1.0,
+    "hold_seconds": 450.0,
+    "entry_minutes": 120.0,
+    "late_hours": 3.0,
+    "opposite_buffer": 0.25,
+    "trailing_activation": 3.0,
+    "trailing_reference": "entry",
+    "trend_threshold": 3.0,
+    "quote_gap_seconds": 60.0,
+    "liquidation_buffer": 5.0,
+    "cost_per_trade": 0.14,
+    "slippage": 0.1,
+    "delay_reserve": 5.0,
+    "ounces_per_lot": 100.0,
+    "swap_per_day": 0.0
+  },
+  "services": {
+    "acd-paper.service": "NRestarts=0\nActiveState=active\nSubState=running\n",
+    "acd-paper-watchdog.timer": "ActiveState=active\nSubState=waiting\n",
+    "datavis.service": "NRestarts=0\nActiveState=active\nSubState=running\n",
+    "tickcollector.service": "NRestarts=0\nActiveState=active\nSubState=running\n"
+  },
+  "unitCommand": "ExecStart={ path=/home/ec2-user/venvs/datavis/bin/python ; argv[]=/home/ec2-user/venvs/datavis/bin/python -m datavis.acd_paper_service --directory /home/ec2-user/acd-paper-state ; ignore_errors=no ; start_time=[Wed 2026-11-25 09:32:50 UTC] ; stop_time=[n/a] ; pid=3797928 ; code=(null) ; status=0/0 }\nWorkingDirectory=/home/ec2-user/acd-paper-release\nActiveEnterTimestamp=Wed 2026-11-25 09:32:50 UTC\n",
+  "sourceSHA256": {
+    "datavis/acd_continuation.py": "31c467567bb9462d9648754910a265d8a8de82a375baa27f97713ef7c7e4b91e",
+    "datavis/acd_paper_service.py": "ff299a9bf33bb07f0df18c743cd2681ced90acb97c9fcd05e85f7421f57b07e5",
+    "datavis/hlrtacd/acd.py": "84ba281e4031e6562ecd7ee7ff548ae2460cb8a6aac7f444993519548b371e91",
+    "datavis/hlrtacd/models.py": "aa613a3eab4a9151f5d16a34cbff1e4e843b5cfc6a71c6c3e0a0479d83df659c"
+  },
+  "feedBounds": [
+    "2026-01-01T00:00:00.204000+11:00",
+    "2026-11-27T12:46:20.073000+11:00"
+  ],
+  "warningErrorLogTail": "-- No entries --\n"
+}

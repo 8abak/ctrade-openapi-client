@@ -1,0 +1,2950 @@
+{
+  "passed": true,
+  "count": 736,
+  "checks": [
+    {
+      "check": "144 independent configurations; 36 entry profiles",
+      "passed": true
+    },
+    {
+      "check": "All 67 observed sessions replayed per configuration",
+      "passed": true
+    },
+    {
+      "check": "Exact revised Phase 2 baseline reproduction",
+      "passed": true
+    },
+    {
+      "check": "Independent full-tick execution verification",
+      "passed": true
+    },
+    {
+      "check": "No open positions at fixed data cutoff",
+      "passed": true
+    },
+    {
+      "check": "Phase 3 control reproduced: baseline",
+      "passed": true
+    },
+    {
+      "check": "Phase 3 control reproduced: target_edge_0.75W",
+      "passed": true
+    },
+    {
+      "check": "Phase 3 control reproduced: trail_entry_entry_1W",
+      "passed": true
+    },
+    {
+      "check": "Phase 3 control reproduced: no_trailing",
+      "passed": true
+    },
+    {
+      "check": "Identical frozen tick hash",
+      "passed": true
+    },
+    {
+      "check": "Active source hashes and configuration unchanged",
+      "passed": true
+    },
+    {
+      "check": "Paper only and broker orders disabled",
+      "passed": true
+    },
+    {
+      "check": "Paper equity, positions and event history preserved",
+      "passed": true
+    },
+    {
+      "check": "Paper service, collector and unrelated monitored services active",
+      "passed": true
+    },
+    {
+      "check": "A_0s__exit_A settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "A_0s__exit_A causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "A_0s__exit_A confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "A_0s__exit_A hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "A_0s__exit_A no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "A_0s__exit_B settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "A_0s__exit_B causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "A_0s__exit_B confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "A_0s__exit_B hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "A_0s__exit_B no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "A_0s__exit_C settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "A_0s__exit_C causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "A_0s__exit_C confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "A_0s__exit_C hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "A_0s__exit_C no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "A_0s__exit_D settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "A_0s__exit_D causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "A_0s__exit_D confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "A_0s__exit_D hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "A_0s__exit_D no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "A_15s__exit_A settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "A_15s__exit_A causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "A_15s__exit_A confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "A_15s__exit_A hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "A_15s__exit_A no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "A_15s__exit_B settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "A_15s__exit_B causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "A_15s__exit_B confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "A_15s__exit_B hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "A_15s__exit_B no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "A_15s__exit_C settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "A_15s__exit_C causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "A_15s__exit_C confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "A_15s__exit_C hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "A_15s__exit_C no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "A_15s__exit_D settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "A_15s__exit_D causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "A_15s__exit_D confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "A_15s__exit_D hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "A_15s__exit_D no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "A_30s__exit_A settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "A_30s__exit_A causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "A_30s__exit_A confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "A_30s__exit_A hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "A_30s__exit_A no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "A_30s__exit_B settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "A_30s__exit_B causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "A_30s__exit_B confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "A_30s__exit_B hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "A_30s__exit_B no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "A_30s__exit_C settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "A_30s__exit_C causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "A_30s__exit_C confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "A_30s__exit_C hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "A_30s__exit_C no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "A_30s__exit_D settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "A_30s__exit_D causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "A_30s__exit_D confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "A_30s__exit_D hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "A_30s__exit_D no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "A_60s__exit_A settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "A_60s__exit_A causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "A_60s__exit_A confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "A_60s__exit_A hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "A_60s__exit_A no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "A_60s__exit_B settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "A_60s__exit_B causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "A_60s__exit_B confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "A_60s__exit_B hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "A_60s__exit_B no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "A_60s__exit_C settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "A_60s__exit_C causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "A_60s__exit_C confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "A_60s__exit_C hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "A_60s__exit_C no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "A_60s__exit_D settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "A_60s__exit_D causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "A_60s__exit_D confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "A_60s__exit_D hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "A_60s__exit_D no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "A_120s__exit_A settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "A_120s__exit_A causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "A_120s__exit_A confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "A_120s__exit_A hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "A_120s__exit_A no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "A_120s__exit_B settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "A_120s__exit_B causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "A_120s__exit_B confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "A_120s__exit_B hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "A_120s__exit_B no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "A_120s__exit_C settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "A_120s__exit_C causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "A_120s__exit_C confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "A_120s__exit_C hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "A_120s__exit_C no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "A_120s__exit_D settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "A_120s__exit_D causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "A_120s__exit_D confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "A_120s__exit_D hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "A_120s__exit_D no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "A_225s__exit_A settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "A_225s__exit_A causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "A_225s__exit_A confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "A_225s__exit_A hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "A_225s__exit_A no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "A_225s__exit_B settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "A_225s__exit_B causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "A_225s__exit_B confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "A_225s__exit_B hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "A_225s__exit_B no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "A_225s__exit_C settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "A_225s__exit_C causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "A_225s__exit_C confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "A_225s__exit_C hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "A_225s__exit_C no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "A_225s__exit_D settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "A_225s__exit_D causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "A_225s__exit_D confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "A_225s__exit_D hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "A_225s__exit_D no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "A_450s__exit_A settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "A_450s__exit_A causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "A_450s__exit_A confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "A_450s__exit_A hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "A_450s__exit_A no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "A_450s__exit_B settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "A_450s__exit_B causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "A_450s__exit_B confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "A_450s__exit_B hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "A_450s__exit_B no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "A_450s__exit_C settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "A_450s__exit_C causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "A_450s__exit_C confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "A_450s__exit_C hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "A_450s__exit_C no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "A_450s__exit_D settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "A_450s__exit_D causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "A_450s__exit_D confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "A_450s__exit_D hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "A_450s__exit_D no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "A_900s__exit_A settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "A_900s__exit_A causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "A_900s__exit_A confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "A_900s__exit_A hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "A_900s__exit_A no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "A_900s__exit_B settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "A_900s__exit_B causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "A_900s__exit_B confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "A_900s__exit_B hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "A_900s__exit_B no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "A_900s__exit_C settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "A_900s__exit_C causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "A_900s__exit_C confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "A_900s__exit_C hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "A_900s__exit_C no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "A_900s__exit_D settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "A_900s__exit_D causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "A_900s__exit_D confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "A_900s__exit_D hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "A_900s__exit_D no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "B_0.05W__exit_A settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "B_0.05W__exit_A causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "B_0.05W__exit_A confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "B_0.05W__exit_A hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "B_0.05W__exit_A no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "B_0.05W__exit_B settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "B_0.05W__exit_B causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "B_0.05W__exit_B confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "B_0.05W__exit_B hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "B_0.05W__exit_B no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "B_0.05W__exit_C settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "B_0.05W__exit_C causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "B_0.05W__exit_C confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "B_0.05W__exit_C hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "B_0.05W__exit_C no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "B_0.05W__exit_D settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "B_0.05W__exit_D causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "B_0.05W__exit_D confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "B_0.05W__exit_D hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "B_0.05W__exit_D no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "B_0.1W__exit_A settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "B_0.1W__exit_A causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "B_0.1W__exit_A confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "B_0.1W__exit_A hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "B_0.1W__exit_A no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "B_0.1W__exit_B settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "B_0.1W__exit_B causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "B_0.1W__exit_B confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "B_0.1W__exit_B hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "B_0.1W__exit_B no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "B_0.1W__exit_C settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "B_0.1W__exit_C causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "B_0.1W__exit_C confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "B_0.1W__exit_C hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "B_0.1W__exit_C no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "B_0.1W__exit_D settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "B_0.1W__exit_D causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "B_0.1W__exit_D confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "B_0.1W__exit_D hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "B_0.1W__exit_D no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "B_0.15W__exit_A settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "B_0.15W__exit_A causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "B_0.15W__exit_A confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "B_0.15W__exit_A hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "B_0.15W__exit_A no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "B_0.15W__exit_B settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "B_0.15W__exit_B causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "B_0.15W__exit_B confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "B_0.15W__exit_B hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "B_0.15W__exit_B no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "B_0.15W__exit_C settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "B_0.15W__exit_C causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "B_0.15W__exit_C confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "B_0.15W__exit_C hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "B_0.15W__exit_C no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "B_0.15W__exit_D settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "B_0.15W__exit_D causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "B_0.15W__exit_D confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "B_0.15W__exit_D hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "B_0.15W__exit_D no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "B_0.25W__exit_A settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "B_0.25W__exit_A causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "B_0.25W__exit_A confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "B_0.25W__exit_A hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "B_0.25W__exit_A no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "B_0.25W__exit_B settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "B_0.25W__exit_B causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "B_0.25W__exit_B confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "B_0.25W__exit_B hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "B_0.25W__exit_B no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "B_0.25W__exit_C settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "B_0.25W__exit_C causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "B_0.25W__exit_C confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "B_0.25W__exit_C hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "B_0.25W__exit_C no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "B_0.25W__exit_D settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "B_0.25W__exit_D causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "B_0.25W__exit_D confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "B_0.25W__exit_D hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "B_0.25W__exit_D no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "B_0.5W__exit_A settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "B_0.5W__exit_A causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "B_0.5W__exit_A confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "B_0.5W__exit_A hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "B_0.5W__exit_A no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "B_0.5W__exit_B settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "B_0.5W__exit_B causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "B_0.5W__exit_B confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "B_0.5W__exit_B hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "B_0.5W__exit_B no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "B_0.5W__exit_C settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "B_0.5W__exit_C causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "B_0.5W__exit_C confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "B_0.5W__exit_C hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "B_0.5W__exit_C no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "B_0.5W__exit_D settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "B_0.5W__exit_D causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "B_0.5W__exit_D confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "B_0.5W__exit_D hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "B_0.5W__exit_D no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_0s__exit_A settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_0s__exit_A causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_0s__exit_A confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_0s__exit_A hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_0s__exit_A no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_0s__exit_B settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_0s__exit_B causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_0s__exit_B confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_0s__exit_B hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_0s__exit_B no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_0s__exit_C settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_0s__exit_C causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_0s__exit_C confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_0s__exit_C hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_0s__exit_C no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_0s__exit_D settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_0s__exit_D causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_0s__exit_D confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_0s__exit_D hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_0s__exit_D no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_30s__exit_A settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_30s__exit_A causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_30s__exit_A confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_30s__exit_A hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_30s__exit_A no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_30s__exit_B settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_30s__exit_B causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_30s__exit_B confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_30s__exit_B hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_30s__exit_B no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_30s__exit_C settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_30s__exit_C causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_30s__exit_C confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_30s__exit_C hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_30s__exit_C no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_30s__exit_D settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_30s__exit_D causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_30s__exit_D confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_30s__exit_D hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_30s__exit_D no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_60s__exit_A settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_60s__exit_A causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_60s__exit_A confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_60s__exit_A hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_60s__exit_A no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_60s__exit_B settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_60s__exit_B causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_60s__exit_B confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_60s__exit_B hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_60s__exit_B no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_60s__exit_C settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_60s__exit_C causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_60s__exit_C confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_60s__exit_C hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_60s__exit_C no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_60s__exit_D settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_60s__exit_D causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_60s__exit_D confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_60s__exit_D hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_60s__exit_D no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_120s__exit_A settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_120s__exit_A causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_120s__exit_A confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_120s__exit_A hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_120s__exit_A no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_120s__exit_B settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_120s__exit_B causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_120s__exit_B confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_120s__exit_B hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_120s__exit_B no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_120s__exit_C settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_120s__exit_C causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_120s__exit_C confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_120s__exit_C hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_120s__exit_C no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_120s__exit_D settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_120s__exit_D causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_120s__exit_D confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_120s__exit_D hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "C_0.1W_120s__exit_D no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_0s__exit_A settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_0s__exit_A causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_0s__exit_A confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_0s__exit_A hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_0s__exit_A no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_0s__exit_B settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_0s__exit_B causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_0s__exit_B confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_0s__exit_B hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_0s__exit_B no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_0s__exit_C settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_0s__exit_C causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_0s__exit_C confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_0s__exit_C hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_0s__exit_C no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_0s__exit_D settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_0s__exit_D causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_0s__exit_D confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_0s__exit_D hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_0s__exit_D no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_30s__exit_A settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_30s__exit_A causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_30s__exit_A confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_30s__exit_A hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_30s__exit_A no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_30s__exit_B settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_30s__exit_B causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_30s__exit_B confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_30s__exit_B hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_30s__exit_B no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_30s__exit_C settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_30s__exit_C causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_30s__exit_C confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_30s__exit_C hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_30s__exit_C no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_30s__exit_D settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_30s__exit_D causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_30s__exit_D confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_30s__exit_D hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_30s__exit_D no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_60s__exit_A settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_60s__exit_A causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_60s__exit_A confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_60s__exit_A hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_60s__exit_A no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_60s__exit_B settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_60s__exit_B causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_60s__exit_B confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_60s__exit_B hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_60s__exit_B no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_60s__exit_C settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_60s__exit_C causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_60s__exit_C confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_60s__exit_C hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_60s__exit_C no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_60s__exit_D settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_60s__exit_D causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_60s__exit_D confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_60s__exit_D hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_60s__exit_D no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_120s__exit_A settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_120s__exit_A causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_120s__exit_A confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_120s__exit_A hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_120s__exit_A no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_120s__exit_B settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_120s__exit_B causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_120s__exit_B confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_120s__exit_B hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_120s__exit_B no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_120s__exit_C settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_120s__exit_C causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_120s__exit_C confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_120s__exit_C hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_120s__exit_C no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_120s__exit_D settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_120s__exit_D causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_120s__exit_D confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_120s__exit_D hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "C_0.25W_120s__exit_D no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.1W__exit_A settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.1W__exit_A causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.1W__exit_A confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.1W__exit_A hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.1W__exit_A no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.1W__exit_B settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.1W__exit_B causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.1W__exit_B confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.1W__exit_B hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.1W__exit_B no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.1W__exit_C settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.1W__exit_C causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.1W__exit_C confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.1W__exit_C hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.1W__exit_C no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.1W__exit_D settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.1W__exit_D causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.1W__exit_D confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.1W__exit_D hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.1W__exit_D no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.25W__exit_A settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.25W__exit_A causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.25W__exit_A confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.25W__exit_A hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.25W__exit_A no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.25W__exit_B settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.25W__exit_B causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.25W__exit_B confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.25W__exit_B hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.25W__exit_B no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.25W__exit_C settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.25W__exit_C causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.25W__exit_C confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.25W__exit_C hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.25W__exit_C no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.25W__exit_D settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.25W__exit_D causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.25W__exit_D confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.25W__exit_D hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.25W__exit_D no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.5W__exit_A settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.5W__exit_A causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.5W__exit_A confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.5W__exit_A hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.5W__exit_A no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.5W__exit_B settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.5W__exit_B causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.5W__exit_B confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.5W__exit_B hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.5W__exit_B no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.5W__exit_C settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.5W__exit_C causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.5W__exit_C confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.5W__exit_C hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.5W__exit_C no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.5W__exit_D settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.5W__exit_D causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.5W__exit_D confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.5W__exit_D hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "D_60s_0.5W__exit_D no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.1W__exit_A settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.1W__exit_A causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.1W__exit_A confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.1W__exit_A hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.1W__exit_A no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.1W__exit_B settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.1W__exit_B causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.1W__exit_B confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.1W__exit_B hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.1W__exit_B no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.1W__exit_C settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.1W__exit_C causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.1W__exit_C confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.1W__exit_C hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.1W__exit_C no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.1W__exit_D settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.1W__exit_D causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.1W__exit_D confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.1W__exit_D hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.1W__exit_D no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.25W__exit_A settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.25W__exit_A causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.25W__exit_A confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.25W__exit_A hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.25W__exit_A no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.25W__exit_B settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.25W__exit_B causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.25W__exit_B confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.25W__exit_B hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.25W__exit_B no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.25W__exit_C settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.25W__exit_C causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.25W__exit_C confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.25W__exit_C hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.25W__exit_C no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.25W__exit_D settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.25W__exit_D causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.25W__exit_D confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.25W__exit_D hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.25W__exit_D no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.5W__exit_A settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.5W__exit_A causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.5W__exit_A confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.5W__exit_A hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.5W__exit_A no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.5W__exit_B settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.5W__exit_B causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.5W__exit_B confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.5W__exit_B hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.5W__exit_B no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.5W__exit_C settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.5W__exit_C causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.5W__exit_C confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.5W__exit_C hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.5W__exit_C no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.5W__exit_D settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.5W__exit_D causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.5W__exit_D confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.5W__exit_D hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "D_225s_0.5W__exit_D no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.1W__exit_A settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.1W__exit_A causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.1W__exit_A confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.1W__exit_A hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.1W__exit_A no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.1W__exit_B settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.1W__exit_B causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.1W__exit_B confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.1W__exit_B hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.1W__exit_B no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.1W__exit_C settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.1W__exit_C causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.1W__exit_C confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.1W__exit_C hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.1W__exit_C no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.1W__exit_D settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.1W__exit_D causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.1W__exit_D confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.1W__exit_D hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.1W__exit_D no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.25W__exit_A settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.25W__exit_A causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.25W__exit_A confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.25W__exit_A hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.25W__exit_A no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.25W__exit_B settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.25W__exit_B causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.25W__exit_B confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.25W__exit_B hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.25W__exit_B no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.25W__exit_C settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.25W__exit_C causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.25W__exit_C confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.25W__exit_C hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.25W__exit_C no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.25W__exit_D settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.25W__exit_D causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.25W__exit_D confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.25W__exit_D hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.25W__exit_D no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.5W__exit_A settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.5W__exit_A causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.5W__exit_A confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.5W__exit_A hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.5W__exit_A no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.5W__exit_B settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.5W__exit_B causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.5W__exit_B confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.5W__exit_B hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.5W__exit_B no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.5W__exit_C settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.5W__exit_C causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.5W__exit_C confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.5W__exit_C hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.5W__exit_C no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.5W__exit_D settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.5W__exit_D causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.5W__exit_D confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.5W__exit_D hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "D_450s_0.5W__exit_D no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.1W__exit_A settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.1W__exit_A causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.1W__exit_A confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.1W__exit_A hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.1W__exit_A no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.1W__exit_B settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.1W__exit_B causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.1W__exit_B confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.1W__exit_B hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.1W__exit_B no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.1W__exit_C settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.1W__exit_C causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.1W__exit_C confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.1W__exit_C hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.1W__exit_C no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.1W__exit_D settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.1W__exit_D causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.1W__exit_D confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.1W__exit_D hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.1W__exit_D no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.25W__exit_A settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.25W__exit_A causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.25W__exit_A confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.25W__exit_A hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.25W__exit_A no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.25W__exit_B settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.25W__exit_B causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.25W__exit_B confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.25W__exit_B hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.25W__exit_B no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.25W__exit_C settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.25W__exit_C causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.25W__exit_C confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.25W__exit_C hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.25W__exit_C no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.25W__exit_D settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.25W__exit_D causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.25W__exit_D confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.25W__exit_D hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "E_30s_0.25W__exit_D no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.1W__exit_A settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.1W__exit_A causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.1W__exit_A confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.1W__exit_A hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.1W__exit_A no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.1W__exit_B settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.1W__exit_B causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.1W__exit_B confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.1W__exit_B hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.1W__exit_B no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.1W__exit_C settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.1W__exit_C causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.1W__exit_C confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.1W__exit_C hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.1W__exit_C no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.1W__exit_D settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.1W__exit_D causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.1W__exit_D confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.1W__exit_D hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.1W__exit_D no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.25W__exit_A settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.25W__exit_A causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.25W__exit_A confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.25W__exit_A hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.25W__exit_A no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.25W__exit_B settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.25W__exit_B causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.25W__exit_B confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.25W__exit_B hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.25W__exit_B no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.25W__exit_C settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.25W__exit_C causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.25W__exit_C confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.25W__exit_C hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.25W__exit_C no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.25W__exit_D settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.25W__exit_D causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.25W__exit_D confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.25W__exit_D hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "E_60s_0.25W__exit_D no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.1W__exit_A settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.1W__exit_A causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.1W__exit_A confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.1W__exit_A hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.1W__exit_A no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.1W__exit_B settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.1W__exit_B causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.1W__exit_B confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.1W__exit_B hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.1W__exit_B no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.1W__exit_C settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.1W__exit_C causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.1W__exit_C confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.1W__exit_C hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.1W__exit_C no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.1W__exit_D settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.1W__exit_D causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.1W__exit_D confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.1W__exit_D hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.1W__exit_D no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.25W__exit_A settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.25W__exit_A causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.25W__exit_A confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.25W__exit_A hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.25W__exit_A no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.25W__exit_B settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.25W__exit_B causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.25W__exit_B confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.25W__exit_B hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.25W__exit_B no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.25W__exit_C settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.25W__exit_C causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.25W__exit_C confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.25W__exit_C hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.25W__exit_C no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.25W__exit_D settlement and single-entry invariant",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.25W__exit_D causal risk admission and zone",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.25W__exit_D confirmation hold and no invalidating quote gap",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.25W__exit_D hybrid prior-touch or distance threshold",
+      "passed": true
+    },
+    {
+      "check": "E_120s_0.25W__exit_D no next-formation exposure",
+      "passed": true
+    },
+    {
+      "check": "All full frames have prior and next-formation context and identical panel scales",
+      "passed": true
+    },
+    {
+      "check": "Full and zoom chart for every material session",
+      "passed": true
+    }
+  ]
+}
