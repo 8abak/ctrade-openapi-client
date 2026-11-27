@@ -1,0 +1,230 @@
+{
+  "counts": {
+    "raw_ticks": 18066705,
+    "processed_ticks": 18065202,
+    "duplicate_timestamp_quotes_skipped": 1503,
+    "window_ticks": 16235560
+  },
+  "dataset_sha256": "e7ad2a5f2736f1deb90392af80d56891026b7832ca9bbd9976cea607ac12002b",
+  "reference": {
+    "window_start": "2026-08-27T06:29:59.982000+11:00",
+    "window_end": "2026-11-27T06:29:59.982000+11:00",
+    "warmup_start": "2026-08-17T06:29:59.982000+11:00",
+    "available_start": "2026-01-01T00:00:00.204000+11:00",
+    "config": {
+      "mode": "paper",
+      "a_offset": 0.75,
+      "c_offset": 1.0,
+      "hold_seconds": 450.0,
+      "entry_minutes": 120.0,
+      "late_hours": 3.0,
+      "opposite_buffer": 0.25,
+      "trailing_activation": 3.0,
+      "trailing_reference": "entry",
+      "trend_threshold": 3.0,
+      "quote_gap_seconds": 60.0,
+      "liquidation_buffer": 5.0,
+      "cost_per_trade": 0.14,
+      "slippage": 0.1,
+      "delay_reserve": 5.0,
+      "ounces_per_lot": 100.0,
+      "swap_per_day": 0.0
+    },
+    "source_sha256": {
+      "/home/ec2-user/acd-paper-release/datavis/acd_continuation.py": "31c467567bb9462d9648754910a265d8a8de82a375baa27f97713ef7c7e4b91e"
+    },
+    "dataset_sha256": "e7ad2a5f2736f1deb90392af80d56891026b7832ca9bbd9976cea607ac12002b",
+    "dataset_hash_encoding": "valid increasing warmup+window records struct <qqdd: id, UTC microseconds, bid, ask",
+    "counts": {
+      "raw_ticks": 18066705,
+      "processed_ticks": 18065202,
+      "duplicate_timestamp_quotes_skipped": 1503,
+      "window_ticks": 16235560
+    },
+    "spread": {
+      "mean": 0.11760076832598045,
+      "max": 1.4399999999995998
+    },
+    "metrics": {
+      "scheduled_weekdays": 67,
+      "observed_trading_days": 67,
+      "missing_weekdays": 0,
+      "directional_continuation_days": 31,
+      "eligible_before_risk_days": 31,
+      "eligible_executable_days": 31,
+      "executed_trades": 31,
+      "closed_trades": 31,
+      "winning_trades": 13,
+      "losing_trades": 18,
+      "breakeven_trades": 0,
+      "realized_net": -90.51000000000329,
+      "ending_equity": 500.0,
+      "mark_to_market_net": -90.51000000000334,
+      "win_rate": 0.41935483870967744,
+      "profit_factor": 0.49635523899615314,
+      "profit_factor_note": null,
+      "expectancy": -2.9196774193549446,
+      "max_equity_drawdown": 100.18000000000006,
+      "max_consecutive_losses": 5,
+      "average_holding_seconds": 5958.408838709677,
+      "max_holding_seconds": 40876.572,
+      "by_side": {
+        "up": {
+          "trades": 7,
+          "net": -22.310000000001022,
+          "wins": 4
+        },
+        "down": {
+          "trades": 24,
+          "net": -68.2000000000023,
+          "wins": 9
+        }
+      },
+      "monthly": {
+        "2026-08": {
+          "trading_days": 4,
+          "trades": 1,
+          "net_pnl": -0.900000000000764,
+          "ending_equity": 500.0
+        },
+        "2026-09": {
+          "trading_days": 22,
+          "trades": 8,
+          "net_pnl": -79.06000000000395,
+          "ending_equity": 504.47999999999774
+        },
+        "2026-10": {
+          "trading_days": 22,
+          "trades": 10,
+          "net_pnl": 29.14999999999972,
+          "ending_equity": 533.6299999999975
+        },
+        "2026-11": {
+          "trading_days": 19,
+          "trades": 12,
+          "net_pnl": -39.69999999999834,
+          "ending_equity": 500.0
+        }
+      },
+      "retracement_trades": 9,
+      "retracement_recovery_trades": 9,
+      "profitable_retracement_trades": 3,
+      "opposite_boundary_broken_trades": 5,
+      "buffered_opposite_broken_trades": 5,
+      "exit_reasons": {
+        "trailing": 27,
+        "capital": 1,
+        "opposite": 3
+      },
+      "risk_shutdown_events": [
+        {
+          "timestamp": "2026-09-22T09:41:09.351000+10:00",
+          "equity_before_replenishment": 454.6699999999999,
+          "threshold": 455.0,
+          "trade_id": 4,
+          "reset_after_full_closure": true
+        }
+      ],
+      "day_trade_limit_violations": [],
+      "net_trading_pnl": -90.51000000000326,
+      "total_replenishments": 90.51000000000334,
+      "replenishment_count": 6,
+      "total_external_capital": 590.5100000000034,
+      "final_balance": 500.0,
+      "max_flow_adjusted_equity_drawdown": 108.12000000000552,
+      "maximum_individual_loss": 52.279999999999966,
+      "original_signal_days": 31,
+      "rejected_signal_days": [],
+      "open_at_end": null,
+      "deadline_violations": [],
+      "next_formation_violations": []
+    },
+    "original_metrics": {
+      "scheduled_weekdays": 67,
+      "observed_trading_days": 67,
+      "missing_weekdays": 0,
+      "directional_continuation_days": 31,
+      "eligible_before_risk_days": 31,
+      "eligible_executable_days": 5,
+      "executed_trades": 5,
+      "closed_trades": 5,
+      "winning_trades": 0,
+      "losing_trades": 5,
+      "breakeven_trades": 0,
+      "realized_net": -45.38000000000302,
+      "ending_equity": 454.619999999997,
+      "mark_to_market_net": -45.38000000000301,
+      "win_rate": 0.0,
+      "profit_factor": 0.0,
+      "profit_factor_note": null,
+      "expectancy": -9.076000000000604,
+      "max_equity_drawdown": 52.350000000002694,
+      "max_consecutive_losses": 5,
+      "average_holding_seconds": 3197.5703999999996,
+      "max_holding_seconds": 11237.187,
+      "by_side": {
+        "up": {
+          "trades": 2,
+          "net": -8.280000000001092,
+          "wins": 0
+        },
+        "down": {
+          "trades": 3,
+          "net": -37.10000000000193,
+          "wins": 0
+        }
+      },
+      "monthly": {
+        "2026-08": {
+          "trading_days": 4,
+          "trades": 1,
+          "net_pnl": -0.900000000000764,
+          "ending_equity": 499.0999999999992
+        },
+        "2026-09": {
+          "trading_days": 22,
+          "trades": 4,
+          "net_pnl": -44.480000000002256,
+          "ending_equity": 454.619999999997
+        },
+        "2026-10": {
+          "trading_days": 22,
+          "trades": 0,
+          "net_pnl": 0.0,
+          "ending_equity": 454.619999999997
+        },
+        "2026-11": {
+          "trading_days": 19,
+          "trades": 0,
+          "net_pnl": 0.0,
+          "ending_equity": 454.619999999997
+        }
+      },
+      "retracement_trades": 1,
+      "retracement_recovery_trades": 1,
+      "profitable_retracement_trades": 0,
+      "opposite_boundary_broken_trades": 1,
+      "buffered_opposite_broken_trades": 1,
+      "exit_reasons": {
+        "trailing": 4,
+        "capital": 1
+      },
+      "risk_shutdown_events": [
+        {
+          "timestamp": "2026-09-23T03:54:26.314000+10:00",
+          "equity": 454.619999999997,
+          "threshold": 455.0
+        }
+      ],
+      "day_trade_limit_violations": []
+    },
+    "elapsed_seconds": 1356.823545332998,
+    "methodology": {
+      "account": "Replenish to500 only after complete closure; retain profits; reset latch after settlement",
+      "risk_threshold": "Unchanged absolute455 =450 floor +5 buffer; not balance-minus45",
+      "calendar": "Unchanged weekday New York ACD; broker holidays unverified",
+      "costs": "Unchanged historical spread and configured commission/slippage/swap",
+      "display": "Actual last quote per second; all ticks drive execution and extrema; no synthetic closure prices"
+    }
+  }
+}

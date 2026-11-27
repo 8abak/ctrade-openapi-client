@@ -1,0 +1,14 @@
+{
+  "matches": true,
+  "errors": [],
+  "compared_keys": [
+    "date",
+    "side",
+    "entry_price",
+    "exit_price",
+    "exit_reason",
+    "net_pnl",
+    "entry_timestamp",
+    "exit_timestamp"
+  ]
+}

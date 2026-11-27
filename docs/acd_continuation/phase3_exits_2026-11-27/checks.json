@@ -1,0 +1,27 @@
+{
+  "passed": true,
+  "checks": {
+    "baseline31_exact_executions": true,
+    "baseline_net": true,
+    "55_independent_configurations": true,
+    "all_pnl_excludes_contributions": true,
+    "all_accounts_reconcile": true,
+    "all_closed_only_correct_topups": true,
+    "every_configuration_started500": true,
+    "fixed001_lot": true,
+    "single_entries_except_explicit_reentry": true,
+    "all_positions_closed": true,
+    "no_next_formation_exposure": true,
+    "trails_only_tighten": true,
+    "fresh_reentry_hold_no_overlap": true,
+    "causal_bias_recomputed": true,
+    "31_identical_scale_full_context_charts": true,
+    "55_individual_trade_exports": true,
+    "active_source_unchanged": true,
+    "active_configuration_unchanged": true,
+    "paper_history_preserved": true,
+    "paper_only_execution": true,
+    "existing_services_active": true,
+    "both_phase2_directories_preserved": true
+  }
+}

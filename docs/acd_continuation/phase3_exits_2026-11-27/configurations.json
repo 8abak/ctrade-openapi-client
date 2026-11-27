@@ -1,0 +1,416 @@
+[
+  {
+    "id": "baseline",
+    "kind": "trail",
+    "activation": "fixed",
+    "multiple": 3.0,
+    "activation_ref": "entry",
+    "trail_ref": "edge"
+  },
+  {
+    "id": "target_entry_0.25W",
+    "kind": "target",
+    "multiple": 0.25,
+    "activation_ref": "entry",
+    "trail_ref": null
+  },
+  {
+    "id": "target_entry_0.5W",
+    "kind": "target",
+    "multiple": 0.5,
+    "activation_ref": "entry",
+    "trail_ref": null
+  },
+  {
+    "id": "target_entry_0.75W",
+    "kind": "target",
+    "multiple": 0.75,
+    "activation_ref": "entry",
+    "trail_ref": null
+  },
+  {
+    "id": "target_entry_1W",
+    "kind": "target",
+    "multiple": 1.0,
+    "activation_ref": "entry",
+    "trail_ref": null
+  },
+  {
+    "id": "target_entry_1.25W",
+    "kind": "target",
+    "multiple": 1.25,
+    "activation_ref": "entry",
+    "trail_ref": null
+  },
+  {
+    "id": "target_entry_1.5W",
+    "kind": "target",
+    "multiple": 1.5,
+    "activation_ref": "entry",
+    "trail_ref": null
+  },
+  {
+    "id": "target_entry_2W",
+    "kind": "target",
+    "multiple": 2.0,
+    "activation_ref": "entry",
+    "trail_ref": null
+  },
+  {
+    "id": "target_entry_3W",
+    "kind": "target",
+    "multiple": 3.0,
+    "activation_ref": "entry",
+    "trail_ref": null
+  },
+  {
+    "id": "trail_entry_edge_0.25W",
+    "kind": "trail",
+    "activation": "width",
+    "multiple": 0.25,
+    "activation_ref": "entry",
+    "trail_ref": "edge"
+  },
+  {
+    "id": "trail_entry_edge_0.5W",
+    "kind": "trail",
+    "activation": "width",
+    "multiple": 0.5,
+    "activation_ref": "entry",
+    "trail_ref": "edge"
+  },
+  {
+    "id": "trail_entry_edge_0.75W",
+    "kind": "trail",
+    "activation": "width",
+    "multiple": 0.75,
+    "activation_ref": "entry",
+    "trail_ref": "edge"
+  },
+  {
+    "id": "trail_entry_edge_1W",
+    "kind": "trail",
+    "activation": "width",
+    "multiple": 1.0,
+    "activation_ref": "entry",
+    "trail_ref": "edge"
+  },
+  {
+    "id": "trail_entry_edge_1.25W",
+    "kind": "trail",
+    "activation": "width",
+    "multiple": 1.25,
+    "activation_ref": "entry",
+    "trail_ref": "edge"
+  },
+  {
+    "id": "trail_entry_edge_1.5W",
+    "kind": "trail",
+    "activation": "width",
+    "multiple": 1.5,
+    "activation_ref": "entry",
+    "trail_ref": "edge"
+  },
+  {
+    "id": "trail_entry_edge_2W",
+    "kind": "trail",
+    "activation": "width",
+    "multiple": 2.0,
+    "activation_ref": "entry",
+    "trail_ref": "edge"
+  },
+  {
+    "id": "trail_entry_edge_3W",
+    "kind": "trail",
+    "activation": "width",
+    "multiple": 3.0,
+    "activation_ref": "entry",
+    "trail_ref": "edge"
+  },
+  {
+    "id": "trail_entry_entry_0.25W",
+    "kind": "trail",
+    "activation": "width",
+    "multiple": 0.25,
+    "activation_ref": "entry",
+    "trail_ref": "entry"
+  },
+  {
+    "id": "trail_entry_entry_0.5W",
+    "kind": "trail",
+    "activation": "width",
+    "multiple": 0.5,
+    "activation_ref": "entry",
+    "trail_ref": "entry"
+  },
+  {
+    "id": "trail_entry_entry_0.75W",
+    "kind": "trail",
+    "activation": "width",
+    "multiple": 0.75,
+    "activation_ref": "entry",
+    "trail_ref": "entry"
+  },
+  {
+    "id": "trail_entry_entry_1W",
+    "kind": "trail",
+    "activation": "width",
+    "multiple": 1.0,
+    "activation_ref": "entry",
+    "trail_ref": "entry"
+  },
+  {
+    "id": "trail_entry_entry_1.25W",
+    "kind": "trail",
+    "activation": "width",
+    "multiple": 1.25,
+    "activation_ref": "entry",
+    "trail_ref": "entry"
+  },
+  {
+    "id": "trail_entry_entry_1.5W",
+    "kind": "trail",
+    "activation": "width",
+    "multiple": 1.5,
+    "activation_ref": "entry",
+    "trail_ref": "entry"
+  },
+  {
+    "id": "trail_entry_entry_2W",
+    "kind": "trail",
+    "activation": "width",
+    "multiple": 2.0,
+    "activation_ref": "entry",
+    "trail_ref": "entry"
+  },
+  {
+    "id": "trail_entry_entry_3W",
+    "kind": "trail",
+    "activation": "width",
+    "multiple": 3.0,
+    "activation_ref": "entry",
+    "trail_ref": "entry"
+  },
+  {
+    "id": "trail_fixed3_entry_entry",
+    "kind": "trail",
+    "activation": "fixed",
+    "multiple": 3.0,
+    "activation_ref": "entry",
+    "trail_ref": "entry"
+  },
+  {
+    "id": "target_edge_0.25W",
+    "kind": "target",
+    "multiple": 0.25,
+    "activation_ref": "edge",
+    "trail_ref": null
+  },
+  {
+    "id": "target_edge_0.5W",
+    "kind": "target",
+    "multiple": 0.5,
+    "activation_ref": "edge",
+    "trail_ref": null
+  },
+  {
+    "id": "target_edge_0.75W",
+    "kind": "target",
+    "multiple": 0.75,
+    "activation_ref": "edge",
+    "trail_ref": null
+  },
+  {
+    "id": "target_edge_1W",
+    "kind": "target",
+    "multiple": 1.0,
+    "activation_ref": "edge",
+    "trail_ref": null
+  },
+  {
+    "id": "target_edge_1.25W",
+    "kind": "target",
+    "multiple": 1.25,
+    "activation_ref": "edge",
+    "trail_ref": null
+  },
+  {
+    "id": "target_edge_1.5W",
+    "kind": "target",
+    "multiple": 1.5,
+    "activation_ref": "edge",
+    "trail_ref": null
+  },
+  {
+    "id": "target_edge_2W",
+    "kind": "target",
+    "multiple": 2.0,
+    "activation_ref": "edge",
+    "trail_ref": null
+  },
+  {
+    "id": "target_edge_3W",
+    "kind": "target",
+    "multiple": 3.0,
+    "activation_ref": "edge",
+    "trail_ref": null
+  },
+  {
+    "id": "trail_edge_edge_0.25W",
+    "kind": "trail",
+    "activation": "width",
+    "multiple": 0.25,
+    "activation_ref": "edge",
+    "trail_ref": "edge"
+  },
+  {
+    "id": "trail_edge_edge_0.5W",
+    "kind": "trail",
+    "activation": "width",
+    "multiple": 0.5,
+    "activation_ref": "edge",
+    "trail_ref": "edge"
+  },
+  {
+    "id": "trail_edge_edge_0.75W",
+    "kind": "trail",
+    "activation": "width",
+    "multiple": 0.75,
+    "activation_ref": "edge",
+    "trail_ref": "edge"
+  },
+  {
+    "id": "trail_edge_edge_1W",
+    "kind": "trail",
+    "activation": "width",
+    "multiple": 1.0,
+    "activation_ref": "edge",
+    "trail_ref": "edge"
+  },
+  {
+    "id": "trail_edge_edge_1.25W",
+    "kind": "trail",
+    "activation": "width",
+    "multiple": 1.25,
+    "activation_ref": "edge",
+    "trail_ref": "edge"
+  },
+  {
+    "id": "trail_edge_edge_1.5W",
+    "kind": "trail",
+    "activation": "width",
+    "multiple": 1.5,
+    "activation_ref": "edge",
+    "trail_ref": "edge"
+  },
+  {
+    "id": "trail_edge_edge_2W",
+    "kind": "trail",
+    "activation": "width",
+    "multiple": 2.0,
+    "activation_ref": "edge",
+    "trail_ref": "edge"
+  },
+  {
+    "id": "trail_edge_edge_3W",
+    "kind": "trail",
+    "activation": "width",
+    "multiple": 3.0,
+    "activation_ref": "edge",
+    "trail_ref": "edge"
+  },
+  {
+    "id": "trail_fixed3_edge_edge",
+    "kind": "trail",
+    "activation": "fixed",
+    "multiple": 3.0,
+    "activation_ref": "edge",
+    "trail_ref": "edge"
+  },
+  {
+    "id": "trail_edge_entry_0.25W",
+    "kind": "trail",
+    "activation": "width",
+    "multiple": 0.25,
+    "activation_ref": "edge",
+    "trail_ref": "entry"
+  },
+  {
+    "id": "trail_edge_entry_0.5W",
+    "kind": "trail",
+    "activation": "width",
+    "multiple": 0.5,
+    "activation_ref": "edge",
+    "trail_ref": "entry"
+  },
+  {
+    "id": "trail_edge_entry_0.75W",
+    "kind": "trail",
+    "activation": "width",
+    "multiple": 0.75,
+    "activation_ref": "edge",
+    "trail_ref": "entry"
+  },
+  {
+    "id": "trail_edge_entry_1W",
+    "kind": "trail",
+    "activation": "width",
+    "multiple": 1.0,
+    "activation_ref": "edge",
+    "trail_ref": "entry"
+  },
+  {
+    "id": "trail_edge_entry_1.25W",
+    "kind": "trail",
+    "activation": "width",
+    "multiple": 1.25,
+    "activation_ref": "edge",
+    "trail_ref": "entry"
+  },
+  {
+    "id": "trail_edge_entry_1.5W",
+    "kind": "trail",
+    "activation": "width",
+    "multiple": 1.5,
+    "activation_ref": "edge",
+    "trail_ref": "entry"
+  },
+  {
+    "id": "trail_edge_entry_2W",
+    "kind": "trail",
+    "activation": "width",
+    "multiple": 2.0,
+    "activation_ref": "edge",
+    "trail_ref": "entry"
+  },
+  {
+    "id": "trail_edge_entry_3W",
+    "kind": "trail",
+    "activation": "width",
+    "multiple": 3.0,
+    "activation_ref": "edge",
+    "trail_ref": "entry"
+  },
+  {
+    "id": "trail_fixed3_edge_entry",
+    "kind": "trail",
+    "activation": "fixed",
+    "multiple": 3.0,
+    "activation_ref": "edge",
+    "trail_ref": "entry"
+  },
+  {
+    "id": "reentry_A",
+    "kind": "pullback",
+    "policy": "A"
+  },
+  {
+    "id": "reentry_B",
+    "kind": "pullback",
+    "policy": "B"
+  },
+  {
+    "id": "no_trailing",
+    "kind": "none"
+  }
+]
