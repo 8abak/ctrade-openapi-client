@@ -140,6 +140,8 @@ def exit_path(t,q,entry,edge,opposite,sign,width,balance,deadline,cfg,initial_ex
         anchor=entry if cfg['activation_ref']=='entry' else edge
         target_level=anchor+sign*cfg['multiple']*width
         target=(q-target_level)*sign>=0
+        if initial_extreme is not None and (initial_extreme-target_level)*sign>=0:
+            target[0]=True
     if cfg['kind']=='trail':
         anchor=entry if cfg['activation_ref']=='entry' else edge
         distance=cfg['multiple']*(width if cfg['activation']=='width' else 1.)
@@ -343,11 +345,48 @@ def run(args):
     (out/'COMPLETE').write_text('Baseline matches; all configurations completed')
 
 
+def verify(args):
+    """Independent timestamp/quote lookup for every recorded execution."""
+    import numpy as np
+    root,cache=Path(args.output),Path(args.cache)
+    records=json.loads((root/'all_trades.json').read_text())
+    dtype=np.dtype([('id','<i8'),('time','<i8'),('bid','<f8'),('ask','<f8')])
+    data_by_date={}
+    total=already=timed=0
+    for cfg,rows in records.items():
+        for r in rows:
+            if r['date'] not in data_by_date:
+                data_by_date[r['date']]=np.memmap(cache/(r['date']+'.bin'),dtype=dtype,mode='r')
+            data=data_by_date[r['date']]
+            a=int(np.searchsorted(data['time'],round(seconds(r['entry_timestamp'])*1e6)))
+            b=int(np.searchsorted(data['time'],round(seconds(r['exit_timestamp'])*1e6)))
+            assert a<b
+            assert int(data['time'][a])==round(seconds(r['entry_timestamp'])*1e6)
+            assert int(data['time'][b])==round(seconds(r['exit_timestamp'])*1e6)
+            sign=1 if r['side']=='up' else -1
+            expected_entry=float(data['ask' if sign==1 else 'bid'][a])+sign*.10
+            expected_exit=float(data['bid' if sign==1 else 'ask'][b])-sign*.10
+            assert abs(expected_entry-r['entry_price'])<1e-8
+            assert abs(expected_exit-r['exit_price'])<1e-8
+            assert abs((expected_exit-expected_entry)*sign-.14-r['net_pnl'])<1e-8
+            assert abs(expected_entry-r['opposite'])+.14+.10+5<r['balance_before']-455
+            if r['target_beyond_at_entry']:
+                assert b==a+1,(cfg,r['date'],'already-reached target did not exit next quote')
+                already+=1
+            if r['exit_reason']=='timed':
+                expected_index=int(np.searchsorted(data['time'],round(seconds(r['mandatory_deadline'])*1e6)))
+                assert b==max(a+1,expected_index)
+                timed+=1
+            total+=1
+    (root/'execution_checks.json').write_text(json.dumps(dict(passed=True,configurations=len(records),trades=total,already_reached_targets_checked=already,timed_first_quote_checks=timed,method='Independent exact UTC-microsecond lookup in hashed full-tick cache; bid/ask fills, slippage, fees, admission budget and next-quote semantics checked'),indent=2))
+    print('ALL_EXECUTIONS_VERIFIED',total,already,timed,flush=True)
+
+
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('mode',choices=['extract','run'])
+    p.add_argument('mode',choices=['extract','run','verify'])
     p.add_argument('--reference',required=True)
     p.add_argument('--output',required=True)
     p.add_argument('--cache')
     args=p.parse_args()
-    (extract if args.mode=='extract' else run)(args)
+    {'extract':extract,'run':run,'verify':verify}[args.mode](args)

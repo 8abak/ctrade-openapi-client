@@ -2,6 +2,7 @@
   "passed": true,
   "checks": {
     "baseline31_exact_executions": true,
+    "all_execution_quotes_independently_verified": true,
     "baseline_net": true,
     "55_independent_configurations": true,
     "all_pnl_excludes_contributions": true,

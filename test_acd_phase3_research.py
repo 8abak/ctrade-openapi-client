@@ -56,6 +56,12 @@ def test_target_uses_actual_available_quote_not_prior_target_price():
     assert details['target']==110
 
 
+def test_already_reached_target_exits_next_quote_even_after_pullback():
+    cfg=dict(kind='target',multiple=1.,activation_ref='edge')
+    result,_=exit_path(np.array([1.,2.]),np.array([109.,115.]),113.,100.,80.,1,10.,500.,1000.,cfg,initial_extreme=114.)
+    assert result==(0,'target')
+
+
 def test_capital_and_deadline_override_other_exit_types():
     cfg=dict(kind='pullback')
     assert exit_path(np.array([100.]),np.array([40.]),100.,90.,80.,1,10.,500.,100.,cfg)[0]==(0,'capital')
@@ -89,10 +95,15 @@ def test_vector_exits_match_independent_tick_loop_across_every_configuration():
                             trail=candidate if trail is None else max(trail,candidate) if sign==1 else min(trail,candidate)
                     beyond=(quote-opposite)*sign<0
                     opposite_since=(stamp if opposite_since is None else opposite_since) if beyond else None
+                    target_hit=False
+                    if cfg['kind']=='target':
+                        anchor=entry if cfg['activation_ref']=='entry' else edge
+                        target_level=anchor+sign*cfg['multiple']*15
+                        target_hit=(quote-target_level)*sign>=0 or (100-target_level)*sign>=0
                     reason=None
                     if 500+(quote-entry)*sign-.14<=455:reason='capital'
                     elif stamp>=500:reason='timed'
-                    elif cfg['kind']=='target' and (quote-(entry if cfg['activation_ref']=='entry' else edge))*sign>=cfg['multiple']*15:reason='target'
+                    elif target_hit:reason='target'
                     elif trail is not None and (quote-trail)*sign<=0:reason='trailing'
                     elif cfg['kind']=='pullback' and (quote-edge)*sign<=0:reason='pullback'
                     elif opposite_since is not None and stamp-opposite_since>=450:reason='opposite'
